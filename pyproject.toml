@@ -1,7 +1,7 @@
 [project]
 name = "voice-kb"
 version = "0.1.0"
-description = "Add your description here"
+description = "Local push-to-talk dictation for Linux/X11"
 readme = "README.md"
 authors = [
     { name = "Felix Peppert", email = "felix@peppert.de" }
@@ -10,6 +10,7 @@ requires-python = ">=3.13"
 dependencies = [
     "evdev>=2.0.0",
     "numpy>=2.5.2",
+    "pyside6>=6.11.2",
     "pyudev>=0.24.4",
     "sherpa-onnx>=1.13.6",
     "sherpa-onnx-core==1.13.6",
@@ -17,8 +18,41 @@ dependencies = [
 ]
 
 [project.scripts]
-voice-kb = "voice_kb:main"
+voice-kb = "voice_kb.app:main"
 
 [build-system]
 requires = ["uv_build>=0.12.5,<0.13.0"]
 build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "mypy>=2.3.1",
+    "pytest>=9.1.1",
+    "ruff>=0.16.4",
+]
+
+[tool.mypy]
+strict = true
+python_version = "3.13"
+files = ["src/voice_kb", "scripts", "tests"]
+warn_unreachable = true
+disallow_any_explicit = false
+
+[[tool.mypy.overrides]]
+module = ["sherpa_onnx.*", "sounddevice.*", "pyudev.*", "evdev.*"]
+ignore_missing_imports = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "ANN"]
+ignore = ["ANN401"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["ANN"]
+"scripts/spike_*.py" = ["ANN", "E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

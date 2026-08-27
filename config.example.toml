@@ -1,0 +1,106 @@
+# voice-kb configuration
+#
+# Every key below is shown at its default value. Copy this file to
+# ~/.config/voice-kb/config.toml and uncomment/edit only what you need to
+# change -- an absent section or key falls back to its default, but an
+# *unknown* section or key is a hard error (config.py rejects typos loudly
+# rather than silently ignoring them).
+
+[hotkey]
+# evdev key code for push-to-talk. 186 is KEY_F16 -- the Keychron Q10 Pro's
+# M4 key. This is the evdev code, not the X11 keycode (which is this + 8).
+key_code = 186
+
+# evdev key code that cancels an in-progress recording/transcription.
+# 1 is KEY_ESC. Set to a bare integer to change it, or comment out /
+# omit for the default -- there is no way to disable it from TOML since
+# `null` isn't a code, only Python's None is (leave this line out and pass
+# cancel_key_code=None in code if you need it disabled).
+cancel_key_code = 1
+
+[audio]
+# Parakeet expects 16 kHz input. Changing this requires a matching model.
+sample_rate = 16000
+
+# Audio retained before the key goes down, so the first word isn't clipped.
+# This costs an always-open input stream -- the mic stays live the whole
+# time voice-kb runs. Set to 0 to disable pre-roll; the stream is then
+# opened lazily on keypress instead, at the cost of clipping quick starts.
+preroll_ms = 250
+
+# PipeWire/PulseAudio source name. Omit (or leave unset) to use the default
+# input device.
+# device = "alsa_input.usb-..."
+
+[asr]
+# Path to the model directory. Relative paths resolve against the config
+# file's own directory, not the current working directory, so this file
+# can be edited from anywhere.
+model_dir = "models/parakeet-tdt-0.6b-v3-int8"
+
+# CPU threads for decoding.
+num_threads = 6
+
+# "greedy_search" (faster, no hotword biasing) or "modified_beam_search"
+# (slightly slower, required for `vocabulary` below).
+decoding = "modified_beam_search"
+
+# Per-token bias applied to each word in `vocabulary`. Measured on this
+# model: 1.5 fixes "mkir" -> "mkdir"; above ~3.0 it starts firing on
+# unrelated audio; 6.0 rewrites ordinary words. Raise with care and re-run
+# scripts/eval.py after any change.
+hotwords_score = 1.5
+
+# Words and phrases to bias the decoder toward, e.g. project names or
+# commands that are otherwise misheard. Only takes effect with
+# decoding = "modified_beam_search"; greedy decoding ignores it.
+# vocabulary = ["kubectl", "voice-kb", "nginx"]
+vocabulary = []
+
+[text]
+# Strip standalone filler words (see `fillers` below) from the transcript.
+strip_fillers = true
+
+# Removed only as whole words, case-insensitively, never as substrings of
+# another word ("um" won't touch "umbrella").
+fillers = ["uh", "um", "erm", "hmm"]
+
+# Exact, whole-word, case-sensitive substitutions applied after decoding.
+# Deliberately NOT fuzzy: the tool this project replaced used edit-distance
+# matching and turned "set" into "sed" and "reset" into "rust". Prefer
+# asr.vocabulary above for fixing misheard technical terms -- biasing what
+# the decoder hears beats rewriting what it already got wrong.
+# replacements = { teh = "the" }
+replacements = {}
+
+# Append a trailing space to the injected text, useful if you always type
+# a word immediately after dictating.
+trailing_space = false
+
+[paste]
+# Key combo used to paste the transcribed text, unless overridden below.
+default = "ctrl+v"
+
+# How long to wait, after pasting, before restoring the clipboard's
+# previous contents.
+restore_delay_ms = 150
+
+# Per-window-class overrides, keyed by X11 WM_CLASS. Terminals commonly
+# need shift added so the emulator doesn't intercept the paste as a
+# different terminal control sequence.
+[paste.per_window_class]
+Alacritty = "ctrl+shift+v"
+
+[overlay]
+# Show the recording/transcribing status overlay at all.
+enabled = true
+
+width = 420
+height = 96
+
+# Gap between the overlay and the bottom edge of the output it's shown on.
+margin_px = 32
+
+# Place the overlay on the output holding the currently focused window,
+# rather than always on the primary output.
+follow_focus = true

@@ -6,8 +6,10 @@ at the cursor. Fully local, CPU-only (the 4 GB GTX 1650 stays free), tuned for
 dictating Claude prompts and shell commands.
 
 ## Now
-- Scaffold + ASR spikes landed. Both plan risks retired (see Measured).
-- Next: implement the modules in plan order — `config.py`/`state.py` first.
+- v1 feature-complete. All modules landed; daemon starts, loads the model and
+  arms the hotkey. ruff + mypy --strict (18 files) + 54 tests green.
+- Not yet done end-to-end with a live voice through the real hotkey.
+- Next: code review, then a real dictation test.
 
 ## Done
 - Surveyed Wispr Flow (cloud, no Linux) + Linux alternatives.
@@ -39,12 +41,14 @@ dictating Claude prompts and shell commands.
 - Remaining gap is technical vocabulary/context (`dir`→`there`), not raw ASR.
 
 ## Next
-- `config.py` + `state.py` (types first), then `hotkey.py`, `audio.py`, `asr.py`.
-- `scripts/fetch_model.py` + `build_hotwords.py` to replace the spikes.
-- **Hand-correct `eval-samples/transcripts.json`** — it currently holds Handy's
-  *output* (errors included), not ground truth, so it cannot score anything yet.
+- `scripts/eval.py` — the regression harness; `eval-samples/references.json`
+  now holds ground truth (all entries `verified: false` until listened to).
+- Re-measure decode RTF on an **idle** machine. The 9.7x figure was measured
+  idle; every later timing was taken under load average ~19 (a large rustc
+  build) and is not trustworthy.
 - Re-apply the i3 change: comment `bindcode $m4 [con_mark="m4"] focus`
   (`~/.config/i3/i3.d/keybindings.conf:79`). Reverted during cleanup.
+- systemd --user unit for autostart.
 
 ## Open questions
 - Cloud ASR (Gladia) as a second backend — issue #1. Not the default; conflicts

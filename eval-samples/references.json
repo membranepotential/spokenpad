@@ -1,0 +1,81 @@
+{
+  "_comment": [
+    "Ground truth for the eval harness: what was ACTUALLY said in each recording.",
+    "",
+    "transcripts.json sits alongside this file and holds what Handy 0.9.6 produced,",
+    "errors included. That is the baseline to beat, not the target. Do not conflate them.",
+    "",
+    "References are reconstructed from the session in which the samples were recorded,",
+    "including the speaker's own typed corrections -- they explicitly confirmed the",
+    "intended words were 'set' and 'reset', which Handy's fuzzy matcher had turned into",
+    "'sed' and 'rust'. Every entry is \"verified\": false until someone listens to the",
+    "audio and confirms it. Do not report WER from unverified references as fact.",
+    "",
+    "'exercises' names the specific failure each sample probes, so a regression can be",
+    "attributed rather than merely observed."
+  ],
+  "samples": [
+    {
+      "file": "handy-1787827422.wav",
+      "duration_s": 20.4,
+      "verified": false,
+      "reference": "So, this is a test. Let's try some commands here. Let's make a dir with the command mkdir named test and touch a new file test_file and then rm -rf this whole folder again.",
+      "exercises": [
+        "commands -> comments: technical word lost to a common English neighbour",
+        "a dir -> there: context error, hotword biasing cannot fix this",
+        "mkdir -> MK D I R / mkir: fixed by hotwords at score 1.5",
+        "rm -rf -> RMRF: command name run together",
+        "test_file -> test underscore file: spoken punctuation not symbolised"
+      ]
+    },
+    {
+      "file": "handy-1787827474.wav",
+      "duration_s": 1.3,
+      "verified": false,
+      "reference": "cd home",
+      "exercises": [
+        "Very short utterance. Primary check that pre-roll keeps the first word:",
+        "at 1.3s there is no room to lose the leading 'cd' and still score."
+      ]
+    },
+    {
+      "file": "handy-1787827701.wav",
+      "duration_s": 13.8,
+      "verified": false,
+      "reference": "I have udev rules, udev rules to set the keyboard layout, but I think something you did reset it.",
+      "exercises": [
+        "set -> sed and reset -> rust: the fuzzy-replacement regression this project bans.",
+        "The speaker confirmed both intended words in writing.",
+        "MUST still decode 'set' and 'reset' correctly even with 'sed' in the vocabulary.",
+        "This is the guard test for text.replacements staying exact-match."
+      ]
+    },
+    {
+      "file": "handy-1787827757.wav",
+      "duration_s": 37.0,
+      "verified": false,
+      "reference": null,
+      "exercises": [
+        "THE REGRESSION SAMPLE. Handy produced an empty transcript for this clip:",
+        "'Timed out waiting 30s for live transcription to finalize'. 37s of speech,",
+        "silently discarded.",
+        "",
+        "Spoken content is unrecovered, so this cannot be scored for accuracy. It is",
+        "still the most important sample in the set: a one-shot decode MUST return",
+        "non-empty text well inside the clip's own duration. Assert that, not WER."
+      ]
+    },
+    {
+      "file": "handy-1787828395.wav",
+      "duration_s": 27.2,
+      "verified": false,
+      "reference": "Okay, we are now at the new model. The overlay is there but not wide enough. And okay, let's see the text quality. But I think the whole system is not great, so maybe before we build our own we should uninstall and reset everything and then try a structured approach to write a plan and then build it.",
+      "exercises": [
+        "Near-clean prose: the speaker rated this decode's quality good.",
+        "Only known error is 'system' -> 'systemd'. Useful as an upper baseline --",
+        "if hotword biasing degrades this sample, hotwords_score is too high.",
+        "Also over 25s, so it is a second guard against any streaming-style time cap."
+      ]
+    }
+  ]
+}
