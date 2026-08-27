@@ -6,10 +6,11 @@ at the cursor. Fully local, CPU-only (the 4 GB GTX 1650 stays free), tuned for
 dictating Claude prompts and shell commands.
 
 ## Now
-- v1 feature-complete and code-reviewed. All 10 review findings fixed.
-  ruff + mypy --strict (20 files) + 72 tests green; daemon starts clean.
-- **Not yet run end-to-end with a live voice through the real hotkey.**
-  That is the only remaining proof and it needs the user.
+- **Works end to end with a live voice.** First real dictation transcribed
+  correctly; Ctrl-C, file logging and the M4 hotkey all confirmed working.
+- ruff + mypy --strict (24 files) + 81 tests green, incl. 9 e2e tests that
+  pin every regression found so far (each verified by reverting the fix).
+- `scripts/eval.py` gives repeatable WER + per-error checks + a score sweep.
 
 ## Done
 - Surveyed Wispr Flow (cloud, no Linux) + Linux alternatives.
@@ -42,8 +43,13 @@ dictating Claude prompts and shell commands.
 - Remaining gap is technical vocabulary/context (`dir`→`there`), not raw ASR.
 
 ## Next
-- `scripts/eval.py` — the regression harness; `eval-samples/references.json`
-  now holds ground truth (all entries `verified: false` until listened to).
+- **Populate `asr.vocabulary`** — it is empty, so `uv`/`pnpm`/`mkdir`/`rm -rf`
+  still mis-transcribe. `eval.py --sweep` is the tool for tuning it.
+- **Verify `eval-samples/references.json` by listening** and set
+  `verified: true`. Until then the aggregate WER is not meaningful -- and the
+  Handy baseline column is biased in Handy's favour (partly circular
+  references; its worst failure excluded). See docs/evaluation.md.
+- Short commands spell out: `cd home` -> `C D home.` (100% WER on 2 words).
 - Re-apply the i3 change: comment `bindcode $m4 [con_mark="m4"] focus`
   (`~/.config/i3/i3.d/keybindings.conf:79`). Reverted during cleanup.
 - systemd --user unit for autostart.

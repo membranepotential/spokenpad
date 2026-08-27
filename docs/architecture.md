@@ -16,14 +16,15 @@ defensively.
 |---|---|---|---|
 | [`config.py`](../src/voice_kb/config.py) | core | no | implemented |
 | [`state.py`](../src/voice_kb/state.py) | core | no | implemented |
-| `text.py` | core | no | not yet implemented |
-| `geometry.py` | core | no | not yet implemented |
-| `hotkey.py` | shell | evdev | not yet implemented |
-| `audio.py` | shell | PipeWire capture | not yet implemented |
-| `asr.py` | shell | sherpa-onnx / CPU inference | not yet implemented |
-| `inject.py` | shell | X11 clipboard + paste | not yet implemented |
-| `overlay.py` | shell | X11 window (PySide6) | not yet implemented |
-| `app.py` | shell | wires everything together | not yet implemented |
+| [`text.py`](../src/voice_kb/text.py) | core | no | implemented |
+| [`geometry.py`](../src/voice_kb/geometry.py) | core | no | implemented |
+| [`hotkey.py`](../src/voice_kb/hotkey.py) | shell | evdev (read-only) | implemented |
+| [`audio.py`](../src/voice_kb/audio.py) | shell | PipeWire capture | implemented |
+| [`asr.py`](../src/voice_kb/asr.py) | shell | sherpa-onnx / CPU inference | implemented |
+| [`inject.py`](../src/voice_kb/inject.py) | shell | X11 clipboard + paste | implemented |
+| [`overlay.py`](../src/voice_kb/overlay.py) | shell | X11 window (PySide6) | implemented |
+| [`x11.py`](../src/voice_kb/x11.py) | shell | xrandr / xdotool queries | implemented |
+| [`app.py`](../src/voice_kb/app.py) | shell | wires everything together | implemented |
 
 The core modules are pure functions over immutable data: given the same
 input they always produce the same output, and they never block, spawn a
@@ -59,8 +60,9 @@ interrupt-like sources (evdev key events, a decode thread finishing late)
 without the shell needing its own guard logic.
 
 `step` never performs an effect itself. It returns a `Command` — one of
-`Nothing`, `StartCapture`, `Decode`, `DiscardCapture` — and the imperative
-shell (`app.py`, not yet implemented) is solely responsible for interpreting
+`Nothing`, `StartCapture`, `Decode`, `DiscardCapture`, `AbortDecode` — and the
+imperative shell ([`app.py`](../src/voice_kb/app.py)) is solely responsible for
+interpreting
 that command into a real action. This is the functional-core/imperative-shell
 boundary made concrete: the *decision* of what should happen next is pure and
 unit-testable; *making it happen* is not, and lives elsewhere.
@@ -111,3 +113,28 @@ decode in the shell silently dropped audio. Keeping the state machine and text
 processing pure means those classes of bug cannot originate in `state.py` or
 `text.py` — they can only come from the shell modules, which is exactly where
 this project now concentrates its defensive code and its manual testing.
+
+
+## Threading
+
+Three threads, and the boundaries matter:
+
+| Thread | Owns | Must never |
+|---|---|---|
+| evdev watcher | `/dev/input/event*` reads | block; it is the hotkey's latency budget |
+| Qt main | the state machine, the overlay | do slow work -- see below |
+| worker | the `Transcriber`, and injection | be touched from the Qt thread |
+
+Hotkey callbacks are emitted as Qt Signals from the watcher thread and Qt
+queues them onto the Qt thread, so `SessionState` is only ever mutated in one
+place and needs no lock.
+
+The Qt-thread rule is not theoretical. `_sync_overlay` once shelled out to
+xrandr and xdotool on *every* dispatched event; evdev auto-repeat fires around
+30 times a second while a key is held, so holding the hotkey spawned roughly 60
+subprocesses per second. That stalled the event loop badly enough to delay the
+key-up (capture kept running ~22s past the physical release) and to batch three
+decode results into the same millisecond. Auto-repeat is now dropped in
+`hotkey.py`, the overlay repositions only on a real phase change, and the
+monitor layout is cached. Anything added to the Qt thread's hot path deserves
+the same scrutiny.

@@ -11,8 +11,21 @@
     "'sed' and 'rust'. Every entry is \"verified\": false until someone listens to the",
     "audio and confirms it. Do not report WER from unverified references as fact.",
     "",
-    "'exercises' names the specific failure each sample probes, so a regression can be",
-    "attributed rather than merely observed."
+    "'exercises' names the specific failure each sample probes, so a regression can be attributed rather than merely observed.",
+    "",
+    "BIAS WARNING on the 'handy WER' baseline column in scripts/eval.py:",
+    "it is NOT a fair comparison and must not be quoted as one.",
+    "",
+    "  1. Some references were reconstructed partly FROM Handy's own output",
+    "     (handy-1787828395 is Handy's text with one word corrected), so Handy",
+    "     is being scored against a reference derived from itself.",
+    "  2. handy-1787827757 has reference: null and is excluded from the",
+    "     aggregate -- that is the 37s clip Handy discarded entirely. Scoring",
+    "     it would give Handy ~100% WER on 37 seconds of speech.",
+    "",
+    "The column is useful for spotting per-sample regressions, not for claiming",
+    "one system beats the other. Verify these references by listening before",
+    "drawing any conclusion from the aggregate."
   ],
   "samples": [
     {

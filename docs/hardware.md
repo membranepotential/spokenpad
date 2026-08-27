@@ -60,7 +60,7 @@ the right of the external `HDMI-1-0` output in the X11 coordinate space.
 ([`config.py`](../src/voice_kb/config.py)) places the overlay on whichever
 output currently holds the focused window, which on this layout means
 computing which of the two `3840x2160` regions the focused window's
-coordinates fall into — `geometry.py` (not yet implemented) owns that
+coordinates fall into — [`geometry.py`](../src/voice_kb/geometry.py) owns that
 calculation as a pure function over window and output rectangles (see
 [architecture.md](architecture.md)).
 

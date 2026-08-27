@@ -2,7 +2,7 @@
 
 ← [docs index](README.md) | The decode-time-biasing rule this implements is
 justified in [constraints.md](constraints.md#bias-vocabulary-at-decode-time-never-fuzzy-replacement);
-`asr.py` (not yet implemented) is the shell module positioned in
+[`asr.py`](../src/voice_kb/asr.py) is the shell module positioned in
 [architecture.md](architecture.md#event-flow); config fields referenced below
 are defined in [`config.py`](../src/voice_kb/config.py).
 
@@ -11,7 +11,7 @@ are defined in [`config.py`](../src/voice_kb/config.py).
 **Parakeet TDT 0.6B v3, int8**, run through
 [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) `>=1.13.6` as a NeMo
 transducer (`model_type="nemo_transducer"` in
-[`scripts/spike_decode.py`](../scripts/spike_decode.py)), CPU only, 6 threads
+[`src/voice_kb/asr.py`](../src/voice_kb/asr.py)), CPU only, 6 threads
 (see [constraints.md](constraints.md#cpu-only)). The model files
 (`encoder.int8.onnx`, `decoder.int8.onnx`, `joiner.int8.onnx`, `tokens.txt`)
 are fetched by `scripts/fetch_model.py` — not committed, ~630 MB — into
@@ -80,11 +80,13 @@ score is the negative of its index in the vocabulary:
 score = -index
 ```
 
-`scripts/build_hotwords.py` (not yet implemented) is responsible for this
-reconstruction; the spike that proved it works is
-[`scripts/spike_hotwords.py`](../scripts/spike_hotwords.py), which builds the
-recognizer with `bpe_vocab=str(MODEL / "bpe.vocab")` and
-`modeling_unit="bpe"` alongside a `hotwords_file`.
+[`scripts/build_hotwords.py`](../scripts/build_hotwords.py) performs this
+reconstruction (the generator itself lives in
+[`src/voice_kb/asr.py`](../src/voice_kb/asr.py) so the daemon and the script
+cannot drift apart). The recogniser is built with
+`bpe_vocab=<model_dir>/bpe.vocab` and `modeling_unit="bpe"` alongside a
+`hotwords_file`. Verified working -- and now guarded by
+[the eval harness](evaluation.md).
 
 ### Measured tuning: `hotwords_score`
 
@@ -104,7 +106,7 @@ mis-decoded it as `mkir`:
 | 3.0 | starts over-firing on unrelated audio |
 | 6.0 | rewrites ordinary, unrelated words |
 
-(README.md, STATUS.md, `scripts/spike_hotwords.py`.) `1.5` is the default in
+(Reproducible via `uv run scripts/eval.py --sweep 0 1.5 3.0 --vocabulary mkdir`.) `1.5` is the default in
 [`config.py`](../src/voice_kb/config.py), with a warning in the docstring to
 re-run `scripts/eval.py` before raising it.
 
