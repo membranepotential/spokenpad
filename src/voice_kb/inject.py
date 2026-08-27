@@ -32,12 +32,15 @@ rather than silently claimed as a clean success.
 
 from __future__ import annotations
 
+import logging
 import subprocess
 import threading
 import time
 from dataclasses import dataclass
 
 from voice_kb.config import PasteConfig
+
+log = logging.getLogger("voice-kb.inject")
 
 _XDOTOOL_TIMEOUT_S = 2.0
 _XCLIP_TIMEOUT_S = 2.0
@@ -127,7 +130,9 @@ def inject_text(text: str, config: PasteConfig) -> InjectResult:
     """
     start = time.monotonic()
 
-    combo = config.combo_for(focused_window_class())
+    window_class = focused_window_class()
+    combo = config.combo_for(window_class)
+    log.debug("target window class %r -> paste combo %r", window_class, combo)
     previous = _read_clipboard()
 
     confirm_proc = _write_clipboard_confirmable(text.encode("utf-8"))

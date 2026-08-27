@@ -29,8 +29,12 @@ from __future__ import annotations
 
 import argparse
 import logging
+import logging.handlers
+import os
+import signal
 import sys
 import time
+import wave
 from pathlib import Path
 from typing import assert_never
 
@@ -139,6 +143,7 @@ class Daemon(QObject):
         self._config = config
         self._state: SessionState = Idle()
         self._started = False
+        self._dump_dir: Path | None = None
 
         #: Bumped whenever an in-flight decode is invalidated. A result whose
         #: generation no longer matches is discarded instead of injected.
@@ -183,6 +188,11 @@ class Daemon(QObject):
 
     # ------------------------------------------------------------------ lifecycle
 
+    def set_dump_dir(self, path: Path) -> None:
+        """Write every captured utterance to ``path`` as a wav, for diagnosis."""
+        self._dump_dir = path
+        log.info("dumping captured audio to %s", path)
+
     def start(self) -> None:
         """Arm the daemon. On failure, tears down whatever did start.
 
@@ -225,7 +235,7 @@ class Daemon(QObject):
             case Decode(spoken_seconds=spoken):
                 self._level_timer.stop()
                 samples = self._audio.stop_capture()
-                log.info("captured %.1fs", spoken)
+                self._log_capture(spoken, samples)
                 self._decode_requested.emit(samples, self._generation)
             case DiscardCapture():
                 self._level_timer.stop()
@@ -259,6 +269,42 @@ class Daemon(QObject):
         target = pick_output(screens, window) if window else _primary(screens)
         return overlay_rect(target.rect, self._config.overlay)
 
+    def _log_capture(self, held_seconds: float, samples: MonoAudio) -> None:
+        """Report what was actually captured, not just how long the key was held.
+
+        These are different numbers and conflating them hides the failure where
+        the key is held for seconds but the buffer comes back empty or silent.
+        """
+        rate = self._config.audio.sample_rate
+        audio_seconds = len(samples) / rate if rate else 0.0
+        rms = float(np.sqrt(np.mean(np.square(samples)))) if len(samples) else 0.0
+        peak = float(np.max(np.abs(samples))) if len(samples) else 0.0
+        log.info(
+            "captured %.1fs held -> %.1fs audio (%d samples), rms=%.4f peak=%.4f",
+            held_seconds, audio_seconds, len(samples), rms, peak,
+        )
+        if peak < 0.01:
+            log.warning(
+                "captured audio is near-silent (peak %.4f). Check the input device "
+                "and its gain -- the model will hallucinate on silence.", peak
+            )
+        if self._dump_dir is not None:
+            self._dump_capture(samples, rate)
+
+    def _dump_capture(self, samples: MonoAudio, rate: int) -> None:
+        assert self._dump_dir is not None
+        path = self._dump_dir / f"capture-{int(time.time())}.wav"
+        try:
+            with wave.open(str(path), "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(rate)
+                w.writeframes((np.clip(samples, -1.0, 1.0) * 32767).astype(np.int16).tobytes())
+        except OSError as e:
+            log.warning("could not dump capture: %s", e)
+            return
+        log.info("dumped capture to %s", path)
+
     def _poll_level(self) -> None:
         if self._overlay is not None:
             self._overlay.push_level(self._audio.current_level())
@@ -270,7 +316,10 @@ class Daemon(QObject):
             log.info("dropping decode from a cancelled session (%.2fs)", elapsed)
             return
         cleaned = postprocess(text, self._config.text)
-        log.info("decoded in %.2fs: %r", elapsed, cleaned[:80])
+        log.info("decoded in %.2fs (%d chars): %r", elapsed, len(cleaned), cleaned[:80])
+        if cleaned != text:
+            log.debug("raw model output: %r", text)
+        log.debug("full transcript: %r", cleaned)
         if not cleaned.strip():
             log.warning("decode produced no text")
         else:
@@ -303,6 +352,52 @@ class Daemon(QObject):
         QApplication.instance().quit()  # type: ignore[union-attr]
 
 
+DEFAULT_LOG_FILE = (
+    Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state"))
+    / "voice-kb"
+    / "voice-kb.log"
+)
+
+
+def _configure_logging(*, verbose: bool, log_file: Path | None) -> None:
+    """Console plus a rotating file.
+
+    The file is always at DEBUG regardless of ``-v``: a dictation problem is
+    usually only noticed after the fact, and re-running to reproduce it is not
+    always possible. Rotation keeps it bounded without any maintenance.
+
+    Note the file records transcribed text, so it holds whatever was dictated.
+    It stays on this machine, mode 0600, and `--log-file none` turns it off.
+    """
+    root = logging.getLogger("voice-kb")
+    root.setLevel(logging.DEBUG)
+    root.propagate = False
+
+    console = logging.StreamHandler()
+    console.setLevel(logging.DEBUG if verbose else logging.INFO)
+    console.setFormatter(logging.Formatter("%(asctime)s %(levelname)-7s %(message)s", "%H:%M:%S"))
+    root.addHandler(console)
+
+    if log_file is not None and str(log_file).lower() == "none":
+        return
+    target = log_file or DEFAULT_LOG_FILE
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        handler = logging.handlers.RotatingFileHandler(
+            target, maxBytes=1_000_000, backupCount=3, encoding="utf-8"
+        )
+        os.chmod(target, 0o600)
+    except OSError as e:
+        root.warning("could not open log file %s: %s", target, e)
+        return
+    handler.setLevel(logging.DEBUG)
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)-7s %(name)s: %(message)s")
+    )
+    root.addHandler(handler)
+    root.info("logging to %s", target)
+
+
 def _primary(screens: list[Output]) -> Output:
     """The primary output, else the first. xrandr order is not primary order."""
     return next((s for s in screens if s.primary), screens[0])
@@ -313,13 +408,22 @@ def main() -> int:
     parser.add_argument("-c", "--config", type=Path, default=None)
     parser.add_argument("--model-dir", type=Path, default=None)
     parser.add_argument("-v", "--verbose", action="store_true")
+    parser.add_argument(
+        "--dump-audio",
+        type=Path,
+        default=None,
+        metavar="DIR",
+        help="write every captured utterance to DIR as a wav, for diagnosis",
+    )
+    parser.add_argument(
+        "--log-file",
+        type=Path,
+        default=None,
+        help=f"defaults to {DEFAULT_LOG_FILE}; pass 'none' to disable",
+    )
     args = parser.parse_args()
 
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(asctime)s %(levelname)-7s %(message)s",
-        datefmt="%H:%M:%S",
-    )
+    _configure_logging(verbose=args.verbose, log_file=args.log_file)
 
     config = Config.load(args.config)
     if args.model_dir is not None:
@@ -330,6 +434,9 @@ def main() -> int:
 
     try:
         daemon = Daemon(config)
+        if args.dump_audio is not None:
+            args.dump_audio.mkdir(parents=True, exist_ok=True)
+            daemon.set_dump_dir(args.dump_audio)
         daemon.start()
     except ModelMissingError as e:
         log.error("%s", e)
@@ -341,6 +448,15 @@ def main() -> int:
     # Only worth connecting once we are actually going to reach the event loop;
     # both failure paths above have already torn themselves down.
     app.aboutToQuit.connect(daemon.stop)
+
+    # Qt's event loop blocks in C, so Python never runs its SIGINT handler and
+    # Ctrl-C is swallowed. Ask Qt to surface briefly so the handler can fire.
+    signal.signal(signal.SIGINT, lambda *_: app.quit())
+    signal.signal(signal.SIGTERM, lambda *_: app.quit())
+    wakeup = QTimer()
+    wakeup.timeout.connect(lambda: None)
+    wakeup.start(200)
+
     return app.exec()
 
 
