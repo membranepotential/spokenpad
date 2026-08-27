@@ -216,6 +216,7 @@ class Daemon(QObject):
         #: When the current utterance's most recent preview was requested, and
         #: whether its cost has already been logged. Qt-thread-only.
         self._preview_requested_at = 0.0
+        self._preview_seconds = 0.0
         self._preview_timed = False
 
         # Fail fast, on this thread, while the error can still reach main().
@@ -394,17 +395,18 @@ class Daemon(QObject):
         if status:
             log.warning("PortAudio reported: %s", status)
 
-        preroll = self._config.audio.preroll_frames
-        if preroll and len(samples) <= preroll and held_seconds > 0.5:
-            # The exact signature of a dead input stream: the key was held for a
-            # real interval but nothing arrived beyond the pre-roll ring, which
-            # is then decoded to silence. The watchdog in audio.py should have
-            # caught this on the next capture; say so loudly if it did not.
+        # A dead input stream shows up as a mismatch between how long the key
+        # was held and how much audio arrived. Testing only for "nothing beyond
+        # the pre-roll" was too narrow and missed the real thing: a stream that
+        # died 0.2s into a 29.8s hold delivered 5705 samples against a 4000
+        # sample pre-roll, cleared that test, and was reported as a normal
+        # capture that merely decoded to nothing.
+        if held_seconds > 1.0 and audio_seconds < held_seconds * 0.5:
             log.error(
-                "captured ONLY the %d-sample pre-roll after holding %.1fs -- the "
-                "input stream is delivering nothing. The next capture will "
-                "reopen it; if this repeats, check `pactl list short sources`.",
-                preroll, held_seconds,
+                "captured only %.1fs of audio while the key was held for %.1fs -- "
+                "the input stream stopped delivering. It has been reopened; if "
+                "this repeats, check `pactl list short sources`.",
+                audio_seconds, held_seconds,
             )
         elif peak < 0.01:
             log.warning(
@@ -429,8 +431,26 @@ class Daemon(QObject):
         log.info("dumped capture to %s", path)
 
     def _poll_level(self) -> None:
+        """Feed the meter, and notice a microphone that has stopped talking.
+
+        This timer already ticks every 33ms for the whole of a recording, so it
+        is the one place that can catch a stream dying *during* an utterance
+        rather than on the next keypress. Silence in the overlay is ambiguous
+        -- a quiet room looks the same as a dead device -- so say which it is,
+        in the log and on the overlay, while the user is still holding the key
+        and can do something about it.
+        """
         if self._overlay is not None:
             self._overlay.push_level(self._audio.current_level())
+        if self._audio.recover_if_dead():
+            self._warn_no_audio()
+
+    def _warn_no_audio(self) -> None:
+        """Tell the user, on the overlay, that the microphone went away."""
+        if self._overlay is not None:
+            self._overlay.set_preview_text(
+                "no audio from the microphone -- reconnected, keep talking"
+            )
 
     # -------------------------------------------------------------------- preview
 
@@ -438,6 +458,7 @@ class Daemon(QObject):
         """Start previewing a new utterance, from a blank slate."""
         self._worker.abandon_previews.clear()
         self._preview_requested_at = 0.0
+        self._preview_seconds = 0.0
         self._preview_timed = False
         if self._overlay is not None:
             self._overlay.set_preview_text("")
@@ -471,6 +492,7 @@ class Daemon(QObject):
         if samples.size == 0:
             return
         self._preview_requested_at = time.monotonic()
+        self._preview_seconds = samples.size / self._config.audio.sample_rate
         self._preview_requested.emit(samples, self._generation)
 
     def _on_previewed(self, text: str, generation: int) -> None:
@@ -489,8 +511,9 @@ class Daemon(QObject):
             # user would actually feel if a preview ever delayed a decode.
             self._preview_timed = True
             log.debug(
-                "preview round trip %.0fms (%.1fs window)",
+                "preview round trip %.0fms for %.1fs of audio (window %.1fs)",
                 (time.monotonic() - self._preview_requested_at) * 1000,
+                self._preview_seconds,
                 self._config.overlay.preview_window_s,
             )
         if self._overlay is not None:

@@ -325,6 +325,51 @@ class AudioCapture:
         self._stream = self._open_stream()
         self._last_callback_at = time.monotonic()
 
+    def seconds_since_callback(self) -> float:
+        """How long since the realtime callback last delivered audio."""
+        return time.monotonic() - self._last_callback_at
+
+    def recover_if_dead(self) -> bool:
+        """Reopen the stream if it has gone quiet, *keeping* the capture going.
+
+        :meth:`_ensure_stream_alive` only runs when a capture starts, so a
+        stream that dies mid-utterance goes unnoticed until the user releases
+        the key and presses it again. Observed in the wild: a stream died 0.2s
+        into a hold, the user spoke for 29.8s, and 0.4s of audio came back with
+        nothing in the log until the *next* keypress reported "no callback for
+        51.3s". This is the same watchdog, running while it can still save the
+        utterance instead of after it is lost.
+
+        Unlike :meth:`start_capture` this preserves ``_chunks`` and the
+        capturing flag, so audio recorded before the stream died is kept and
+        audio after the reopen appends to it. The dead interval is gone either
+        way; the rest of the sentence does not have to be.
+
+        Returns whether a reopen actually happened.
+        """
+        if self._stream is None or not self._capturing:
+            return False
+        if self.seconds_since_callback() < STALE_STREAM_SECONDS:
+            return False
+        log.error(
+            "input stream stopped delivering audio %.1fs ago, mid-capture -- "
+            "reopening now so the rest of this utterance survives. Everything "
+            "spoken during the gap is lost.",
+            self.seconds_since_callback(),
+        )
+        try:
+            self._stream.stop()
+            self._stream.close()
+        except sd.PortAudioError as e:
+            log.debug("closing the dead stream failed, continuing: %s", e)
+        self._stream = None
+        # The ring is only written while idle, so it is stale by definition
+        # here; a capture is in progress and the callback appends to _chunks.
+        if self._ring is not None:
+            self._ring = _RingBuffer(self._config.preroll_frames)
+        self._stream = self._open_stream()
+        return True
+
     def take_stream_status(self) -> str | None:
         """Any PortAudio status flags seen since the last call (overflows etc.)."""
         status, self._last_status = self._last_status, None

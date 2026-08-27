@@ -269,3 +269,55 @@ def test_snapshot_while_idle_returns_an_empty_array() -> None:
     assert snapshot.size == 0
     assert snapshot.dtype == np.float32
     cap.close()
+
+
+def test_stream_dying_mid_capture_is_recovered_without_losing_what_was_recorded(
+    _fake_sounddevice: None,
+) -> None:
+    """The 29.8s failure: the stream died 0.2s into a hold and nothing noticed
+    until the *next* keypress, because ``_ensure_stream_alive`` only runs at
+    ``start_capture``.
+
+    Recovery mid-capture has to preserve the audio recorded before the stream
+    died -- reopening is worth nothing if it silently discards the first half
+    of the sentence along with the dead interval.
+    """
+    cap = AudioCapture(AudioConfig(preroll_ms=250))
+    first = cap._stream
+    assert first is not None
+
+    cap.start_capture()
+    before = np.full((800, 1), 0.5, dtype=np.float32)
+    cap._callback(before, 800, None, _NO_STATUS)
+
+    # Alive and recently heard from: nothing to do.
+    assert cap.recover_if_dead() is False
+    assert cap._stream is first
+
+    # Now the callback stops, mid-utterance.
+    cap._last_callback_at = time.monotonic() - (STALE_STREAM_SECONDS + 0.5)
+    assert cap.recover_if_dead() is True
+    assert cap._stream is not first, "a stream that died mid-capture must be reopened"
+
+    after = np.full((400, 1), 0.25, dtype=np.float32)
+    cap._callback(after, 400, None, _NO_STATUS)
+
+    samples = cap.stop_capture()
+    # Pre-roll + 800 recorded before the death + whatever the reopened stream's
+    # own start() delivered + 400 after. The two real chunks must both survive.
+    assert np.count_nonzero(samples == 0.5) == 800
+    assert np.count_nonzero(samples == 0.25) == 400
+    cap.close()
+
+
+def test_recover_if_dead_leaves_an_idle_stream_alone(_fake_sounddevice: None) -> None:
+    """Scoped to an in-flight capture on purpose: an idle stream is handled at
+    the next ``start_capture``, and reopening it here would throw away the warm
+    pre-roll ring for nothing."""
+    cap = AudioCapture(AudioConfig(preroll_ms=250))
+    first = cap._stream
+    cap._last_callback_at = time.monotonic() - (STALE_STREAM_SECONDS + 0.5)
+
+    assert cap.recover_if_dead() is False
+    assert cap._stream is first
+    cap.close()

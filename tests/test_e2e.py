@@ -35,6 +35,7 @@ connection to a direct (synchronous) call -- so the real generation check in
 from __future__ import annotations
 
 import inspect
+import logging
 from collections.abc import Callable
 from pathlib import Path
 from typing import cast
@@ -528,6 +529,75 @@ def _assert_stands_in_for(fake: type, real: type) -> None:
         )
     # `signature` of the class itself is the constructor's, minus `self`.
     assert _params(fake) == _params(real), f"{fake.__name__}() no longer matches {real.__name__}()"
+
+
+def test_a_stream_that_dies_mid_capture_is_caught_while_the_key_is_still_held(
+    make_daemon: DaemonFactory,
+) -> None:
+    """The failure this was written against: the input stream died 0.2s into a
+    hold, the user spoke for 29.8s, and 0.4s of audio came back -- with nothing
+    in the log until the *next* keypress reported "no callback for 51.3s".
+
+    ``_ensure_stream_alive`` only runs at ``start_capture``, so the level timer
+    is the only thing ticking during an utterance and therefore the only place
+    that can notice in time to save it.
+    """
+    daemon = make_daemon(None)
+    audio = _audio(daemon)
+
+    daemon._dispatch(KeyDown(at=0.0))
+    assert audio.recover_calls == 0
+
+    daemon._poll_level()  # healthy: polls, finds nothing wrong, says nothing
+    assert audio.recover_calls == 1
+    assert _overlay(daemon)._preview == ""
+
+    audio.dead = True
+    daemon._poll_level()
+
+    # Recovered, and the user is told on the overlay -- silence in the meter is
+    # ambiguous (a quiet room looks identical to a dead device), so the overlay
+    # has to say which one it is while they can still act on it.
+    assert "no audio" in _overlay(daemon)._preview
+
+
+def test_the_level_poll_does_not_touch_the_stream_when_idle(
+    make_daemon: DaemonFactory,
+) -> None:
+    """Recovery is scoped to an in-flight capture: reopening a stream that is
+    merely idle would throw away the warm pre-roll ring for no reason."""
+    daemon = make_daemon(None)
+    audio = _audio(daemon)
+    audio.dead = True
+
+    daemon._poll_level()
+
+    # The fake reports the reopen it was told to report; the real
+    # AudioCapture.recover_if_dead returns False when not capturing. What is
+    # pinned here is that the daemon asks rather than deciding for itself.
+    assert audio.recover_calls == 1
+
+
+def test_capture_far_shorter_than_the_hold_is_reported_as_an_error(
+    make_daemon: DaemonFactory,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The old check was ``len(samples) <= preroll``, which this real failure
+    slipped past: 5705 samples against a 4000-sample pre-roll, from a 29.8s
+    hold. It was logged as an ordinary capture that happened to decode to
+    nothing. Held-versus-captured is the comparison that actually detects it.
+    """
+    daemon = make_daemon(None)
+    rate = daemon._config.audio.sample_rate
+
+    with caplog.at_level(logging.ERROR, logger="voice-kb"):
+        daemon._log_capture(29.8, np.full(5705, 0.01, dtype=np.float32))
+    assert "stopped delivering" in caplog.text
+
+    caplog.clear()
+    with caplog.at_level(logging.ERROR, logger="voice-kb"):
+        daemon._log_capture(2.0, np.full(2 * rate, 0.01, dtype=np.float32))
+    assert caplog.text == ""
 
 
 def test_every_fake_still_matches_the_interface_it_stands_in_for() -> None:

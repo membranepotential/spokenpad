@@ -38,6 +38,9 @@ class FakeAudioCapture:
         self.closed = False
         self.next_samples: MonoAudio = np.zeros(1600, dtype=np.float32)
         self.preview_samples: MonoAudio = np.zeros(800, dtype=np.float32)
+        self.dead = False
+        self.recover_calls = 0
+        self.seconds_since_callback_value = 0.0
 
     def start_capture(self) -> None:
         self.start_calls += 1
@@ -57,6 +60,18 @@ class FakeAudioCapture:
     def take_stream_status(self) -> str | None:
         """Mirrors AudioCapture.take_stream_status; the fake never sees flags."""
         return None
+
+    def seconds_since_callback(self) -> float:
+        return self.seconds_since_callback_value
+
+    def recover_if_dead(self) -> bool:
+        """Mirrors AudioCapture.recover_if_dead. Set ``dead`` to make the next
+        poll report a recovery; it self-clears, as a real reopen would."""
+        self.recover_calls += 1
+        if not self.dead:
+            return False
+        self.dead = False
+        return True
 
     def current_level(self) -> float:
         return 0.0

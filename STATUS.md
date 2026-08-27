@@ -12,9 +12,8 @@ dictating Claude prompts and shell commands.
   every regression found so far (each verified by reverting the fix).
 
 ## Done
-- Evaluated and rejected Handy 0.9.6 (rationale in README); reverted every
-  change. 5 real dictation samples in `eval-samples/` (audio gitignored).
-- v1 built, reviewed, all 10 review findings fixed. Gladia is issue #1.
+- Evaluated and rejected Handy 0.9.6 (README); reverted every change. v1
+  built, reviewed, all 10 findings fixed. Gladia is issue #1.
 - All 5 references verified (2026-08-27); both `handy WER` biases discharged.
 - Live overlay preview: bounded 6s tail re-decode every 1100ms, dropped on
   key-up, never injected. 100 tests green.
@@ -41,12 +40,14 @@ why keysym-based hotkey libraries cannot bind it.
 ## Next
 - **Try the live preview** and report back on feel: is 1100ms too laggy, is
   6s of trailing text the right amount, does release-to-text still feel fast?
+- Root cause of the dying input stream is still unknown (3rd occurrence,
+  never reproduced outside a live session). All three watchdogs now recover
+  it; nobody has explained it.
 - Short commands spell out: `cd home` -> `C D home.` (100% WER; Handy got 0%).
 - systemd --user unit for autostart.
 
 ## Open questions
-- Cloud ASR (Gladia) as a second backend — issue #1. Not the default; conflicts
-  with the local-processing requirement.
+- Cloud ASR (Gladia) as a second backend — issue #1. Not the default.
 - Is an LLM cleanup pass worth it? Hotwords are deferred, so the technical
   vocabulary gap (mkdir, udev, `cd home`) is currently unaddressed.
 

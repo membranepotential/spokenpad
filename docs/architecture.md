@@ -115,6 +115,39 @@ clipboard. See
 event, command or state was added for it — a preview is a shell concern, so
 `state.py` is untouched.
 
+## The input stream is not trusted
+
+PortAudio streams on Linux die quietly. PipeWire can suspend the device, the
+default source can change, the server can restart -- and when it happens the
+callback simply stops. Nothing raises, and `InputStream.active` keeps
+reporting `True`. The symptom is a capture that returns only the frozen
+pre-roll ring, decoded to nothing, over and over.
+
+So liveness is observed through the callback, never through the handle, at
+three points:
+
+| when | what | why it is not enough on its own |
+|---|---|---|
+| stream open | wait up to `FIRST_CALLBACK_TIMEOUT` for the first buffer | catches a stream born dead; blind to one that dies later |
+| `start_capture` | `_ensure_stream_alive` reopens if the callback has been quiet for `STALE_STREAM_SECONDS` | repairs a device that died *while idle*, before it can swallow a dictation; blind to one that dies mid-utterance |
+| every 33ms while recording | `recover_if_dead`, driven by the level-meter timer | the only one that can act while the utterance is still happening |
+
+The third exists because of a real failure: the stream died 0.2s into a hold,
+the user spoke for 29.8 seconds, and 0.4s of audio came back. Nothing appeared
+in the log until the *next* keypress reported "no callback for 51.3s". The
+first two checks were both working correctly and neither could see it.
+
+`recover_if_dead` preserves the in-progress capture rather than restarting it:
+the dead interval is lost either way, but the words before it are not. It is
+also scoped to an in-flight capture, since an idle stream is already handled at
+the next `start_capture` and reopening there would discard a warm pre-roll ring
+for nothing.
+
+Silence in the level meter is ambiguous -- a quiet room and a dead microphone
+look identical -- so a recovery also writes a message into the overlay's
+preview band. That is the only case where the overlay shows text that did not
+come from the recogniser.
+
 ## Why this split matters here specifically
 
 The [constraints](constraints.md) this project runs under were all discovered
