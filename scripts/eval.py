@@ -5,9 +5,10 @@ Answers, repeatably and numerically, whether a change to ``asr.vocabulary``,
 worse -- see [docs/evaluation.md](../docs/evaluation.md) for what the numbers
 mean and why one sample is a pass/fail check instead of a WER row.
 
-Loads ``eval-samples/references.json`` (hand-reconstructed ground truth,
-every entry ``verified: false``) and ``eval-samples/transcripts.json`` (the
-Handy 0.9.6 baseline this project replaces), decodes each sample through the
+Loads ``eval-samples/references.json`` (ground truth, reconstructed from the
+recording session and since confirmed against the audio by the speaker) and
+``eval-samples/transcripts.json`` (the Handy 0.9.6 baseline this project
+replaces), decodes each sample through the
 real :class:`~voice_kb.asr.Transcriber`, applies
 :func:`~voice_kb.text.postprocess`, and reports WER/CER plus decode timing.
 
@@ -119,8 +120,17 @@ class Reference:
     duration_s: float
     verified: bool
     reference: str | None
-    """``None`` for the one sample that cannot be scored -- see ``LONG_CLIP_MARGIN``."""
+    """``None`` for a sample with no ground truth yet; such a sample is skipped
+    for WER rather than scored against nothing."""
     exercises: tuple[str, ...]
+    long_clip_check: bool = False
+    """Additionally assert this clip decodes to non-empty text well inside its
+    own duration -- see :data:`LONG_CLIP_MARGIN`.
+
+    Independent of whether the sample has a reference. It used to be inferred
+    from ``reference is None``, which silently disabled the assertion the
+    moment the 37s regression clip was finally transcribed: exactly the sample
+    the check exists for would have stopped being checked."""
 
 
 def load_references(path: Path) -> list[Reference]:
@@ -132,6 +142,7 @@ def load_references(path: Path) -> list[Reference]:
             verified=s["verified"],
             reference=s["reference"],
             exercises=tuple(s["exercises"]),
+            long_clip_check=bool(s.get("long_clip_check", False)),
         )
         for s in raw["samples"]
     ]
@@ -212,6 +223,23 @@ EXERCISE_CHECKS: Mapping[str, tuple[ExerciseCheck, ...]] = {
             "reset (not rust): same regression, second word",
             expect=(_p(r"\breset\b"),),
             forbid=(_p(r"\brust\b"),),
+        ),
+    ),
+    "handy-1787827757.wav": (
+        ExerciseCheck(
+            "set AND sed both survive -- spoken in one sentence, about each other",
+            expect=(_p(r"\bset\b"), _p(r"\bsed\b")),
+            forbid=(),
+        ),
+        ExerciseCheck(
+            "reset AND rust both survive -- same sentence, same trap",
+            expect=(_p(r"\breset\b"), _p(r"\brust\b")),
+            forbid=(),
+        ),
+        ExerciseCheck(
+            "i3 (not 'I three' / 'eye three') -- hotword candidate, expected to fail today",
+            expect=(_p(r"\bi3\b"),),
+            forbid=(),
         ),
     ),
     "handy-1787828395.wav": (
@@ -355,8 +383,7 @@ def evaluate(
             wav_duration_s / result.elapsed_seconds if result.elapsed_seconds > 0 else float("inf")
         )
 
-        reference_text = ref.reference
-        if reference_text is None:
+        if ref.long_clip_check:
             threshold = wav_duration_s * LONG_CLIP_MARGIN
             long_clip = LongClipCheck(
                 file=ref.file,
@@ -367,6 +394,9 @@ def evaluate(
                 within_time_margin=result.elapsed_seconds < threshold,
                 hypothesis=hypothesis,
             )
+
+        reference_text = ref.reference
+        if reference_text is None:
             continue
 
         handy_text = handy_baseline.get(ref.file)
@@ -425,10 +455,16 @@ def print_report(report: EvalReport) -> None:
     print("-" * len(header))
     agg = report.aggregate
     handy_agg = f"{agg.handy_wer * 100:9.1f}%" if agg.handy_wer is not None else f"{'N/A':>10}"
+    unverified = sum(1 for s in report.samples if not s.verified)
+    caveat = (
+        f" -- {unverified}/{len(report.samples)} references are UNVERIFIED; this "
+        "aggregate is not quotable, see docs/evaluation.md"
+        if unverified
+        else ""
+    )
     print(
         f"{'AGGREGATE (' + str(agg.samples_scored) + ' samples)':<24} "
-        f"{agg.wer * 100:6.1f}% {agg.cer * 100:6.1f}% {handy_agg}"
-        " -- ALL references are verified:false, see docs/evaluation.md"
+        f"{agg.wer * 100:6.1f}% {agg.cer * 100:6.1f}% {handy_agg}{caveat}"
     )
     print()
 
@@ -446,7 +482,7 @@ def print_report(report: EvalReport) -> None:
     if report.long_clip is not None:
         lc = report.long_clip
         status = "PASS" if lc.passed else "FAIL"
-        print("Long-clip check (37 s regression sample, not scored for WER -- no reference):")
+        print("Long-clip check (the 37 s clip Handy discarded; also scored above):")
         print(
             f"  [{status}] {lc.file}: decoded in {lc.decode_seconds:.2f}s "
             f"(threshold {lc.threshold_s:.1f}s = {LONG_CLIP_MARGIN}x{lc.duration_s:.1f}s), "
