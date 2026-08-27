@@ -308,7 +308,23 @@ class Daemon(QObject):
             "captured %.1fs held -> %.1fs audio (%d samples), rms=%.4f peak=%.4f",
             held_seconds, audio_seconds, len(samples), rms, peak,
         )
-        if peak < 0.01:
+        status = self._audio.take_stream_status()
+        if status:
+            log.warning("PortAudio reported: %s", status)
+
+        preroll = self._config.audio.preroll_frames
+        if preroll and len(samples) <= preroll and held_seconds > 0.5:
+            # The exact signature of a dead input stream: the key was held for a
+            # real interval but nothing arrived beyond the pre-roll ring, which
+            # is then decoded to silence. The watchdog in audio.py should have
+            # caught this on the next capture; say so loudly if it did not.
+            log.error(
+                "captured ONLY the %d-sample pre-roll after holding %.1fs -- the "
+                "input stream is delivering nothing. The next capture will "
+                "reopen it; if this repeats, check `pactl list short sources`.",
+                preroll, held_seconds,
+            )
+        elif peak < 0.01:
             log.warning(
                 "captured audio is near-silent (peak %.4f). Check the input device "
                 "and its gain -- the model will hallucinate on silence.", peak

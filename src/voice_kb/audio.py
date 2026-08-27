@@ -21,7 +21,9 @@ writes into a buffer sized up front.
 
 from __future__ import annotations
 
+import logging
 import threading
+import time
 
 import numpy as np
 import numpy.typing as npt
@@ -31,7 +33,19 @@ from voice_kb.config import AudioConfig
 
 type MonoAudio = npt.NDArray[np.float32]
 
+log = logging.getLogger("voice-kb.audio")
+
 MAX_UTTERANCE_SECONDS = 600.0
+
+STALE_STREAM_SECONDS = 1.0
+"""If no callback has fired in this long, treat the stream as dead.
+
+PortAudio streams on Linux do die: PipeWire can suspend the device, the
+default source can change, the server can restart. When that happens the
+callback simply stops and nothing raises -- capture then returns only the
+pre-roll ring, byte-identical every time, and the model dutifully decodes
+0.25s of room noise into nothing. Observed in the wild; hence the watchdog.
+"""
 """Hard ceiling on a single capture. Guards against unbounded memory growth
 if the hotkey's key-up is ever lost (stuck key, dropped event, wedged
 device) -- without this, `_chunks` would grow for as long as the key stays
@@ -106,6 +120,8 @@ class AudioCapture:
         self._chunks: list[MonoAudio] = []
         self._frames_captured = 0
         self._level = 0.0
+        self._last_callback_at = 0.0
+        self._last_status: str | None = None
 
         self._stream: sd.InputStream | None = None
         if self._ring is not None:
@@ -123,6 +139,10 @@ class AudioCapture:
             stream.start()
         except sd.PortAudioError as e:
             raise AudioCaptureError(f"failed to open input stream: {e}") from e
+        # A brand new stream has not called back yet; without this the watchdog
+        # would judge it stale on the very first capture and reopen it, throwing
+        # away the pre-roll it was about to use.
+        self._last_callback_at = time.monotonic()
         return stream
 
     def _callback(
@@ -134,6 +154,10 @@ class AudioCapture:
     ) -> None:
         mono = indata[:, 0]
         self._level = float(np.abs(mono).max()) if frames else 0.0
+        self._last_callback_at = time.monotonic()
+        if _status:
+            # Cannot log from a realtime thread; stash it for the next caller.
+            self._last_status = str(_status)
 
         with self._lock:
             if self._capturing:
@@ -150,6 +174,8 @@ class AudioCapture:
         """Begin accumulating audio, seeded with the pre-roll buffer if any."""
         if self._config.preroll_frames == 0:
             self._stream = self._open_stream()
+        else:
+            self._ensure_stream_alive()
 
         with self._lock:
             # Snapshotting the ring buffer must happen under the same lock
@@ -181,6 +207,40 @@ class AudioCapture:
         if not chunks:
             return np.zeros(0, dtype=np.float32)
         return chunks[0] if len(chunks) == 1 else np.concatenate(chunks)
+
+    def _ensure_stream_alive(self) -> None:
+        """Reopen the input stream if its callback has gone quiet.
+
+        Called on the capture path rather than from a timer so the cost is paid
+        once per utterance, and so a device that died while idle is repaired
+        before it can swallow a dictation.
+        """
+        if self._stream is None:
+            self._stream = self._open_stream()
+            self._last_callback_at = time.monotonic()
+            return
+        idle = time.monotonic() - self._last_callback_at
+        if getattr(self._stream, "active", True) and idle < STALE_STREAM_SECONDS:
+            return
+        log.warning(
+            "input stream looks dead (active=%s, no callback for %.1fs); reopening",
+            self._stream.active, idle,
+        )
+        try:
+            self._stream.stop()
+            self._stream.close()
+        except sd.PortAudioError as e:
+            log.debug("closing the dead stream failed, continuing: %s", e)
+        self._stream = None
+        if self._ring is not None:
+            self._ring = _RingBuffer(self._config.preroll_frames)
+        self._stream = self._open_stream()
+        self._last_callback_at = time.monotonic()
+
+    def take_stream_status(self) -> str | None:
+        """Any PortAudio status flags seen since the last call (overflows etc.)."""
+        status, self._last_status = self._last_status, None
+        return status
 
     def current_level(self) -> float:
         """Cheap peak level of the most recent callback, 0.0-1.0, for the overlay meter."""

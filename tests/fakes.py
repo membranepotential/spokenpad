@@ -39,6 +39,10 @@ class FakeAudioCapture:
         self.stop_calls += 1
         return self.next_samples
 
+    def take_stream_status(self) -> str | None:
+        """Mirrors AudioCapture.take_stream_status; the fake never sees flags."""
+        return None
+
     def current_level(self) -> float:
         return 0.0
 

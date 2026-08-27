@@ -20,8 +20,11 @@ import numpy.typing as npt
 import pytest
 import sounddevice as sd
 
-from voice_kb.audio import AudioCapture, _RingBuffer
+from voice_kb.audio import STALE_STREAM_SECONDS, AudioCapture, _RingBuffer
 from voice_kb.config import AudioConfig
+
+_NO_STATUS = sd.CallbackFlags()
+"""An empty PortAudio status: no overflow, no underflow."""
 
 
 class _FakeInputStream:
@@ -30,15 +33,19 @@ class _FakeInputStream:
 
     def __init__(self, **kwargs: Any) -> None:
         self.callback = kwargs["callback"]
+        # Mirrors sounddevice.InputStream.active, which AudioCapture's stale
+        # stream watchdog reads. A fake that omits it would make the watchdog
+        # untestable here.
+        self.active = False
 
     def start(self) -> None:
-        pass
+        self.active = True
 
     def stop(self) -> None:
-        pass
+        self.active = False
 
     def close(self) -> None:
-        pass
+        self.active = False
 
 
 class _SlowRingBuffer(_RingBuffer):
@@ -123,3 +130,45 @@ def test_preroll_snapshot_is_never_reordered_under_concurrent_writes() -> None:
         capture.close()
 
     assert reordered == 0, f"{reordered}/{iterations} pre-roll snapshots were reordered"
+
+
+def test_dead_stream_is_detected_and_reopened(_fake_sounddevice: None) -> None:
+    """A stream whose callback has gone silent must be replaced, not trusted.
+
+    Regression: PipeWire suspended the device mid-session. The callback simply
+    stopped, nothing raised, and every subsequent capture returned the same
+    frozen 250ms pre-roll ring -- byte-identical, decoded to nothing, over and
+    over. Silent failure is the one mode this project refuses.
+    """
+    cap = AudioCapture(AudioConfig(preroll_ms=250))
+    first = cap._stream
+    assert first is not None
+
+    # The stream is alive and calling back: no reopen.
+    cap._callback(np.zeros((512, 1), dtype=np.float32), 512, None, _NO_STATUS)
+    cap.start_capture()
+    assert cap._stream is first
+    cap.stop_capture()
+
+    # Now it goes quiet for longer than the watchdog tolerates.
+    cap._last_callback_at = time.monotonic() - (STALE_STREAM_SECONDS + 0.5)
+    cap.start_capture()
+    assert cap._stream is not first, "a silent stream should have been reopened"
+    cap.stop_capture()
+    cap.close()
+
+
+def test_inactive_stream_is_reopened_even_if_recently_called_back(
+    _fake_sounddevice: None,
+) -> None:
+    """`active` going False is enough on its own; do not wait for the timeout."""
+    cap = AudioCapture(AudioConfig(preroll_ms=250))
+    first = cap._stream
+    assert first is not None
+    cap._callback(np.zeros((512, 1), dtype=np.float32), 512, None, _NO_STATUS)
+    first.active = False
+
+    cap.start_capture()
+    assert cap._stream is not first
+    cap.stop_capture()
+    cap.close()
