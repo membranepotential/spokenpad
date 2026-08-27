@@ -32,10 +32,20 @@ this project's hard constraints:
 
 Parakeet TDT 0.6B v3 int8 on an i7-9850H, 6 threads, CPU only:
 
+Idle machine, warm model, `modified_beam_search`, best of 3:
+
+| audio | decode | real-time factor |
+|---|---|---|
+| 5 s | 0.38 s | 13.0× |
+| 20 s | 1.19 s | **16.8×** |
+| 37 s | 2.55 s | 14.5× |
+
+Scaling is linear; there is no long-utterance cliff. For comparison, the tool
+this replaces managed 1.37× on the same hardware and silently discarded the
+37 s clip entirely (its streaming decoder hit a hard 30 s cap).
+
 | | |
 |---|---|
-| 20.4 s utterance | 2.12 s decode (**9.7× real-time**) |
-| with `modified_beam_search` | 2.38 s (8.6× real-time) |
 | VRAM used | none |
 
 ## Setup

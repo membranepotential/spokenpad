@@ -12,6 +12,7 @@ from voice_kb.config import (
     ConfigError,
     HotkeyConfig,
     OverlayConfig,
+    PasteConfig,
     TextConfig,
 )
 
@@ -152,3 +153,43 @@ def test_absolute_model_dir_is_left_untouched(tmp_path: Path) -> None:
 
 def test_text_config_replacements_default_is_empty() -> None:
     assert TextConfig().replacements == {}
+
+
+# -- PasteConfig combo validation ---------------------------------------------
+
+
+def test_default_paste_combos_construct() -> None:
+    cfg = PasteConfig()
+    assert cfg.combo_for(None) == "ctrl+v"
+    assert cfg.combo_for("Alacritty") == "ctrl+shift+v"
+
+
+def test_good_custom_combo_is_accepted() -> None:
+    cfg = PasteConfig(default="ctrl+shift+v", per_window_class={"Foo": "super+alt+x"})
+    assert cfg.combo_for(None) == "ctrl+shift+v"
+    assert cfg.combo_for("Foo") == "super+alt+x"
+
+
+def test_non_ascii_key_is_rejected() -> None:
+    with pytest.raises(ConfigError, match="disallowed key"):
+        PasteConfig(default="ctrl+ü")
+
+
+def test_unknown_modifier_is_rejected() -> None:
+    with pytest.raises(ConfigError, match="unknown modifier"):
+        PasteConfig(default="hyper+v")
+
+
+def test_bare_key_with_no_modifier_is_rejected() -> None:
+    with pytest.raises(ConfigError, match="no modifier"):
+        PasteConfig(default="v")
+
+
+def test_bad_combo_in_per_window_class_names_the_window_class() -> None:
+    with pytest.raises(ConfigError, match=r"per_window_class\[.*Alacritty.*\]"):
+        PasteConfig(per_window_class={"Alacritty": "ctrl+ü"})
+
+
+def test_paste_combo_validated_through_toml_load() -> None:
+    with pytest.raises(ConfigError, match="disallowed key"):
+        Config.from_mapping({"paste": {"default": "ctrl+ü"}})

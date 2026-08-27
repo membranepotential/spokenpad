@@ -151,8 +151,16 @@ class AudioCapture:
         if self._config.preroll_frames == 0:
             self._stream = self._open_stream()
 
-        preroll = self._ring.snapshot() if self._ring is not None else None
         with self._lock:
+            # Snapshotting the ring buffer must happen under the same lock
+            # the callback uses for `_RingBuffer.write` (the `_capturing is
+            # False` branch below). Taken outside the lock, a concurrent
+            # write could be mid-splice when `snapshot()` reads `_write_pos`,
+            # returning the pre-roll reordered; taken outside entirely, a
+            # write landing between the snapshot and the `_capturing = True`
+            # flip would be silently dropped instead of ending up in
+            # `_chunks`. Holding the lock across both closes both gaps.
+            preroll = self._ring.snapshot() if self._ring is not None else None
             self._chunks = [preroll] if preroll is not None and preroll.size else []
             self._frames_captured = preroll.size if preroll is not None else 0
             self._capturing = True

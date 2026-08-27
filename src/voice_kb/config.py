@@ -133,6 +133,56 @@ class TextConfig:
     trailing_space: bool = False
 
 
+_PASTE_MODIFIERS = frozenset({"ctrl", "shift", "alt", "super", "meta"})
+"""Allowed modifier names in a paste combo, lowercase."""
+
+_PASTE_NAMED_KEYS = frozenset({"Insert", "Return", "Tab", "space", "BackSpace", "Delete"})
+"""Allowed non-alphanumeric final keys, on top of a single ASCII alphanumeric.
+
+Deliberately short: this is an allowlist for the small set of real paste
+combos (``ctrl+v``, ``ctrl+shift+v``, ``shift+Insert``, ...), not a general
+key-name validator.
+"""
+
+
+def _validate_combo(combo: str, *, context: str) -> None:
+    """Raise :class:`ConfigError` unless ``combo`` is ``modifier+...+key``
+    with every modifier in :data:`_PASTE_MODIFIERS` and a conservative final
+    key -- a single ASCII alphanumeric character or a name from
+    :data:`_PASTE_NAMED_KEYS`.
+
+    This is an allowlist, not a denylist, on purpose: ``combo`` reaches
+    ``xdotool key`` verbatim (see :mod:`voice_kb.inject`), and an
+    unconstrained key name -- most dangerously a non-ASCII character such as
+    ``ctrl+ü`` -- forces xdotool to remap a scratch keycode in the *core* X
+    keymap to find a keysym for it, which is exactly the mechanism that
+    destroyed the user's per-device ``setxkbmap`` layout in the tool this
+    project replaced (see ``docs/constraints.md``).
+    """
+    parts = combo.split("+")
+    *modifiers, key = parts
+    if not modifiers:
+        raise ConfigError(
+            f"paste combo for {context} must be 'modifier+...+key', got {combo!r} "
+            "(no modifier)"
+        )
+    for mod in modifiers:
+        if mod not in _PASTE_MODIFIERS:
+            raise ConfigError(
+                f"paste combo for {context} has unknown modifier {mod!r} in {combo!r}; "
+                f"allowed modifiers: {', '.join(sorted(_PASTE_MODIFIERS))}"
+            )
+    if key in _PASTE_NAMED_KEYS:
+        return
+    if len(key) == 1 and key.isascii() and key.isalnum():
+        return
+    raise ConfigError(
+        f"paste combo for {context} has disallowed key {key!r} in {combo!r}; "
+        "must be a single ASCII alphanumeric character or one of "
+        f"{', '.join(sorted(_PASTE_NAMED_KEYS))}"
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class PasteConfig:
     default: str = "ctrl+v"
@@ -142,9 +192,22 @@ class PasteConfig:
     """Keyed by X11 ``WM_CLASS``; terminals need shift."""
 
     restore_delay_ms: int = 150
-    """How long to wait before putting the previous clipboard contents back."""
+    """Max time to wait for evidence that the paste was served before
+    restoring the previous clipboard contents (see
+    :func:`voice_kb.inject.inject_text`)."""
+
+    def __post_init__(self) -> None:
+        _validate_combo(self.default, context="paste.default")
+        for window_class, combo in self.per_window_class.items():
+            _validate_combo(combo, context=f"paste.per_window_class[{window_class!r}]")
 
     def combo_for(self, window_class: str | None) -> str:
+        """The validated paste combo for ``window_class``.
+
+        Every combo this can return was checked by :func:`_validate_combo`
+        in ``__post_init__`` -- there is no path from an unvalidated string
+        to the caller.
+        """
         if window_class is None:
             return self.default
         return self.per_window_class.get(window_class, self.default)

@@ -24,17 +24,28 @@ The GPU on this machine is a 4 GB GTX 1650, deliberately kept free (see
 [constraints.md](constraints.md#cpu-only)). Int8 quantization on 6 CPU
 threads (i7-9850H) measures fast enough that this isn't a compromise:
 
-| | |
-|---|---|
-| 20.4 s utterance, `greedy_search` | 2.12 s decode (**9.7× real-time**) |
-| 20.4 s utterance, `modified_beam_search` | 2.38 s decode (8.6× real-time) |
-| VRAM used | none |
-| Handy 0.9.6, same clip | 1.37× real-time, fails past 30 s |
+Idle machine, warm model, `modified_beam_search`, best of 3:
 
-(README.md, STATUS.md). `modified_beam_search` is ~10% slower than
-`greedy_search` on this checkpoint but is required for hotword biasing (next
-section), and 8.6x real-time is still comfortably faster than needed for a
-one-shot decode fired once per utterance — so it's the default
+| audio | decode | real-time factor |
+|---|---|---|
+| 2 s | 0.22 s | 9.1× |
+| 5 s | 0.38 s | 13.0× |
+| 10 s | 0.62 s | 16.2× |
+| 20 s | 1.19 s | **16.8×** |
+| 30 s | 1.89 s | 15.8× |
+| 37 s | 2.55 s | 14.5× |
+| VRAM used | none | |
+| Handy 0.9.6 | 1.37× real-time, discards past 30 s | |
+
+Scaling is linear — the short clips are dominated by fixed per-decode overhead,
+not the reverse. Measure on an idle machine: under load (a parallel build,
+load average ~19) these figures degrade by roughly 5×, which is easy to
+mistake for a scaling problem in the model.
+
+`modified_beam_search` is marginally slower than `greedy_search` on this
+checkpoint but is required for hotword biasing (next section), and the margin
+is irrelevant for a one-shot decode fired once per utterance — so it's the
+default
 (`AsrConfig.decoding` in [`config.py`](../src/voice_kb/config.py)).
 
 ## Hotwords: biasing the beam, not rewriting the output
@@ -89,7 +100,7 @@ mis-decoded it as `mkir`:
 | `hotwords_score` | Result |
 |---|---|
 | no hotwords | `mkir` (uncorrected) |
-| **1.5** | `mkdir` — correct, no side effects observed |
+| **1.5** | `mkdir` — correct; one observed side effect, `comment` -> `comman` |
 | 3.0 | starts over-firing on unrelated audio |
 | 6.0 | rewrites ordinary, unrelated words |
 

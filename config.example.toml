@@ -81,8 +81,11 @@ trailing_space = false
 # Key combo used to paste the transcribed text, unless overridden below.
 default = "ctrl+v"
 
-# How long to wait, after pasting, before restoring the clipboard's
-# previous contents.
+# How long to wait for evidence that the paste was actually served before
+# restoring the clipboard's previous contents. This is a ceiling, not a
+# fixed sleep: a confirmed paste restores as soon as it is observed. On
+# timeout the clipboard is restored anyway and the injection is logged as
+# unconfirmed rather than reported as a clean success.
 restore_delay_ms = 150
 
 # Per-window-class overrides, keyed by X11 WM_CLASS. Terminals commonly

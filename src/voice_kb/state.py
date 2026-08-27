@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import assert_never
+from typing import Final, assert_never
 
 
 class Phase(Enum):
@@ -128,13 +128,39 @@ class DiscardCapture:
     """Stop accumulating and throw the audio away."""
 
 
-type Command = Nothing | StartCapture | Decode | DiscardCapture
+@dataclass(frozen=True, slots=True)
+class AbortDecode:
+    """Invalidate the in-flight decode so its result is never injected.
+
+    Without this the shell has no way to distinguish "the decode the user is
+    still waiting for" from "the decode the user cancelled two seconds ago",
+    and stale text lands in whatever window happens to be focused by the time
+    it finishes.
+    """
+
+
+type Command = Nothing | StartCapture | Decode | DiscardCapture | AbortDecode
 
 
 # ----------------------------------------------------------------------- transition
 
 
-def step(state: SessionState, event: Event) -> tuple[SessionState, Command]:
+MIN_HOLD_SECONDS: Final = 0.12
+"""Below this, a keypress is a stray tap rather than dictation.
+
+The hotkey is deliberately not grabbed, so the key stays live for everything
+else on the system and accidental presses are expected. Without this floor a
+30ms brush of the key decodes a fraction of a second of room noise and pastes
+whatever the model hallucinates into the focused window.
+"""
+
+
+def step(
+    state: SessionState,
+    event: Event,
+    *,
+    min_hold_seconds: float = MIN_HOLD_SECONDS,
+) -> tuple[SessionState, Command]:
     """Total transition function.
 
     Every (state, event) pair is handled. Events that are meaningless in the
@@ -146,9 +172,17 @@ def step(state: SessionState, event: Event) -> tuple[SessionState, Command]:
         case Idle(), KeyDown(at=at):
             return Recording(started_at=at), StartCapture()
 
+        # A press arriving while a previous decode is still running starts a new
+        # utterance rather than being dropped. The decode runs on its own thread
+        # and is unaffected; its result still gets injected when it lands.
+        case Transcribing(), KeyDown(at=at):
+            return Recording(started_at=at), StartCapture()
+
         # -- finishing
+        case Recording(started_at=started), KeyUp(at=at) if at - started < min_hold_seconds:
+            return Idle(), DiscardCapture()
+
         case Recording(started_at=started), KeyUp(at=at):
-            # A key held for a few milliseconds is a stray tap, not dictation.
             return (
                 Transcribing(started_at=started, released_at=at),
                 Decode(spoken_seconds=at - started),
@@ -157,9 +191,9 @@ def step(state: SessionState, event: Event) -> tuple[SessionState, Command]:
         # -- aborting
         case Recording(), Cancelled():
             return Idle(), DiscardCapture()
+
         case Transcribing(), Cancelled():
-            # The decode thread checks for this and drops its result.
-            return Idle(), Nothing()
+            return Idle(), AbortDecode()
 
         # -- settling
         case Transcribing(), DecodeFinished():

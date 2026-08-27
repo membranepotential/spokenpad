@@ -6,10 +6,10 @@ at the cursor. Fully local, CPU-only (the 4 GB GTX 1650 stays free), tuned for
 dictating Claude prompts and shell commands.
 
 ## Now
-- v1 feature-complete. All modules landed; daemon starts, loads the model and
-  arms the hotkey. ruff + mypy --strict (18 files) + 54 tests green.
-- Not yet done end-to-end with a live voice through the real hotkey.
-- Next: code review, then a real dictation test.
+- v1 feature-complete and code-reviewed. All 10 review findings fixed.
+  ruff + mypy --strict (20 files) + 72 tests green; daemon starts clean.
+- **Not yet run end-to-end with a live voice through the real hotkey.**
+  That is the only remaining proof and it needs the user.
 
 ## Done
 - Surveyed Wispr Flow (cloud, no Linux) + Linux alternatives.
@@ -19,8 +19,9 @@ dictating Claude prompts and shell commands.
 - Private repo `membranepotential/voice-kb`; Gladia captured as issue #1.
 
 ## Measured (i7-9850H, 6 threads, CPU, 0 VRAM)
-- 20.4 s utterance: **2.12 s** greedy (9.7x RT), 2.38 s `modified_beam_search`
-  (8.6x RT). Handy managed 1.37x RT on the same clip and failed at 30 s.
+- Idle + warm, `modified_beam_search`: 5 s -> 0.38 s (13x), 20 s -> 1.19 s
+  (**16.8x**), 37 s -> 2.55 s (14.5x). Linear; no long-utterance cliff.
+  Handy managed 1.37x and discarded the 37 s clip at its 30 s cap.
 - `modified_beam_search` **works** on the TDT checkpoint → hotwords viable.
 - `bpe_vocab` is the two-column SentencePiece `.vocab` (piece, log-prob), not
   the protobuf — reconstructable from `tokens.txt` as score = `-index`.
@@ -43,9 +44,6 @@ dictating Claude prompts and shell commands.
 ## Next
 - `scripts/eval.py` — the regression harness; `eval-samples/references.json`
   now holds ground truth (all entries `verified: false` until listened to).
-- Re-measure decode RTF on an **idle** machine. The 9.7x figure was measured
-  idle; every later timing was taken under load average ~19 (a large rustc
-  build) and is not trustworthy.
 - Re-apply the i3 change: comment `bindcode $m4 [con_mark="m4"] focus`
   (`~/.config/i3/i3.d/keybindings.conf:79`). Reverted during cleanup.
 - systemd --user unit for autostart.
