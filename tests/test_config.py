@@ -63,7 +63,7 @@ def test_toml_round_trip(tmp_path: Path) -> None:
         margin_px = 10
         live_preview = false
         preview_interval_ms = 500
-        preview_window_s = 6.5
+        preview_max_seconds = 6.5
         preview_height = 40
         """,
         encoding="utf-8",
@@ -85,7 +85,7 @@ def test_toml_round_trip(tmp_path: Path) -> None:
         margin_px=10,
         live_preview=False,
         preview_interval_ms=500,
-        preview_window_s=6.5,
+        preview_max_seconds=6.5,
         preview_height=40,
     )
 
@@ -141,8 +141,8 @@ def test_too_frequent_preview_interval_is_rejected() -> None:
 
 
 def test_non_positive_preview_window_is_rejected() -> None:
-    with pytest.raises(ConfigError, match="preview_window_s"):
-        Config.from_mapping({"overlay": {"preview_window_s": 0}})
+    with pytest.raises(ConfigError, match="preview_max_seconds"):
+        Config.from_mapping({"overlay": {"preview_max_seconds": 0}})
 
 
 def test_negative_preview_height_is_rejected() -> None:

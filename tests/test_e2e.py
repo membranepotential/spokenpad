@@ -390,12 +390,10 @@ def test_preview_mid_recording_reaches_the_overlay(make_daemon: DaemonFactory) -
     daemon._request_preview()  # what the preview QTimer does, once a second
 
     assert len(requests) == 1
-    # A fixed-length trailing window, not the whole buffer: preview cost must
-    # not grow with the utterance (invariant 2).
-    expected_frames = int(
-        daemon._config.overlay.preview_window_s * daemon._config.audio.sample_rate
-    )
-    assert _audio(daemon).snapshot_calls == [expected_frames]
+    # The WHOLE utterance so far, not a trailing window: a window physically
+    # discards the start of the sentence, so text the user has already watched
+    # appear vanishes in chunks while they are still speaking.
+    assert _audio(daemon).snapshot_calls == [None]
 
     samples, generation = requests[0]
     _transcriber(daemon).next_result = TranscriptionResult(
@@ -650,6 +648,127 @@ def test_overlay_falls_back_to_xrandr_when_qt_does_not_know_the_screen(
     assert position is not None
     cfg = daemon._config.overlay
     assert position.y == 1080 - cfg.margin_px - cfg.total_height
+
+
+def test_previews_stop_past_the_cap_without_clearing_what_is_on_screen(
+    make_daemon: DaemonFactory,
+) -> None:
+    """Preview cost grows with the utterance now, so it has to stop somewhere.
+
+    Stopping must not look like the failure it was introduced to fix: the text
+    already shown stays exactly where it is. Silence from the previewer is not
+    the same as an empty overlay.
+    """
+    daemon = make_daemon(None)
+    requests = _preview_spy(daemon)
+    audio = _audio(daemon)
+    rate = daemon._config.audio.sample_rate
+    cap = daemon._config.overlay.preview_max_seconds
+
+    daemon._dispatch(KeyDown(at=0.0))
+    audio.preview_samples = np.zeros(int((cap - 1) * rate), dtype=np.float32)
+    daemon._request_preview()
+    assert len(requests) == 1
+
+    samples, generation = requests[0]
+    _transcriber(daemon).next_result = TranscriptionResult(
+        text="everything said so far", elapsed_seconds=0.5
+    )
+    daemon._worker.run_preview(samples, generation)
+    assert _overlay(daemon)._preview == "everything said so far"
+
+    # Past the cap: no new request, and critically the old text is untouched.
+    audio.preview_samples = np.zeros(int((cap + 5) * rate), dtype=np.float32)
+    daemon._request_preview()
+    assert len(requests) == 1, "no preview should be issued past the cap"
+    assert _overlay(daemon)._preview == "everything said so far"
+
+
+def test_preview_cadence_backs_off_so_the_worker_stays_half_idle(
+    make_daemon: DaemonFactory,
+) -> None:
+    """A preview inside ``decode_stream`` when the key comes up cannot be
+    cancelled, so the fraction of time one is running is the fraction of
+    releases that wait for it. The gap is ``max(interval - decode, decode)``,
+    making the period ``max(interval, 2 * decode)`` -- a 50% ceiling on the
+    duty cycle regardless of how long the utterance gets."""
+    daemon = make_daemon(None)
+    timer = daemon._preview_timer
+    assert timer is not None
+    assert timer.isSingleShot(), "a repeating timer cannot express an adaptive gap"
+
+    interval = daemon._config.overlay.preview_interval_ms / 1000.0
+    daemon._dispatch(KeyDown(at=0.0))
+
+    # Cheap decode: keep the configured cadence exactly.
+    daemon._rearm_previews(0.2)
+    assert timer.interval() == pytest.approx(int((interval - 0.2) * 1000), abs=2)
+
+    # Expensive decode: back off, so decode/period stays at 50%.
+    daemon._rearm_previews(2.0)
+    assert timer.interval() == pytest.approx(2000, abs=2)
+
+
+def test_a_preview_that_shrank_never_replaces_a_longer_one(
+    make_daemon: DaemonFactory,
+) -> None:
+    """Each preview sees strictly more audio than the last, so the transcript
+    should only grow -- but the recogniser does not guarantee it. On a real
+    sample, decoding 4.4s returned "Okay." where 3.3s had returned "Okay, we
+    are now at the new model.". Rendering that verbatim is the disappearing
+    text this whole change exists to fix, so a shorter preview is treated as
+    instability and the previous text stands."""
+    daemon = make_daemon(None)
+    requests = _preview_spy(daemon)
+    daemon._dispatch(KeyDown(at=0.0))
+
+    daemon._request_preview()
+    samples, generation = requests[-1]
+    _transcriber(daemon).next_result = TranscriptionResult(
+        text="Okay, we are now at the new model.", elapsed_seconds=0.3
+    )
+    daemon._worker.run_preview(samples, generation)
+    assert _overlay(daemon)._preview == "Okay, we are now at the new model."
+
+    daemon._request_preview()
+    samples, generation = requests[-1]
+    _transcriber(daemon).next_result = TranscriptionResult(text="Okay.", elapsed_seconds=0.4)
+    daemon._worker.run_preview(samples, generation)
+    assert _overlay(daemon)._preview == "Okay, we are now at the new model."
+
+    # Growth still lands, so this is not a freeze.
+    daemon._request_preview()
+    samples, generation = requests[-1]
+    _transcriber(daemon).next_result = TranscriptionResult(
+        text="Okay, we are now at the new model. The overlay is there.", elapsed_seconds=0.5
+    )
+    daemon._worker.run_preview(samples, generation)
+    assert _overlay(daemon)._preview.endswith("The overlay is there.")
+
+
+def test_each_utterance_starts_its_preview_from_nothing(
+    make_daemon: DaemonFactory,
+) -> None:
+    """The monotonic guard is per utterance. Without a reset, a long first
+    dictation would suppress every shorter preview of the next one."""
+    daemon = make_daemon(None)
+    requests = _preview_spy(daemon)
+
+    daemon._dispatch(KeyDown(at=0.0))
+    daemon._request_preview()
+    samples, generation = requests[-1]
+    _transcriber(daemon).next_result = TranscriptionResult(
+        text="a considerably longer first dictation than the second", elapsed_seconds=0.3
+    )
+    daemon._worker.run_preview(samples, generation)
+    daemon._dispatch(KeyUp(at=5.0))
+
+    daemon._dispatch(KeyDown(at=6.0))
+    daemon._request_preview()
+    samples, generation = requests[-1]
+    _transcriber(daemon).next_result = TranscriptionResult(text="short", elapsed_seconds=0.2)
+    daemon._worker.run_preview(samples, generation)
+    assert _overlay(daemon)._preview == "short"
 
 
 def test_every_fake_still_matches_the_interface_it_stands_in_for() -> None:

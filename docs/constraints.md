@@ -86,11 +86,32 @@ that line, and they are asserted in `tests/test_e2e.py`:
    output is never injected, never merged into the final text, and never
    influences it. `AudioCapture.snapshot_capture` is non-destructive: the
    capture keeps accumulating and `stop_capture` still returns everything.
-2. **Preview cost is bounded and independent of utterance length.** A preview
-   decodes only a fixed-length trailing window
-   (`OverlayConfig.preview_window_s`, 10 s by default), walking just the
-   chunks that window needs. A five-minute dictation costs the same per
-   preview as a ten-second one — there is no growing buffer anywhere.
+2. **Preview cost is bounded.** Not *constant* — this is weaker than it was,
+   deliberately. Previews originally decoded a fixed-length trailing window,
+   which made cost independent of utterance length but physically discarded
+   the start of the sentence: text the user had already watched appear
+   vanished in chunks while they were still speaking. A preview whose whole
+   job is to show what was heard cannot throw away what was heard, so it now
+   decodes the entire utterance so far and cost grows with it.
+
+   Two things bound that growth. The gap between previews is
+   `max(interval - last_decode, last_decode)`, so the worker is idle at least
+   half the time however long the utterance runs; and past
+   `OverlayConfig.preview_max_seconds` (15 s) previews stop being issued at
+   all. Nothing is cleared when they stop — the last one stays on screen.
+
+   The budget this buys: at ~14.6x real-time a 15 s utterance costs ~1.0 s,
+   which is the worst a key release can wait on an in-flight preview, ~0.5 s
+   expected from the duty cycle.
+
+   One further guard, for the same reason the window was dropped: each
+   preview sees strictly more audio than the last, so the transcript *should*
+   only grow, but the recogniser does not guarantee it — decoding 4.4 s of a
+   real sample returned `"Okay."` where 3.3 s of the same sample had returned
+   `"Okay, we are now at the new model."`. A preview that comes back shorter
+   is treated as instability rather than news, and the previous text stands.
+   The guard resets per utterance, or a long dictation would suppress every
+   shorter preview of the next one.
 3. **A preview can never make the user wait.** Previews are *abandoned* the
    instant a committed decode (or a cancellation) is due: `Daemon` sets the
    worker's abandon flag before it requests the decode, so a preview already

@@ -8,15 +8,15 @@ dictating Claude prompts and shell commands.
 ## Now
 - **Works end to end with a live voice**, overlay and live preview included.
   Confirmed 2026-08-27: 3 consecutive clean dictations, no dropped audio.
-- ruff + mypy --strict (25 files) + 100 tests green, incl. e2e tests pinning
+- ruff + mypy --strict (25 files) + 111 tests green, incl. e2e tests pinning
   every regression found so far (each verified by reverting the fix).
 
 ## Done
 - Evaluated and rejected Handy 0.9.6 (README); reverted every change. v1
   built, reviewed, all 10 findings fixed. Gladia is issue #1.
 - All 5 references verified (2026-08-27); both `handy WER` biases discharged.
-- Live overlay preview: bounded 6s tail re-decode every 1100ms, dropped on
-  key-up, never injected. 100 tests green.
+- Live overlay preview: whole-utterance re-decode, monotonic, adaptive
+  cadence, capped at 15s, dropped on key-up, never injected. 111 tests green.
 
 ## Measured (i7-9850H, 6 threads, CPU, 0 VRAM)
 - Warm, idle: 20 s -> 1.19 s (**16.8x**), 37 s -> 2.55 s. Linear; no cliff.

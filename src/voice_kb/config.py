@@ -246,30 +246,36 @@ class OverlayConfig:
     """
 
     preview_interval_ms: int = 1100
-    """How often a preview decode is requested while recording.
+    """Minimum time between preview decodes while recording.
 
-    Floored at 200ms so previews cannot be asked for faster than they can
-    plausibly be produced. The default leaves the worker idle roughly half the
-    time -- see :attr:`preview_window_s` for why that idle fraction matters.
+    A floor, not a fixed period: the real gap is
+    ``max(preview_interval_ms - last_decode, last_decode)``, which keeps the
+    worker idle at least half the time however long the utterance gets. See
+    :attr:`preview_max_seconds` for why that idle fraction is the thing being
+    protected.
     """
 
-    preview_window_s: float = 6.0
-    """How much *trailing* audio each preview decodes.
+    preview_max_seconds: float = 15.0
+    """Stop previewing once the utterance is longer than this.
 
-    Fixed-length by construction: a preview's cost is bounded and independent
-    of utterance length, so a five-minute dictation costs the same per preview
-    as a ten-second one.
+    Each preview decodes the whole utterance so far, from its beginning. That
+    is what keeps already-transcribed words on screen: a trailing window was
+    tried first and it *physically discarded* the start of the sentence, so
+    text vanished in chunks while the user was still speaking.
 
-    The default is a latency budget, not a display choice. A *queued* preview
-    is dropped the instant the key is released, but one already inside
-    ``decode_stream`` cannot be interrupted, so the committed decode waits for
-    it. Measured on this model: a 6s window decodes in ~0.5s and a 10s window
-    in ~0.8s. Paired with a 1100ms interval, that leaves the worker idle about
-    half the time, so the expected cost to release-to-text is ~0.2s and the
-    worst case ~0.5s. Widening this without widening the interval makes a
-    preview almost always be in flight at key release, and then the worst case
-    is what you pay every time. Six seconds also happens to be about what the
-    overlay's two lines can show.
+    Decoding from the start means preview cost grows with the utterance, and
+    two things bound it. The cadence adapts (see
+    :attr:`preview_interval_ms`) so the worker stays idle at least half the
+    time; and past this many seconds previews stop being issued altogether.
+    Nothing disappears when they do -- the last full preview simply stays on
+    screen, which by then holds far more text than the overlay can show.
+
+    The number is a latency budget. A *queued* preview is dropped the instant
+    the key is released, but one already inside ``decode_stream`` cannot be
+    interrupted, so the committed decode waits for it. This model decodes at
+    ~14.6x real-time, so 15s of audio costs ~1.0s: that is the worst case a
+    release can pay, with ~0.5s expected from the duty cycle. Raising this
+    raises both, in direct proportion.
     """
 
     preview_height: int = 64
@@ -280,8 +286,10 @@ class OverlayConfig:
             raise ConfigError(
                 f"overlay.preview_interval_ms must be >= 200: {self.preview_interval_ms}"
             )
-        if self.preview_window_s <= 0:
-            raise ConfigError(f"overlay.preview_window_s must be positive: {self.preview_window_s}")
+        if self.preview_max_seconds <= 0:
+            raise ConfigError(
+                f"overlay.preview_max_seconds must be positive: {self.preview_max_seconds}"
+            )
         if self.preview_height < 0:
             raise ConfigError(f"overlay.preview_height must not be negative: {self.preview_height}")
 

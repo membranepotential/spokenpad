@@ -33,8 +33,9 @@ It is cosmetic and strictly subordinate to the committed decode
 1. the text that gets injected is still produced by *exactly one* decode of
    the complete captured buffer at key release -- preview output is never
    injected, never merged into it, and never influences it;
-2. a preview decodes only a fixed-length trailing window
-   (``OverlayConfig.preview_window_s``), so its cost is bounded and
+2. a preview's cost is bounded -- by an adaptive cadence that keeps the
+   worker idle at least half the time, and by a hard stop at
+   ``OverlayConfig.preview_max_seconds``, so it is bounded and
    independent of how long the user has been speaking;
 3. a preview can never make the user wait: previews are *abandoned* the
    instant a committed decode (or a cancellation) is due, so a preview
@@ -218,6 +219,7 @@ class Daemon(QObject):
         self._preview_requested_at = 0.0
         self._preview_seconds = 0.0
         self._preview_timed = False
+        self._preview_text = ""
 
         # Fail fast, on this thread, while the error can still reach main().
         # Constructing the Transcriber on the worker would bury ModelMissingError
@@ -264,7 +266,10 @@ class Daemon(QObject):
         self._preview_timer: QTimer | None = None
         if self._overlay is not None and config.overlay.live_preview:
             self._preview_timer = QTimer(self)
-            self._preview_timer.setInterval(config.overlay.preview_interval_ms)
+            # Single-shot and re-armed after each result: the gap between
+            # previews depends on how long the last one took. See
+            # _rearm_previews.
+            self._preview_timer.setSingleShot(True)
             self._preview_timer.timeout.connect(self._request_preview)
 
     # ------------------------------------------------------------------ lifecycle
@@ -482,10 +487,11 @@ class Daemon(QObject):
         self._preview_requested_at = 0.0
         self._preview_seconds = 0.0
         self._preview_timed = False
+        self._preview_text = ""
         if self._overlay is not None:
             self._overlay.set_preview_text("")
         if self._preview_timer is not None:
-            self._preview_timer.start()
+            self._preview_timer.start(self._config.overlay.preview_interval_ms)
 
     def _abandon_previews(self) -> None:
         """Stop previewing, and drop whatever is already queued on the worker.
@@ -500,22 +506,56 @@ class Daemon(QObject):
             self._preview_timer.stop()
 
     def _request_preview(self) -> None:
-        """Ask the worker for a preview of the last ``preview_window_s`` of audio.
+        """Ask the worker to preview the whole utterance so far.
 
-        Fixed-length window, snapshotted non-destructively: the capture keeps
-        accumulating and the committed decode at key release still sees the
-        whole buffer.
+        From the beginning, not a trailing window. A trailing window was tried
+        first and it was wrong for the one job a preview has: it physically
+        discarded the start of the sentence, so words the user had already
+        watched appear would vanish in chunks while they were still speaking.
+        Decoding from the start means what is on screen only ever grows.
+
+        Snapshotted non-destructively, so the capture keeps accumulating and
+        the committed decode at key release still sees everything.
         """
         if phase_of(self._state) is not Phase.RECORDING:
             return
-        overlay_cfg = self._config.overlay
-        frames = int(overlay_cfg.preview_window_s * self._config.audio.sample_rate)
-        samples = self._audio.snapshot_capture(frames)
+        samples = self._audio.snapshot_capture()
+        seconds = samples.size / self._config.audio.sample_rate
+        if seconds > self._config.overlay.preview_max_seconds:
+            # Cost grows with the utterance, so it has to stop somewhere. The
+            # text stays exactly as it is -- this stops updating it, it does
+            # not clear it -- and by now there is far more of it than the
+            # overlay can show anyway.
+            log.debug(
+                "utterance past %.0fs; no more previews for it (the last one stays on screen)",
+                self._config.overlay.preview_max_seconds,
+            )
+            return
         if samples.size == 0:
+            self._rearm_previews(0.0)
             return
         self._preview_requested_at = time.monotonic()
-        self._preview_seconds = samples.size / self._config.audio.sample_rate
+        self._preview_seconds = seconds
         self._preview_requested.emit(samples, self._generation)
+
+    def _rearm_previews(self, last_decode_seconds: float) -> None:
+        """Schedule the next preview, keeping the worker idle at least half the time.
+
+        The gap is ``max(interval - decode, decode)``, so the *period* is
+        ``max(interval, 2 * decode)``. Short utterances keep the configured
+        cadence exactly; long ones slow down on their own rather than pinning
+        the worker. The duty cycle is what matters: a preview already inside
+        ``decode_stream`` when the key comes up cannot be cancelled, so the
+        fraction of time one is running is the fraction of releases that pay
+        for it.
+
+        A repeating timer cannot express this, hence single-shot plus re-arm.
+        """
+        if self._preview_timer is None or phase_of(self._state) is not Phase.RECORDING:
+            return
+        interval = self._config.overlay.preview_interval_ms / 1000.0
+        gap = max(interval - last_decode_seconds, last_decode_seconds)
+        self._preview_timer.start(int(gap * 1000))
 
     def _on_previewed(self, text: str, generation: int) -> None:
         """Show a preview, unless it has been overtaken by events.
@@ -527,19 +567,39 @@ class Daemon(QObject):
         if generation != self._generation or phase_of(self._state) is not Phase.RECORDING:
             log.debug("dropping a preview that no longer applies (gen %d)", generation)
             return
+        round_trip = (
+            time.monotonic() - self._preview_requested_at if self._preview_requested_at else 0.0
+        )
+        self._rearm_previews(round_trip)
         if not self._preview_timed and self._preview_requested_at:
             # Once per utterance, so preview cost stays visible in the log file
             # without flooding it. Round trip, so it includes the queue hop the
             # user would actually feel if a preview ever delayed a decode.
             self._preview_timed = True
             log.debug(
-                "preview round trip %.0fms for %.1fs of audio (window %.1fs)",
-                (time.monotonic() - self._preview_requested_at) * 1000,
+                "preview round trip %.0fms for %.1fs of audio",
+                round_trip * 1000,
                 self._preview_seconds,
-                self._config.overlay.preview_window_s,
             )
-        if self._overlay is not None:
-            self._overlay.set_preview_text(postprocess(text, self._config.text))
+        if self._overlay is None:
+            return
+        cleaned = postprocess(text, self._config.text)
+        # Each preview sees strictly more audio than the last, so the
+        # transcript should only ever grow -- but the recogniser does not
+        # guarantee that. Decoding 4.4s of a real sample returned "Okay."
+        # where 3.3s of the same sample had returned "Okay, we are now at the
+        # new model.". Showing that verbatim is the exact thing being fixed
+        # here: words the user watched appear, disappearing again.
+        #
+        # So a preview that came back shorter is treated as instability rather
+        # than as news, and the previous text stands. Worst case is a slightly
+        # stale preview for one cycle; the committed decode is unaffected
+        # either way, since nothing here can reach the clipboard.
+        if len(cleaned) < len(self._preview_text):
+            log.debug("ignoring a preview that shrank: %r", cleaned[:40])
+            return
+        self._preview_text = cleaned
+        self._overlay.set_preview_text(cleaned)
 
     # -------------------------------------------------------------------- results
 

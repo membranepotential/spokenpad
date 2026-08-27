@@ -126,18 +126,25 @@ live_preview = true
 # How often a preview decode is requested while recording. Must be >= 200.
 preview_interval_ms = 1100
 
-# How much TRAILING audio each preview decodes. Fixed-length on purpose: a
-# preview's cost is bounded and does not grow with the utterance, so a
-# five-minute dictation costs the same per preview as a ten-second one.
+# Stop previewing once the utterance is longer than this many seconds.
 #
-# These two defaults are a latency budget. A preview still QUEUED when you let
-# go of the key is dropped, but one already decoding cannot be interrupted, so
-# the real decode waits behind it. Measured: a 6s window takes ~0.5s, a 10s
-# window ~0.8s. At 6s/1100ms the worker is idle about half the time, so a
-# release costs ~0.2s on average and ~0.5s at worst. Raise the window and you
-# should raise the interval with it, or a preview will be running every single
-# time you release and you pay the worst case on every dictation.
-preview_window_s = 6.0
+# Each preview decodes the WHOLE utterance so far, from its start. That is what
+# keeps words on screen once they appear. A trailing window was tried first and
+# it was wrong: it physically discarded the beginning of the sentence, so text
+# vanished in chunks while you were still speaking.
+#
+# Decoding from the start means cost grows with the utterance, and two things
+# bound it. The gap between previews is max(interval - last_decode,
+# last_decode), so the worker stays idle at least half the time; and past this
+# many seconds previews simply stop. Nothing disappears when they do -- the
+# last one stays on screen, holding more text than the overlay can show.
+#
+# This is a latency budget. A preview still QUEUED when you release the key is
+# dropped, but one already decoding cannot be interrupted, so the real decode
+# waits behind it. At ~14.6x real-time, 15s of audio costs ~1.0s -- that is the
+# worst a release can pay, ~0.5s expected. Raising this raises both in
+# proportion.
+preview_max_seconds = 15.0
 
 # Extra pixels below the status row for the preview text (two lines, with
 # the oldest words elided away first). Ignored when live_preview = false.
