@@ -27,19 +27,13 @@ dictating Claude prompts and shell commands.
   the protobuf — reconstructable from `tokens.txt` as score = `-index`.
   Verified: `mkir` → `mkdir` at `hotwords_score=1.5`; >3.0 over-biases badly.
 
-## Hard constraints (rationale in README)
-- **M4** = evdev `186` (`KEY_F16`) → X keycode `194`, keysym `XF86Launch7`.
-  Keysym-based hotkey libs cannot resolve it — read evdev directly.
-- **Read `/dev/input/event*` read-only.** No `EVIOCGRAB`, no uinput clones:
-  clones inherit the default layout and destroy the per-device `setxkbmap`
-  from `keychron-add.sh`.
-- **Never synthesise characters** (`xdotool type`/enigo) — rewrites the core X
-  keymap. Clipboard + `ctrl+v`: **183 ms vs 3.3 s** for 159 chars.
-- **One-shot decode**, never streaming. **CPU only**, `num_threads=6`.
-- **Bias vocabulary at decode time**, never fuzzy replacement.
-- **Overlay**: borderless, `no_focus` (focus steal aborts transcription).
-  Dual 4K: HDMI-1-0 `0,0 3840x2160`, eDP-1 (primary) `3840,0 3840x2160`.
-- Remaining gap is technical vocabulary/context (`dir`→`there`), not raw ASR.
+## Hard constraints — full rationale in `docs/constraints.md`
+Read evdev **read-only** (no `EVIOCGRAB`, no uinput clones); **never synthesise
+characters** (no `xdotool type`/enigo) — both destroy the per-device
+`setxkbmap` layout. One-shot decode, never streaming. CPU only. Bias vocabulary
+at decode time, never fuzzy replacement. Overlay must never take focus.
+M4 = evdev `186` (`KEY_F16`) → X keycode `194`, keysym `XF86Launch7`, which is
+why keysym-based hotkey libraries cannot bind it.
 
 ## Next
 - **Populate `asr.vocabulary`** — it is empty, so `uv`/`pnpm`/`mkdir`/`rm -rf`
@@ -49,8 +43,6 @@ dictating Claude prompts and shell commands.
   Handy baseline column is biased in Handy's favour (partly circular
   references; its worst failure excluded). See docs/evaluation.md.
 - Short commands spell out: `cd home` -> `C D home.` (100% WER on 2 words).
-- Re-apply the i3 change: comment `bindcode $m4 [con_mark="m4"] focus`
-  (`~/.config/i3/i3.d/keybindings.conf:79`). Reverted during cleanup.
 - systemd --user unit for autostart.
 
 ## Open questions
