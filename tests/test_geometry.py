@@ -17,16 +17,28 @@ OUTPUTS = (HDMI, EDP)
 
 
 def test_overlay_centred_and_bottom_aligned_on_hdmi() -> None:
-    cfg = OverlayConfig(width=420, height=96, margin_px=32)
+    cfg = OverlayConfig(width=420, height=96, margin_px=32, live_preview=False)
     rect = overlay_rect(HDMI.rect, cfg)
     assert rect == Rect(x=(3840 - 420) // 2, y=2160 - 32 - 96, width=420, height=96)
 
 
 def test_overlay_centred_and_bottom_aligned_on_edp() -> None:
-    cfg = OverlayConfig(width=420, height=96, margin_px=32)
+    cfg = OverlayConfig(width=420, height=96, margin_px=32, live_preview=False)
     rect = overlay_rect(EDP.rect, cfg)
     # eDP-1 starts at x=3840, so its centring is offset by that origin.
     assert rect == Rect(x=3840 + (3840 - 420) // 2, y=2160 - 32 - 96, width=420, height=96)
+
+
+def test_overlay_uses_total_height_when_the_preview_band_is_enabled() -> None:
+    """With ``live_preview`` on the widget is ``height + preview_height`` tall,
+    and placement must be computed against *that* -- otherwise the pill is
+    positioned as if it were only its status row and the preview band hangs
+    below where the margin says the overlay ends."""
+    cfg = OverlayConfig(width=720, height=96, preview_height=64, margin_px=32, live_preview=True)
+    assert cfg.total_height == 160
+
+    rect = overlay_rect(HDMI.rect, cfg)
+    assert rect == Rect(x=(3840 - 720) // 2, y=2160 - 32 - 160, width=720, height=160)
 
 
 def test_overlay_is_always_fully_within_its_output() -> None:
@@ -45,15 +57,32 @@ def test_regression_overlay_never_hangs_off_the_bottom_edge() -> None:
     reproduce that naive (unclamped) y must instead be clamped fully
     on-screen."""
     output = Rect(x=0, y=0, width=3840, height=2160)
-    cfg = OverlayConfig(width=400, height=200, margin_px=-35)
+    cfg = OverlayConfig(width=400, height=200, margin_px=-35, live_preview=False)
 
-    naive_y = output.bottom - cfg.margin_px - cfg.height
+    naive_y = output.bottom - cfg.margin_px - cfg.total_height
     assert naive_y == 1995  # reproduces the exact regression numbers
-    assert naive_y + cfg.height > output.bottom  # ... which was off-screen
+    assert naive_y + cfg.total_height > output.bottom  # ... which was off-screen
 
     rect = overlay_rect(output, cfg)
     assert rect.bottom <= output.bottom
-    assert rect.y == output.bottom - cfg.height
+    assert rect.y == output.bottom - cfg.total_height
+
+
+def test_preview_overlay_taller_than_the_margin_still_lands_fully_inside() -> None:
+    """The same clamp, but for the failure the preview band introduces: a
+    widget whose *total* height exceeds what the margin leaves room for must
+    still be entirely on-screen. Clamping ``height`` instead of
+    ``total_height`` would put the whole preview band off the bottom edge."""
+    output = Rect(x=0, y=0, width=1280, height=200)
+    cfg = OverlayConfig(width=720, height=96, preview_height=64, margin_px=80, live_preview=True)
+    assert cfg.total_height == 160
+    # Naive placement would start above the output entirely.
+    assert output.bottom - cfg.margin_px - cfg.total_height < output.y
+
+    rect = overlay_rect(output, cfg)
+    assert rect.height == cfg.total_height
+    assert rect.y >= output.y
+    assert rect.bottom <= output.bottom
 
 
 # -- focus following -----------------------------------------------------------

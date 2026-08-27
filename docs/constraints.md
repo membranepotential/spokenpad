@@ -15,7 +15,7 @@ running system.
 |---|---|---|
 | Read `/dev/input/event*` **read-only** | uinput clone inherited the default XKB layout | yes |
 | **Never** synthesise characters (`xdotool type` / enigo) | rewrote the core X keymap | yes |
-| **One-shot decode** at key release, never streaming | growing-buffer re-decode dropped long utterances | no (functional, silent) |
+| **One-shot *committed* decode** at key release, over the whole buffer | growing-buffer re-decode dropped long utterances | no (functional, silent) |
 | **CPU only** | auto-selection bound the model to the 4 GB GTX 1650 | no |
 | **Bias vocabulary at decode time**, never fuzzy replacement | edit-distance rewrite turned real words into wrong ones | no |
 | **Overlay must not steal focus** | focus steal aborted transcription mid-utterance | no |
@@ -56,21 +56,50 @@ implemented), restoring the previous clipboard contents afterward
 aware — terminals like Alacritty need `ctrl+shift+v`
 (`PasteConfig.per_window_class`).
 
-## One-shot decode, never streaming
+## One-shot committed decode, never streaming
 
 Handy streamed audio into the model continuously, re-decoding a growing
 buffer as more audio arrived. Measured real-time factor on this project's
 hardware: **1.37x real-time** — barely faster than the utterance itself —
 and it silently dropped audio past a 30 s cap, with no error surfaced to the
-user (STATUS.md).
+user (STATUS.md). A 37 s dictation was discarded outright.
 
-**Rule:** voice-kb captures audio to a buffer while the key is held and
-decodes it exactly once, after `KeyUp`. This is the `Decode` command in the
-[state machine](architecture.md#statestep-a-total-function) — it only ever
-fires on the `Recording → Transcribing` transition, never mid-recording.
-Because decode only happens once per utterance, at a known correct decode
-speed (9.7x real-time, see [asr.md](asr.md)), there is no growing-buffer cost
-and no silent length cap.
+**Rule:** the text voice-kb injects is produced by **exactly one decode of
+the complete captured buffer**, run once after `KeyUp`. This is the `Decode`
+command in the [state machine](architecture.md#statestep-a-total-function) —
+it only ever fires on the `Recording → Transcribing` transition, never
+mid-recording. Because the committed decode happens once per utterance, at a
+known correct decode speed (9.7x real-time, see [asr.md](asr.md)), there is
+no growing-buffer cost and no silent length cap.
+
+### The one relaxation: cosmetic previews
+
+The overlay shows a live transcript preview while the key is held
+(`OverlayConfig.live_preview`). That is an extra decode, so it is worth being
+precise about what this constraint does and does not forbid. What broke Handy
+was not "more than one decode" — it was that the *result the user got* came
+from a streaming pipeline whose cost grew with the utterance and which
+silently truncated it. Three invariants keep previews on the safe side of
+that line, and they are asserted in `tests/test_e2e.py`:
+
+1. **The committed text is still one shot over the whole buffer.** Preview
+   output is never injected, never merged into the final text, and never
+   influences it. `AudioCapture.snapshot_capture` is non-destructive: the
+   capture keeps accumulating and `stop_capture` still returns everything.
+2. **Preview cost is bounded and independent of utterance length.** A preview
+   decodes only a fixed-length trailing window
+   (`OverlayConfig.preview_window_s`, 10 s by default), walking just the
+   chunks that window needs. A five-minute dictation costs the same per
+   preview as a ten-second one — there is no growing buffer anywhere.
+3. **A preview can never make the user wait.** Previews are *abandoned* the
+   instant a committed decode (or a cancellation) is due: `Daemon` sets the
+   worker's abandon flag before it requests the decode, so a preview already
+   queued on the single worker thread is dropped rather than run ahead of the
+   text the user is waiting for.
+
+There is still no time cap, no incremental re-decode of a growing buffer, and
+nothing the user sees mid-recording can reach the clipboard. See
+[decisions.md](decisions.md#live-transcript-preview-as-a-cosmetic-second-decode).
 
 ## CPU only
 

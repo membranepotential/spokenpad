@@ -98,7 +98,9 @@ Alacritty = "ctrl+shift+v"
 # Show the recording/transcribing status overlay at all.
 enabled = true
 
-width = 420
+# Width of the pill, and the height of its status row (dot, label, level
+# meter). With live_preview on, the widget is height + preview_height tall.
+width = 720
 height = 96
 
 # Gap between the overlay and the bottom edge of the output it's shown on.
@@ -107,3 +109,32 @@ margin_px = 32
 # Place the overlay on the output holding the currently focused window,
 # rather than always on the primary output.
 follow_focus = true
+
+# Show a rolling preview of the transcript while the key is held.
+#
+# Cosmetic only. The text that actually gets injected is still produced by
+# exactly ONE decode of the complete captured buffer at key release -- a
+# preview is never injected, never merged into the final text, and never
+# influences it (see docs/constraints.md). Set to false for a status-only
+# pill; the overlay is then just `height` tall.
+live_preview = true
+
+# How often a preview decode is requested while recording. Must be >= 200.
+preview_interval_ms = 1100
+
+# How much TRAILING audio each preview decodes. Fixed-length on purpose: a
+# preview's cost is bounded and does not grow with the utterance, so a
+# five-minute dictation costs the same per preview as a ten-second one.
+#
+# These two defaults are a latency budget. A preview still QUEUED when you let
+# go of the key is dropped, but one already decoding cannot be interrupted, so
+# the real decode waits behind it. Measured: a 6s window takes ~0.5s, a 10s
+# window ~0.8s. At 6s/1100ms the worker is idle about half the time, so a
+# release costs ~0.2s on average and ~0.5s at worst. Raise the window and you
+# should raise the interval with it, or a preview will be running every single
+# time you release and you pay the worst case on every dictation.
+preview_window_s = 6.0
+
+# Extra pixels below the status row for the preview text (two lines, with
+# the oldest words elided away first). Ignored when live_preview = false.
+preview_height = 64

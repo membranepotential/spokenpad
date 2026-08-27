@@ -10,7 +10,10 @@ Threading: a :class:`Transcriber` is **not** thread-safe. sherpa-onnx does
 not document ``OfflineRecognizer.decode_stream`` as safe for concurrent
 calls, so callers must serialize every call to :meth:`Transcriber.transcribe`
 on a single worker thread (or hold an external lock) -- never call it
-concurrently from multiple threads against the same instance.
+concurrently from multiple threads against the same instance. The overlay's
+live-preview decodes share this same recognizer and rely on exactly that: they
+are dispatched to the same single worker thread as the committed decode, so
+the two are serialized and never overlap.
 """
 
 from __future__ import annotations

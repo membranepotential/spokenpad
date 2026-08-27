@@ -23,6 +23,25 @@ from the worker.
 Nothing is ever dropped silently. Every path that discards audio or a decode
 result says so in the log, because silent loss is the failure this project
 exists to eliminate.
+
+Live preview
+------------
+While the key is held, the overlay shows a rolling preview of the transcript.
+It is cosmetic and strictly subordinate to the committed decode
+(``docs/constraints.md``, "One-shot committed decode"):
+
+1. the text that gets injected is still produced by *exactly one* decode of
+   the complete captured buffer at key release -- preview output is never
+   injected, never merged into it, and never influences it;
+2. a preview decodes only a fixed-length trailing window
+   (``OverlayConfig.preview_window_s``), so its cost is bounded and
+   independent of how long the user has been speaking;
+3. a preview can never make the user wait: previews are *abandoned* the
+   instant a committed decode (or a cancellation) is due, so a preview
+   already queued on the worker is dropped rather than run ahead of it.
+
+Preview decodes run on the same single worker as the committed decode, which
+is what keeps the non-thread-safe recogniser serialized.
 """
 
 from __future__ import annotations
@@ -33,6 +52,7 @@ import logging.handlers
 import os
 import signal
 import sys
+import threading
 import time
 import wave
 from pathlib import Path
@@ -85,11 +105,27 @@ class _Worker(QObject):
     decode_failed = Signal(str, int)
     injected = Signal(float, bool)
     inject_failed = Signal(str)
+    previewed = Signal(str, int)  # text, generation
 
     def __init__(self, config: Config) -> None:
         super().__init__()
         self._config = config
         self._transcriber: Transcriber | None = None
+        #: Set from the Qt thread, read on this worker thread. The *only*
+        #: mutable state shared between the two -- everything else crosses by
+        #: queued signal. It exists so a preview that is already queued when a
+        #: committed decode becomes due is dropped instead of run, which is
+        #: what keeps a cosmetic decode off the user's latency path.
+        self._abandon_previews = threading.Event()
+
+    @property
+    def abandon_previews(self) -> threading.Event:
+        """The abandon flag: ``set()`` to drop pending previews, ``clear()`` to re-arm.
+
+        Exposed as the whole ``Event`` rather than as a pair of methods so it
+        is obvious at the call site that this is the one shared object.
+        """
+        return self._abandon_previews
 
     def prepare(self) -> None:
         """Load the model, then decode a moment of silence.
@@ -121,6 +157,26 @@ class _Worker(QObject):
             return
         self.decoded.emit(result.text, result.elapsed_seconds, generation)
 
+    def run_preview(self, samples: MonoAudio, generation: int) -> None:
+        """Decode a trailing slice of the in-flight capture, for the overlay only.
+
+        Deliberately toothless: it returns without decoding at all if previews
+        have been abandoned, and it emits nothing if they were abandoned while
+        it was decoding. Anything it raises is swallowed at DEBUG -- a failed
+        preview is cosmetic, and must never surface as an error, abort the
+        session, or touch the committed decode.
+        """
+        if self._abandon_previews.is_set() or self._transcriber is None or samples.size == 0:
+            return
+        try:
+            result = self._transcriber.transcribe(samples, self._config.audio.sample_rate)
+        except Exception as e:
+            log.debug("preview decode failed, ignoring: %s", e)
+            return
+        if self._abandon_previews.is_set():
+            return
+        self.previewed.emit(result.text, generation)
+
     def run_inject(self, text: str, paste: PasteConfig) -> None:
         match inject_text(text, paste):
             case Injected(elapsed_ms=ms, confirmed=confirmed):
@@ -139,6 +195,7 @@ class Daemon(QObject):
 
     _decode_requested = Signal(object, int)
     _inject_requested = Signal(str, object)
+    _preview_requested = Signal(object, int)
 
     def __init__(self, config: Config) -> None:
         super().__init__()
@@ -152,7 +209,14 @@ class Daemon(QObject):
 
         #: Bumped whenever an in-flight decode is invalidated. A result whose
         #: generation no longer matches is discarded instead of injected.
+        #: Previews never touch it: a preview is a shell concern, not a
+        #: session transition.
         self._generation = 0
+
+        #: When the current utterance's most recent preview was requested, and
+        #: whether its cost has already been logged. Qt-thread-only.
+        self._preview_requested_at = 0.0
+        self._preview_timed = False
 
         # Fail fast, on this thread, while the error can still reach main().
         # Constructing the Transcriber on the worker would bury ModelMissingError
@@ -169,11 +233,13 @@ class Daemon(QObject):
         self._thread.started.connect(self._worker.prepare)
         self._decode_requested.connect(self._worker.run_decode)
         self._inject_requested.connect(self._worker.run_inject)
+        self._preview_requested.connect(self._worker.run_preview)
         self._worker.ready.connect(lambda: log.info("model ready"))
         self._worker.prepare_failed.connect(self._on_prepare_failed)
         self._worker.decoded.connect(self._on_decoded)
         self._worker.decode_failed.connect(self._on_decode_failed)
         self._worker.injected.connect(self._on_injected)
+        self._worker.previewed.connect(self._on_previewed)
         self._worker.inject_failed.connect(lambda r: log.error("injection failed: %s", r))
 
         self.key_down.connect(lambda at: self._dispatch(KeyDown(at=at)))
@@ -190,6 +256,15 @@ class Daemon(QObject):
         self._level_timer = QTimer(self)
         self._level_timer.setInterval(_LEVEL_POLL_MS)
         self._level_timer.timeout.connect(self._poll_level)
+
+        # No overlay (or previews turned off) means there is nothing a preview
+        # could be *for*, so the timer is not created at all rather than
+        # created and left stopped.
+        self._preview_timer: QTimer | None = None
+        if self._overlay is not None and config.overlay.live_preview:
+            self._preview_timer = QTimer(self)
+            self._preview_timer.setInterval(config.overlay.preview_interval_ms)
+            self._preview_timer.timeout.connect(self._request_preview)
 
     # ------------------------------------------------------------------ lifecycle
 
@@ -217,6 +292,7 @@ class Daemon(QObject):
     def stop(self) -> None:
         self._watcher.stop()
         self._level_timer.stop()
+        self._abandon_previews()
         self._audio.close()
         if self._thread.isRunning():
             self._thread.quit()
@@ -237,16 +313,22 @@ class Daemon(QObject):
             case StartCapture():
                 self._audio.start_capture()
                 self._level_timer.start()
+                self._arm_previews()
             case Decode(spoken_seconds=spoken):
                 self._level_timer.stop()
+                # Before the decode is even requested: a preview already queued
+                # on the worker must be dropped, not run ahead of it.
+                self._abandon_previews()
                 samples = self._audio.stop_capture()
                 self._log_capture(spoken, samples)
                 self._decode_requested.emit(samples, self._generation)
             case DiscardCapture():
                 self._level_timer.stop()
+                self._abandon_previews()
                 self._audio.stop_capture()
                 log.info("discarded capture (too short, or cancelled)")
             case AbortDecode():
+                self._abandon_previews()
                 self._generation += 1
                 log.info("cancelled; in-flight decode will not be injected")
             case _:
@@ -349,6 +431,70 @@ class Daemon(QObject):
     def _poll_level(self) -> None:
         if self._overlay is not None:
             self._overlay.push_level(self._audio.current_level())
+
+    # -------------------------------------------------------------------- preview
+
+    def _arm_previews(self) -> None:
+        """Start previewing a new utterance, from a blank slate."""
+        self._worker.abandon_previews.clear()
+        self._preview_requested_at = 0.0
+        self._preview_timed = False
+        if self._overlay is not None:
+            self._overlay.set_preview_text("")
+        if self._preview_timer is not None:
+            self._preview_timer.start()
+
+    def _abandon_previews(self) -> None:
+        """Stop previewing, and drop whatever is already queued on the worker.
+
+        This is invariant 3 of the live preview (see the module docstring): a
+        preview must never make the user wait. Setting the flag *before* the
+        committed decode is requested is what guarantees a queued preview is
+        skipped entirely rather than decoded ahead of the real thing.
+        """
+        self._worker.abandon_previews.set()
+        if self._preview_timer is not None:
+            self._preview_timer.stop()
+
+    def _request_preview(self) -> None:
+        """Ask the worker for a preview of the last ``preview_window_s`` of audio.
+
+        Fixed-length window, snapshotted non-destructively: the capture keeps
+        accumulating and the committed decode at key release still sees the
+        whole buffer.
+        """
+        if phase_of(self._state) is not Phase.RECORDING:
+            return
+        overlay_cfg = self._config.overlay
+        frames = int(overlay_cfg.preview_window_s * self._config.audio.sample_rate)
+        samples = self._audio.snapshot_capture(frames)
+        if samples.size == 0:
+            return
+        self._preview_requested_at = time.monotonic()
+        self._preview_requested.emit(samples, self._generation)
+
+    def _on_previewed(self, text: str, generation: int) -> None:
+        """Show a preview, unless it has been overtaken by events.
+
+        Everything here is DEBUG: a preview is cosmetic, and previews arrive
+        about once a second, so anything louder would drown the log that
+        matters.
+        """
+        if generation != self._generation or phase_of(self._state) is not Phase.RECORDING:
+            log.debug("dropping a preview that no longer applies (gen %d)", generation)
+            return
+        if not self._preview_timed and self._preview_requested_at:
+            # Once per utterance, so preview cost stays visible in the log file
+            # without flooding it. Round trip, so it includes the queue hop the
+            # user would actually feel if a preview ever delayed a decode.
+            self._preview_timed = True
+            log.debug(
+                "preview round trip %.0fms (%.1fs window)",
+                (time.monotonic() - self._preview_requested_at) * 1000,
+                self._config.overlay.preview_window_s,
+            )
+        if self._overlay is not None:
+            self._overlay.set_preview_text(postprocess(text, self._config.text))
 
     # -------------------------------------------------------------------- results
 

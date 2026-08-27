@@ -23,8 +23,10 @@ this project's hard constraints:
   destroy per-device `setxkbmap` configuration.
 - Never synthesise characters (`xdotool type` / enigo). It rewrites the *core*
   X keymap. Clipboard + `ctrl+v` instead: measured 183 ms vs 3.3 s.
-- One-shot decode at key release. Streaming models re-decode a growing buffer
-  and silently drop long utterances.
+- One-shot *committed* decode at key release. Streaming models re-decode a
+  growing buffer and silently drop long utterances. The live overlay preview is
+  a bounded, throwaway decode that is never injected and never delays the real
+  one -- see `docs/constraints.md`.
 - Bias vocabulary at decode time, never by fuzzy string replacement
   (`set`→`sed`, `reset`→`rust`).
 

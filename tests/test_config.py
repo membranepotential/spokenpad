@@ -61,6 +61,10 @@ def test_toml_round_trip(tmp_path: Path) -> None:
         width = 300
         height = 120
         margin_px = 10
+        live_preview = false
+        preview_interval_ms = 500
+        preview_window_s = 6.5
+        preview_height = 40
         """,
         encoding="utf-8",
     )
@@ -75,7 +79,15 @@ def test_toml_round_trip(tmp_path: Path) -> None:
     assert cfg.text.fillers == ("uh", "erm")
     assert cfg.text.replacements == {"teh": "the"}
     assert cfg.text.trailing_space is True
-    assert cfg.overlay == OverlayConfig(width=300, height=120, margin_px=10)
+    assert cfg.overlay == OverlayConfig(
+        width=300,
+        height=120,
+        margin_px=10,
+        live_preview=False,
+        preview_interval_ms=500,
+        preview_window_s=6.5,
+        preview_height=40,
+    )
 
 
 # -- unknown section / key ---------------------------------------------------
@@ -121,6 +133,31 @@ def test_vocabulary_with_modified_beam_search_is_accepted() -> None:
 def test_out_of_range_hotkey_code_is_rejected() -> None:
     with pytest.raises(ConfigError, match="key_code"):
         Config.from_mapping({"hotkey": {"key_code": -1}})
+
+
+def test_too_frequent_preview_interval_is_rejected() -> None:
+    with pytest.raises(ConfigError, match="preview_interval_ms"):
+        Config.from_mapping({"overlay": {"preview_interval_ms": 199}})
+
+
+def test_non_positive_preview_window_is_rejected() -> None:
+    with pytest.raises(ConfigError, match="preview_window_s"):
+        Config.from_mapping({"overlay": {"preview_window_s": 0}})
+
+
+def test_negative_preview_height_is_rejected() -> None:
+    with pytest.raises(ConfigError, match="preview_height"):
+        Config.from_mapping({"overlay": {"preview_height": -1}})
+
+
+def test_total_height_includes_the_preview_band_only_when_it_is_enabled() -> None:
+    """The overlay widget and its placement both size off ``total_height``, so
+    this is the single place the preview band's existence is expressed."""
+    with_preview = OverlayConfig(height=96, preview_height=64, live_preview=True)
+    without = OverlayConfig(height=96, preview_height=64, live_preview=False)
+
+    assert with_preview.total_height == 160
+    assert without.total_height == 96
 
 
 # -- relative model_dir resolution -------------------------------------------

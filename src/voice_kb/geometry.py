@@ -81,9 +81,15 @@ def overlay_rect(output: Rect, cfg: OverlayConfig) -> Rect:
     bounds rather than trusted outright -- an overlay taller or wider than
     the margin leaves room for must still land on-screen, not hang off the
     bottom edge the way the previous tool's overlay did.
+
+    Height comes from :attr:`OverlayConfig.total_height`, not ``height``: with
+    the live preview enabled the widget is taller than its status row, and
+    clamping the shorter number would put the preview band off-screen -- the
+    exact failure this clamp exists to prevent.
     """
+    height = cfg.total_height
     x = output.x + (output.width - cfg.width) // 2
-    y = output.bottom - cfg.margin_px - cfg.height
+    y = output.bottom - cfg.margin_px - height
     x = max(output.x, min(x, output.right - cfg.width))
-    y = max(output.y, min(y, output.bottom - cfg.height))
-    return Rect(x=x, y=y, width=cfg.width, height=cfg.height)
+    y = max(output.y, min(y, output.bottom - height))
+    return Rect(x=x, y=y, width=cfg.width, height=height)

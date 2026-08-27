@@ -86,8 +86,8 @@ state.step()          -- pure: (SessionState, Event) -> (SessionState, Command)
 app.py                -- interprets the command
     │
     ├─ StartCapture   → audio.py starts accumulating from the pre-roll buffer
-    ├─ Decode         → asr.py runs one-shot decode over the captured audio
-    │                     (hotword-biased via bpe.vocab, see asr.md)
+    ├─ Decode         → asr.py runs the one committed decode over the whole
+    │                     captured buffer (hotword-biased via bpe.vocab, asr.md)
     ├─ DiscardCapture → audio thrown away, nothing decoded
     │
     ▼
@@ -103,6 +103,17 @@ text lands at the cursor
 `overlay.py` sits to the side of this pipeline, reading `Phase` off the
 current `SessionState` to show idle/recording/transcribing, without being on
 the critical path from keypress to injected text.
+
+The live transcript preview is the one place the overlay reads audio rather
+than just phase: while recording, a timer on the Qt thread snapshots a
+fixed-length trailing window (non-destructively — `snapshot_capture` never
+consumes the buffer) and asks the *same* worker for a throwaway decode. It is
+still off the critical path by construction: previews are abandoned before the
+committed decode is requested, and nothing a preview produces can reach the
+clipboard. See
+[constraints.md](constraints.md#the-one-relaxation-cosmetic-previews). No
+event, command or state was added for it — a preview is a shell concern, so
+`state.py` is untouched.
 
 ## Why this split matters here specifically
 

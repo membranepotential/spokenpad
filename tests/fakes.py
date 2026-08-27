@@ -23,14 +23,21 @@ class FakeAudioCapture:
     ``start_capture`` calls happened in between -- tests that care about the
     actual samples passed to a decode set it directly before dispatching the
     key-up that triggers ``Decode``.
+
+    ``snapshot_capture`` is likewise decoupled from ``next_samples``: a
+    preview reads its own :attr:`preview_samples`, so a test can prove the
+    injected text came from the *committed* decode and not from anything a
+    preview saw.
     """
 
     def __init__(self, config: AudioConfig) -> None:
         self.config = config
         self.start_calls = 0
         self.stop_calls = 0
+        self.snapshot_calls: list[int | None] = []
         self.closed = False
         self.next_samples: MonoAudio = np.zeros(1600, dtype=np.float32)
+        self.preview_samples: MonoAudio = np.zeros(800, dtype=np.float32)
 
     def start_capture(self) -> None:
         self.start_calls += 1
@@ -38,6 +45,14 @@ class FakeAudioCapture:
     def stop_capture(self) -> MonoAudio:
         self.stop_calls += 1
         return self.next_samples
+
+    def snapshot_capture(self, max_frames: int | None = None) -> MonoAudio:
+        """Mirrors ``AudioCapture.snapshot_capture``: non-destructive, and
+        never disturbs what ``stop_capture`` will hand back."""
+        self.snapshot_calls.append(max_frames)
+        if max_frames is None:
+            return self.preview_samples
+        return self.preview_samples[-max_frames:]
 
     def take_stream_status(self) -> str | None:
         """Mirrors AudioCapture.take_stream_status; the fake never sees flags."""

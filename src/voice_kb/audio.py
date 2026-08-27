@@ -36,6 +36,11 @@ type MonoAudio = npt.NDArray[np.float32]
 log = logging.getLogger("voice-kb.audio")
 
 MAX_UTTERANCE_SECONDS = 600.0
+"""Hard ceiling on a single capture. Guards against unbounded memory growth
+if the hotkey's key-up is ever lost (stuck key, dropped event, wedged
+device) -- without this, `_chunks` would grow for as long as the key stays
+down. At 16 kHz float32 mono this is ~38 MB, negligible to hold and easy to
+notice in the overlay if it is ever actually hit."""
 
 FIRST_CALLBACK_TIMEOUT = 0.5
 """How long a newly opened stream gets to deliver its first callback.
@@ -55,11 +60,6 @@ callback simply stops and nothing raises -- capture then returns only the
 pre-roll ring, byte-identical every time, and the model dutifully decodes
 0.25s of room noise into nothing. Observed in the wild; hence the watchdog.
 """
-"""Hard ceiling on a single capture. Guards against unbounded memory growth
-if the hotkey's key-up is ever lost (stuck key, dropped event, wedged
-device) -- without this, `_chunks` would grow for as long as the key stays
-down. At 16 kHz float32 mono this is ~38 MB, negligible to hold and easy to
-notice in the overlay if it is ever actually hit."""
 
 
 class AudioCaptureError(RuntimeError):
@@ -112,8 +112,12 @@ class AudioCapture:
 
     Not safe to call from multiple threads concurrently; the caller (the
     session state machine, via a single hotkey watcher thread) already
-    serialises start/stop calls with respect to each other. It is always
-    safe to call :meth:`current_level` from any thread at any time.
+    serialises start/stop/snapshot calls with respect to each other. It is
+    always safe to call :meth:`current_level` from any thread at any time.
+
+    :meth:`snapshot_capture` is safe *against the realtime callback* -- it
+    reads under the same lock -- and is non-destructive, so it can be called
+    mid-capture without disturbing what :meth:`stop_capture` will return.
     """
 
     def __init__(self, config: AudioConfig) -> None:
@@ -243,6 +247,54 @@ class AudioCapture:
         if not chunks:
             return np.zeros(0, dtype=np.float32)
         return chunks[0] if len(chunks) == 1 else np.concatenate(chunks)
+
+    def snapshot_capture(self, max_frames: int | None = None) -> MonoAudio:
+        """The audio captured so far, without ending the capture.
+
+        Returns at most the trailing ``max_frames`` samples. Copies out under
+        the same lock the realtime callback uses, so it never observes a
+        partially appended chunk.
+
+        Only the trailing chunks needed to satisfy ``max_frames`` are walked
+        and concatenated -- never the whole buffer -- so the cost of a
+        snapshot is bounded by ``max_frames`` and does *not* grow with the
+        length of the utterance. That bound is what makes the overlay's live
+        preview safe: a five-minute dictation costs the same per preview as a
+        ten-second one (``docs/constraints.md``).
+
+        This is deliberately non-destructive. It never touches ``_chunks``,
+        ``_frames_captured`` or ``_capturing``, so the committed decode at key
+        release still sees the complete buffer, exactly once, via
+        :meth:`stop_capture`.
+        """
+        if max_frames is not None and max_frames <= 0:
+            return np.zeros(0, dtype=np.float32)
+
+        with self._lock:
+            if not self._capturing:
+                return np.zeros(0, dtype=np.float32)
+            if max_frames is None:
+                tail = list(self._chunks)
+            else:
+                tail = []
+                frames = 0
+                for chunk in reversed(self._chunks):
+                    tail.append(chunk)
+                    frames += len(chunk)
+                    if frames >= max_frames:
+                        break
+                tail.reverse()
+
+        # Concatenation happens outside the lock on purpose: every chunk in
+        # `tail` is already an immutable-by-convention copy made by the
+        # callback, so nothing can mutate them, and the realtime thread must
+        # not be made to wait on an allocation it does not need to.
+        if not tail:
+            return np.zeros(0, dtype=np.float32)
+        audio = np.concatenate(tail) if len(tail) > 1 else tail[0].copy()
+        if max_frames is not None and audio.size > max_frames:
+            audio = audio[-max_frames:]
+        return audio
 
     def _ensure_stream_alive(self) -> None:
         """Reopen the input stream if its callback has gone quiet.

@@ -23,8 +23,9 @@ Driving the worker: ``Daemon``'s worker thread is never started (see
 ``make_daemon`` in ``conftest.py`` for why). Instead, wherever production
 code would cross to the worker thread via a queued signal
 (``_decode_requested`` -> ``_Worker.run_decode``, ``_inject_requested`` ->
-``_Worker.run_inject``), tests call the real worker method directly on the
-main thread. Because the *receiving* end of ``_worker.decoded``/
+``_Worker.run_inject``, ``_preview_requested`` -> ``_Worker.run_preview``),
+tests call the real worker method directly on the main thread. Because the
+*receiving* end of ``_worker.decoded``/
 ``decode_failed`` (``Daemon._on_decoded``/``_on_decode_failed``) lives on the
 main thread and the call happens from the main thread, Qt resolves that
 connection to a direct (synchronous) call -- so the real generation check in
@@ -33,18 +34,24 @@ connection to a direct (synchronous) call -- so the real generation check in
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 
+import numpy as np
 import pytest
 from fakes import FakeAudioCapture, FakeInjector, FakeTranscriber, FakeX11
 from PySide6.QtWidgets import QApplication
 
+from voice_kb import x11
 from voice_kb.app import Daemon
-from voice_kb.asr import ModelMissingError, TranscriptionResult
+from voice_kb.asr import ModelMissingError, Transcriber, TranscriptionResult
+from voice_kb.audio import AudioCapture, MonoAudio
 from voice_kb.config import AsrConfig, Config, HotkeyConfig, PasteConfig
 from voice_kb.hotkey import HotkeyWatcher
+from voice_kb.inject import inject_text
+from voice_kb.overlay import Overlay
 from voice_kb.state import (
     MIN_HOLD_SECONDS,
     Cancelled,
@@ -341,3 +348,196 @@ def test_decode_that_raises_does_not_kill_daemon_and_returns_to_idle(
     # The daemon is still alive and responsive to new events.
     daemon._dispatch(KeyDown(at=2.0))
     assert isinstance(_state(daemon), Recording)
+
+
+# -- 9. the live preview never touches the committed decode -------------------
+#
+# The preview relaxes constraint 3 ("one-shot decode") in exactly one
+# direction: extra *cosmetic* decodes are allowed, the *committed* decode is
+# still one shot over the whole buffer. These tests pin the three invariants
+# that keep the relaxation from turning back into the failure it came from --
+# a streaming decode that made the user wait and silently dropped audio.
+
+
+def _preview_spy(daemon: Daemon) -> list[tuple[MonoAudio, int]]:
+    """Records every ``(samples, generation)`` a preview was requested for.
+
+    As :func:`_decode_spy`: the worker thread is never started, so tests take
+    what the daemon asked for here and hand it to ``_Worker.run_preview``
+    themselves, exactly where Qt would have made the thread hop.
+    """
+    calls: list[tuple[MonoAudio, int]] = []
+    daemon._preview_requested.connect(
+        lambda samples, generation: calls.append((samples, generation))
+    )
+    return calls
+
+
+def _overlay(daemon: Daemon) -> Overlay:
+    """``daemon._overlay`` is statically ``Overlay | None``; every daemon these
+    tests build has ``overlay.enabled`` on, so it is always present."""
+    assert daemon._overlay is not None
+    return daemon._overlay
+
+
+def test_preview_mid_recording_reaches_the_overlay(make_daemon: DaemonFactory) -> None:
+    daemon = make_daemon(None)
+    requests = _preview_spy(daemon)
+
+    daemon._dispatch(KeyDown(at=0.0))
+    daemon._request_preview()  # what the preview QTimer does, once a second
+
+    assert len(requests) == 1
+    # A fixed-length trailing window, not the whole buffer: preview cost must
+    # not grow with the utterance (invariant 2).
+    expected_frames = int(
+        daemon._config.overlay.preview_window_s * daemon._config.audio.sample_rate
+    )
+    assert _audio(daemon).snapshot_calls == [expected_frames]
+
+    samples, generation = requests[0]
+    _transcriber(daemon).next_result = TranscriptionResult(
+        text="um hello world", elapsed_seconds=0.02
+    )
+    daemon._worker.run_preview(samples, generation)
+
+    # Post-processed on the way to the overlay, like the committed transcript.
+    assert _overlay(daemon)._preview == "hello world"
+
+
+def test_preview_from_a_previous_generation_is_dropped(make_daemon: DaemonFactory) -> None:
+    """A preview requested before a cancellation must not land in the overlay
+    of the *next* utterance -- the same staleness rule the committed decode
+    already obeys."""
+    daemon = make_daemon(None)
+    requests = _preview_spy(daemon)
+
+    daemon._dispatch(KeyDown(at=0.0))
+    daemon._request_preview()
+    stale_samples, stale_generation = requests[0]
+
+    # Key up, then cancel the decode: this is what bumps the generation.
+    daemon._dispatch(KeyUp(at=0.5))
+    daemon._dispatch(Cancelled(at=0.6))
+    assert daemon._generation != stale_generation
+
+    # A new utterance starts, which re-arms previews.
+    daemon._dispatch(KeyDown(at=1.0))
+    assert isinstance(_state(daemon), Recording)
+
+    _transcriber(daemon).next_result = TranscriptionResult(
+        text="stale preview", elapsed_seconds=0.02
+    )
+    daemon._worker.run_preview(stale_samples, stale_generation)
+
+    assert _overlay(daemon)._preview == ""
+
+
+def test_preview_arriving_after_key_up_is_dropped(make_daemon: DaemonFactory) -> None:
+    """Once the key is up the daemon is transcribing, and a preview that
+    resolves late must not overwrite (or resurrect) the overlay text."""
+    daemon = make_daemon(None)
+
+    daemon._dispatch(KeyDown(at=0.0))
+    generation = daemon._generation
+    daemon._dispatch(KeyUp(at=0.5))
+    assert isinstance(_state(daemon), Transcribing)
+
+    # Straight from the worker's signal, bypassing the worker-side abandon
+    # check, so this pins the *receiving* guard on its own.
+    daemon._worker.previewed.emit("late preview", generation)
+
+    assert _overlay(daemon)._preview == ""
+
+
+def test_abandon_flag_skips_a_queued_preview_entirely(make_daemon: DaemonFactory) -> None:
+    """Invariant 3, the one that protects decode latency: when the key comes
+    up, a preview already queued on the worker must be *skipped*, not decoded
+    ahead of the committed decode. The recogniser is single-threaded, so a
+    preview that ran here would be pure added latency on the text the user is
+    waiting for -- which is how the tool this replaced felt slow.
+    """
+    daemon = make_daemon(None)
+    requests = _preview_spy(daemon)
+
+    daemon._dispatch(KeyDown(at=0.0))
+    daemon._request_preview()
+    queued_samples, queued_generation = requests[0]
+
+    daemon._dispatch(KeyUp(at=0.5))
+    assert daemon._worker.abandon_previews.is_set()
+
+    transcriber = _transcriber(daemon)
+    decodes_before = len(transcriber.calls)
+    transcriber.next_result = TranscriptionResult(text="never decoded", elapsed_seconds=0.02)
+
+    # The queued preview finally reaches the worker, after the key-up.
+    daemon._worker.run_preview(queued_samples, queued_generation)
+
+    assert len(transcriber.calls) == decodes_before, "the preview was decoded anyway"
+    assert _overlay(daemon)._preview == ""
+
+
+def test_injected_text_comes_only_from_the_committed_decode(
+    make_daemon: DaemonFactory,
+) -> None:
+    """Invariant 1: previews are cosmetic. Even with a preview that decoded to
+    something completely different, the injected text is produced by exactly
+    one decode of the complete captured buffer at key release.
+    """
+    daemon = make_daemon(None)
+    inject_calls = _inject_spy(daemon)
+    audio = _audio(daemon)
+    audio.preview_samples = np.full(800, 0.5, dtype=np.float32)
+    audio.next_samples = np.full(1600, 0.25, dtype=np.float32)
+    requests = _preview_spy(daemon)
+    transcriber = _transcriber(daemon)
+
+    daemon._dispatch(KeyDown(at=0.0))
+    daemon._request_preview()
+    transcriber.next_result = TranscriptionResult(text="preview only", elapsed_seconds=0.02)
+    daemon._worker.run_preview(*requests[0])
+    assert _overlay(daemon)._preview == "preview only"
+
+    daemon._dispatch(KeyUp(at=0.5))
+    transcriber.next_result = TranscriptionResult(text="committed text", elapsed_seconds=0.1)
+    daemon._worker.run_decode(audio.next_samples, daemon._generation)
+
+    assert inject_calls == [("committed text", daemon._config.paste)]
+    # Exactly one decode saw the full buffer, and the preview's window never
+    # reached injection in any form.
+    full_buffer_decodes = [c for c in transcriber.calls if c.size == audio.next_samples.size]
+    assert len(full_buffer_decodes) == 1
+    assert np.array_equal(full_buffer_decodes[0], audio.next_samples)
+
+
+# -- 10. the fakes still match the real interfaces ----------------------------
+
+
+def _params(member: object) -> list[str]:
+    return [p for p in inspect.signature(member).parameters if p != "self"]  # type: ignore[arg-type]
+
+
+def _assert_stands_in_for(fake: type, real: type) -> None:
+    for name, member in inspect.getmembers(real, callable):
+        if name.startswith("_"):
+            continue
+        assert hasattr(fake, name), f"{fake.__name__} is missing {real.__name__}.{name}"
+        assert _params(getattr(fake, name)) == _params(member), (
+            f"{fake.__name__}.{name} no longer matches {real.__name__}.{name}"
+        )
+    # `signature` of the class itself is the constructor's, minus `self`.
+    assert _params(fake) == _params(real), f"{fake.__name__}() no longer matches {real.__name__}()"
+
+
+def test_every_fake_still_matches_the_interface_it_stands_in_for() -> None:
+    """Regression: the last two features each shipped a new method on a real
+    boundary class without adding it to the fake, and the whole e2e suite went
+    red on an ``AttributeError`` that had nothing to do with the feature. This
+    fails on the *fake* instead, pointing straight at the fix.
+    """
+    _assert_stands_in_for(FakeAudioCapture, AudioCapture)
+    _assert_stands_in_for(FakeTranscriber, Transcriber)
+    for name in ("outputs", "focused_window_rect"):
+        assert _params(getattr(FakeX11, name)) == _params(getattr(x11, name))
+    assert _params(FakeInjector.__call__) == _params(inject_text)

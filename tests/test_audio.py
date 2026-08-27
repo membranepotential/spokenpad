@@ -176,3 +176,96 @@ def test_inactive_stream_is_reopened_even_if_recently_called_back(
     assert cap._stream is not first
     cap.stop_capture()
     cap.close()
+
+
+# -- non-destructive snapshots for the overlay's live preview -----------------
+
+
+def _feed(capture: AudioCapture, values: list[float], frames: int = 4) -> None:
+    """Push `frames`-sample callbacks, one constant value each, as PortAudio would."""
+    for value in values:
+        capture._callback(np.full((frames, 1), value, dtype=np.float32), frames, None, _NO_STATUS)
+
+
+def test_snapshot_returns_what_has_arrived_so_far_mid_capture() -> None:
+    """The preview needs the in-flight audio without ending the capture."""
+    cap = AudioCapture(AudioConfig(sample_rate=1000, preroll_ms=0))
+    cap.start_capture()
+    _feed(cap, [1.0, 2.0, 3.0])
+
+    snapshot = cap.snapshot_capture()
+
+    assert snapshot.tolist() == [1.0] * 4 + [2.0] * 4 + [3.0] * 4
+    cap.stop_capture()
+    cap.close()
+
+
+def test_snapshot_respects_max_frames_and_returns_the_tail() -> None:
+    """The window is trailing, not leading: the newest audio is what a preview
+    must decode, and its cost must not grow with the utterance."""
+    cap = AudioCapture(AudioConfig(sample_rate=1000, preroll_ms=0))
+    cap.start_capture()
+    _feed(cap, [1.0, 2.0, 3.0, 4.0, 5.0])
+
+    snapshot = cap.snapshot_capture(6)
+
+    assert snapshot.size == 6
+    assert snapshot.tolist() == [4.0] * 2 + [5.0] * 4
+
+
+def test_snapshot_walks_only_the_chunks_the_window_needs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Invariant 2: a preview's cost is independent of utterance length. If
+    the tail were taken by concatenating the whole buffer and slicing, a long
+    dictation would make every preview steadily more expensive than the last
+    -- which is exactly the growing-buffer cost this project exists to avoid.
+    """
+    cap = AudioCapture(AudioConfig(sample_rate=1000, preroll_ms=0))
+    cap.start_capture()
+    _feed(cap, [float(i) for i in range(500)])
+    assert len(cap._chunks) == 500
+
+    joined: list[int] = []
+    real_concatenate = np.concatenate
+
+    def counting_concatenate(chunks: Any, *args: Any, **kwargs: Any) -> Any:
+        joined.append(len(chunks))
+        return real_concatenate(chunks, *args, **kwargs)
+
+    # `audio.py` does `import numpy as np`, so it resolves `np.concatenate`
+    # against this very module object at call time.
+    monkeypatch.setattr(np, "concatenate", counting_concatenate)
+    snapshot = cap.snapshot_capture(8)
+
+    assert snapshot.tolist() == [498.0] * 4 + [499.0] * 4
+    # Two 4-frame chunks cover the 8-frame window; the other 498 are untouched.
+    assert joined == [2]
+
+
+def test_snapshot_does_not_disturb_a_subsequent_stop_capture() -> None:
+    """The committed decode still sees the complete buffer: previewing must
+    not consume, truncate or reorder a single sample of it."""
+    cap = AudioCapture(AudioConfig(sample_rate=1000, preroll_ms=0))
+    cap.start_capture()
+    _feed(cap, [1.0, 2.0, 3.0])
+
+    cap.snapshot_capture(4)
+    cap.snapshot_capture()
+    _feed(cap, [4.0])
+    cap.snapshot_capture(2)
+
+    full = cap.stop_capture()
+
+    assert full.tolist() == [1.0] * 4 + [2.0] * 4 + [3.0] * 4 + [4.0] * 4
+    cap.close()
+
+
+def test_snapshot_while_idle_returns_an_empty_array() -> None:
+    cap = AudioCapture(AudioConfig(sample_rate=1000, preroll_ms=0))
+
+    snapshot = cap.snapshot_capture(1000)
+
+    assert snapshot.size == 0
+    assert snapshot.dtype == np.float32
+    cap.close()

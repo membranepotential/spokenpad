@@ -216,13 +216,72 @@ class PasteConfig:
 @dataclass(frozen=True, slots=True)
 class OverlayConfig:
     enabled: bool = True
-    width: int = 420
+    width: int = 720
+    """Wide enough to read a line of transcript, not just the status label."""
+
     height: int = 96
+    """Height of the status row (dot, label, level meter) on its own."""
+
     margin_px: int = 32
     """Gap between the overlay and the bottom edge of the output."""
 
     follow_focus: bool = True
     """Place the overlay on the output holding the focused window."""
+
+    live_preview: bool = True
+    """Show a rolling preview of the transcript while the key is held.
+
+    A preview is *cosmetic only*. The text that actually gets injected is
+    still produced by exactly one decode of the complete captured buffer at
+    key release (``docs/constraints.md``, "One-shot committed decode"):
+    preview output is never injected, never merged into the final text, and
+    never influences it. Set to ``false`` to go back to a status-only pill.
+    """
+
+    preview_interval_ms: int = 1100
+    """How often a preview decode is requested while recording.
+
+    Floored at 200ms so previews cannot be asked for faster than they can
+    plausibly be produced. The default leaves the worker idle roughly half the
+    time -- see :attr:`preview_window_s` for why that idle fraction matters.
+    """
+
+    preview_window_s: float = 6.0
+    """How much *trailing* audio each preview decodes.
+
+    Fixed-length by construction: a preview's cost is bounded and independent
+    of utterance length, so a five-minute dictation costs the same per preview
+    as a ten-second one.
+
+    The default is a latency budget, not a display choice. A *queued* preview
+    is dropped the instant the key is released, but one already inside
+    ``decode_stream`` cannot be interrupted, so the committed decode waits for
+    it. Measured on this model: a 6s window decodes in ~0.5s and a 10s window
+    in ~0.8s. Paired with a 1100ms interval, that leaves the worker idle about
+    half the time, so the expected cost to release-to-text is ~0.2s and the
+    worst case ~0.5s. Widening this without widening the interval makes a
+    preview almost always be in flight at key release, and then the worst case
+    is what you pay every time. Six seconds also happens to be about what the
+    overlay's two lines can show.
+    """
+
+    preview_height: int = 64
+    """Extra pixels below the status row for the preview text area."""
+
+    def __post_init__(self) -> None:
+        if self.preview_interval_ms < 200:
+            raise ConfigError(
+                f"overlay.preview_interval_ms must be >= 200: {self.preview_interval_ms}"
+            )
+        if self.preview_window_s <= 0:
+            raise ConfigError(f"overlay.preview_window_s must be positive: {self.preview_window_s}")
+        if self.preview_height < 0:
+            raise ConfigError(f"overlay.preview_height must not be negative: {self.preview_height}")
+
+    @property
+    def total_height(self) -> int:
+        """Full widget height: the status row plus the preview area when enabled."""
+        return self.height + self.preview_height if self.live_preview else self.height
 
 
 @dataclass(frozen=True, slots=True)
