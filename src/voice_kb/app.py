@@ -62,6 +62,7 @@ from voice_kb.state import (
     KeyDown,
     KeyUp,
     Nothing,
+    Phase,
     SessionState,
     StartCapture,
     phase_of,
@@ -72,6 +73,7 @@ from voice_kb.text import postprocess
 log = logging.getLogger("voice-kb")
 
 _LEVEL_POLL_MS = 33  # matches the overlay's own frame interval
+_OUTPUTS_TTL_S = 5.0
 
 
 class _Worker(QObject):
@@ -144,6 +146,9 @@ class Daemon(QObject):
         self._state: SessionState = Idle()
         self._started = False
         self._dump_dir: Path | None = None
+        self._last_phase = Phase.IDLE
+        self._outputs_cache: list[Output] | None = None
+        self._outputs_read_at = 0.0
 
         #: Bumped whenever an in-flight decode is invalidated. A result whose
         #: generation no longer matches is discarded instead of injected.
@@ -250,24 +255,44 @@ class Daemon(QObject):
     # ------------------------------------------------------------------- overlay
 
     def _sync_overlay(self) -> None:
+        """Reposition only on a real phase change.
+
+        This runs from every dispatched event, and positioning shells out to
+        xrandr and xdotool. Doing that per event is what previously stalled the
+        Qt thread; the overlay only needs moving when it appears, so anything
+        that leaves the phase unchanged must cost nothing.
+        """
         if self._overlay is None:
             return
         phase = phase_of(self._state)
-        if isinstance(self._state, Idle):
-            self._overlay.set_phase(phase)
+        if phase == self._last_phase:
             return
-        pos = self._overlay_position()
-        if pos is not None:
-            self._overlay.show_at(pos.x, pos.y)
+        self._last_phase = phase
+        if phase is not Phase.IDLE:
+            pos = self._overlay_position()
+            if pos is not None:
+                self._overlay.show_at(pos.x, pos.y)
         self._overlay.set_phase(phase)
 
     def _overlay_position(self) -> Rect | None:
-        screens = x11.outputs()
+        screens = self._cached_outputs()
         if not screens:
             return None
         window = x11.focused_window_rect() if self._config.overlay.follow_focus else None
         target = pick_output(screens, window) if window else _primary(screens)
         return overlay_rect(target.rect, self._config.overlay)
+
+    def _cached_outputs(self) -> list[Output]:
+        """Monitor layout, re-read at most every few seconds.
+
+        xrandr is a subprocess and the layout almost never changes; re-reading
+        it on the hot path is pure latency.
+        """
+        now = time.monotonic()
+        if self._outputs_cache is None or now - self._outputs_read_at > _OUTPUTS_TTL_S:
+            self._outputs_cache = x11.outputs()
+            self._outputs_read_at = now
+        return self._outputs_cache
 
     def _log_capture(self, held_seconds: float, samples: MonoAudio) -> None:
         """Report what was actually captured, not just how long the key was held.

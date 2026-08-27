@@ -264,15 +264,19 @@ class HotkeyWatcher:
             self._handle_key(event.code, event.value)
 
     def _handle_key(self, code: int, value: int) -> None:
-        # value: 0 = up, 1 = down, 2 = auto-repeat. Auto-repeat is passed
-        # through as another down event rather than dropped: `state.step`
-        # already treats a down event while Recording as a no-op, so this
-        # costs nothing and means a missed initial down (e.g. a device that
-        # only just got re-armed after a hot-plug) is self-healing as soon
-        # as the kernel starts repeating.
+        # value: 0 = up, 1 = down, 2 = auto-repeat. Auto-repeat is DROPPED.
+        #
+        # The state machine no-ops a key-down while already recording, so
+        # forwarding repeats looked free. It is not: every event reaches
+        # `Daemon._dispatch`, and at ~30 repeats/second that was enough to
+        # saturate the Qt thread, delaying the key-up (so capture ran on past
+        # the release) and batching decode results seconds late.
+        if value == 2:
+            return
+
         now = time.monotonic()
         if code == self._config.key_code:
-            if value in (1, 2):
+            if value == 1:
                 self._on_key_down(now)
             elif value == 0:
                 self._on_key_up(now)
