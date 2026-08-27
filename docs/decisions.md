@@ -62,6 +62,48 @@ harness once references exist." That harness needs
 currently holds Handy's raw (error-including) output, not references
 (STATUS.md).
 
+## Live transcript preview as a cosmetic second decode
+
+The overlay now shows a rolling preview of what is being said while the key
+is held. This touches the project's third hard constraint, so the change was
+a deliberate *rewording* of that constraint rather than a quiet exception to
+it (see [constraints.md](constraints.md#one-shot-committed-decode-never-streaming)).
+
+The constraint used to read "one-shot decode at key release; no streaming, no
+incremental re-decode, no time cap." It exists because Handy's streaming
+model ran at 1.37x real-time and **silently discarded a 37 s dictation** at
+its 30 s finalize cap. Read literally, "one decode, ever" also forbids showing
+the user anything at all until they let go of the key — which is the single
+biggest usability gap against Wispr Flow, and costs nothing that the original
+failure was about.
+
+What actually failed in Handy was that the *committed result* came out of a
+growing-buffer pipeline. So the constraint is now scoped to the committed
+decode: it is the text that gets injected that must come from exactly one
+decode of the complete buffer. Previews are permitted only under three
+invariants that make the old failure mode unreachable:
+
+- previews are never injected, merged, or otherwise allowed to influence the
+  committed text (`_Worker.run_preview` emits to the overlay and nowhere
+  else);
+- a preview decodes a fixed-length trailing window, never a growing buffer,
+  so its cost cannot scale with utterance length;
+- previews are abandoned before a committed decode is requested, so a
+  cosmetic decode can never sit in front of the user's real one on the single
+  worker thread.
+
+Rejected alternatives:
+
+- **A real streaming recognizer.** Reintroduces exactly the architecture that
+  was rejected, for a cosmetic feature.
+- **Re-decoding the whole buffer for each preview.** Simpler to write, and
+  precisely the growing-buffer cost the constraint was written against.
+- **Previewing on a second recognizer instance.** Doubles the resident model
+  (CPU-only, and the decode is already 9.7x real-time) and removes the
+  serialization that keeps the non-thread-safe `Transcriber` safe. Sharing
+  the one worker is what guarantees a preview and the committed decode never
+  overlap.
+
 ## Cloud ASR (Gladia) captured as issue #1, rejected as the default
 
 [Issue #1](https://github.com/membranepotential/voice-kb/issues/1) proposes
@@ -88,3 +130,37 @@ The issue leaves open whether a hybrid (local by default, cloud opt-in per
 context) is worth it later — noting that reintroduces the privacy question
 rather than settling it, so it needs a deliberate decision rather than a
 default.
+
+## Hotword biasing built, then deferred: v1 ships plain transcription
+
+`asr.vocabulary` is empty by default and stays that way. The machinery works
+and is kept — `modified_beam_search`, the reconstructed `bpe.vocab`, the
+`hotwords_score` sweep in `scripts/eval.py` — but no vocabulary is configured,
+so nothing biases the decode.
+
+The reason is measured, not theoretical. Hotwords are a thumb on the scale for
+words the model *might* have heard, and this project's own eval set contains
+the case where that goes wrong. `handy-1787827757.wav` has the speaker saying
+"set S E T you corrected to **sed** S E D" and "reset R E S E T you fix to
+**Rust** R U S T" — both members of each pair, in one sentence, about each
+other. Biasing toward `set` there actively damages the transcript. The tool
+this project replaced shipped exactly that kind of correction (as fuzzy
+post-replacement rather than decode-time biasing) and it is what produced
+`set` → `sed` and `reset` → `rust` in the first place.
+
+Measured on the five verified references with an empty vocabulary: 13.4% WER
+against Handy's 48.7%, though that margin is entirely the 37s clip Handy
+discarded. On the four Handy completed it is 18.4% ours to 15.8% theirs — some
+of Handy's edge coming from the very replacement map that broke set/reset. So
+the gap hotwords would close is real but small, and the failure mode they
+introduce is the one this project exists to avoid.
+
+Deferred rather than dropped: the `--sweep` harness stays, and a vocabulary
+can be added later against measurements rather than intuition. Known costs of
+shipping without it, all visible in `uv run scripts/eval.py`:
+
+- `mkdir` → `mkir`, `udev` → `Udev` / `U Dev`, `rm -rf` → `RMRF`
+- `cd home` → `C D home.` — short commands get spelled out, 100% WER on two
+  words, and the one sample where Handy clearly beats us
+- `commands` → `comments`, which biasing might fix; `a dir` → `there`, which
+  it cannot, since that one is a context error rather than a rare word
