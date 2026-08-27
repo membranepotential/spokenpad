@@ -27,10 +27,10 @@ dictating Claude prompts and shell commands.
 - Live, 2026-08-27: 11.2s held -> 0.78s decode (14.6x) + 167ms inject, i.e.
   **~0.95s release-to-text**. Captured audio runs ~0.3s longer than the hold,
   so the 250ms pre-roll is working.
-- `modified_beam_search` **works** on the TDT checkpoint → hotwords viable.
-- `bpe_vocab` is the two-column SentencePiece `.vocab` (piece, log-prob), not
-  the protobuf — reconstructable from `tokens.txt` as score = `-index`.
-  Verified: `mkir` → `mkdir` at `hotwords_score=1.5`; >3.0 over-biases badly.
+- `modified_beam_search` works on the TDT checkpoint, so hotwords are viable
+  if ever wanted: `bpe_vocab` is the two-column SentencePiece `.vocab` (piece,
+  log-prob), not the protobuf — rebuild from `tokens.txt` as score = `-index`.
+  Verified `mkir` → `mkdir` at score 1.5; >3.0 over-biases badly.
 
 ## Hard constraints — full rationale in `docs/constraints.md`
 Read evdev **read-only** (no `EVIOCGRAB`, no uinput clones); **never synthesise
