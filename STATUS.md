@@ -24,9 +24,8 @@ dictating Claude prompts and shell commands.
 - WER on 5 verified refs, empty vocabulary: **13.4% vs Handy's 48.7%** -- but
   that gap is entirely the clip Handy dropped. On the other four: 18.4% vs
   **15.8%**. We win on reliability, not yet on accuracy.
-- Live, 2026-08-27: 11.2s held -> 0.78s decode (14.6x) + 167ms inject, i.e.
-  **~0.95s release-to-text**. Captured audio runs ~0.3s longer than the hold,
-  so the 250ms pre-roll is working.
+- Live: 11.2s held -> 0.78s decode + 167ms inject = **~0.95s release-to-text**.
+  Captured audio runs ~0.3s over the hold, so the 250ms pre-roll works.
 - `modified_beam_search` works on the TDT checkpoint, so hotwords are viable
   if ever wanted: `bpe_vocab` is the two-column SentencePiece `.vocab` (piece,
   log-prob), not the protobuf — rebuild from `tokens.txt` as score = `-index`.
