@@ -37,6 +37,15 @@ log = logging.getLogger("voice-kb.audio")
 
 MAX_UTTERANCE_SECONDS = 600.0
 
+FIRST_CALLBACK_TIMEOUT = 0.5
+"""How long a newly opened stream gets to deliver its first callback.
+
+A stream can be born dead -- opened without error, reporting ``active``, and
+never calling back. The watchdog below only notices once enough time has
+passed, which costs the user their first dictation. Proving liveness at open
+time closes that gap.
+"""
+
 STALE_STREAM_SECONDS = 1.0
 """If no callback has fired in this long, treat the stream as dead.
 
@@ -122,12 +131,16 @@ class AudioCapture:
         self._level = 0.0
         self._last_callback_at = 0.0
         self._last_status: str | None = None
+        self._callback_count = 0
 
         self._stream: sd.InputStream | None = None
         if self._ring is not None:
             self._stream = self._open_stream()
 
     def _open_stream(self) -> sd.InputStream:
+        # Sampled before start(): a stream can deliver its first buffer during
+        # start() itself, and that callback must count toward liveness.
+        count_before = self._callback_count
         try:
             stream = sd.InputStream(
                 samplerate=self._config.sample_rate,
@@ -143,7 +156,29 @@ class AudioCapture:
         # would judge it stale on the very first capture and reopen it, throwing
         # away the pre-roll it was about to use.
         self._last_callback_at = time.monotonic()
+        if not self._wait_for_first_callback(count_before):
+            log.error(
+                "input stream opened but delivered no audio within %.0fms. "
+                "The device may be suspended or held by another client; "
+                "check `pactl list short sources`.",
+                FIRST_CALLBACK_TIMEOUT * 1000,
+            )
         return stream
+
+    def _wait_for_first_callback(self, count_before: int) -> bool:
+        """Block briefly until the new stream proves it is delivering audio.
+
+        Liveness is observed through the callback rather than the stream handle,
+        because a dead stream still reports ``active``.
+        """
+        start_count = count_before
+        deadline = time.monotonic() + FIRST_CALLBACK_TIMEOUT
+        while time.monotonic() < deadline:
+            if self._callback_count > start_count:
+                self._last_callback_at = time.monotonic()
+                return True
+            time.sleep(0.01)
+        return False
 
     def _callback(
         self,
@@ -155,6 +190,7 @@ class AudioCapture:
         mono = indata[:, 0]
         self._level = float(np.abs(mono).max()) if frames else 0.0
         self._last_callback_at = time.monotonic()
+        self._callback_count += 1
         if _status:
             # Cannot log from a realtime thread; stash it for the next caller.
             self._last_status = str(_status)

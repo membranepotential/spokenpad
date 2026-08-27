@@ -40,6 +40,10 @@ class _FakeInputStream:
 
     def start(self) -> None:
         self.active = True
+        # A real InputStream begins delivering immediately; AudioCapture proves
+        # liveness at open time by waiting for the first callback, so a fake
+        # that never calls back would just burn that timeout on every open.
+        self.callback(np.zeros((256, 1), dtype=np.float32), 256, None, _NO_STATUS)
 
     def stop(self) -> None:
         self.active = False
