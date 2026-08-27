@@ -216,6 +216,13 @@ class PasteConfig:
 @dataclass(frozen=True, slots=True)
 class OverlayConfig:
     enabled: bool = True
+
+    # Sizes below are in Qt's *logical* pixels, which is what Qt's resize()
+    # takes. On a display with a device pixel ratio above 1 -- Xft.dpi 192
+    # gives 2.0 -- the overlay is drawn at twice these numbers in device
+    # pixels, so it keeps the same apparent size as on a 96dpi screen. That is
+    # deliberate: it follows the DPI the user configured rather than shrinking
+    # to a sliver on a 4K panel. See voice_kb.overlay.screen_rect.
     width: int = 720
     """Wide enough to read a line of transcript, not just the status label."""
 

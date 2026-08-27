@@ -69,7 +69,7 @@ from voice_kb.config import Config, PasteConfig
 from voice_kb.geometry import Output, Rect, overlay_rect, pick_output
 from voice_kb.hotkey import HotkeyPermissionError, HotkeyWatcher
 from voice_kb.inject import Injected, InjectionFailed, inject_text
-from voice_kb.overlay import Overlay
+from voice_kb.overlay import Overlay, screen_rect
 from voice_kb.state import (
     AbortDecode,
     Cancelled,
@@ -358,12 +358,34 @@ class Daemon(QObject):
         self._overlay.set_phase(phase)
 
     def _overlay_position(self) -> Rect | None:
+        """Where to put the overlay, in the coordinate space Qt's ``move()`` uses.
+
+        Two coordinate systems meet here and must not be confused. Choosing the
+        *output* is a question about the physical desktop, so it is answered
+        with device pixels from ``xrandr`` and ``xdotool``. Placing the overlay
+        *on* that output is a question for Qt, which works in logical units
+        whenever the device pixel ratio is not 1 -- so the placement maths runs
+        against the matching ``QScreen``'s own rect, never the xrandr one.
+
+        Mixing them is silently wrong: it put the overlay 1776px below the
+        bottom of the screen, mapped and painted and invisible.
+        """
         screens = self._cached_outputs()
         if not screens:
             return None
         window = x11.focused_window_rect() if self._config.overlay.follow_focus else None
         target = pick_output(screens, window) if window else _primary(screens)
-        return overlay_rect(target.rect, self._config.overlay)
+        # Fall back to the xrandr rect only if Qt does not know this screen by
+        # name; on a device pixel ratio of 1 the two are identical anyway.
+        qt_rect = screen_rect(target.name)
+        if qt_rect is None:
+            log.warning(
+                "Qt does not know a screen named %r; placing the overlay from "
+                "xrandr geometry, which is wrong under HiDPI scaling",
+                target.name,
+            )
+            qt_rect = target.rect
+        return overlay_rect(qt_rect, self._config.overlay)
 
     def _cached_outputs(self) -> list[Output]:
         """Monitor layout, re-read at most every few seconds.

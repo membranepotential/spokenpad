@@ -50,6 +50,7 @@ from voice_kb.app import Daemon
 from voice_kb.asr import ModelMissingError, Transcriber, TranscriptionResult
 from voice_kb.audio import AudioCapture, MonoAudio
 from voice_kb.config import AsrConfig, Config, HotkeyConfig, PasteConfig
+from voice_kb.geometry import Rect
 from voice_kb.hotkey import HotkeyWatcher
 from voice_kb.inject import inject_text
 from voice_kb.overlay import Overlay
@@ -598,6 +599,57 @@ def test_capture_far_shorter_than_the_hold_is_reported_as_an_error(
     with caplog.at_level(logging.ERROR, logger="voice-kb"):
         daemon._log_capture(2.0, np.full(2 * rate, 0.01, dtype=np.float32))
     assert caplog.text == ""
+
+
+def test_overlay_is_placed_from_qt_geometry_not_xrandr_geometry(
+    make_daemon: DaemonFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The overlay was invisible for the whole of the project's life.
+
+    Placement was computed from xrandr, which reports device pixels, and handed
+    to Qt's ``move()``, which takes logical units whenever the device pixel
+    ratio is not 1. With ``Xft.dpi: 192`` (ratio 2.0) the overlay landed at
+    y=3936 on a 2160px-tall screen -- mapped, viewable, painted, and 1776px
+    below the bottom edge. Every offscreen render test passed throughout,
+    because a render test never involves a screen.
+
+    So: pick the output with xrandr, place on it with Qt's own rect. This pins
+    that the *Qt* rect is what reaches the placement maths.
+    """
+    daemon = make_daemon(None)
+
+    # A screen Qt describes very differently from xrandr: same panel, half the
+    # logical size, exactly what a 2.0 device pixel ratio produces.
+    monkeypatch.setattr(
+        "voice_kb.app.screen_rect",
+        lambda name: Rect(x=0, y=0, width=960, height=540),
+    )
+    position = daemon._overlay_position()
+
+    assert position is not None
+    # Centred and bottom-aligned within the QT rect (960x540), not the 1920x1080
+    # one the fake xrandr reports.
+    cfg = daemon._config.overlay
+    assert position.x == (960 - cfg.width) // 2
+    assert position.y == 540 - cfg.margin_px - cfg.total_height
+
+
+def test_overlay_falls_back_to_xrandr_when_qt_does_not_know_the_screen(
+    make_daemon: DaemonFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unrecognised screen name must still put the overlay somewhere. At a
+    device pixel ratio of 1 the two rects are identical anyway, so the fallback
+    is only wrong on the setup where Qt would have known the name."""
+    daemon = make_daemon(None)
+    monkeypatch.setattr("voice_kb.app.screen_rect", lambda name: None)
+
+    position = daemon._overlay_position()
+
+    assert position is not None
+    cfg = daemon._config.overlay
+    assert position.y == 1080 - cfg.margin_px - cfg.total_height
 
 
 def test_every_fake_still_matches_the_interface_it_stands_in_for() -> None:

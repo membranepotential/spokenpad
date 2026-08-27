@@ -100,6 +100,10 @@ enabled = true
 
 # Width of the pill, and the height of its status row (dot, label, level
 # meter). With live_preview on, the widget is height + preview_height tall.
+# Sizes are in Qt's LOGICAL pixels, not device pixels. On a HiDPI display
+# (Xft.dpi 192 gives a device pixel ratio of 2.0) the overlay is drawn twice
+# this size in real pixels, so it stays the same apparent size as it would on
+# a 96dpi screen rather than shrinking to a sliver on a 4K panel.
 width = 720
 height = 96
 

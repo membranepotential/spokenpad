@@ -38,11 +38,11 @@ M4 = evdev `186` (`KEY_F16`) → X keycode `194`, keysym `XF86Launch7`, which is
 why keysym-based hotkey libraries cannot bind it.
 
 ## Next
-- **Try the live preview** and report back on feel: is 1100ms too laggy, is
-  6s of trailing text the right amount, does release-to-text still feel fast?
-- Root cause of the dying input stream is still unknown (3rd occurrence,
-  never reproduced outside a live session). All three watchdogs now recover
-  it; nobody has explained it.
+- **Try the overlay + live preview** (it was invisible until the HiDPI fix):
+  is 1100ms too laggy, is 6s of trailing text right, is 720x160 the right
+  size on the 4K panels?
+- Root cause of the dying input stream is still unknown (3rd occurrence).
+  All three watchdogs recover it; nobody has explained it.
 - Short commands spell out: `cd home` -> `C D home.` (100% WER; Handy got 0%).
 - systemd --user unit for autostart.
 

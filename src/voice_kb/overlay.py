@@ -31,6 +31,7 @@ from PySide6.QtGui import (
     QColor,
     QFont,
     QFontMetrics,
+    QGuiApplication,
     QPainter,
     QPainterPath,
     QPaintEvent,
@@ -38,6 +39,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QWidget
 
 from voice_kb.config import OverlayConfig
+from voice_kb.geometry import Rect
 from voice_kb.state import Phase
 
 # A dark translucent pill reads correctly over both light and dark windows,
@@ -65,6 +67,39 @@ capsule it has always had.
 
 _PREVIEW_LINES: Final = 2
 _PREVIEW_ALPHA: Final = 0.85
+
+
+def screen_rect(name: str) -> Rect | None:
+    """The named screen's geometry **in Qt's own coordinate space**.
+
+    Everything else in this project measures the desktop in device pixels,
+    because that is what ``xrandr`` and ``xdotool`` report. Qt does not: with a
+    device pixel ratio above 1 (this machine sets ``Xft.dpi: 192``, so Qt uses
+    2.0), :meth:`QWidget.move` and :meth:`QWidget.resize` take *logical* units.
+
+    Passing device pixels to ``move()`` is silently wrong rather than loudly
+    wrong, and it put the overlay 1776px below the bottom of a 2160px screen --
+    mapped, viewable, correctly painted, and completely invisible. Offscreen
+    render tests could not catch it, because they never involve a screen.
+
+    There is no single factor to divide by, either: Qt reports screen *origins*
+    in device pixels but screen *sizes* in logical ones (here, eDP-1 is
+    ``(3840, 0, 1920, 1080)`` for a 3840x2160 panel at x=3840). So this returns
+    Qt's rect verbatim, and the rule for callers is simply: anything handed to
+    Qt must be computed from a Qt rect.
+
+    ``xrandr`` remains the right source for deciding *which* output to use --
+    that is a question about the physical desktop, and the focused window's
+    geometry is in device pixels too. Only the placement maths moves into Qt's
+    coordinate space.
+    """
+    if QGuiApplication.instance() is None:
+        return None
+    for candidate in QGuiApplication.screens():
+        if candidate.name() == name:
+            g = candidate.geometry()
+            return Rect(x=g.x(), y=g.y(), width=g.width(), height=g.height())
+    return None
 
 
 class Overlay(QWidget):

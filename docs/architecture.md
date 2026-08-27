@@ -115,6 +115,33 @@ clipboard. See
 event, command or state was added for it — a preview is a shell concern, so
 `state.py` is untouched.
 
+## Two coordinate systems, and the rule for keeping them apart
+
+`xrandr` and `xdotool` report the desktop in **device pixels**. Qt's
+`move()` and `resize()` take **logical pixels**, which differ whenever the
+device pixel ratio is not 1 -- `Xft.dpi: 192` gives a ratio of 2.0.
+
+There is no single factor to convert between them, because Qt reports screen
+*origins* in device pixels but screen *sizes* in logical ones. On this machine
+a 3840x2160 panel at x=3840 comes back from Qt as `(3840, 0, 1920, 1080)`.
+
+The rule is therefore not "divide by the ratio" but:
+
+> Choosing **which** output is a question about the physical desktop — answer
+> it with xrandr. Placing something **on** that output is a question for Qt —
+> answer it with `QScreen`'s own rect, via `overlay.screen_rect`.
+
+Mixing them is silently wrong rather than loudly wrong. Placement computed
+from xrandr and passed to `move()` put the overlay at y=3936 on a 2160px-tall
+screen: mapped, `IsViewable`, painted correctly, and 1776px below the bottom
+edge. The overlay was invisible for the entire life of the project and every
+test passed the whole time, because offscreen render tests never involve a
+screen and unit tests never involve Qt. It took `xwininfo` on the live window
+to see it.
+
+`geometry.py` stays pure and unit-testable throughout; it does the same
+centre-and-clamp arithmetic either way. Only the rect handed to it changes.
+
 ## The input stream is not trusted
 
 PortAudio streams on Linux die quietly. PipeWire can suspend the device, the
