@@ -43,9 +43,9 @@ why keysym-based hotkey libraries cannot bind it.
 ## Next
 - systemd --user unit for autostart -- the last thing between this and daily
   use. Everything else below is polish.
-- Root cause of the dying input stream is still unknown (3rd occurrence).
-  All three watchdogs recover it; nobody has explained it.
-- Short commands spell out: `cd home` -> `C D home.` (100% WER; Handy got 0%).
+- Dying input stream: root cause unknown (3rd occurrence). Watchdogs recover
+  it; nobody has explained it.
+- `cd home` -> `C D home.` -- short commands spell out (Handy got this right).
 
 ## Open questions
 - Cloud ASR (Gladia) as a second backend — issue #1. Not the default.
