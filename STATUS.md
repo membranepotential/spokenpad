@@ -13,11 +13,10 @@ dictating Claude prompts and shell commands.
 - `scripts/eval.py` gives repeatable WER + per-error checks + a score sweep.
 
 ## Done
-- Surveyed Wispr Flow (cloud, no Linux) + Linux alternatives.
-- Ran Handy 0.9.6 end-to-end, rejected it, reverted every change, uninstalled.
-- Captured 5 real dictation samples in `eval-samples/` (audio gitignored).
-- uv project + `sherpa-onnx` 1.13.6 running on CPU.
-- Private repo `membranepotential/voice-kb`; Gladia captured as issue #1.
+- Surveyed Wispr Flow + Linux alternatives; evaluated and rejected Handy 0.9.6
+  (rationale in README), reverted every change, uninstalled.
+- 5 real dictation samples in `eval-samples/` (audio gitignored).
+- v1 built, reviewed, all 10 review findings fixed. Gladia is issue #1.
 
 ## Measured (i7-9850H, 6 threads, CPU, 0 VRAM)
 - Idle + warm, `modified_beam_search`: 5 s -> 0.38 s (13x), 20 s -> 1.19 s
