@@ -6,14 +6,23 @@ at the cursor. Fully local, CPU-only (the 4 GB GTX 1650 stays free), tuned for
 dictating Claude prompts and shell commands.
 
 ## Now
-- Evaluated Handy 0.9.6 (AUR `handy-bin`) as a baseline. Rejected — see Findings.
-- All Handy changes reverted; package uninstall pending.
-- Next: write the implementation plan.
+- Scaffold + ASR spikes landed. Both plan risks retired (see Measured).
+- Next: implement the modules in plan order — `config.py`/`state.py` first.
 
 ## Done
-- Surveyed Wispr Flow (cloud, no Linux) + Linux alternatives (Handy, whisrs,
-  OpenWhispr, Speech Note, nerd-dictation).
-- Ran Handy end-to-end; captured 5 real dictation samples in `eval-samples/`.
+- Surveyed Wispr Flow (cloud, no Linux) + Linux alternatives.
+- Ran Handy 0.9.6 end-to-end, rejected it, reverted every change, uninstalled.
+- Captured 5 real dictation samples in `eval-samples/` (audio gitignored).
+- uv project + `sherpa-onnx` 1.13.6 running on CPU.
+- Private repo `membranepotential/voice-kb`; Gladia captured as issue #1.
+
+## Measured (i7-9850H, 6 threads, CPU, 0 VRAM)
+- 20.4 s utterance: **2.12 s** greedy (9.7x RT), 2.38 s `modified_beam_search`
+  (8.6x RT). Handy managed 1.37x RT on the same clip and failed at 30 s.
+- `modified_beam_search` **works** on the TDT checkpoint → hotwords viable.
+- `bpe_vocab` is the two-column SentencePiece `.vocab` (piece, log-prob), not
+  the protobuf — reconstructable from `tokens.txt` as score = `-index`.
+  Verified: `mkir` → `mkdir` at `hotwords_score=1.5`; >3.0 over-biases badly.
 
 ## Findings that constrain the build
 - **M4 key** = evdev `186` (`KEY_F16`) → X11 keycode `194`, keysym `XF86Launch7`.
@@ -38,8 +47,20 @@ dictating Claude prompts and shell commands.
   (`commands`→`comments`, `dir`→`there`, `rm -rf`→`RMRF`), not raw ASR quality.
 
 ## Next
-- Plan: architecture, language/stack, overlay toolkit, cleanup-pass design.
+- `config.py` + `state.py` (types first), then `hotkey.py`, `audio.py`, `asr.py`.
+- `scripts/fetch_model.py` + `build_hotwords.py` to replace the spikes.
+- **Hand-correct `eval-samples/transcripts.json`** — it currently holds Handy's
+  *output* (errors included), not ground truth, so it cannot score anything yet.
+- Re-apply the i3 change: comment `bindcode $m4 [con_mark="m4"] focus`
+  (`~/.config/i3/i3.d/keybindings.conf:79`). Reverted during cleanup.
 
 ## Open questions
-- Cleanup layer: local LLM (Ollama) vs Claude API vs none?
-- Overlay stack: GTK4, Tauri, or a plain X11 shaped window?
+- Cloud ASR (Gladia) as a second backend — issue #1. Not the default; conflicts
+  with the local-processing requirement.
+- Does hotword biasing alone close the technical-vocabulary gap, or is an LLM
+  cleanup pass still needed? Answer with the eval harness once references exist.
+
+## Decided
+- Python + `uv`; overlay-only UI with TOML config; hotwords-only cleanup for v1.
+- **PySide6** for the overlay — GTK4 has no `move()`/`set_type_hint()` on X11
+  (verified), which disqualifies it for a positioned, non-focusable window.
