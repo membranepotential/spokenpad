@@ -6,8 +6,8 @@ at the cursor. Fully local, CPU-only (the 4 GB GTX 1650 stays free), tuned for
 dictating Claude prompts and shell commands.
 
 ## Now
-- **Works end to end with a live voice.** First real dictation transcribed
-  correctly; Ctrl-C, file logging and the M4 hotkey all confirmed working.
+- **Works end to end with a live voice**, overlay and live preview included.
+  Confirmed 2026-08-27: 3 consecutive clean dictations, no dropped audio.
 - ruff + mypy --strict (25 files) + 100 tests green, incl. e2e tests pinning
   every regression found so far (each verified by reverting the fix).
 
@@ -19,11 +19,14 @@ dictating Claude prompts and shell commands.
   key-up, never injected. 100 tests green.
 
 ## Measured (i7-9850H, 6 threads, CPU, 0 VRAM)
-- Idle + warm, `modified_beam_search`: 20 s -> 1.19 s (**16.8x**), 37 s ->
-  2.55 s (14.5x). Linear; no cliff. Handy managed 1.37x and discarded the 37 s.
+- Warm, idle: 20 s -> 1.19 s (**16.8x**), 37 s -> 2.55 s. Linear; no cliff.
+  Handy managed 1.37x and discarded the 37 s clip at its 30 s cap.
 - WER on 5 verified refs, empty vocabulary: **13.4% vs Handy's 48.7%** -- but
   that gap is entirely the clip Handy dropped. On the other four: 18.4% vs
   **15.8%**. We win on reliability, not yet on accuracy.
+- Live, 2026-08-27: 11.2s held -> 0.78s decode (14.6x) + 167ms inject, i.e.
+  **~0.95s release-to-text**. Captured audio runs ~0.3s longer than the hold,
+  so the 250ms pre-roll is working.
 - `modified_beam_search` **works** on the TDT checkpoint → hotwords viable.
 - `bpe_vocab` is the two-column SentencePiece `.vocab` (piece, log-prob), not
   the protobuf — reconstructable from `tokens.txt` as score = `-index`.
@@ -38,13 +41,11 @@ M4 = evdev `186` (`KEY_F16`) → X keycode `194`, keysym `XF86Launch7`, which is
 why keysym-based hotkey libraries cannot bind it.
 
 ## Next
-- **Try the overlay + live preview** (it was invisible until the HiDPI fix):
-  is 1100ms too laggy, is 6s of trailing text right, is 720x160 the right
-  size on the 4K panels?
+- systemd --user unit for autostart -- the last thing between this and daily
+  use. Everything else below is polish.
 - Root cause of the dying input stream is still unknown (3rd occurrence).
   All three watchdogs recover it; nobody has explained it.
 - Short commands spell out: `cd home` -> `C D home.` (100% WER; Handy got 0%).
-- systemd --user unit for autostart.
 
 ## Open questions
 - Cloud ASR (Gladia) as a second backend — issue #1. Not the default.
