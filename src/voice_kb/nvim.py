@@ -176,6 +176,8 @@ class NvimSession:
         phase: Phase | None = None,
         level: float | None = None,
         preview: str | None = None,
+        latched: bool | None = None,
+        previewing: bool | None = None,
     ) -> None:
         """Update the indicator. Fire-and-forget, and never raises.
 
@@ -193,6 +195,10 @@ class NvimSession:
             update["level"] = max(0.0, min(1.0, level))
         if preview is not None:
             update["preview"] = preview
+        if latched is not None:
+            update["latched"] = latched
+        if previewing is not None:
+            update["previewing"] = previewing
         if not update:
             return
         try:

@@ -247,7 +247,7 @@ def test_auto_repeat_never_invokes_any_callback() -> None:
     calls: list[tuple[str, float]] = []
     watcher = HotkeyWatcher(
         HotkeyConfig(key_code=186, cancel_key_code=1),
-        on_key_down=lambda at: calls.append(("down", at)),
+        on_key_down=lambda at, _latch: calls.append(("down", at)),
         on_key_up=lambda at: calls.append(("up", at)),
         on_cancel=lambda at: calls.append(("cancel", at)),
     )

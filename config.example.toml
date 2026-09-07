@@ -18,6 +18,19 @@ key_code = 186
 # cancel_key_code=None in code if you need it disabled).
 cancel_key_code = 1
 
+# Modifier that turns a press into a LATCHED recording: hold it together with
+# the hotkey and recording runs until the hotkey is pressed again, instead of
+# ending when you let go. For a long passage, holding a key for two minutes is
+# its own kind of friction.
+#
+# The press that STOPS a latched recording does not need the modifier -- so you
+# never have to remember which hand you started with. The nvim winbar shows a
+# lock while latched, since the way to stop it differs from push-to-talk.
+#
+# One of "shift", "ctrl", "alt". Omit the line entirely to disable latching and
+# leave pure push-to-talk (there is no way to write None in TOML).
+latch_modifier = "shift"
+
 [audio]
 # Parakeet expects 16 kHz input. Changing this requires a matching model.
 sample_rate = 16000
@@ -157,10 +170,10 @@ interval_ms = 1100
 #
 # This is a latency budget. A preview still QUEUED when you release the key is
 # dropped, but one already decoding cannot be interrupted, so the real decode
-# waits behind it. At ~14.6x real-time, 15s of audio costs ~1.0s -- that is the
-# worst a release can pay, ~0.5s expected. Raising this raises both in
-# proportion.
-max_seconds = 15.0
+# waits behind it. At ~14.6x real-time, 30s of audio costs ~2.0s -- that is the
+# worst a release can pay, ~1.0s expected. Raising this raises both in
+# proportion. When previews do stop, the nvim winbar says so.
+max_seconds = 30.0
 
 [overlay]
 # Show the Qt status overlay at all.

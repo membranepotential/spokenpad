@@ -248,3 +248,22 @@ def test_nvim_spawn_argv_substitutes_instance_and_appends_listen_and_target() ->
         "/tmp/x.sock",
         "/tmp/x.md",
     ]
+
+
+def test_latch_modifier_defaults_to_shift_and_covers_both_sides() -> None:
+    """Both left and right, so it does not matter which hand is on the key."""
+    assert HotkeyConfig().latch_key_codes == frozenset({42, 54})  # KEY_*SHIFT
+
+
+def test_latching_can_be_turned_off() -> None:
+    assert HotkeyConfig(latch_modifier=None).latch_key_codes == frozenset()
+
+
+def test_unknown_latch_modifier_is_rejected() -> None:
+    with pytest.raises(ConfigError, match="latch_modifier"):
+        Config.from_mapping({"hotkey": {"latch_modifier": "super"}})
+
+
+def test_latch_modifier_reads_from_toml() -> None:
+    config = Config.from_mapping({"hotkey": {"latch_modifier": "ctrl"}})
+    assert config.hotkey.latch_key_codes == frozenset({29, 97})  # KEY_*CTRL

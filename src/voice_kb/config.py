@@ -19,6 +19,17 @@ from typing import Any, Literal, Self
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / "voice-kb" / "config.toml"
 
 type DecodingMethod = Literal["greedy_search", "modified_beam_search"]
+type LatchModifier = Literal["shift", "ctrl", "alt"]
+
+_LATCH_KEY_CODES: dict[str, frozenset[int]] = {
+    # evdev codes from linux/input-event-codes.h, both sides of each modifier.
+    # Hardcoded rather than imported from evdev so this module stays pure and
+    # importable without the kernel headers -- the same reason `key_code`
+    # defaults to a bare 186 rather than `ecodes.KEY_F16`.
+    "shift": frozenset({42, 54}),
+    "ctrl": frozenset({29, 97}),
+    "alt": frozenset({56, 100}),
+}
 
 
 class ConfigError(ValueError):
@@ -36,9 +47,35 @@ class HotkeyConfig:
     cancel_key_code: int | None = 1
     """evdev ``KEY_ESC``. ``None`` disables cancelling."""
 
+    latch_modifier: LatchModifier | None = "shift"
+    """Modifier that turns a press into a *latched* recording.
+
+    Hold it with the hotkey and recording runs until the hotkey is pressed
+    again, instead of ending at the release. For long passages, holding a key
+    for two minutes is its own kind of friction.
+
+    ``None`` disables latching entirely, leaving pure push-to-talk.
+    """
+
     def __post_init__(self) -> None:
         if not 0 < self.key_code < 0x300:
             raise ConfigError(f"hotkey.key_code out of range: {self.key_code}")
+        if self.latch_modifier is not None and self.latch_modifier not in _LATCH_KEY_CODES:
+            raise ConfigError(
+                f"hotkey.latch_modifier must be one of "
+                f"{', '.join(sorted(_LATCH_KEY_CODES))}, or omitted: {self.latch_modifier!r}"
+            )
+
+    @property
+    def latch_key_codes(self) -> frozenset[int]:
+        """evdev codes any of which count as the latch modifier being held.
+
+        Both sides of the modifier, so it does not matter which hand is on it.
+        Empty when latching is disabled.
+        """
+        if self.latch_modifier is None:
+            return frozenset()
+        return _LATCH_KEY_CODES[self.latch_modifier]
 
 
 @dataclass(frozen=True, slots=True)
@@ -299,7 +336,7 @@ class PreviewConfig:
     protected.
     """
 
-    max_seconds: float = 15.0
+    max_seconds: float = 30.0
     """Stop previewing once the utterance is longer than this.
 
     Each preview decodes the whole utterance so far, from its beginning. That
@@ -316,9 +353,15 @@ class PreviewConfig:
     The number is a latency budget. A *queued* preview is dropped the instant
     the key is released, but one already inside ``decode_stream`` cannot be
     interrupted, so the committed decode waits for it. This model decodes at
-    ~14.6x real-time, so 15s of audio costs ~1.0s: that is the worst case a
-    release can pay, with ~0.5s expected from the duty cycle. Raising this
+    ~14.6x real-time, so 30s of audio costs ~2.0s: that is the worst case a
+    release can pay, with ~1.0s expected from the duty cycle. Raising this
     raises both, in direct proportion.
+
+    Raised from 15s once dictation moved to nvim, because the passages being
+    recorded got longer -- 30-38s measured in the first real session, which
+    left the preview frozen for half of every one of them. The freeze is now
+    also shown in the winbar, so a stopped preview reads as "still recording,
+    just not showing you" rather than as lost audio.
     """
 
     def __post_init__(self) -> None:

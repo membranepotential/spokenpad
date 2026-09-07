@@ -33,10 +33,21 @@ class Idle:
 
 @dataclass(frozen=True, slots=True)
 class Recording:
-    """The hotkey is held down and audio is accumulating."""
+    """Audio is accumulating. Either the key is held, or recording is latched."""
 
     started_at: float
     """``time.monotonic()`` when the key went down."""
+
+    latched: bool = False
+    """Whether this recording outlives the key release.
+
+    ``False`` is push-to-talk: the release ends it. ``True`` is a latched
+    recording, started with the modifier held, which ignores the release and
+    runs until the key is pressed again. The distinction has to be *in the
+    state* rather than read off the event that ends it, because the ending
+    event is a different one in each mode -- a ``KeyUp`` for push-to-talk, a
+    ``KeyDown`` for a latch.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +86,14 @@ def phase_of(state: SessionState) -> Phase:
 @dataclass(frozen=True, slots=True)
 class KeyDown:
     at: float
+
+    latch: bool = False
+    """The latch modifier was held when the key went down.
+
+    Only meaningful for a press that *starts* a recording. The press that
+    ends a latched recording stops it whether or not the modifier was held,
+    so the user never has to remember which hand they started with.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,16 +188,37 @@ def step(
     """
     match state, event:
         # -- starting
-        case Idle(), KeyDown(at=at):
-            return Recording(started_at=at), StartCapture()
+        case Idle(), KeyDown(at=at, latch=latch):
+            return Recording(started_at=at, latched=latch), StartCapture()
 
         # A press arriving while a previous decode is still running starts a new
         # utterance rather than being dropped. The decode runs on its own thread
-        # and is unaffected; its result still gets injected when it lands.
-        case Transcribing(), KeyDown(at=at):
-            return Recording(started_at=at), StartCapture()
+        # and is unaffected; its result still gets appended when it lands.
+        case Transcribing(), KeyDown(at=at, latch=latch):
+            return Recording(started_at=at, latched=latch), StartCapture()
 
-        # -- finishing
+        # -- finishing a latched recording: the *press* ends it, not the release
+        #
+        # This case has to precede the KeyDown cases above in intent, but it
+        # cannot conflict with them: those match Idle and Transcribing, and a
+        # latched recording is neither.
+        case Recording(started_at=started, latched=True), KeyDown(at=at) if (
+            at - started < min_hold_seconds
+        ):
+            return Idle(), DiscardCapture()
+
+        case Recording(started_at=started, latched=True), KeyDown(at=at):
+            return (
+                Transcribing(started_at=started, released_at=at),
+                Decode(spoken_seconds=at - started),
+            )
+
+        # A latched recording ignores the release that started it, and every
+        # release after. Without this the very first key-up would end it.
+        case Recording(latched=True), KeyUp():
+            return state, Nothing()
+
+        # -- finishing push-to-talk
         case Recording(started_at=started), KeyUp(at=at) if at - started < min_hold_seconds:
             return Idle(), DiscardCapture()
 

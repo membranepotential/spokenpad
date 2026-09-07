@@ -164,10 +164,16 @@ class FakeNvimSession:
         phase: Phase | None = None,
         level: float | None = None,
         preview: str | None = None,
+        latched: bool | None = None,
+        previewing: bool | None = None,
     ) -> None:
-        update: dict[str, Phase | float | str] = {}
+        update: dict[str, Phase | float | str | bool] = {}
         if phase is not None:
             update["phase"] = phase
+        if latched is not None:
+            update["latched"] = latched
+        if previewing is not None:
+            update["previewing"] = previewing
         if level is not None:
             update["level"] = level
         if preview is not None:

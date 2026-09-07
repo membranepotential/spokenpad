@@ -140,3 +140,89 @@ def test_min_hold_is_injectable_for_tests() -> None:
     """The floor is a parameter so callers can tune it without patching."""
     _, command = step(Recording(started_at=1.0), KeyUp(at=1.05), min_hold_seconds=0.0)
     assert isinstance(command, Decode)
+
+
+# ------------------------------------------------------------------- latching
+
+
+def test_plain_press_starts_an_unlatched_recording() -> None:
+    state, command = step(Idle(), KeyDown(at=1.0))
+    assert state == Recording(started_at=1.0, latched=False)
+    assert command == StartCapture()
+
+
+def test_press_with_the_modifier_starts_a_latched_recording() -> None:
+    state, command = step(Idle(), KeyDown(at=1.0, latch=True))
+    assert state == Recording(started_at=1.0, latched=True)
+    assert command == StartCapture()
+
+
+def test_a_latched_recording_survives_the_key_release() -> None:
+    """The whole point of latching: you let go and it keeps recording.
+
+    Push-to-talk decodes on this exact event, so getting it wrong would end
+    every latched recording a fraction of a second after it began.
+    """
+    recording = Recording(started_at=1.0, latched=True)
+    state, command = step(recording, KeyUp(at=1.4))
+    assert state == recording
+    assert command == Nothing()
+
+
+def test_a_latched_recording_survives_many_releases() -> None:
+    """Releases keep arriving -- the user may press and release the hotkey's
+    modifier, or brush the key -- and none of them may end the recording."""
+    state: Recording | Idle | Transcribing = Recording(started_at=1.0, latched=True)
+    for at in (1.4, 9.0, 30.0):
+        state, command = step(state, KeyUp(at=at))
+        assert command == Nothing()
+    assert state == Recording(started_at=1.0, latched=True)
+
+
+def test_the_next_press_ends_a_latched_recording() -> None:
+    state, command = step(Recording(started_at=1.0, latched=True), KeyDown(at=45.0))
+    assert state == Transcribing(started_at=1.0, released_at=45.0)
+    assert command == Decode(spoken_seconds=44.0)
+
+
+def test_ending_a_latch_does_not_require_the_modifier() -> None:
+    """Stopping must not depend on which hand is free, so a bare press ends a
+    latched recording exactly as a modified one does."""
+    latched = Recording(started_at=1.0, latched=True)
+    plain = step(latched, KeyDown(at=20.0))
+    modified = step(latched, KeyDown(at=20.0, latch=True))
+    assert plain == modified
+    assert isinstance(plain[1], Decode)
+
+
+def test_a_double_tapped_latch_is_discarded_not_decoded() -> None:
+    """The stray-tap floor applies to latching too: press-and-immediately-press
+    again is a fumble, not a recording of room noise."""
+    state, command = step(
+        Recording(started_at=1.0, latched=True), KeyDown(at=1.0 + MIN_HOLD_SECONDS / 2)
+    )
+    assert state == Idle()
+    assert command == DiscardCapture()
+
+
+def test_an_unlatched_recording_still_ignores_further_presses() -> None:
+    """Push-to-talk is unchanged: a press while already recording is auto-repeat
+    noise, not a stop command."""
+    recording = Recording(started_at=1.0, latched=False)
+    state, command = step(recording, KeyDown(at=1.5))
+    assert state == recording
+    assert command == Nothing()
+
+
+def test_a_latched_recording_is_still_cancellable() -> None:
+    state, command = step(Recording(started_at=1.0, latched=True), Cancelled(at=9.0))
+    assert state == Idle()
+    assert command == DiscardCapture()
+
+
+def test_a_press_during_transcribing_carries_its_own_latch() -> None:
+    """Starting a new utterance while the previous decode is still running must
+    preserve the mode of the *new* press, not inherit anything."""
+    transcribing = Transcribing(started_at=1.0, released_at=2.0)
+    state, _ = step(transcribing, KeyDown(at=3.0, latch=True))
+    assert state == Recording(started_at=3.0, latched=True)

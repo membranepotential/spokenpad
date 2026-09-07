@@ -21,13 +21,15 @@ local M = {}
 local BARS = { "\u{2581}", "\u{2582}", "\u{2583}", "\u{2584}", "\u{2585}", "\u{2586}", "\u{2587}", "\u{2588}" }
 local METER_CELLS = 24
 local PREVIEW_EXTMARK = 1
+local PREVIEW_MAX_LINES = 8
+local PREVIEW_GUTTER = 2  -- breathing room so wrapped text never touches the edge
 
 -- Speech barely moves a linear meter, so the same perceptual curve the Qt
 -- overlay used (level ^ 0.6) is applied before picking a bar glyph.
 local METER_GAMMA = 0.6
 local AUDIBLE = 0.02
 
-M.state = { phase = "idle", level = 0.0, preview = "" }
+M.state = { phase = "idle", level = 0.0, preview = "", latched = false, previewing = true }
 M.levels = {}
 M.buf = nil
 M.ns = vim.api.nvim_create_namespace("voice_kb")
@@ -70,7 +72,19 @@ end
 local function winbar()
   local phase = M.state.phase
   if phase == "recording" then
-    return "%#VoiceKbRec#\u{25cf} REC %*" .. meter()
+    -- A latched recording says so, because the way to stop it is different:
+    -- the key has already been released, and pressing it again is what ends
+    -- it. Someone who cannot tell which mode they are in is stuck.
+    local label = M.state.latched and "\u{25cf} REC \u{1f512} press to stop " or "\u{25cf} REC "
+    local bar = "%#VoiceKbRec#" .. label .. "%*" .. meter()
+    if not M.state.previewing then
+      -- Previews stop once an utterance is long enough that re-decoding it
+      -- would start costing the user real latency at key release. Saying so
+      -- is the difference between "it is still recording, it just stopped
+      -- showing me" and "it has silently dropped what I am saying".
+      bar = bar .. "%#VoiceKbIdle# preview paused, still recording%*"
+    end
+    return bar
   elseif phase == "transcribing" then
     return "%#VoiceKbWork#\u{25cf} transcribing\u{2026}%*"
   end
@@ -100,6 +114,52 @@ local function render()
   end
 end
 
+--- Word-wrap `text` to `width` display columns, keeping the last `max_lines`.
+---
+--- Virtual text does **not** wrap -- nvim truncates a `virt_lines` chunk at
+--- the window edge -- so a preview of a long passage showed only its first
+--- line and looked like it had stopped updating. Wrapping has to be done
+--- here, by hand.
+---
+--- Measured in display columns via `strdisplaywidth`, not bytes: dictation is
+--- routinely German here, and counting bytes would wrap "längeren" several
+--- columns early and a CJK character several columns late.
+---
+--- The *tail* is kept when there is too much, for the same reason the meter
+--- shows recent levels: the newest words are the ones being checked against
+--- what was just said.
+local function wrap(text, width, max_lines)
+  if width < 8 then
+    return { text }
+  end
+  local lines, current = {}, ""
+  for word in text:gmatch("%S+") do
+    local candidate = current == "" and word or (current .. " " .. word)
+    if vim.fn.strdisplaywidth(candidate) <= width then
+      current = candidate
+    else
+      if current ~= "" then
+        lines[#lines + 1] = current
+      end
+      -- A single word wider than the window is left long rather than split
+      -- mid-word; nvim truncates it, which is the lesser evil for a preview.
+      current = word
+    end
+  end
+  if current ~= "" then
+    lines[#lines + 1] = current
+  end
+  if #lines <= max_lines then
+    return lines
+  end
+  local tail = {}
+  for i = #lines - max_lines + 1, #lines do
+    tail[#tail + 1] = lines[i]
+  end
+  tail[1] = "\u{2026} " .. tail[1]
+  return tail
+end
+
 --- The preview, as virtual lines hanging below the end of the buffer -- which
 --- is exactly where the committed text will land, so the user reads it in
 --- place rather than in a second widget somewhere else on screen.
@@ -112,10 +172,18 @@ local function render_preview()
   if text == "" or M.state.phase ~= "recording" then
     return
   end
+
+  local wins = windows()
+  local width = wins[1] and vim.api.nvim_win_get_width(wins[1]) or 80
+  local virt_lines = {}
+  for _, line in ipairs(wrap(text, width - PREVIEW_GUTTER, PREVIEW_MAX_LINES)) do
+    virt_lines[#virt_lines + 1] = { { line, "VoiceKbPreview" } }
+  end
+
   local last = vim.api.nvim_buf_line_count(M.buf) - 1
   pcall(vim.api.nvim_buf_set_extmark, M.buf, M.ns, last, 0, {
     id = PREVIEW_EXTMARK,
-    virt_lines = { { { "\u{2026} " .. text, "VoiceKbPreview" } } },
+    virt_lines = virt_lines,
     virt_lines_above = false,
   })
 end
@@ -191,14 +259,22 @@ function M.append(text)
     error("voice-kb: dictation buffer is gone")
   end
   local lines = vim.api.nvim_buf_get_lines(M.buf, 0, -1, false)
-  local blank = #lines == 1 and lines[1] == ""
+
+  -- Trailing blank lines are trimmed before appending, so the gap between
+  -- utterances is always exactly one blank line however the buffer got into
+  -- its current shape -- an editing session in the window, a plugin adding a
+  -- final newline. Without this the separation drifts and never recovers.
+  local last_text = #lines
+  while last_text > 0 and lines[last_text]:match("^%s*$") do
+    last_text = last_text - 1
+  end
 
   -- Paragraph separation, not a running wall of text: one blank line between
   -- utterances, and none at the very top of a fresh file.
+  local blank = last_text == 0
   local addition = blank and { text } or { "", text }
-  local start = blank and 0 or -1
   local previous_last = #lines
-  vim.api.nvim_buf_set_lines(M.buf, start, -1, false, addition)
+  vim.api.nvim_buf_set_lines(M.buf, last_text, -1, false, addition)
   local last = vim.api.nvim_buf_line_count(M.buf)
 
   -- Follow the text only for a reader who was already at the end. Someone who
@@ -234,6 +310,12 @@ function M.set_state(update)
   end
   if update.preview ~= nil then
     M.state.preview = update.preview
+  end
+  if update.latched ~= nil then
+    M.state.latched = update.latched
+  end
+  if update.previewing ~= nil then
+    M.state.previewing = update.previewing
   end
   if update.level ~= nil then
     M.state.level = update.level

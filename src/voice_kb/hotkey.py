@@ -42,8 +42,16 @@ logger = logging.getLogger(__name__)
 type KeyEventCallback = Callable[[float], None]
 """Invoked on the watcher's background thread with ``time.monotonic()`` at
 the moment the event was read, ready to feed straight into
-:func:`voice_kb.state.step` as the ``at`` field of a ``KeyDown``/``KeyUp``/
-``Cancelled`` event."""
+:func:`voice_kb.state.step` as the ``at`` field of a ``KeyUp``/``Cancelled``
+event."""
+
+type KeyDownCallback = Callable[[float, bool], None]
+"""Like :type:`KeyEventCallback`, plus whether the latch modifier was held.
+
+The flag is resolved here rather than downstream because it is a property of
+the keyboard at the instant of the press, and nothing outside this module can
+observe that after the fact.
+"""
 
 _INPUT_EVENT_PREFIX = "/dev/input/event"
 
@@ -73,7 +81,7 @@ class HotkeyWatcher:
         self,
         config: HotkeyConfig,
         *,
-        on_key_down: KeyEventCallback,
+        on_key_down: KeyDownCallback,
         on_key_up: KeyEventCallback,
         on_cancel: KeyEventCallback | None = None,
     ) -> None:
@@ -263,6 +271,34 @@ class HotkeyWatcher:
                 continue
             self._handle_key(event.code, event.value)
 
+    def _latch_held(self) -> bool:
+        """Whether the latch modifier is down right now, on any watched keyboard.
+
+        Read with ``active_keys()`` -- a query of the kernel's current key
+        state -- rather than by tracking modifier press/release events
+        ourselves. Tracking would need this watcher to see every modifier
+        event on every device from the moment it started, and it does not:
+        devices come and go through udev, and a modifier already held when a
+        keyboard is plugged in (or when the daemon starts) would be invisible
+        forever after.
+
+        Every watched device is polled, not just the one that delivered the
+        hotkey press, so holding shift on one keyboard and pressing M4 on
+        another still latches.
+        """
+        codes = self._config.latch_key_codes
+        if not codes:
+            return False
+        for path, device in list(self._devices.items()):
+            try:
+                if codes.intersection(device.active_keys()):
+                    return True
+            except OSError as e:
+                # The device went away between select() and here. Not fatal --
+                # the read loop drops it on its own next pass.
+                logger.debug("could not read key state from %s: %s", path, e)
+        return False
+
     def _handle_key(self, code: int, value: int) -> None:
         # value: 0 = up, 1 = down, 2 = auto-repeat. Auto-repeat is DROPPED.
         #
@@ -277,7 +313,7 @@ class HotkeyWatcher:
         now = time.monotonic()
         if code == self._config.key_code:
             if value == 1:
-                self._on_key_down(now)
+                self._on_key_down(now, self._latch_held())
             elif value == 0:
                 self._on_key_up(now)
         elif (

@@ -98,6 +98,7 @@ from voice_kb.state import (
     KeyUp,
     Nothing,
     Phase,
+    Recording,
     SessionState,
     StartCapture,
     phase_of,
@@ -244,6 +245,12 @@ class _NvimBridge(QObject):
     def set_preview(self, text: str) -> None:
         self._session.set_state(preview=text)
 
+    def set_latched(self, latched: bool) -> None:
+        self._session.set_state(latched=latched)
+
+    def set_previewing(self, previewing: bool) -> None:
+        self._session.set_state(previewing=previewing)
+
     def shutdown(self) -> None:
         self._session.close()
 
@@ -253,7 +260,7 @@ class Daemon(QObject):
     """Holds the session state and interprets the state machine's commands."""
 
     # Emitted from the evdev thread; queued onto the Qt thread by Qt.
-    key_down = Signal(float)
+    key_down = Signal(float, bool)  # at, latch modifier held
     key_up = Signal(float)
     cancelled = Signal(float)
 
@@ -265,6 +272,8 @@ class Daemon(QObject):
     _nvim_phase_changed = Signal(object)
     _nvim_level = Signal(float)
     _nvim_preview = Signal(str)
+    _nvim_latched = Signal(bool)
+    _nvim_previewing = Signal(bool)
     _nvim_shutdown_requested = Signal()
 
     def __init__(self, config: Config) -> None:
@@ -327,13 +336,15 @@ class Daemon(QObject):
         self._nvim_phase_changed.connect(self._nvim.set_phase)
         self._nvim_level.connect(self._nvim.set_level)
         self._nvim_preview.connect(self._nvim.set_preview)
+        self._nvim_latched.connect(self._nvim.set_latched)
+        self._nvim_previewing.connect(self._nvim.set_previewing)
         self._nvim_shutdown_requested.connect(self._nvim.shutdown)
         self._nvim.opened.connect(lambda path: log.info("dictation window ready: %s", path))
         self._nvim.open_failed.connect(self._on_nvim_unavailable)
         self._nvim.appended.connect(self._on_appended)
         self._nvim.append_failed.connect(self._on_append_failed)
 
-        self.key_down.connect(lambda at: self._dispatch(KeyDown(at=at)))
+        self.key_down.connect(lambda at, latch: self._dispatch(KeyDown(at=at, latch=latch)))
         self.key_up.connect(lambda at: self._dispatch(KeyUp(at=at)))
         self.cancelled.connect(lambda at: self._dispatch(Cancelled(at=at)))
 
@@ -466,6 +477,7 @@ class Daemon(QObject):
             return
         self._last_phase = phase
         self._nvim_phase_changed.emit(phase)
+        self._nvim_latched.emit(isinstance(self._state, Recording) and self._state.latched)
         if self._overlay is None:
             return
         if phase is not Phase.IDLE:
@@ -617,6 +629,7 @@ class Daemon(QObject):
         if self._overlay is not None:
             self._overlay.set_preview_text("")
         self._nvim_preview.emit("")
+        self._nvim_previewing.emit(self._config.preview.enabled)
         if self._preview_timer is not None:
             self._preview_timer.start(self._config.preview.interval_ms)
 
@@ -657,6 +670,7 @@ class Daemon(QObject):
                 "utterance past %.0fs; no more previews for it (the last one stays on screen)",
                 self._config.preview.max_seconds,
             )
+            self._nvim_previewing.emit(False)
             return
         if samples.size == 0:
             self._rearm_previews(0.0)

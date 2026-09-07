@@ -4,6 +4,10 @@ Local push-to-talk dictation for Linux/X11 (i3). Hold a key, speak, release —
 the text appears in a floating neovim window that never takes focus. Fully
 local, CPU-only.
 
+Hold **shift** with the hotkey instead and recording *latches*: let go, keep
+talking, and press the hotkey again when you are done. For a long passage,
+holding a key for two minutes is its own kind of friction.
+
 Built for recording long passages quickly — dictating notes while reading
 through a document, or drafting a prompt — over a narrower, more technical
 vocabulary than prose dictation tools assume.

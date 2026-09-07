@@ -67,6 +67,25 @@ Placement happens **once, on spawn**. On later dictations the window is only
 moved to the current workspace — a window that jumped back under the pointer
 on every keypress would fight anyone who had put it somewhere they wanted it.
 
+## Latched recording
+
+Holding the latch modifier (`hotkey.latch_modifier`, shift by default) with
+the hotkey starts a recording that outlives the key release: let go, keep
+talking, press the hotkey again to stop. Push-to-talk is unchanged without it.
+
+The mode lives in the state machine — `Recording(latched=True)` — rather than
+being read off whichever event ends the recording, because the ending event
+differs between the modes: a `KeyUp` for push-to-talk, a `KeyDown` for a
+latch. The stopping press does *not* need the modifier, so there is nothing to
+remember about which hand started it. The winbar shows a lock while latched.
+
+The modifier is read with evdev's `active_keys()` at the moment of the press —
+a query of the kernel's current key state — rather than by tracking modifier
+events. Tracking would need the watcher to have seen every modifier event on
+every device since it started, and it has not: devices come and go through
+udev, so a modifier already held when a keyboard is plugged in would be
+invisible forever after.
+
 ## The file
 
 One markdown file per day under `nvim.dictation_dir`, named by
@@ -104,6 +123,18 @@ content: it cannot be written to the file, yanked, or undone into the buffer
 even deliberately. That makes "a preview is never committed"
 ([constraints.md](constraints.md#the-one-relaxation-cosmetic-previews)) a
 property of the data model rather than a discipline.
+
+Virtual text does **not** wrap — nvim truncates a chunk at the window edge —
+so the preview is word-wrapped here by hand, measured in display columns with
+`strdisplaywidth` rather than bytes, since dictation is routinely German and
+byte counting would break `längeren` several columns early. It keeps the last
+eight lines; the newest words are the ones being checked against what was
+just said.
+
+When previews stop (past `preview.max_seconds`) the winbar says
+`preview paused, still recording`. Without that, a frozen preview during a
+long passage reads as lost audio rather than as a cost control — which is
+exactly how it was first reported.
 
 **The chrome is stripped** — `laststatus=0`, `showtabline=0`, no line
 numbers, sign column, fold column or cursorline — and re-applied on
