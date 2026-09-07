@@ -101,10 +101,22 @@ returning `"Okay."` where 3.3 s returned a full sentence is the same collapse,
 seen one preview at a time.
 
 Throughput is unchanged — 12.3-12.6x real-time whole-buffer against 11.0-11.7x
-segmented, slightly *worse*, because per-segment overhead costs about what the
-skipped silence saves. What changes is when the first text appears:
-0.27-0.49 s instead of 2.2-3.4 s on the same clips. Nobody should reach for
-segmentation to make decoding faster; it does not.
+segmented, slightly *worse*, because per-chunk overhead costs about what the
+skipped silence saves. Nobody should reach for this to make decoding faster;
+it does not. What changes is *when* text appears: the first chunk lands after
+~1 s rather than after the whole recording, so a five-minute latched passage
+starts arriving immediately instead of all at once at the end.
+
+**Accuracy is preserved by merging, and that is not optional.** Decoding every
+detected run of speech separately costs about four WER points, because the
+model gets no context across a boundary. Runs are therefore merged until a
+chunk holds `vad.chunk_seconds` (10 s) of speech, and each chunk is padded by
+`vad.pad_seconds` (0.5 s) of the real surrounding audio, since Silero's
+boundaries clip word onsets and endings. Measured on the eval samples, per-run
+33.7% → 37.7% WER, merged-and-padded 33.4%; and through `scripts/eval.py
+--vad`, which scores the way the harness always has, **13.4% either way**,
+with one *more* exercise check passing. Anyone lowering `chunk_seconds` for
+faster first text is spending accuracy, and should re-run that harness.
 
 One property genuinely weakens. A cancellation during `Transcribing` used to
 mean the text never existed; now some of it may already be in the buffer, so

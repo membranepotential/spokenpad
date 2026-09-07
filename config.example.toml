@@ -82,8 +82,10 @@ vocabulary = []
 # restores the old whole-buffer behaviour, that bug included.
 #
 # It does NOT make decoding faster -- measured 12.3-12.6x real-time whole-buffer
-# against 11.0-11.7x segmented. What it changes is when text starts appearing:
-# 0.3-0.5s instead of 2-3s, then streaming in behind that.
+# against 11.0-11.7x segmented. What it changes is WHEN text appears: the first
+# chunk lands after ~1s instead of after the whole recording, so a five-minute
+# latched passage starts arriving immediately rather than all at once at the
+# end. Accuracy is unchanged: 13.4% WER either way through scripts/eval.py.
 enabled = true
 
 # Silero VAD weights, ~2 MB, fetched by scripts/fetch_model.py. Relative paths
@@ -104,10 +106,22 @@ min_silence_seconds = 0.35
 # Shortest run that counts as speech, so a cough does not become a segment.
 min_speech_seconds = 0.15
 
-# Hard cap on a single segment, cutting it even mid-sentence. Nothing is lost
-# -- the audio continues in the next segment -- and this is what bounds time
-# to first text when someone talks without pausing.
+# Hard cap on a single detected run of speech, cutting it even mid-sentence.
+# Nothing is lost -- the audio continues in the next one.
 max_speech_seconds = 20.0
+
+# Speech to accumulate before closing a chunk and decoding it. Detected runs
+# are MERGED up to this, because a boundary costs accuracy -- the model sees no
+# context across one. Measured: decoding every run separately scored 37.7% WER
+# against 33.7% for the whole buffer, while merging to 10s scored 33.4%.
+# Lower it for text sooner at some cost in accuracy, and re-run
+# `uv run scripts/eval.py --vad` if you do.
+chunk_seconds = 10.0
+
+# Real audio kept either side of a chunk, beyond what the detector marked.
+# Silero's boundaries clip word onsets and endings; 0.5s beat 0.2s by 2-4 WER
+# points at every chunk size tried.
+pad_seconds = 0.5
 
 [text]
 # Strip standalone filler words (see `fillers` below) from the transcript.

@@ -15,7 +15,7 @@ real :class:`~voice_kb.asr.Transcriber`, applies
 Usage:
     uv run scripts/eval.py [--config PATH] [--samples-dir PATH]
         [--vocabulary WORD[,WORD...] ...] [--hotwords-score SCORE]
-        [--decoding {greedy_search,modified_beam_search}] [--json]
+        [--decoding {greedy_search,modified_beam_search}] [--vad] [--json]
     uv run scripts/eval.py --sweep 0 1.5 3.0 6.0 --vocabulary mkdir [--json]
 """
 
@@ -25,6 +25,7 @@ import argparse
 import json
 import re
 import sys
+import time
 import wave
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -32,10 +33,11 @@ from pathlib import Path
 
 import numpy as np
 
-from voice_kb.asr import ModelMissingError, Transcriber
+from voice_kb.asr import ModelMissingError, Transcriber, TranscriptionResult
 from voice_kb.audio import MonoAudio
 from voice_kb.config import Config, ConfigError, DecodingMethod
 from voice_kb.text import postprocess
+from voice_kb.vad import SpeechSegmenter, load_segmenter
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_SAMPLES_DIR = SCRIPT_DIR.parent / "eval-samples"
@@ -355,16 +357,47 @@ def _aggregate(samples: Sequence[SampleResult]) -> AggregateStats:
     )
 
 
+def _decode(
+    transcriber: Transcriber,
+    segmenter: SpeechSegmenter | None,
+    samples: MonoAudio,
+    sample_rate: int,
+) -> TranscriptionResult:
+    """One decode of the whole buffer, or one per chunk joined in order.
+
+    The chunked branch reports the *total* elapsed time, so the reported RTF
+    stays the cost of transcribing the file rather than of its first chunk.
+    """
+    if segmenter is None:
+        return transcriber.transcribe(samples, sample_rate)
+    started = time.perf_counter()
+    parts = [transcriber.transcribe(c.samples, sample_rate).text for c in segmenter.split(samples)]
+    text = " ".join(p for p in parts if p.strip())
+    return TranscriptionResult(text=text, elapsed_seconds=time.perf_counter() - started)
+
+
 def evaluate(
     config: Config,
     samples_dir: Path,
     references: Sequence[Reference],
     handy_baseline: Mapping[str, str],
+    *,
+    use_vad: bool = False,
 ) -> EvalReport:
-    """Load the model once, warm it up, then decode every sample in order."""
+    """Load the model once, warm it up, then decode every sample in order.
+
+    ``use_vad`` decodes each sample the way the daemon does -- split at silence
+    into merged, padded chunks -- instead of in one pass over the whole file.
+    Off by default so the historical numbers in STATUS.md and docs/asr.md stay
+    comparable; ``--vad`` is how you check that segmentation has not cost
+    accuracy, which is the question it exists to answer.
+    """
     transcriber = Transcriber(config.asr)
     warmup = np.zeros(config.audio.sample_rate, dtype=np.float32)
     transcriber.transcribe(warmup, config.audio.sample_rate)  # discard; first decode is slow
+    segmenter = load_segmenter(config.vad, config.audio.sample_rate) if use_vad else None
+    if use_vad and segmenter is None:
+        print("warning: --vad requested but no VAD model loaded", file=sys.stderr)
 
     sample_results: list[SampleResult] = []
     long_clip: LongClipCheck | None = None
@@ -377,7 +410,7 @@ def evaluate(
                 f"actual wav is {wav_duration_s:.1f}s -- file may have been replaced",
                 file=sys.stderr,
             )
-        result = transcriber.transcribe(samples, sample_rate)
+        result = _decode(transcriber, segmenter, samples, sample_rate)
         hypothesis = postprocess(result.text, config.text)
         rtf = (
             wav_duration_s / result.elapsed_seconds if result.elapsed_seconds > 0 else float("inf")
@@ -609,6 +642,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Directory with *.wav, references.json, transcripts.json (default: eval-samples/).",
     )
     parser.add_argument(
+        "--vad",
+        action="store_true",
+        help=(
+            "Decode the way the daemon does: split at silence into merged, padded "
+            "chunks, instead of one pass over the whole file. Off by default so the "
+            "historical numbers stay comparable."
+        ),
+    )
+    parser.add_argument(
         "--vocabulary",
         action="append",
         default=None,
@@ -652,7 +694,14 @@ def main() -> int:
             for score in args.sweep:
                 print(f"decoding sweep point hotwords_score={score} ...", file=sys.stderr)
                 cfg = _configure(base_config, args, hotwords_score=score)
-                rows.append((score, evaluate(cfg, args.samples_dir, references, handy_baseline)))
+                rows.append(
+                    (
+                        score,
+                        evaluate(
+                            cfg, args.samples_dir, references, handy_baseline, use_vad=args.vad
+                        ),
+                    )
+                )
             if args.json:
                 print(json.dumps({"sweep": [sweep_row_to_dict(s, r) for s, r in rows]}, indent=2))
             else:
@@ -661,7 +710,7 @@ def main() -> int:
 
         print("loading model and warming up ...", file=sys.stderr)
         cfg = _configure(base_config, args)
-        report = evaluate(cfg, args.samples_dir, references, handy_baseline)
+        report = evaluate(cfg, args.samples_dir, references, handy_baseline, use_vad=args.vad)
         if args.json:
             print(json.dumps(report_to_dict(report), indent=2))
         else:

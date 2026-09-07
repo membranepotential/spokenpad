@@ -28,8 +28,8 @@ For recording long passages while reading something else.
 - Warm, idle: 20 s -> 1.19 s (**16.8x**); Handy managed 1.37x and dropped a
   37 s clip at its 30 s cap. WER 13.4% vs its 48.7% (15.8/18.4 excluding that).
 - Live: 11.2s held -> 0.78s decode + ~40ms append = **~0.8s to text**.
-- VAD-segmented decode: **first text in 0.27-0.49s** (was 2.2-3.4s), rest
-  streams in. Throughput unchanged (12.4x -> 11.4x); 6 threads already optimal.
+- VAD-chunked decode: first text after ~1s at any recording length, rest
+  streams in. **WER unchanged at 13.4%** (`eval.py --vad`); 6 threads optimal.
 - Window: cold open **244ms**, reattach 92ms, append 14-62ms — off the path.
 
 ## Hard constraints — full rationale in `docs/constraints.md`

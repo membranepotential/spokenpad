@@ -193,15 +193,44 @@ class VadConfig:
     """Shortest run that counts as speech, so a cough is not a segment."""
 
     max_speech_seconds: float = 20.0
-    """Hard cap on one segment, cutting it even mid-sentence.
+    """Hard cap on one detected run of speech, cutting it even mid-sentence.
 
-    Nothing is lost -- the audio continues in the next segment -- and it is
-    what bounds time to first text when someone talks without pausing.
+    Nothing is lost -- the audio continues in the next one -- and it is what
+    bounds time to first text when someone talks without pausing.
+    """
+
+    chunk_seconds: float = 10.0
+    """Speech to accumulate before closing a chunk and decoding it.
+
+    Detected segments are *merged* up to this before being handed to the
+    recogniser, because a boundary costs accuracy: the model sees no context
+    across one. Measured over the eval samples, decoding every segment
+    separately scored 37.7% WER against 33.7% for the whole buffer, while
+    merging to 10 s scored 33.4% -- indistinguishable from not splitting at
+    all, and still bounding time to first text by the chunk rather than by the
+    length of the recording. That is the whole point on a long latched
+    passage: text starts landing after one chunk instead of after everything.
+
+    Lower it for text sooner at some cost in accuracy; raise it to approach
+    whole-buffer decoding with a longer wait for the first words.
+    """
+
+    pad_seconds: float = 0.5
+    """Audio kept either side of a chunk, beyond what the detector marked.
+
+    Silero's boundaries are tight and clip word onsets and endings. Measured:
+    at every chunk size tried, 0.5 s of padding beat 0.2 s by 2-4 WER points.
+    It is real audio from the capture, not silence, so it also gives the
+    recogniser the run-up it wants into the first word.
     """
 
     def __post_init__(self) -> None:
         if not 0.0 < self.threshold < 1.0:
             raise ConfigError(f"vad.threshold must be between 0 and 1: {self.threshold}")
+        if self.pad_seconds < 0:
+            raise ConfigError(f"vad.pad_seconds must not be negative: {self.pad_seconds}")
+        if self.chunk_seconds < 0:
+            raise ConfigError(f"vad.chunk_seconds must not be negative: {self.chunk_seconds}")
         for name in ("min_silence_seconds", "min_speech_seconds", "max_speech_seconds"):
             value: float = getattr(self, name)
             if value <= 0:

@@ -194,3 +194,66 @@ def test_its_log_lines_reach_the_daemons_log() -> None:
     for module in (vad, hotkey):
         name = getattr(module, "log", None) or module.logger
         assert name.name.startswith("voice-kb."), f"{module.__name__} logs outside the tree"
+
+
+# --------------------------------------------------- merging and padding
+
+
+@pytest.mark.skipif(not SAMPLE.exists(), reason="eval sample not present")
+def test_speech_runs_are_merged_into_chunks_rather_than_decoded_one_by_one(
+    segmenter: SpeechSegmenter,
+) -> None:
+    """A boundary costs accuracy, because the model sees no context across one.
+
+    Measured on the eval samples: every run decoded separately scored 37.7%
+    WER against 33.7% for the whole buffer, and merging to 10s recovered all
+    of it. So a capture with many short runs in it must not produce many
+    chunks.
+    """
+    core = _speech_core(_load(SAMPLE))
+    gap = np.zeros(int(0.6 * RATE), dtype=np.float32)
+    # Eight short utterances separated by pauses long enough to end a segment.
+    many = np.concatenate([x for _ in range(8) for x in (core, gap)])
+
+    chunks = segmenter.split(many)
+
+    assert len(chunks) < 8, "runs of speech should be merged, not decoded one by one"
+
+
+def test_a_chunk_carries_padding_from_the_real_audio_around_it() -> None:
+    """Silero's boundaries clip word onsets and endings; 0.5s of padding was
+    worth 2-4 WER points at every chunk size tried. It has to be the *real*
+    surrounding audio, not silence, which is why it is sliced from the capture
+    rather than concatenated on."""
+    config = Config().vad
+    if not config.model.exists():
+        pytest.skip("no VAD model")
+    built = load_segmenter(config, RATE)
+    assert built is not None
+
+    core = _speech_core(_load(SAMPLE))
+    padded = _padded(core, seconds=2.0)
+    chunk = built.split(padded)[0]
+
+    pad = int(config.pad_seconds * RATE)
+    assert chunk.samples.size >= core.size + pad, "padding should widen the chunk"
+    # start_seconds must describe the samples returned, padding included, or it
+    # does not locate them in the capture.
+    start = int(chunk.start_seconds * RATE)
+    assert np.array_equal(chunk.samples, padded[start : start + chunk.samples.size])
+
+
+def test_padding_never_runs_off_either_end_of_the_capture() -> None:
+    """Speech starting in the first frame, or ending in the last, must not
+    produce a slice with a negative start or one past the end."""
+    config = Config().vad
+    if not config.model.exists():
+        pytest.skip("no VAD model")
+    built = load_segmenter(config, RATE)
+    assert built is not None
+
+    core = _speech_core(_load(SAMPLE))
+    for audio in (core, np.concatenate([core, core])):
+        for chunk in built.split(audio):
+            assert chunk.start_seconds >= 0.0
+            assert chunk.samples.size <= audio.size

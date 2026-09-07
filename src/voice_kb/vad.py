@@ -36,11 +36,26 @@ decoding at 11.0-11.7x -- slightly **worse**, because per-segment overhead
 costs about what the skipped silence saves. Anyone reaching for this module
 to make decoding faster should stop; it will not.
 
-What it buys is *incrementality*. Time to the first text on those same clips
-drops from 2.2-3.4 s to 0.27-0.49 s, and the rest streams in behind it. That
-is the answer to a long latched recording ending in a wall of silence: the
-transcript starts landing almost immediately and grows, instead of arriving
-all at once several seconds after the key comes up.
+What it buys is *incrementality*. The first chunk lands after ~1 s however
+long the recording is, and the rest streams in behind it. That is the answer
+to a long latched passage ending in a wall of silence: the transcript starts
+landing immediately and grows, instead of arriving all at once at the end.
+
+## Why chunks are merged, and padded
+
+Both are accuracy, and neither is optional. Decoding every detected run of
+speech separately costs about four WER points, because the model gets no
+context across a boundary -- measured on the eval samples, 33.7% whole-buffer
+against 37.7% per-run. Merging runs until a chunk holds
+:attr:`VadConfig.chunk_seconds` of speech recovers all of it (33.4%), and
+padding each chunk with :attr:`VadConfig.pad_seconds` of the *real*
+surrounding audio was worth another 2-4 points at every chunk size tried,
+because Silero's boundaries clip word onsets and endings.
+
+Through ``scripts/eval.py --vad``, which scores the way that harness always
+has: **13.4% WER either way**, with one more exercise check passing. Lowering
+``chunk_seconds`` for faster first text spends accuracy; re-run that harness
+if you do.
 
 ## Why this is not the streaming decode the project forbids
 
@@ -63,8 +78,6 @@ import logging
 from dataclasses import dataclass
 from typing import Final
 
-import numpy as np
-
 from voice_kb.audio import MonoAudio
 from voice_kb.config import VadConfig
 
@@ -86,9 +99,9 @@ _BUFFER_HEADROOM: Final = 2.0
 class Segment:
     """One run of speech, tight around its edges.
 
-    ``start_seconds`` is the offset into the capture, kept for logging and
-    tests: it is the only way to tell "the VAD found two segments" from "the
-    VAD found the same segment twice".
+    ``start_seconds`` is where ``samples`` begins in the capture, kept for
+    logging and tests: it is the only way to tell "the VAD found two chunks"
+    from "the VAD found the same chunk twice".
     """
 
     samples: MonoAudio
@@ -117,50 +130,97 @@ class SpeechSegmenter:
         model.sample_rate = sample_rate
 
         self._sample_rate = sample_rate
+        self._chunk_seconds = config.chunk_seconds
+        self._pad_seconds = config.pad_seconds
         self._detector = sherpa_onnx.VoiceActivityDetector(
             model, buffer_size_in_seconds=config.max_speech_seconds * _BUFFER_HEADROOM
         )
 
     def split(self, samples: MonoAudio) -> list[Segment]:
-        """Speech segments in ``samples``, in order.
+        """``samples`` as chunks of speech, in order, with the silence dropped.
 
-        Returns a single segment covering the whole buffer if the detector
-        finds no speech at all. That is deliberate: "the VAD heard nothing" is
-        not the same claim as "there is nothing to hear", and the cost of
-        being wrong is asymmetric -- decoding a silent buffer wastes a few
-        hundred milliseconds and logs an empty result, while discarding a real
+        Detected runs of speech are **merged** up to
+        :attr:`VadConfig.chunk_seconds` before being returned, and each chunk
+        is padded by :attr:`VadConfig.pad_seconds` of the real surrounding
+        audio. Both matter, and both were measured (see the class docstring
+        and ``docs/asr.md``): every segment decoded separately cost about four
+        WER points against the whole buffer, merging to 10 s recovered all of
+        it, and 0.5 s of padding was worth another 2-4 on top because Silero's
+        boundaries clip word onsets and endings.
+
+        Returns a single chunk covering the whole buffer if the detector finds
+        no speech at all. That is deliberate: "the VAD heard nothing" is not
+        the same claim as "there is nothing to hear", and the cost of being
+        wrong is asymmetric -- decoding a silent buffer wastes a few hundred
+        milliseconds and logs an empty result, while discarding a real
         utterance loses something the user cannot get back by repeating
         themselves, because they have already stopped speaking.
         """
-        self._detector.reset()
-        segments: list[Segment] = []
-
-        for start in range(0, samples.size - _WINDOW + 1, _WINDOW):
-            self._detector.accept_waveform(samples[start : start + _WINDOW])
-            self._drain(segments)
-        # The final partial frame is never fed -- sherpa-onnx rejects a short
-        # one -- so flush() closes whatever segment is still open, including
-        # the common case of releasing the key mid-word.
-        self._detector.flush()
-        self._drain(segments)
-
-        if not segments:
+        spans = self._speech_spans(samples)
+        if not spans:
             log.debug(
                 "VAD found no speech in %.1fs; decoding the whole buffer",
                 samples.size / self._sample_rate,
             )
             return [Segment(samples=samples, start_seconds=0.0)]
-        return segments
 
-    def _drain(self, into: list[Segment]) -> None:
-        while not self._detector.empty():
-            front = self._detector.front
-            into.append(
+        pad = int(self._pad_seconds * self._sample_rate)
+        chunks = []
+        for start, end in self._merged(spans):
+            # `start_seconds` describes the samples actually returned, padding
+            # included, so it always locates them in the capture rather than
+            # pointing a little after where they begin.
+            padded_start = max(0, start - pad)
+            chunks.append(
                 Segment(
-                    samples=np.asarray(front.samples, dtype=np.float32),
-                    start_seconds=front.start / self._sample_rate,
+                    samples=samples[padded_start : min(samples.size, end + pad)],
+                    start_seconds=padded_start / self._sample_rate,
                 )
             )
+        return chunks
+
+    def _merged(self, spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+        """Group ``(start, end)`` sample spans into chunks of enough speech.
+
+        Merging is by *speech* accumulated, not elapsed time, so a passage
+        with long thinking pauses in it still produces chunks the recogniser
+        has enough context to work with rather than one chunk per phrase.
+        """
+        target = self._chunk_seconds * self._sample_rate
+        chunks: list[tuple[int, int]] = []
+        start: int | None = None
+        speech = 0
+        for span_start, span_end in spans:
+            if start is None:
+                start = span_start
+            speech += span_end - span_start
+            if speech >= target:
+                chunks.append((start, span_end))
+                start, speech = None, 0
+        if start is not None:
+            chunks.append((start, spans[-1][1]))
+        return chunks
+
+    def _speech_spans(self, samples: MonoAudio) -> list[tuple[int, int]]:
+        """Raw ``(start, end)`` sample offsets of every run of speech."""
+        self._detector.reset()
+        spans: list[tuple[int, int]] = []
+
+        for start in range(0, samples.size - _WINDOW + 1, _WINDOW):
+            self._detector.accept_waveform(samples[start : start + _WINDOW])
+            self._drain(spans)
+        # The final partial frame is never fed -- sherpa-onnx rejects a short
+        # one -- so flush() closes whatever run is still open, including the
+        # common case of releasing the key mid-word.
+        self._detector.flush()
+        self._drain(spans)
+        return spans
+
+    def _drain(self, into: list[tuple[int, int]]) -> None:
+        while not self._detector.empty():
+            front = self._detector.front
+            start = int(front.start)
+            into.append((start, start + len(front.samples)))
             self._detector.pop()
 
 
