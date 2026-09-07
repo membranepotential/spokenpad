@@ -235,9 +235,10 @@ def test_nvim_spawn_argv_substitutes_instance_and_appends_listen_and_target() ->
         terminal=("alacritty", "--class", "Floating,{instance}", "-e"),
         editor=("nvim",),
         window_instance="voice-kb-test",
+        init=Path("/tmp/x-init.lua"),
     )
 
-    argv = cfg.spawn_argv(socket=Path("/tmp/x.sock"), target=Path("/tmp/x.md"))
+    argv = cfg.spawn_argv(socket=Path("/tmp/x.sock"), target=Path("/tmp/x.md"), at=(10, 20))
 
     assert argv == [
         "alacritty",
@@ -245,6 +246,8 @@ def test_nvim_spawn_argv_substitutes_instance_and_appends_listen_and_target() ->
         "Floating,voice-kb-test",
         "-e",
         "nvim",
+        "-u",
+        "/tmp/x-init.lua",
         "--listen",
         "/tmp/x.sock",
         "/tmp/x.md",
@@ -304,3 +307,48 @@ def test_a_relative_vad_model_resolves_against_the_config_file(tmp_path: Path) -
     config_file.write_text('[vad]\nmodel = "models/silero_vad.onnx"\n', encoding="utf-8")
 
     assert Config.load(config_file).vad.model == tmp_path / "models" / "silero_vad.onnx"
+
+
+def test_the_dictation_window_uses_the_bundled_nvim_config_by_default() -> None:
+    """The repo owns the window's behaviour: no config option set means the
+    file shipped inside the package, not whatever is in the user's dotfiles."""
+    init = NvimConfig().init_path
+
+    assert init.name == "dictation_init.lua"
+    assert init.exists(), "the bundled config must ship with the package"
+
+
+def test_pointing_init_somewhere_else_wins() -> None:
+    assert NvimConfig(init=Path("/tmp/mine.lua")).init_path == Path("/tmp/mine.lua")
+
+
+def test_spawn_argv_tells_the_terminal_where_to_open() -> None:
+    """The window's first frame should already be in the right place. Placing
+    it afterwards made it appear wherever the window manager chose -- often
+    the middle of the other monitor -- and then fly across the screen."""
+    argv = NvimConfig().spawn_argv(
+        socket=Path("/tmp/x.sock"), target=Path("/tmp/x.md"), at=(1234, 567)
+    )
+
+    assert "window.position.x=1234" in argv
+    assert "window.position.y=567" in argv
+
+
+def test_spawn_argv_without_a_known_position_still_produces_one_command_line() -> None:
+    """No usable screen geometry substitutes 0 rather than dropping the flags:
+    that is no worse than the window manager's own choice, and it keeps the
+    command line one shape instead of two."""
+    argv = NvimConfig().spawn_argv(socket=Path("/tmp/x.sock"), target=Path("/tmp/x.md"), at=None)
+
+    assert "window.position.x=0" in argv
+    assert "{x}" not in " ".join(argv)
+
+
+def test_a_terminal_that_names_the_window_is_one_voice_kb_can_wait_for() -> None:
+    assert NvimConfig().announces_instance is True
+
+
+def test_spawning_the_editor_directly_announces_no_instance() -> None:
+    """Nothing communicates the instance name, so there is no window for the
+    manager rules to match and none for voice-kb to wait for."""
+    assert NvimConfig(terminal=()).announces_instance is False

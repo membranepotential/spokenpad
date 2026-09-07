@@ -62,7 +62,7 @@ this replaces managed 1.37× on the same hardware and silently discarded the
 | | |
 |---|---|
 | VRAM used | none |
-| dictation window, cold open | 1.0-1.2 s, off the latency path |
+| dictation window, cold open | 244 ms, off the latency path (92 ms to reattach) |
 | append to the buffer | 19-62 ms |
 
 ## Setup

@@ -14,7 +14,9 @@ written to.
 ## What gets spawned
 
 ```
-alacritty --class 'Floating,voice-kb' -e nvim --listen <socket> <dated file>
+alacritty --class 'Floating,voice-kb' \
+  -o window.position.x=<x> -o window.position.y=<y> \
+  -e nvim -u <bundled dictation_init.lua> --listen <socket> <dated file>
 ```
 
 The X11 **class** is `Floating` and the **instance** is `voice-kb`. Both are
@@ -146,33 +148,67 @@ When previews stop (past `preview.max_seconds`) the winbar says
 long passage reads as lost audio rather than as a cost control — which is
 exactly how it was first reported.
 
-**The chrome is stripped** — `laststatus=0`, `showtabline=0`, no line
-numbers, sign column, fold column or cursorline — and re-applied on
-`BufWinEnter`/`WinNew`/`FileType`, because a plugin reacting to those events
-would otherwise put it back. This is a dictation surface held in a small
-floating window, not a general editing session; the user's own nvim is
-untouched.
+**The chrome is off before the first frame.** The window runs voice-kb's own
+`dictation_init.lua` (`nvim -u`), which turns off the status line, tab line,
+line numbers, sign column, fold column and cursorline, sets prose wrapping,
+and disables swap/backup/undo files so a killed daemon cannot leave a
+recovery prompt in a window that is not allowed to take focus. The indicator
+re-applies the display half on `BufWinEnter`/`WinNew`/`FileType` as well,
+because a plugin reacting to those events would otherwise put it back — that
+still matters when `nvim.init` points at a config with plugins in it.
 
-## Startup cost, and the timeout that bounds it
+This used to be done over RPC after attaching, which worked but meant the
+window had already painted a normal editor for a moment before settling.
+Bundling it also means the window's behaviour lives in this repository rather
+than in whoever's dotfiles, so it is the same on a fresh machine.
 
-`nvim.editor` defaults to plain `nvim`, so the window is *their* editor, with
-their keybindings. That has a cost: a full plugin configuration takes about a
-second before it answers RPC (measured: 1.0–1.2 s for LazyVim here), and the
-first ever open took 13.5 s while the plugin manager did one-time work.
+The trade is that the dictation window does *not* have the user's keybindings
+or colourscheme. `nvim.init` points somewhere else — `~/.config/nvim/init.lua`
+for the full personal setup — at the cost of both guarantees above, and of a
+format-on-save then reflowing dictated prose on the write after every
+utterance.
 
-Attaching during that window would block the bridge thread with no way out —
-pynvim requests have no timeout — which would in turn hang the daemon's
-shutdown. So readiness is probed **out of process**, with
-`nvim --server <socket> --remote-expr 1` under a hard `subprocess` timeout,
-and the attach only happens once nvim answers. `nvim.startup_timeout_s`
-defaults to a generous 20 s for the same reason; waiting costs nothing the
-user feels.
+## Startup cost
 
-For an instant, config-free window instead, set:
+**244 ms** from key-down to a window that is placed, chrome-free and
+answering RPC; **92 ms** to reattach to one that is already open. Both are off
+the latency path — the window is opened on every key-down, on the bridge
+thread, while the user is still speaking.
+
+Neither number is about nvim. Measured time-to-RPC-ready is 0.26 s under a
+full LazyVim config and 0.28 s under the bundled one, so the editor was never
+the cost. Three other things were, and all three are fixed:
+
+- **The readiness probe spawned a whole nvim per poll.** `nvim --server
+  <socket> --remote-expr 1` every 100 ms, at ~200 ms a spawn. It is now a raw
+  msgpack-RPC round trip on the socket: one connection, one request, and the
+  reply arrives when nvim's event loop reaches it. It still has a hard
+  timeout, which is the reason it was out of process to begin with — pynvim
+  requests have none, and attaching to an editor that is still starting would
+  block the bridge thread with no way out, hanging the daemon's shutdown.
+  `nvim.startup_timeout_s` stays a generous 20 s: a first-ever open took
+  13.5 s while a plugin manager did one-time work.
+- **The first X query of the process cost ~1.9 s**, where every later one
+  costs ~50 ms. That landed on the first dictation of a session — the one
+  occasion with nothing on screen to hide it. The bridge now warms it up when
+  its thread starts, and caches the monitor layout for 5 s besides.
+- **The window was placed after nvim answered.** It is now told where to open
+  (`window.position.x`/`y`, which i3 honours for a floating window: verified,
+  the window maps at exactly the requested point, floating and unfocused), so
+  its first frame is already in the right place instead of appearing wherever
+  the window manager chose — often the middle of the other monitor — and then
+  flying across the screen. Only the size is still corrected afterwards,
+  because alacritty measures its window in character cells and guessing the
+  font metrics to avoid one small resize would be worse than the resize. That
+  correction is issued as soon as i3 reports the window (~0.18 s), which is
+  well before nvim has drawn anything.
+
+`init` is passed straight to `nvim -u`, so nvim's own special value works
+there too — for a window with no configuration at all:
 
 ```toml
 [nvim]
-editor = ["nvim", "-u", "NONE"]
+init = "NONE"
 ```
 
 ## Reconnection

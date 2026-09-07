@@ -256,6 +256,15 @@ class _NvimBridge(QObject):
         super().__init__()
         self._session = NvimSession(config.nvim)
 
+    def warm_up(self) -> None:
+        """Get the first, slow X query out of the way before it is needed.
+
+        Runs when the bridge thread starts, so the ~1.9s one-off cost of this
+        process's first subprocess lands at daemon start rather than on the
+        first dictation of the session.
+        """
+        self._session.warm_up()
+
     def open(self) -> None:
         """Ensure the window exists and is on the workspace the user is on.
 
@@ -380,6 +389,7 @@ class Daemon(QObject):
         self._nvim = _NvimBridge(config)
         self._nvim_thread = QThread()
         self._nvim.moveToThread(self._nvim_thread)
+        self._nvim_thread.started.connect(self._nvim.warm_up)
         self._nvim_open_requested.connect(self._nvim.open)
         self._nvim_append_requested.connect(self._nvim.append)
         self._nvim_phase_changed.connect(self._nvim.set_phase)

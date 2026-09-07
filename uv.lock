@@ -733,6 +733,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "evdev" },
+    { name = "msgpack" },
     { name = "numpy" },
     { name = "pynvim" },
     { name = "pyside6" },
@@ -752,6 +753,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "evdev", specifier = ">=2.0.0" },
+    { name = "msgpack", specifier = ">=1.1.0" },
     { name = "numpy", specifier = ">=2.5.2" },
     { name = "pynvim", specifier = ">=0.6.0" },
     { name = "pyside6", specifier = ">=6.11.2" },

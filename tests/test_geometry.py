@@ -3,8 +3,11 @@ HDMI-1-0 at 0,0 3840x2160 and eDP-1 (primary) at 3840,0 3840x2160."""
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
+from voice_kb import x11
 from voice_kb.config import OverlayConfig
 from voice_kb.geometry import Output, Rect, dictation_rect, overlay_rect, pick_output
 
@@ -167,3 +170,45 @@ def test_rect_rejects_non_positive_area() -> None:
         Rect(x=0, y=0, width=0, height=100)
     with pytest.raises(ValueError, match="positive area"):
         Rect(x=0, y=0, width=100, height=-1)
+
+
+# ---------------------------------------------------------- i3 window lookup
+
+
+def test_i3_window_exists_finds_a_window_nested_in_floating_nodes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The dictation window is floating, so it hangs off ``floating_nodes``
+    rather than ``nodes`` -- walking only the latter would never find it."""
+    tree = {
+        "nodes": [
+            {
+                "nodes": [],
+                "floating_nodes": [
+                    {"window_properties": {"instance": "voice-kb"}, "nodes": []},
+                ],
+            }
+        ]
+    }
+    monkeypatch.setattr(x11, "_run", lambda args: json.dumps(tree))
+
+    assert x11.i3_window_exists("voice-kb") is True
+    assert x11.i3_window_exists("something-else") is False
+
+
+def test_i3_window_exists_is_false_when_i3_cannot_be_reached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The caller's fallback is to leave placement to the window manager,
+    which is the right answer when i3 is not the window manager at all."""
+    monkeypatch.setattr(x11, "_run", lambda args: None)
+
+    assert x11.i3_window_exists("voice-kb") is False
+
+
+def test_i3_window_exists_survives_unparseable_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(x11, "_run", lambda args: "not json")
+
+    assert x11.i3_window_exists("voice-kb") is False

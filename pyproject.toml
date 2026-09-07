@@ -9,6 +9,10 @@ authors = [
 requires-python = ">=3.13"
 dependencies = [
     "evdev>=2.0.0",
+    # Direct: the nvim readiness probe speaks msgpack-RPC on the raw socket,
+    # because pynvim's own requests cannot be given a timeout. Pulled in by
+    # pynvim anyway, but declared because this project imports it itself.
+    "msgpack>=1.1.0",
     "numpy>=2.5.2",
     "pynvim>=0.6.0",
     "pyside6>=6.11.2",
@@ -40,7 +44,7 @@ warn_unreachable = true
 disallow_any_explicit = false
 
 [[tool.mypy.overrides]]
-module = ["sherpa_onnx.*", "sounddevice.*", "pyudev.*", "evdev.*", "pynvim.*"]
+module = ["sherpa_onnx.*", "sounddevice.*", "pyudev.*", "evdev.*", "pynvim.*", "msgpack.*"]
 ignore_missing_imports = true
 
 [tool.ruff]

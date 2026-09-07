@@ -8,6 +8,7 @@ crashed daemon is not.
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 
@@ -95,3 +96,39 @@ def focused_window_rect() -> Rect | None:
         )
     except (KeyError, ValueError):
         return None
+
+
+def i3_window_exists(instance: str) -> bool:
+    """Whether i3 is currently managing a window with this X11 instance name.
+
+    Used to find the moment a freshly spawned dictation window becomes
+    *placeable*, which is earlier than the moment nvim starts answering RPC.
+    Asks i3 rather than X so the answer means "i3 has taken this window over
+    and will accept commands about it", which is the thing actually being
+    waited for -- a window X knows about but i3 has not managed yet would
+    still refuse a `resize`.
+
+    ``False`` on any failure, including i3 not being the window manager: the
+    caller's fallback is to leave placement alone, which is correct there.
+    """
+    out = _run(["i3-msg", "-t", "get_tree"])
+    if out is None:
+        return False
+    try:
+        tree = json.loads(out)
+    except json.JSONDecodeError:
+        return False
+
+    def walk(node: object) -> bool:
+        if not isinstance(node, dict):
+            return False
+        properties = node.get("window_properties")
+        if isinstance(properties, dict) and properties.get("instance") == instance:
+            return True
+        return any(
+            walk(child)
+            for key in ("nodes", "floating_nodes")
+            for child in (node.get(key) or [])
+        )
+
+    return walk(tree)

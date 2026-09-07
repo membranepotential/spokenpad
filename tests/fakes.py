@@ -149,6 +149,7 @@ class FakeNvimSession:
         self.append_calls: list[tuple[str, bool]] = []
         self.states: list[dict[str, Phase | float | str]] = []
         self.ensure_calls = 0
+        self.warm_up_calls = 0
         self.raise_calls = 0
         self.close_calls = 0
         self.place_calls: list[Rect] = []
@@ -167,6 +168,9 @@ class FakeNvimSession:
     def ensure(self) -> bool:
         self.ensure_calls += 1
         return self.ensure_result
+
+    def warm_up(self) -> None:
+        self.warm_up_calls += 1
 
     def append(self, text: str, *, continued: bool = False) -> AppendResult:
         self.appended.append(text)

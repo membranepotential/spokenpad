@@ -7,12 +7,14 @@ against a missing key or a negative duration.
 
 from __future__ import annotations
 
+import functools
 import os
 import re
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import date
+from importlib import resources
 from pathlib import Path
 from typing import Any, Literal, Self
 
@@ -230,6 +232,8 @@ class TextConfig:
 
 
 _INSTANCE_PLACEHOLDER = "{instance}"
+_X_PLACEHOLDER = "{x}"
+_Y_PLACEHOLDER = "{y}"
 """Token in :attr:`NvimConfig.terminal` replaced by the window instance name.
 
 Substituted with :meth:`str.replace`, not :meth:`str.format`, so a terminal
@@ -271,6 +275,18 @@ class NvimConfig:
         "alacritty",
         "--class",
         f"Floating,{_INSTANCE_PLACEHOLDER}",
+        # Where the window should map, so it is in the right place in its very
+        # first frame. i3 honours this for a floating window (verified: the
+        # window appeared at exactly the requested point, floating, unfocused),
+        # which removes the visible jump from wherever the window manager first
+        # put it to where voice-kb wants it. The size is still corrected over
+        # i3 afterwards -- alacritty measures its window in character cells,
+        # and guessing the font's metrics to avoid one small resize would be
+        # worse than the resize.
+        "-o",
+        f"window.position.x={_X_PLACEHOLDER}",
+        "-o",
+        f"window.position.y={_Y_PLACEHOLDER}",
         "-e",
     )
     """Terminal to run the editor in, with the editor's argv appended.
@@ -279,12 +295,30 @@ class NvimConfig:
     terminal. The default names the window ``Floating`` (class) /
     ``voice-kb`` (instance) so a window manager rule can float it and refuse
     it focus -- see ``docs/nvim-window.md``.
+
+    ``{instance}`` is replaced with :attr:`window_instance`, and ``{x}``/
+    ``{y}`` with the top-left corner the window should open at. A terminal
+    that cannot be told where to open simply leaves those out; the window is
+    still placed, just one frame later.
     """
 
     editor: tuple[str, ...] = ("nvim",)
-    """The editor itself. ``--listen <socket>`` and the dictation file are
-    appended; anything here is passed before them, so ``("nvim", "-u", "NONE")``
-    gets a config-free editor."""
+    """The editor itself. ``-u <init>``, ``--listen <socket>`` and the
+    dictation file are appended; anything here is passed before them."""
+
+    init: Path | None = None
+    """nvim config for the dictation window. ``None`` means the bundled one.
+
+    The bundled ``dictation_init.lua`` keeps the window's behaviour inside
+    this repository rather than depending on whatever is in the user's
+    dotfiles, and turns the chrome off before the first frame is drawn instead
+    of stripping it over RPC afterwards, which used to flash a normal editor
+    for a moment. See that file for the full reasoning.
+
+    Point this at ``~/.config/nvim/init.lua`` to use your own setup in the
+    dictation window instead -- keybindings and colourscheme included, along
+    with any format-on-save that would then rewrite dictated prose.
+    """
 
     window_instance: str = "voice-kb"
     """X11 instance name of the dictation window.
@@ -359,16 +393,60 @@ class NvimConfig:
                 f"got {rendered!r} from {self.file_template!r}"
             )
 
-    def spawn_argv(self, *, socket: Path, target: Path) -> list[str]:
+    def spawn_argv(self, *, socket: Path, target: Path, at: tuple[int, int] | None) -> list[str]:
         """The full command line for a new dictation window.
 
         ``target`` is passed as its own argument rather than through a shell,
         so a path with spaces in it needs no quoting and cannot be re-parsed.
+
+        ``at`` is where the window should map. ``None`` -- no usable screen
+        geometry -- substitutes ``0``, which is no worse than the window
+        manager's own choice and keeps the command line one shape.
         """
+        x, y = at if at is not None else (0, 0)
+        substitutions = {
+            _INSTANCE_PLACEHOLDER: self.window_instance,
+            _X_PLACEHOLDER: str(x),
+            _Y_PLACEHOLDER: str(y),
+        }
         terminal = [
-            arg.replace(_INSTANCE_PLACEHOLDER, self.window_instance) for arg in self.terminal
+            functools.reduce(lambda a, kv: a.replace(*kv), substitutions.items(), arg)
+            for arg in self.terminal
         ]
-        return [*terminal, *self.editor, "--listen", str(socket), str(target)]
+        return [
+            *terminal,
+            *self.editor,
+            "-u",
+            str(self.init_path),
+            "--listen",
+            str(socket),
+            str(target),
+        ]
+
+    @property
+    def announces_instance(self) -> bool:
+        """Whether the spawned command will actually name the window.
+
+        ``{instance}`` is substituted into :attr:`terminal`, so only a
+        terminal template that contains it produces a window findable by
+        :attr:`window_instance`. Without one there is nothing for the window
+        manager rules to match and nothing for voice-kb to wait for -- the
+        editor is on its own for placement, which is right for a bare
+        ``nvim --headless`` and for a GUI editor that places itself.
+        """
+        return any(_INSTANCE_PLACEHOLDER in arg for arg in self.terminal)
+
+    @property
+    def init_path(self) -> Path:
+        """:attr:`init`, or the config bundled with the package.
+
+        Resolved here rather than at spawn time so the path is a value the
+        caller can log, test against, and check for existence, instead of
+        something only the subprocess ever sees.
+        """
+        if self.init is not None:
+            return self.init
+        return Path(str(resources.files("voice_kb").joinpath("dictation_init.lua")))
 
 
 
@@ -562,7 +640,7 @@ def _resolve_vad_model(section: Mapping[str, Any], base_dir: Path | None) -> Map
     return {**section, "model": model}
 
 
-_NVIM_PATH_KEYS = ("socket_path", "dictation_dir")
+_NVIM_PATH_KEYS = ("socket_path", "dictation_dir", "init")
 
 
 def _resolve_nvim_paths(section: Mapping[str, Any]) -> Mapping[str, Any]:

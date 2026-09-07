@@ -53,19 +53,56 @@ from importlib import resources
 from pathlib import Path
 from typing import Any, Final
 
+import msgpack
 import pynvim
 
 from voice_kb import x11
 from voice_kb.config import NvimConfig
-from voice_kb.geometry import Rect, dictation_rect, pick_output
+from voice_kb.geometry import Output, Rect, dictation_rect, pick_output
 from voice_kb.state import Phase
 
 log = logging.getLogger("voice-kb.nvim")
 
 _CONNECT_POLL_S: Final = 0.1
+
+#: How long to wait for i3 to report the new window, and how often to ask.
+#: Measured: alacritty appears in i3's tree ~0.18s after the spawn.
+_MAP_TIMEOUT_S: Final = 3.0
+_MAP_POLL_S: Final = 0.02
+
+#: How long a cached monitor layout is trusted. Long enough that a burst of
+#: dictations costs one xrandr, short enough that plugging in a screen is
+#: noticed without restarting the daemon.
+_OUTPUTS_TTL_S: Final = 5.0
 _I3_TIMEOUT_S: Final = 2.0
 _SOCKET_PROBE_S: Final = 0.25
-_READY_PROBE_S: Final = 2.0
+
+#: How long a window that is *already* open gets to answer before it is
+#: written off as wedged. Reattachment is on the key-down path, so this is
+#: latency the user feels; a healthy editor answers in about a millisecond.
+_REATTACH_TIMEOUT_S: Final = 2.0
+
+#: msgpack-RPC message types and the id used for the readiness probe. Only
+#: these two appear here; the real session speaks through pynvim.
+_RPC_REQUEST: Final = 0
+_RPC_RESPONSE: Final = 1
+_PROBE_MSGID: Final = 1
+
+
+def _is_probe_reply(message: object) -> bool:
+    """Whether ``message`` is the response to the readiness probe.
+
+    Notifications arrive on the same stream (nvim announces things whether or
+    not anyone asked), so the type and the message id both have to match --
+    treating any traffic as the answer would call an editor ready the moment
+    it said anything at all.
+    """
+    return (
+        isinstance(message, (list, tuple))
+        and len(message) == 4
+        and message[0] == _RPC_RESPONSE
+        and message[1] == _PROBE_MSGID
+    )
 
 _OPEN_BUFFER_LUA: Final = """
 vim.cmd.edit(vim.fn.fnameescape(...))
@@ -137,6 +174,8 @@ class NvimSession:
         self._buffer: int | None = None
         self._path: Path | None = None
         self._process: subprocess.Popen[bytes] | None = None
+        self._outputs: list[Output] | None = None
+        self._outputs_read_at = 0.0
 
     # ------------------------------------------------------------------ queries
 
@@ -325,33 +364,48 @@ class NvimSession:
             return False
         return True
 
-    def _answers_rpc(self) -> bool:
-        """Whether nvim is far enough through startup to serve API requests.
+    def _answers_rpc(self, deadline: float, process: subprocess.Popen[bytes] | None) -> bool:
+        """Wait until nvim is far enough through startup to serve API requests.
 
-        Out of process, via ``nvim --server``, purely so it can be given a
-        hard timeout -- pynvim offers none, and this is exactly the wait that
-        needs one. Measured here: a full plugin configuration takes ~1s before
-        it answers, and the first ever open took 13.5s while the plugin
-        manager did one-time work. Attaching inside that window blocks the
+        A raw msgpack-RPC round trip on the socket, because that is the one
+        way to bound the wait: pynvim's requests have no timeout, and a plain
+        ``connect`` says nothing -- libuv is listening well before the main
+        loop can answer anything. Attaching inside that window blocks the
         bridge thread with no way out, which would in turn hang the daemon's
         shutdown.
+
+        One connection and one request, then a poll for the reply. nvim's
+        event loop picks the request up when it reaches the loop, so the reply
+        arrives on its own the moment the editor is genuinely ready; the poll
+        exists only so a terminal that dies during startup is noticed instead
+        of waited out. This replaced spawning ``nvim --server ... --remote-expr``
+        every 100ms, which cost a whole editor process per probe and put most
+        of the ~1s cold open on the user rather than on nvim.
         """
+        request = msgpack.packb([_RPC_REQUEST, _PROBE_MSGID, "nvim_eval", ["1"]])
+        unpacker = msgpack.Unpacker(raw=False, strict_map_key=False)
         try:
-            done = subprocess.run(
-                [
-                    *self._config.editor[:1],
-                    "--server",
-                    str(self._config.socket_path),
-                    "--remote-expr",
-                    "1",
-                ],
-                capture_output=True,
-                timeout=_READY_PROBE_S,
-                check=False,
-            )
-        except (OSError, subprocess.SubprocessError):
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+                probe.settimeout(_SOCKET_PROBE_S)
+                probe.connect(str(self._config.socket_path))
+                probe.sendall(request)
+                while time.monotonic() < deadline:
+                    if process is not None and process.poll() is not None:
+                        return False
+                    try:
+                        chunk = probe.recv(4096)
+                    except TimeoutError:
+                        continue
+                    if not chunk:
+                        return False
+                    unpacker.feed(chunk)
+                    for message in unpacker:
+                        if _is_probe_reply(message):
+                            return True
+        except OSError as e:
+            log.debug("readiness probe on %s failed: %s", self._config.socket_path, e)
             return False
-        return done.returncode == 0
+        return False
 
     def _attach_existing(self) -> bool:
         """Reuse the nvim already listening on the socket, if any."""
@@ -361,7 +415,10 @@ class NvimSession:
             log.info("stale nvim socket at %s; starting a new one", self._config.socket_path)
             self._config.socket_path.unlink(missing_ok=True)
             return False
-        if not self._answers_rpc():
+        # A short deadline, not the startup one: this window is already open,
+        # so it is either answering now or it is wedged. Waiting out a full
+        # startup timeout here would stall the key-down that opened it.
+        if not self._answers_rpc(time.monotonic() + _REATTACH_TIMEOUT_S, process=None):
             # Connectable but not serving: an editor still starting up, or one
             # wedged. Either way, attaching would block indefinitely.
             log.warning(
@@ -398,7 +455,16 @@ class NvimSession:
         self._config.socket_path.parent.mkdir(parents=True, exist_ok=True)
         self._config.socket_path.unlink(missing_ok=True)
 
-        argv = self._config.spawn_argv(socket=self._config.socket_path, target=target)
+        # Before the spawn, not after: the terminal is told where to open, so
+        # its first frame is already in the right place. Placing it afterwards
+        # meant the window appeared wherever the window manager chose -- often
+        # the middle of the other monitor -- and then flew across the screen.
+        placement = self._placement()
+        argv = self._config.spawn_argv(
+            socket=self._config.socket_path,
+            target=target,
+            at=(placement.x, placement.y) if placement is not None else None,
+        )
         log.info("opening the dictation window: %s", " ".join(argv))
         try:
             process = subprocess.Popen(
@@ -416,20 +482,61 @@ class NvimSession:
         # Nothing ever waits on this process, so a daemon thread reaps it.
         threading.Thread(target=process.wait, daemon=True).start()
 
+        # The size, as soon as i3 knows the window -- which happens while nvim
+        # is still starting, so the correction lands before there is anything
+        # drawn to see it. Only the size is really outstanding by now; the
+        # position is asserted again in the same command because it costs
+        # nothing and covers a terminal that ignored the hint.
+        if placement is not None and self._config.announces_instance:
+            self._place_when_mapped(placement, process)
+
         nvim = self._wait_for_socket(process)
         if nvim is None:
             return False
         self._bind(nvim, target)
-        placement = self._placement()
-        if placement is not None:
-            self.place_window(placement)
         return True
+
+    def _place_when_mapped(self, rect: Rect, process: subprocess.Popen[bytes]) -> None:
+        """Wait for i3 to take the window over, then set its geometry.
+
+        i3 has the window a good while before nvim answers RPC, and this is
+        the last visible change to the window, so doing it at the earlier of
+        the two moments is the difference between correcting an empty terminal
+        and correcting one the user is already reading.
+        """
+        deadline = time.monotonic() + _MAP_TIMEOUT_S
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                return
+            if x11.i3_window_exists(self._config.window_instance):
+                self.place_window(rect)
+                return
+            time.sleep(_MAP_POLL_S)
+        log.debug(
+            "i3 did not report a %r window within %.1fs; leaving placement to it",
+            self._config.window_instance,
+            _MAP_TIMEOUT_S,
+        )
+
+    def warm_up(self) -> None:
+        """Pay the one-off cost of talking to X, at startup rather than mid-key.
+
+        The first subprocess this process runs costs ~1.9s where every later
+        one costs ~50ms, and ``_placement`` is usually the first. Left alone
+        that lands on the user's very first dictation of a session -- the one
+        occasion there is nothing else on screen to hide it behind. Called
+        once when the bridge thread starts; failure is uninteresting, because
+        everything here already degrades to "let the window manager place it".
+        """
+        started = time.monotonic()
+        self._placement()
+        log.debug("warmed up X queries in %.0fms", (time.monotonic() - started) * 1000)
 
     def _placement(self) -> Rect | None:
         """Where a newly opened window should sit: under the pointer, on the
         monitor the pointer is on. ``None`` when X cannot be queried at all,
         in which case the window manager's own placement stands."""
-        screens = x11.outputs()
+        screens = self._cached_outputs()
         if not screens:
             return None
         pointer = x11.pointer_position()
@@ -441,14 +548,34 @@ class NvimSession:
             target = pick_output(screens, Rect(x=pointer[0], y=pointer[1], width=1, height=1))
         return dictation_rect(target.rect, pointer, self._config.window_fraction)
 
+    def _cached_outputs(self) -> list[Output]:
+        """The monitor layout, re-read at most every few seconds.
+
+        ``xrandr`` is a subprocess and the layout almost never changes, so
+        asking again on every key-down is pure latency on the path that opens
+        the window. Same cache, same reasoning, as ``Daemon._cached_outputs``
+        -- kept separately because this runs on the bridge thread and that one
+        runs on the Qt thread, and a shared cache would need a lock to save an
+        xrandr call neither of them makes often.
+        """
+        now = time.monotonic()
+        if self._outputs is None or now - self._outputs_read_at > _OUTPUTS_TTL_S:
+            self._outputs = x11.outputs()
+            self._outputs_read_at = now
+        return self._outputs
+
     def _wait_for_socket(self, process: subprocess.Popen[bytes]) -> Any | None:
-        """Poll until nvim is *answering*, it dies, or the timeout expires.
+        """Wait until nvim is *answering*, it dies, or the timeout expires.
 
         Answering, not merely listening: the socket file appears, and accepts
         connections, well before nvim has finished loading a configuration and
         can serve API requests. Attaching in that window is what turns a slow
         editor startup into a blocked bridge thread, so the readiness probe --
         which is the one call here with a hard timeout -- gates the attach.
+
+        Only the socket *file* is polled for. Once it exists the probe holds a
+        single connection open and waits for its reply, so readiness costs one
+        round trip rather than a fresh probe every tick.
         """
         deadline = time.monotonic() + self._config.startup_timeout_s
         while time.monotonic() < deadline:
@@ -460,7 +587,9 @@ class NvimSession:
                     self._config.terminal[0] if self._config.terminal else self._config.editor[0],
                 )
                 return None
-            if self._config.socket_path.exists() and self._answers_rpc():
+            if self._config.socket_path.exists():
+                if not self._answers_rpc(deadline, process):
+                    break
                 try:
                     return pynvim.attach("socket", path=str(self._config.socket_path))
                 except OSError as e:

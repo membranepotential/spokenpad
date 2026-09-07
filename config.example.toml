@@ -130,6 +130,16 @@ replacements = {}
 trailing_space = false
 
 [nvim]
+# nvim config for the dictation window. Commented out means the one bundled
+# with voice-kb (src/voice_kb/dictation_init.lua): chrome off before the first
+# frame is drawn, prose wrapping on, no swap/backup/undo files, and no
+# format-on-save that could reflow a transcript. It also keeps the window's
+# behaviour inside this repo rather than depending on your dotfiles.
+#
+# Point it at your own config to get your keybindings and colourscheme in the
+# window instead -- at the cost of both of those guarantees. "NONE" is nvim's
+# own special value for no config at all.
+# init = "~/.config/nvim/init.lua"
 # Where the transcript goes: a floating neovim window, appended to over its
 # msgpack-RPC socket. Nothing is ever pasted into the window you are working
 # in, and no keystrokes are synthesised anywhere -- see docs/constraints.md.
