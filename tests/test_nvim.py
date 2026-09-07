@@ -519,3 +519,71 @@ def test_gg_goes_to_the_very_start() -> None:
     )
 
     assert out.endswith("1,0"), f"gg should land on line 1 column 0, got {out!r}"
+
+
+# --------------------------------- the preview shows text where it will land
+
+
+def _preview_rows(session: NvimSession) -> list[str]:
+    """The preview's virtual lines, blank separators included.
+
+    ``_preview_lines`` above drops the structure by flattening chunks; these
+    tests are about the shape, so they need the rows as rows.
+    """
+    nvim = session._nvim
+    buf = session._buffer
+    assert nvim is not None and buf is not None
+    ns = nvim.api.create_namespace("voice_kb")
+    marks = nvim.api.buf_get_extmarks(buf, ns, 0, -1, {"details": True})
+    if not marks:
+        return []
+    return ["".join(chunk[0] for chunk in line) for line in marks[0][-1].get("virt_lines", [])]
+
+
+def test_the_preview_sits_where_the_committed_text_will_go(
+    make_session: Callable[..., NvimSession],
+) -> None:
+    """An utterance is written after a blank separator line, so the preview
+    has to show one too. Without it the preview sat a line higher than the
+    committed text, and every utterance visibly shifted down as it landed."""
+    session = make_session()
+    assert session.ensure()
+    session.append("Ein erster Absatz.")
+
+    session.set_state(phase=Phase.RECORDING, preview="was gerade gesagt wird")
+
+    assert _preview_rows(session) == ["", "was gerade gesagt wird"]
+
+
+def test_an_empty_buffer_gets_no_leading_blank(
+    make_session: Callable[..., NvimSession],
+) -> None:
+    """``M.append`` puts no blank line at the top of a fresh file, so neither
+    may the preview -- the two have to agree about where the text goes."""
+    session = make_session()
+    assert session.ensure()
+
+    session.set_state(phase=Phase.RECORDING, preview="die ersten Worte")
+
+    assert _preview_rows(session) == ["die ersten Worte"]
+
+
+def test_the_preview_anchors_to_the_last_line_with_text_on_it(
+    make_session: Callable[..., NvimSession],
+) -> None:
+    """Trailing blank lines -- from an edit in the window, or a plugin adding
+    a final newline -- must not push the preview away from where the append
+    will actually write."""
+    session = make_session()
+    assert session.ensure()
+    session.append("Ein Absatz.")
+    nvim, buf = session._nvim, session._buffer
+    assert nvim is not None and buf is not None
+    nvim.api.buf_set_lines(buf, -1, -1, False, ["", "", ""])
+
+    session.set_state(phase=Phase.RECORDING, preview="weiter")
+
+    ns = nvim.api.create_namespace("voice_kb")
+    marks = nvim.api.buf_get_extmarks(buf, ns, 0, -1, {"details": True})
+    assert marks[0][1] == 0, "anchored to the paragraph, not to the blank lines below it"
+    assert _preview_rows(session) == ["", "weiter"]

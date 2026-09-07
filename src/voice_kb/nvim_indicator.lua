@@ -167,6 +167,18 @@ local function wrap(text, width, max_lines)
   return tail
 end
 
+--- Index of the last line with text on it, ignoring trailing blanks; 0 when
+--- the buffer holds nothing. Both the preview and the append use this, and
+--- they must agree: it is what decides where the next paragraph begins, and
+--- the whole point of the preview is to show text where it is about to land.
+local function last_text_line(lines)
+  local n = #lines
+  while n > 0 and lines[n]:match("^%s*$") do
+    n = n - 1
+  end
+  return n
+end
+
 --- The preview, as virtual lines hanging below the end of the buffer -- which
 --- is exactly where the committed text will land, so the user reads it in
 --- place rather than in a second widget somewhere else on screen.
@@ -188,13 +200,25 @@ local function render_preview()
 
   local wins = windows()
   local width = wins[1] and vim.api.nvim_win_get_width(wins[1]) or 80
+  local lines = vim.api.nvim_buf_get_lines(M.buf, 0, -1, false)
+  local last_text = last_text_line(lines)
+
   local virt_lines = {}
+  -- The blank line `M.append` will put between paragraphs, shown before the
+  -- preview so the words appear exactly where they are about to be written.
+  -- Without it the preview sat one line higher than the committed text, and
+  -- every utterance visibly shifted down as it landed.
+  if last_text > 0 then
+    virt_lines[1] = { { "", "VoiceKbPreview" } }
+  end
   for _, line in ipairs(wrap(text, width - PREVIEW_GUTTER, PREVIEW_MAX_LINES)) do
     virt_lines[#virt_lines + 1] = { { line, "VoiceKbPreview" } }
   end
 
-  local last = vim.api.nvim_buf_line_count(M.buf) - 1
-  pcall(vim.api.nvim_buf_set_extmark, M.buf, M.ns, last, 0, {
+  -- Anchored to the last line with text on it, not the last line of the
+  -- buffer, for the same reason: that is the line the append writes after.
+  local anchor = math.max(last_text - 1, 0)
+  pcall(vim.api.nvim_buf_set_extmark, M.buf, M.ns, anchor, 0, {
     id = PREVIEW_EXTMARK,
     virt_lines = virt_lines,
     virt_lines_above = false,
@@ -283,10 +307,7 @@ function M.append(text, continued)
   -- utterances is always exactly one blank line however the buffer got into
   -- its current shape -- an editing session in the window, a plugin adding a
   -- final newline. Without this the separation drifts and never recovers.
-  local last_text = #lines
-  while last_text > 0 and lines[last_text]:match("^%s*$") do
-    last_text = last_text - 1
-  end
+  local last_text = last_text_line(lines)
 
   -- Paragraph separation, not a running wall of text: one blank line between
   -- utterances, and none at the very top of a fresh file. `continued` instead
