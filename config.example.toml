@@ -70,6 +70,45 @@ hotwords_score = 1.5
 # vocabulary = ["kubectl", "voice-kb", "nginx"]
 vocabulary = []
 
+[vad]
+# Voice activity detection. The capture is split at silence and each speech
+# segment decoded in turn, in one pass -- no region is ever decoded twice.
+#
+# This is a CORRECTNESS setting before it is anything else. Parakeet returns
+# an EMPTY STRING when speech is a small fraction of the window it is given:
+# the same 0.53s of speech decodes to "D home." with no padding, "Did the
+# home?" with 2s of silence each side, and "" with 5s. In use that is pressing
+# the key, saying two words, and getting nothing back. Turning this off
+# restores the old whole-buffer behaviour, that bug included.
+#
+# It does NOT make decoding faster -- measured 12.3-12.6x real-time whole-buffer
+# against 11.0-11.7x segmented. What it changes is when text starts appearing:
+# 0.3-0.5s instead of 2-3s, then streaming in behind that.
+enabled = true
+
+# Silero VAD weights, ~2 MB, fetched by scripts/fetch_model.py. Relative paths
+# resolve against this file's directory. If the file is missing, voice-kb logs
+# a warning and decodes whole captures rather than refusing to start.
+model = "models/silero_vad.onnx"
+
+# Speech probability above which a frame counts as speech.
+threshold = 0.5
+
+# Silence needed to end a segment -- the sentence-boundary knob. Too low and a
+# sentence is chopped at every breath, which costs quality: the recogniser
+# capitalises each segment as a fresh start, so mid-sentence splits leave
+# stray capitals. Too high and segments grow until delivery stops feeling
+# incremental.
+min_silence_seconds = 0.35
+
+# Shortest run that counts as speech, so a cough does not become a segment.
+min_speech_seconds = 0.15
+
+# Hard cap on a single segment, cutting it even mid-sentence. Nothing is lost
+# -- the audio continues in the next segment -- and this is what bounds time
+# to first text when someone talks without pausing.
+max_speech_seconds = 20.0
+
 [text]
 # Strip standalone filler words (see `fillers` below) from the transcript.
 strip_fillers = true

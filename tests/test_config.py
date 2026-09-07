@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -267,3 +268,39 @@ def test_unknown_latch_modifier_is_rejected() -> None:
 def test_latch_modifier_reads_from_toml() -> None:
     config = Config.from_mapping({"hotkey": {"latch_modifier": "ctrl"}})
     assert config.hotkey.latch_key_codes == frozenset({29, 97})  # KEY_*CTRL
+
+
+# ------------------------------------------------------------------------- vad
+
+
+def test_vad_defaults_to_on_because_the_default_is_load_bearing() -> None:
+    """Off means short utterances buried in silence decode to nothing -- see
+    ``voice_kb.vad``. Anyone changing this default should read that first."""
+    assert Config().vad.enabled is True
+
+
+@pytest.mark.parametrize(
+    ("section", "expected"),
+    [
+        ({"threshold": 1.5}, "vad.threshold"),
+        ({"threshold": 0.0}, "vad.threshold"),
+        ({"min_speech_seconds": 0}, "vad.min_speech_seconds"),
+        ({"min_silence_seconds": -1}, "vad.min_silence_seconds"),
+        ({"max_speech_seconds": 0.1}, "vad.max_speech_seconds"),
+    ],
+)
+def test_nonsensical_vad_settings_are_rejected_at_the_boundary(
+    section: dict[str, float], expected: str
+) -> None:
+    with pytest.raises(ConfigError, match=re.escape(expected)):
+        Config.from_mapping({"vad": section})
+
+
+def test_a_relative_vad_model_resolves_against_the_config_file(tmp_path: Path) -> None:
+    """Same rule as ``asr.model_dir``: a config file is read from wherever the
+    daemon happened to be started, and a path in it should mean what it looks
+    like it means."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text('[vad]\nmodel = "models/silero_vad.onnx"\n', encoding="utf-8")
+
+    assert Config.load(config_file).vad.model == tmp_path / "models" / "silero_vad.onnx"

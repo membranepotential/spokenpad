@@ -68,13 +68,49 @@ hardware: **1.37x real-time** — barely faster than the utterance itself —
 and it silently dropped audio past a 30 s cap, with no error surfaced to the
 user (STATUS.md). A 37 s dictation was discarded outright.
 
-**Rule:** the text voice-kb injects is produced by **exactly one decode of
-the complete captured buffer**, run once after `KeyUp`. This is the `Decode`
-command in the [state machine](architecture.md#statestep-a-total-function) —
-it only ever fires on the `Recording → Transcribing` transition, never
-mid-recording. Because the committed decode happens once per utterance, at a
-known correct decode speed (9.7x real-time, see [asr.md](asr.md)), there is
-no growing-buffer cost and no silent length cap.
+**Rule:** every captured sample is decoded **exactly once**, in a single
+pass that starts after `KeyUp`. This is the `Decode` command in the
+[state machine](architecture.md#statestep-a-total-function) — it only ever
+fires on the `Recording → Transcribing` transition, never mid-recording.
+Because the committed decode happens once per utterance, at a known correct
+decode speed (9.7x real-time, see [asr.md](asr.md)), there is no
+growing-buffer cost and no silent length cap.
+
+### Segmented is not streamed
+
+That pass is split at silence by [`voice_kb.vad`](../src/voice_kb/vad.py)
+before decoding, and each speech segment is appended as it lands rather than
+all of them at the end. This is not the thing the rule forbids, and the
+difference is worth being exact about, because "the transcript arrives in
+pieces" sounds like the failure mode by description.
+
+What broke Handy was re-decoding a *growing* buffer: the same audio decoded
+again and again as more arrived, so cost grew with the utterance and a cap had
+to be bolted on, which then dropped a 37 s dictation silently. Segmentation
+keeps both properties that rule protects. No region is ever decoded twice, so
+cost stays linear in the audio; and nothing is capped or discarded at any
+length, because a segment boundary is a pause, not a limit.
+
+The reason it exists is **correctness**, not speed. Parakeet TDT returns an
+empty string when speech is a small fraction of its window — measured, same
+0.53 s of speech, varying only the padding: no padding gives `'D home.'`, 2 s
+each side gives `'Did the home?'`, 5 s each side gives `''`. In use that was
+pressing the key, saying two words, and getting nothing back. It is also the
+other end of the preview instability described below: a preview of 4.4 s
+returning `"Okay."` where 3.3 s returned a full sentence is the same collapse,
+seen one preview at a time.
+
+Throughput is unchanged — 12.3-12.6x real-time whole-buffer against 11.0-11.7x
+segmented, slightly *worse*, because per-segment overhead costs about what the
+skipped silence saves. What changes is when the first text appears:
+0.27-0.49 s instead of 2.2-3.4 s on the same clips. Nobody should reach for
+segmentation to make decoding faster; it does not.
+
+One property genuinely weakens. A cancellation during `Transcribing` used to
+mean the text never existed; now some of it may already be in the buffer, so
+it means "stop adding" and what landed stays. That is the honest trade for
+watching a long passage arrive instead of waiting out its decode, and the file
+is the user's to edit either way.
 
 ### The one relaxation: cosmetic previews
 

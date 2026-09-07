@@ -156,6 +156,62 @@ class AsrConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class VadConfig:
+    """Voice activity detection, used to split a capture before decoding.
+
+    On by default, and the default is load-bearing: without it a short
+    utterance inside a long quiet capture decodes to an empty string. See
+    ``voice_kb.vad`` for the measurements. Turning it off restores exactly the
+    older whole-buffer behaviour, bug included.
+    """
+
+    enabled: bool = True
+
+    model: Path = Path("models/silero_vad.onnx")
+    """Silero VAD weights, ~2 MB, fetched by ``scripts/fetch_model.py``.
+
+    Resolved like :attr:`AsrConfig.model_dir`: relative to the config file's
+    directory when one is loaded, else to the working directory. Absent means
+    the daemon runs without segmentation rather than refusing to start.
+    """
+
+    threshold: float = 0.5
+    """Speech probability above which a frame counts as speech."""
+
+    min_silence_seconds: float = 0.35
+    """Silence needed to end a segment.
+
+    This is the sentence-boundary knob. Too low and one sentence is chopped at
+    every breath, which costs quality: the recogniser capitalises each segment
+    as a fresh start, so mid-sentence splits produce stray capitals. Too high
+    and segments grow until incremental delivery stops being incremental.
+    """
+
+    min_speech_seconds: float = 0.15
+    """Shortest run that counts as speech, so a cough is not a segment."""
+
+    max_speech_seconds: float = 20.0
+    """Hard cap on one segment, cutting it even mid-sentence.
+
+    Nothing is lost -- the audio continues in the next segment -- and it is
+    what bounds time to first text when someone talks without pausing.
+    """
+
+    def __post_init__(self) -> None:
+        if not 0.0 < self.threshold < 1.0:
+            raise ConfigError(f"vad.threshold must be between 0 and 1: {self.threshold}")
+        for name in ("min_silence_seconds", "min_speech_seconds", "max_speech_seconds"):
+            value: float = getattr(self, name)
+            if value <= 0:
+                raise ConfigError(f"vad.{name} must be > 0: {value}")
+        if self.max_speech_seconds <= self.min_speech_seconds:
+            raise ConfigError(
+                "vad.max_speech_seconds must exceed vad.min_speech_seconds: "
+                f"{self.max_speech_seconds} <= {self.min_speech_seconds}"
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class TextConfig:
     strip_fillers: bool = True
     fillers: tuple[str, ...] = ("uh", "um", "erm", "hmm")
@@ -431,6 +487,7 @@ class Config:
     hotkey: HotkeyConfig = field(default_factory=HotkeyConfig)
     audio: AudioConfig = field(default_factory=AudioConfig)
     asr: AsrConfig = field(default_factory=AsrConfig)
+    vad: VadConfig = field(default_factory=VadConfig)
     text: TextConfig = field(default_factory=TextConfig)
     nvim: NvimConfig = field(default_factory=NvimConfig)
     preview: PreviewConfig = field(default_factory=PreviewConfig)
@@ -450,7 +507,7 @@ class Config:
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any], base_dir: Path | None = None) -> Self:
-        known = {"hotkey", "audio", "asr", "text", "nvim", "preview", "overlay"}
+        known = {"hotkey", "audio", "asr", "vad", "text", "nvim", "preview", "overlay"}
         if unknown := set(raw) - known:
             raise ConfigError(f"unknown config section(s): {', '.join(sorted(unknown))}")
 
@@ -463,6 +520,7 @@ class Config:
                 "asr",
                 tuple_fields=("vocabulary",),
             ),
+            vad=_build(VadConfig, _resolve_vad_model(raw.get("vad", {}), base_dir), "vad"),
             text=_build(TextConfig, raw.get("text", {}), "text", tuple_fields=("fillers",)),
             nvim=_build(
                 NvimConfig,
@@ -487,6 +545,21 @@ def _resolve_model_dir(section: Mapping[str, Any], base_dir: Path | None) -> Map
     if not model_dir.is_absolute() and base_dir is not None:
         model_dir = base_dir / model_dir
     return {**section, "model_dir": model_dir}
+
+
+def _resolve_vad_model(section: Mapping[str, Any], base_dir: Path | None) -> Mapping[str, Any]:
+    """Make a relative VAD ``model`` relative to the config file, not the cwd.
+
+    Same rule as :func:`_resolve_model_dir`, for the same reason: a config
+    file is read from wherever the daemon happens to have been started, and a
+    path in it should mean what it looks like it means.
+    """
+    if "model" not in section:
+        return section
+    model = Path(str(section["model"])).expanduser()
+    if not model.is_absolute() and base_dir is not None:
+        model = base_dir / model
+    return {**section, "model": model}
 
 
 _NVIM_PATH_KEYS = ("socket_path", "dictation_dir")

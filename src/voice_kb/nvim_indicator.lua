@@ -86,7 +86,14 @@ local function winbar()
     end
     return bar
   elseif phase == "transcribing" then
-    return "%#VoiceKbWork#\u{25cf} transcribing\u{2026}%*"
+    -- Say the text below is the preview, not the result. Otherwise a preview
+    -- left standing through the decode reads as finished text that then
+    -- changes under the reader.
+    local bar = "%#VoiceKbWork#\u{25cf} transcribing\u{2026}%*"
+    if M.state.preview ~= "" then
+      bar = bar .. " %#VoiceKbIdle#showing the live preview until it lands%*"
+    end
+    return bar
   end
   local name = M.buf and vim.api.nvim_buf_get_name(M.buf) or ""
   return "%#VoiceKbIdle#\u{25cb} voice-kb%* %#VoiceKbFile#" .. vim.fn.fnamemodify(name, ":t") .. "%*"
@@ -169,7 +176,13 @@ local function render_preview()
   end
   pcall(vim.api.nvim_buf_del_extmark, M.buf, M.ns, PREVIEW_EXTMARK)
   local text = M.state.preview
-  if text == "" or M.state.phase ~= "recording" then
+  -- Held through `transcribing`, not just `recording`. The decode takes a
+  -- second or more on a long passage, and clearing the preview at the key
+  -- release blanked the screen for exactly as long as the user had to wait --
+  -- so the one moment they most want to start reading was the one moment
+  -- there was nothing to read. It is replaced when the real text lands
+  -- (`M.append` clears it), which is the only correct moment to drop it.
+  if text == "" or (M.state.phase ~= "recording" and M.state.phase ~= "transcribing") then
     return
   end
 
@@ -249,12 +262,18 @@ function M.setup(buf)
   render()
 end
 
---- Append one committed utterance as its own paragraph, then save.
+--- Append committed text, then save.
+---
+--- One utterance is delivered as several calls, one per speech segment the
+--- VAD found, so that text starts landing while the rest is still decoding.
+--- `continued` says which: false opens a new paragraph, true extends the one
+--- the previous segment started. An utterance is therefore still exactly one
+--- paragraph -- it just grows a piece at a time instead of arriving whole.
 ---
 --- Returns the buffer's new line count, which is what the daemon logs -- a
 --- request rather than a notification, so a failure to land text is visible
 --- instead of silent. That is the whole point of this project.
-function M.append(text)
+function M.append(text, continued)
   if not M.buf or not vim.api.nvim_buf_is_valid(M.buf) then
     error("voice-kb: dictation buffer is gone")
   end
@@ -270,11 +289,21 @@ function M.append(text)
   end
 
   -- Paragraph separation, not a running wall of text: one blank line between
-  -- utterances, and none at the very top of a fresh file.
-  local blank = last_text == 0
-  local addition = blank and { text } or { "", text }
+  -- utterances, and none at the very top of a fresh file. `continued` instead
+  -- extends the last line, so the segments of one utterance read as the one
+  -- sentence-stream they are.
   local previous_last = #lines
-  vim.api.nvim_buf_set_lines(M.buf, last_text, -1, false, addition)
+  local addition
+  local from = last_text
+  if continued and last_text > 0 then
+    from = last_text - 1
+    addition = { lines[last_text] .. " " .. text }
+  elseif last_text == 0 then
+    addition = { text }
+  else
+    addition = { "", text }
+  end
+  vim.api.nvim_buf_set_lines(M.buf, from, -1, false, addition)
   local last = vim.api.nvim_buf_line_count(M.buf)
 
   -- Follow the text only for a reader who was already at the end. Someone who
@@ -291,8 +320,10 @@ function M.append(text)
   M.state.preview = ""
   render_preview()
 
-  -- `noautocmd`, deliberately: the user's own config may format on save, and
-  -- reflowing dictated prose behind their back would rewrite the transcript.
+  -- `noautocmd`, deliberately. The dictation window runs a bundled config
+  -- with nothing on BufWritePre, but `nvim.init` can point at any config, and
+  -- a format-on-save that reflowed dictated prose would rewrite the
+  -- transcript behind the user's back.
   vim.api.nvim_buf_call(M.buf, function()
     vim.cmd("silent! noautocmd write")
   end)
@@ -307,6 +338,17 @@ function M.set_state(update)
   local phase_changed = update.phase ~= nil and update.phase ~= M.state.phase
   if update.phase ~= nil then
     M.state.phase = update.phase
+  end
+  if phase_changed and M.state.phase == "recording" then
+    -- Drop the previous utterance's preview the moment a new one starts.
+    -- Now that a preview survives `transcribing`, one that was never replaced
+    -- by committed text -- a decode that produced nothing, a cancellation --
+    -- would otherwise still be sitting there when the user speaks again, and
+    -- would read as the beginning of what they are saying now.
+    --
+    -- Before `update.preview` is applied, not after: a caller may set the
+    -- phase and a preview in one call, and that preview is news, not stale.
+    M.state.preview = ""
   end
   if update.preview ~= nil then
     M.state.preview = update.preview

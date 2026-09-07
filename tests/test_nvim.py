@@ -343,3 +343,116 @@ def test_reattaching_adopts_the_open_buffer_instead_of_starting_a_new_file(
 
     assert restarted.path == original
     assert _read(restarted) == "before the restart\n\nafter the restart\n"
+
+
+# ---------------------------------------------- one utterance, several segments
+
+
+def test_a_continued_append_extends_the_paragraph_instead_of_starting_one(
+    make_session: Callable[..., NvimSession],
+) -> None:
+    """An utterance decoded in segments must still read as one paragraph.
+
+    This is the on-disk proof for what ``test_e2e.py`` asserts at the signal
+    boundary: three appends, one paragraph, words separated by single spaces.
+    """
+    session = make_session()
+    assert session.ensure()
+
+    session.append("The first piece", continued=False)
+    session.append("and the second", continued=True)
+    session.append("and the third.", continued=True)
+
+    assert _read(session).strip() == "The first piece and the second and the third."
+
+
+def test_a_fresh_utterance_still_starts_its_own_paragraph(
+    make_session: Callable[..., NvimSession],
+) -> None:
+    session = make_session()
+    assert session.ensure()
+
+    session.append("First utterance.", continued=False)
+    session.append("still first", continued=True)
+    session.append("Second utterance.", continued=False)
+
+    assert _read(session).strip() == "First utterance. still first\n\nSecond utterance."
+
+
+def test_continuing_into_an_empty_buffer_does_not_produce_a_leading_space(
+    make_session: Callable[..., NvimSession],
+) -> None:
+    """``continued=True`` with nothing above it can only happen if the first
+    segment decoded to nothing after post-processing. It must not leave the
+    file starting with a stray space."""
+    session = make_session()
+    assert session.ensure()
+
+    session.append("Text with nowhere to continue from", continued=True)
+
+    assert _read(session) == "Text with nowhere to continue from\n"
+
+
+# ------------------------------------------ the preview stays up while decoding
+
+
+def _preview_lines(session: NvimSession) -> list[str]:
+    """The preview extmark's virtual lines, flattened to plain strings."""
+    nvim = session._nvim
+    buf = session._buffer
+    assert nvim is not None and buf is not None
+    ns = nvim.api.create_namespace("voice_kb")
+    marks = nvim.api.buf_get_extmarks(buf, ns, 0, -1, {"details": True})
+    return [
+        chunk[0]
+        for mark in marks
+        for line in mark[-1].get("virt_lines", [])
+        for chunk in line
+    ]
+
+
+def test_the_preview_survives_the_decode_so_there_is_something_to_read(
+    make_session: Callable[..., NvimSession],
+) -> None:
+    """Clearing it at the key release blanked the window for exactly as long
+    as the user had to wait -- the one moment they most want to start
+    reading."""
+    session = make_session()
+    assert session.ensure()
+
+    session.set_state(phase=Phase.RECORDING, preview="what was heard so far")
+    assert _preview_lines(session), "sanity: the preview shows while recording"
+
+    session.set_state(phase=Phase.TRANSCRIBING)
+
+    assert "".join(_preview_lines(session)) == "what was heard so far"
+
+
+def test_committed_text_replaces_the_preview(
+    make_session: Callable[..., NvimSession],
+) -> None:
+    session = make_session()
+    assert session.ensure()
+    session.set_state(phase=Phase.RECORDING, preview="rough version")
+    session.set_state(phase=Phase.TRANSCRIBING)
+
+    session.append("The polished version.")
+
+    assert _preview_lines(session) == []
+    assert "rough version" not in _read(session)
+
+
+def test_a_stale_preview_never_greets_the_next_utterance(
+    make_session: Callable[..., NvimSession],
+) -> None:
+    """A preview that was never replaced by committed text -- a decode that
+    produced nothing, a cancellation -- must not still be sitting there when
+    the user speaks again, where it would read as what they are saying now."""
+    session = make_session()
+    assert session.ensure()
+    session.set_state(phase=Phase.RECORDING, preview="last time's words")
+    session.set_state(phase=Phase.IDLE)  # decode produced nothing
+
+    session.set_state(phase=Phase.RECORDING)
+
+    assert _preview_lines(session) == []

@@ -68,6 +68,7 @@ from voice_kb.state import (
     SessionState,
     Transcribing,
 )
+from voice_kb.vad import Segment, SpeechSegmenter
 
 pytestmark = pytest.mark.usefixtures("qapp")
 
@@ -80,11 +81,23 @@ def _append_spy(daemon: Daemon) -> list[str]:
 
     A plain function connected to a Qt signal is always invoked directly
     (Qt has no thread affinity to queue against for a bare callable), so
-    this fires synchronously the moment ``_on_decoded`` emits it -- no
-    bridge thread required to observe it.
+    this fires synchronously the moment ``_on_segment_decoded`` emits it --
+    no bridge thread required to observe it.
+
+    The ``continued`` flag is dropped here; :func:`_paragraph_spy` keeps it
+    for the tests that are actually about paragraph shape.
     """
     calls: list[str] = []
-    daemon._nvim_append_requested.connect(calls.append)
+    daemon._nvim_append_requested.connect(lambda text, _continued: calls.append(text))
+    return calls
+
+
+def _paragraph_spy(daemon: Daemon) -> list[tuple[str, bool]]:
+    """Every append with its ``continued`` flag: ``False`` opens a paragraph,
+    ``True`` extends the one the previous segment of the same utterance
+    started."""
+    calls: list[tuple[str, bool]] = []
+    daemon._nvim_append_requested.connect(lambda text, continued: calls.append((text, continued)))
     return calls
 
 
@@ -306,7 +319,7 @@ def test_happy_path_key_down_to_appended_postprocessed_text(
     # Drive the actual append boundary too, with the exact text the daemon
     # asked for, so the real seam between the bridge and the dictation
     # window (faked here) is exercised as well.
-    daemon._nvim.append(append_calls[0])
+    daemon._nvim.append(append_calls[0], False)
 
     assert _nvim_session(daemon).appended == ["hello world"]
 
@@ -846,7 +859,7 @@ def test_failed_append_is_reported_and_does_not_take_the_daemon_down(
     _nvim_session(daemon).append_result = AppendFailed(reason="nvim went away")
 
     with caplog.at_level(logging.ERROR, logger="voice-kb"):
-        daemon._nvim.append("some text")
+        daemon._nvim.append("some text", False)
 
     assert "could not append" in caplog.text
     assert "nvim went away" in caplog.text
@@ -871,3 +884,142 @@ def test_phase_changes_reach_the_nvim_bridge_even_when_the_overlay_is_disabled(
     daemon._dispatch(KeyDown(at=0.0))
 
     assert phases == [Phase.RECORDING]
+
+
+# ------------------------------------------------ incremental (segmented) decode
+
+
+class _FakeSegmenter:
+    """Splits a capture into ``count`` equal pieces, like a VAD that found
+    ``count`` runs of speech. Stands in for ``voice_kb.vad.SpeechSegmenter``
+    so these tests need no model and no real audio."""
+
+    def __init__(self, count: int) -> None:
+        self.count = count
+        self.calls: list[MonoAudio] = []
+
+    def split(self, samples: MonoAudio) -> list[Segment]:
+        self.calls.append(samples)
+        step = max(1, samples.size // self.count)
+        return [
+            Segment(samples=samples[i * step : (i + 1) * step], start_seconds=float(i))
+            for i in range(self.count)
+        ]
+
+
+def test_each_segment_lands_as_it_decodes_and_the_utterance_stays_one_paragraph(
+    make_daemon: DaemonFactory,
+) -> None:
+    """The point of segmenting: text appears while the rest is still decoding.
+
+    Three segments means three appends, not one at the end -- and the first
+    opens a paragraph while the rest extend it, so the user sees a paragraph
+    growing rather than three of them appearing.
+    """
+    daemon = make_daemon(None)
+    paragraphs = _paragraph_spy(daemon)
+    daemon._worker._segmenter = cast(SpeechSegmenter, _FakeSegmenter(3))
+
+    daemon._dispatch(KeyDown(at=0.0))
+    daemon._dispatch(KeyUp(at=0.5))
+    _transcriber(daemon).results = [
+        TranscriptionResult(text=text, elapsed_seconds=0.1)
+        for text in ("first piece", "second piece", "third piece")
+    ]
+
+    daemon._worker.run_decode(_audio(daemon).next_samples, daemon._generation)
+
+    assert paragraphs == [
+        ("first piece", False),
+        ("second piece", True),
+        ("third piece", True),
+    ]
+
+
+def test_a_segment_that_decodes_to_nothing_does_not_open_a_paragraph(
+    make_daemon: DaemonFactory,
+) -> None:
+    """An empty segment must not consume the "first" slot.
+
+    If it did, the next real segment would arrive with ``continued=True`` and
+    be glued onto whatever paragraph happened to be above it -- the previous
+    utterance's.
+    """
+    daemon = make_daemon(None)
+    paragraphs = _paragraph_spy(daemon)
+    daemon._worker._segmenter = cast(SpeechSegmenter, _FakeSegmenter(3))
+
+    daemon._dispatch(KeyDown(at=0.0))
+    daemon._dispatch(KeyUp(at=0.5))
+    _transcriber(daemon).results = [
+        TranscriptionResult(text=text, elapsed_seconds=0.1)
+        for text in ("   ", "real text", "more text")
+    ]
+
+    daemon._worker.run_decode(_audio(daemon).next_samples, daemon._generation)
+
+    assert paragraphs == [("real text", False), ("more text", True)]
+
+
+def test_a_new_utterance_starts_a_new_paragraph(make_daemon: DaemonFactory) -> None:
+    """``continued`` resets per utterance, not per daemon.
+
+    Without the reset in ``Decode``, every dictation after the first would be
+    glued onto the previous one -- exactly the "appending to the old dictation"
+    behaviour the one-file-per-window work removed.
+    """
+    daemon = make_daemon(None)
+    paragraphs = _paragraph_spy(daemon)
+    daemon._worker._segmenter = cast(SpeechSegmenter, _FakeSegmenter(2))
+
+    for text in ("first utterance", "second utterance"):
+        daemon._dispatch(KeyDown(at=0.0))
+        daemon._dispatch(KeyUp(at=0.5))
+        _transcriber(daemon).results = [
+            TranscriptionResult(text=text, elapsed_seconds=0.1),
+            TranscriptionResult(text="tail", elapsed_seconds=0.1),
+        ]
+        daemon._worker.run_decode(_audio(daemon).next_samples, daemon._generation)
+
+    assert [continued for _, continued in paragraphs] == [False, True, False, True]
+
+
+def test_cancelling_stops_the_decode_between_segments(make_daemon: DaemonFactory) -> None:
+    """A cancelled long decode stops adding text rather than running to the end.
+
+    What already landed stays -- it is the user's file, and with progressive
+    delivery a cancellation can arrive after some of it is written. The
+    guarantee is "stop adding", not "none of this happened".
+    """
+    daemon = make_daemon(None)
+    paragraphs = _paragraph_spy(daemon)
+    daemon._worker._segmenter = cast(SpeechSegmenter, _FakeSegmenter(4))
+
+    daemon._dispatch(KeyDown(at=0.0))
+    daemon._dispatch(KeyUp(at=0.5))
+    generation = daemon._generation
+    daemon._worker.abandon_decode.set()
+
+    daemon._worker.run_decode(_audio(daemon).next_samples, generation)
+
+    assert paragraphs == []
+
+
+def test_without_a_segmenter_the_whole_buffer_is_decoded_exactly_as_before(
+    make_daemon: DaemonFactory,
+) -> None:
+    """A missing VAD model is a lost improvement, not a broken daemon."""
+    daemon = make_daemon(None)
+    paragraphs = _paragraph_spy(daemon)
+    assert daemon._worker._segmenter is None
+
+    daemon._dispatch(KeyDown(at=0.0))
+    daemon._dispatch(KeyUp(at=0.5))
+    _transcriber(daemon).next_result = TranscriptionResult(
+        text="um the whole thing", elapsed_seconds=0.1
+    )
+
+    daemon._worker.run_decode(_audio(daemon).next_samples, daemon._generation)
+
+    assert paragraphs == [("the whole thing", False)]
+    assert len(_transcriber(daemon).calls) == 1

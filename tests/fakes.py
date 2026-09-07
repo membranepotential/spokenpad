@@ -91,6 +91,11 @@ class FakeTranscriber:
     ``next_result`` is mutated by the test right before the call it wants to
     control; a :class:`BaseException` instance there makes ``transcribe``
     raise it instead of returning, for exercising the decode-failure path.
+
+    ``results`` queues one result per call, for a decode that is split into
+    several segments and so calls ``transcribe`` more than once. It is
+    consumed in order and falls back to ``next_result`` when empty, so every
+    existing single-decode test is unaffected.
     """
 
     def __init__(self, config: AsrConfig | None = None) -> None:
@@ -99,13 +104,15 @@ class FakeTranscriber:
         self.next_result: TranscriptionResult | BaseException = TranscriptionResult(
             text="", elapsed_seconds=0.0
         )
+        self.results: list[TranscriptionResult | BaseException] = []
 
     def transcribe(self, samples: MonoAudio, sample_rate: int) -> TranscriptionResult:
         del sample_rate
         self.calls.append(samples)
-        if isinstance(self.next_result, BaseException):
-            raise self.next_result
-        return self.next_result
+        result = self.results.pop(0) if self.results else self.next_result
+        if isinstance(result, BaseException):
+            raise result
+        return result
 
 
 class FakeNvimSession:
@@ -136,6 +143,10 @@ class FakeNvimSession:
         self.config = config
         self.clock = clock
         self.appended: list[str] = []
+        #: ``(text, continued)`` for every append, so a test can assert that
+        #: an utterance arriving in several segments still forms one
+        #: paragraph -- which ``appended`` alone cannot show.
+        self.append_calls: list[tuple[str, bool]] = []
         self.states: list[dict[str, Phase | float | str]] = []
         self.ensure_calls = 0
         self.raise_calls = 0
@@ -157,8 +168,9 @@ class FakeNvimSession:
         self.ensure_calls += 1
         return self.ensure_result
 
-    def append(self, text: str) -> AppendResult:
+    def append(self, text: str, *, continued: bool = False) -> AppendResult:
         self.appended.append(text)
+        self.append_calls.append((text, continued))
         return self.append_result
 
     def set_state(

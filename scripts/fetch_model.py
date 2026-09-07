@@ -1,4 +1,4 @@
-"""Download the Parakeet TDT model files, then generate ``bpe.vocab``.
+"""Download the ASR and VAD models, then generate ``bpe.vocab``.
 
 Idempotent: a file already present with the correct remote size is skipped,
 so re-running repairs a partial download without re-fetching everything.
@@ -20,6 +20,11 @@ from voice_kb.config import Config
 HF_REPO = "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8"
 BASE_URL = f"https://huggingface.co/{HF_REPO}/resolve/main"
 MODEL_FILES = ("encoder.int8.onnx", "decoder.int8.onnx", "joiner.int8.onnx", "tokens.txt")
+
+#: Silero VAD, ~2 MB, taken from sherpa-onnx's own release assets rather than
+#: upstream: it is the build sherpa-onnx is tested against, and this project
+#: already depends on that vendor for the recogniser.
+VAD_URL = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx"
 
 _CHUNK_SIZE = 1 << 20  # 1 MiB
 _TIMEOUT_S = 30
@@ -78,7 +83,28 @@ def fetch(config_path: Path | None) -> int:
 
     write_bpe_vocab(asr.tokens, asr.bpe_vocab)
     print(f"wrote {asr.bpe_vocab}")
+
+    _fetch_vad(Config.load(config_path).vad.model)
     return 0
+
+
+def _fetch_vad(dest: Path) -> None:
+    """Fetch the VAD model, reporting rather than raising if it cannot.
+
+    The daemon degrades to whole-buffer decoding without this file, so a
+    failure here must not fail a run that has just downloaded 630 MB of
+    recogniser successfully.
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    remote_size = _remote_size(VAD_URL)
+    if dest.exists() and remote_size is not None and dest.stat().st_size == remote_size:
+        print(f"  {dest.name}: already present, skipping")
+        return
+    print(f"  {dest.name}: downloading from {VAD_URL}")
+    try:
+        _download(VAD_URL, dest)
+    except OSError as e:
+        print(f"  {dest.name}: FAILED ({e}) -- voice-kb will decode whole captures instead")
 
 
 def main() -> int:

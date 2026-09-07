@@ -193,8 +193,14 @@ class NvimSession:
 
     # ------------------------------------------------------------------ writing
 
-    def append(self, text: str) -> AppendResult:
-        """Append one committed utterance as its own paragraph, and save.
+    def append(self, text: str, *, continued: bool = False) -> AppendResult:
+        """Append committed text and save, as a new paragraph or extending one.
+
+        One utterance arrives as several calls, one per speech segment, so
+        that text lands while the rest is still decoding. ``continued=False``
+        starts the paragraph and every later segment of the same utterance
+        passes ``True``, which keeps "one utterance is one paragraph" true
+        while letting it grow a piece at a time.
 
         A *request*, not a notification: this is the one call whose failure
         the user must hear about, so it waits for nvim to confirm the new
@@ -204,7 +210,7 @@ class NvimSession:
             return AppendFailed(reason="not connected to nvim")
         start = time.monotonic()
         try:
-            line = int(self._nvim.exec_lua("return VoiceKb.append(...)", text))
+            line = int(self._nvim.exec_lua("return VoiceKb.append(...)", text, continued))
         except Exception as e:
             self._drop("append failed")
             return AppendFailed(reason=str(e))

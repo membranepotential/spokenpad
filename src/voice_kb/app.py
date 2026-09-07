@@ -105,6 +105,7 @@ from voice_kb.state import (
     step,
 )
 from voice_kb.text import postprocess
+from voice_kb.vad import Segment, SpeechSegmenter, load_segmenter
 
 log = logging.getLogger("voice-kb")
 
@@ -119,7 +120,8 @@ class _Worker(QObject):
 
     ready = Signal()
     prepare_failed = Signal(str)
-    decoded = Signal(str, float, int)  # text, elapsed, generation
+    decoded = Signal(str, float, int)  # full text, elapsed, generation
+    segment_decoded = Signal(str, int)  # one segment's text, generation
     decode_failed = Signal(str, int)
     previewed = Signal(str, int)  # text, generation
 
@@ -127,12 +129,17 @@ class _Worker(QObject):
         super().__init__()
         self._config = config
         self._transcriber: Transcriber | None = None
+        self._segmenter: SpeechSegmenter | None = None
         #: Set from the Qt thread, read on this worker thread. The *only*
         #: mutable state shared between the two -- everything else crosses by
         #: queued signal. It exists so a preview that is already queued when a
         #: committed decode becomes due is dropped instead of run, which is
         #: what keeps a cosmetic decode off the user's latency path.
         self._abandon_previews = threading.Event()
+        #: Set from the Qt thread when an in-flight decode is cancelled. Read
+        #: between segments so a cancelled long decode stops appending rather
+        #: than running to the end of a passage the user has abandoned.
+        self._abandon_decode = threading.Event()
 
     @property
     def abandon_previews(self) -> threading.Event:
@@ -142,6 +149,11 @@ class _Worker(QObject):
         is obvious at the call site that this is the one shared object.
         """
         return self._abandon_previews
+
+    @property
+    def abandon_decode(self) -> threading.Event:
+        """Set to stop a running decode after its current segment."""
+        return self._abandon_decode
 
     def prepare(self) -> None:
         """Load the model, then decode a moment of silence.
@@ -159,19 +171,48 @@ class _Worker(QObject):
         except Exception as e:
             self.prepare_failed.emit(str(e))
             return
+        # After the recogniser, and never fatal: a missing VAD model costs
+        # segmentation, not the daemon.
+        self._segmenter = load_segmenter(self._config.vad, self._config.audio.sample_rate)
         self.ready.emit()
 
     def run_decode(self, samples: MonoAudio, generation: int) -> None:
+        """Decode the capture segment by segment, emitting each as it lands.
+
+        Every sample is decoded exactly once, in one pass, after the key came
+        up -- no region is re-decoded as more audio arrives, which is the
+        property ``docs/constraints.md`` protects. Splitting first is a
+        correctness fix (see ``voice_kb.vad``) that happens to also let text
+        start appearing in a few hundred milliseconds instead of at the end.
+        """
         if self._transcriber is None:
             self.decode_failed.emit("model not loaded", generation)
             return
+        rate = self._config.audio.sample_rate
+        start = time.perf_counter()
         try:
-            result = self._transcriber.transcribe(samples, self._config.audio.sample_rate)
+            segments = (
+                self._segmenter.split(samples)
+                if self._segmenter is not None
+                else [Segment(samples=samples, start_seconds=0.0)]
+            )
+            texts: list[str] = []
+            for index, segment in enumerate(segments):
+                if self._abandon_decode.is_set():
+                    log.info(
+                        "decode cancelled after %d of %d segments", index, len(segments)
+                    )
+                    break
+                text = self._transcriber.transcribe(segment.samples, rate).text
+                if not text.strip():
+                    continue
+                texts.append(text)
+                self.segment_decoded.emit(text, generation)
         except Exception as e:
             log.exception("decode raised")
             self.decode_failed.emit(str(e), generation)
             return
-        self.decoded.emit(result.text, result.elapsed_seconds, generation)
+        self.decoded.emit(" ".join(texts), time.perf_counter() - start, generation)
 
     def run_preview(self, samples: MonoAudio, generation: int) -> None:
         """Decode the in-flight capture, for the indicators only.
@@ -230,8 +271,8 @@ class _NvimBridge(QObject):
         # in the log rather than an error, which is worse.
         self.opened.emit(str(self._session.path or "?"))
 
-    def append(self, text: str) -> None:
-        match self._session.append(text):
+    def append(self, text: str, continued: bool) -> None:
+        match self._session.append(text, continued=continued):
             case Appended(line=line, elapsed_ms=ms):
                 self.appended.emit(line, ms)
             case AppendFailed(reason=reason):
@@ -270,7 +311,7 @@ class Daemon(QObject):
     _preview_requested = Signal(object, int)
 
     _nvim_open_requested = Signal()
-    _nvim_append_requested = Signal(str)
+    _nvim_append_requested = Signal(str, bool)
     _nvim_phase_changed = Signal(object)
     _nvim_level = Signal(float)
     _nvim_preview = Signal(str)
@@ -297,6 +338,11 @@ class Daemon(QObject):
         #: When the current utterance's most recent preview was requested, and
         #: whether its cost has already been logged. Qt-thread-only.
         self._level_tick = 0
+        #: Whether the utterance being decoded has already appended a
+        #: paragraph. The *second* and later segments extend it rather than
+        #: starting a new one, so an utterance stays one paragraph however
+        #: many pieces it arrives in. Qt-thread-only, reset per decode.
+        self._utterance_started = False
         self._preview_requested_at = 0.0
         self._preview_seconds = 0.0
         self._preview_timed = False
@@ -324,6 +370,7 @@ class Daemon(QObject):
         self._worker.ready.connect(lambda: log.info("model ready"))
         self._worker.prepare_failed.connect(self._on_prepare_failed)
         self._worker.decoded.connect(self._on_decoded)
+        self._worker.segment_decoded.connect(self._on_segment_decoded)
         self._worker.decode_failed.connect(self._on_decode_failed)
         self._worker.previewed.connect(self._on_previewed)
 
@@ -442,6 +489,8 @@ class Daemon(QObject):
                 self._arm_previews()
             case Decode(spoken_seconds=spoken):
                 self._level_timer.stop()
+                self._utterance_started = False
+                self._worker.abandon_decode.clear()
                 # Before the decode is even requested: a preview already queued
                 # on the worker must be dropped, not run ahead of it.
                 self._abandon_previews()
@@ -455,6 +504,12 @@ class Daemon(QObject):
                 log.info("discarded capture (too short, or cancelled)")
             case AbortDecode():
                 self._abandon_previews()
+                # Stop the decode between segments as well as discarding its
+                # result. With text landing progressively, a cancellation can
+                # arrive after some of it is already in the buffer -- so it
+                # now means "stop adding", not "none of this happened". What
+                # is already written stays; it is the user's file.
+                self._worker.abandon_decode.set()
                 self._generation += 1
                 log.info("cancelled; in-flight decode will not be injected")
             case _:
@@ -757,9 +812,25 @@ class Daemon(QObject):
         log.debug("full transcript: %r", cleaned)
         if not cleaned.strip():
             log.warning("decode produced no text")
-        else:
-            self._nvim_append_requested.emit(cleaned)
         self._dispatch(DecodeFinished(at=time.monotonic()))
+
+    def _on_segment_decoded(self, text: str, generation: int) -> None:
+        """Put one segment's text in the buffer, without waiting for the rest.
+
+        The first segment of an utterance opens a paragraph and the rest
+        extend it, so what the user sees is a paragraph growing rather than
+        several appearing. Nothing here can run ahead of itself: appends cross
+        to the bridge thread on a queued signal, so they land in the order
+        this method emitted them.
+        """
+        if generation != self._generation:
+            log.debug("dropping a segment from a cancelled session")
+            return
+        cleaned = postprocess(text, self._config.text)
+        if not cleaned.strip():
+            return
+        self._nvim_append_requested.emit(cleaned, self._utterance_started)
+        self._utterance_started = True
 
     def _on_decode_failed(self, reason: str, generation: int) -> None:
         if generation == self._generation:

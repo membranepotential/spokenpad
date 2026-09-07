@@ -11,6 +11,9 @@ For recording long passages while reading something else.
   file per window. Nothing pasted anywhere; `inject.py` deleted.
 - **Used live, German and English, hold and latch.** Daily-use shape.
 - ruff + mypy --strict + **139 tests** green, incl. 12 driving a real nvim.
+- **In flight (2026-09-07):** empty-transcript fix + incremental decode (VAD),
+  preview persisting through decode, smoother/faster window open, and pulling
+  the i3 + nvim config into the repo. Four commits, main session.
 
 ## Done
 - Rejected Handy 0.9.6 (README); every change reverted. v1 built and reviewed,
