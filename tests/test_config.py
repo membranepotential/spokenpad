@@ -360,3 +360,41 @@ def test_spawning_the_editor_directly_announces_no_instance() -> None:
     """Nothing communicates the instance name, so there is no window for the
     manager rules to match and none for voice-kb to wait for."""
     assert NvimConfig(terminal=()).announces_instance is False
+
+
+def test_bundled_is_a_named_value_not_a_path() -> None:
+    """A user config should not have to name a checkout directory that may
+    move -- the file lives inside the installed package. nvim's own ``-u NONE``
+    is the same idea."""
+    cfg = Config.from_mapping({"nvim": {"init": "bundled"}}).nvim
+
+    assert cfg.resolved_init == cfg.bundled_init
+    assert cfg.resolved_init.exists()
+
+
+def test_resolving_init_when_it_is_unset_is_a_bug_not_a_default() -> None:
+    """Unset means "pass no -u at all", which is a different thing from "use
+    some default file". Silently returning one would hide the distinction."""
+    with pytest.raises(ConfigError, match=re.escape("nvim.init is unset")):
+        _ = NvimConfig().resolved_init
+
+
+def test_a_colorscheme_is_applied_in_a_way_that_works_under_either_config() -> None:
+    """The bundled config defines the loader that finds the scheme among
+    installed plugins; a user's own config already has its theme loaded. One
+    command has to cover both, and must never leave a message waiting for a
+    keypress in a window that cannot take focus."""
+    argv = NvimConfig(colorscheme="tokyonight-moon").spawn_argv(
+        socket=Path("/tmp/x.sock"), target=Path("/tmp/x.md"), at=None
+    )
+
+    command = argv[argv.index("-c") + 1]
+    assert "VoiceKbColorscheme" in command
+    assert "pcall" in command
+    assert "tokyonight-moon" in command
+
+
+def test_no_colorscheme_adds_no_command() -> None:
+    argv = NvimConfig().spawn_argv(socket=Path("/tmp/x.sock"), target=Path("/tmp/x.md"), at=None)
+
+    assert "-c" not in argv

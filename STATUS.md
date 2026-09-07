@@ -11,7 +11,7 @@ For recording long passages while reading something else.
 - **Used live, German and English, hold and latch.** ruff + mypy --strict +
   **175 tests** green, incl. 18 driving a real nvim.
 - **Self-contained:** `scripts/install.py` symlinks the i3 rules and systemd
-  unit out of `packaging/`. Window uses the user's nvim config (reverted).
+  unit out of `packaging/`.
 
 ## Done
 - nvim sink: pointer-anchored one-third window, winbar indicator, preview as
@@ -20,7 +20,8 @@ For recording long passages while reading something else.
 - **VAD chunking** (`vad.py`): fixes short utterances decoding to nothing;
   transcript lands progressively; previews decode only the open tail.
 - **Window open:** placed by the terminal, msgpack readiness probe, X warm-up
-  at start. Runs the user's own nvim config. Never moves once open.
+  at start. Never moves once open. `nvim.init = "bundled"` + `colorscheme`
+  opens in 0.23s against 0.73s for full LazyVim, same theme.
 - **systemd `--user` unit**, enabled, `WantedBy=i3-session.target`.
 
 ## Measured (i7-9850H, 6 threads, CPU, 0 VRAM)

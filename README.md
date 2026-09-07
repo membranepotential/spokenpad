@@ -62,7 +62,7 @@ this replaces managed 1.37× on the same hardware and silently discarded the
 | | |
 |---|---|
 | VRAM used | none |
-| dictation window, cold open | ~820 ms with your nvim config, off the latency path (92 ms to reattach) |
+| dictation window, cold open | 0.21 s bundled nvim config, 0.73 s with a full LazyVim; off the latency path |
 | append to the buffer | 19-62 ms |
 
 ## Setup
@@ -86,11 +86,13 @@ step and no copy to drift; `--copy` installs independent copies instead. It is
 idempotent, it refuses to overwrite a file it did not write, it warns if your
 i3 config has no `include i3.d/*.conf` line, and `--uninstall` removes both.
 
-The dictation window runs **your** nvim configuration by default — your
-colourscheme, your keybindings, your yank flash — while voice-kb strips the
-chrome and sets prose wrapping over RPC regardless. A self-contained fallback
-config ships at `src/voice_kb/dictation_init.lua` for a machine without one;
-point `nvim.init` at it. See [docs/nvim-window.md](docs/nvim-window.md).
+The dictation window runs **your** nvim configuration by default. It opens
+3x faster on the bundled one (`nvim.init = "bundled"`) and still looks like
+your editor if you name your theme (`nvim.colorscheme`), since only that one
+plugin is loaded — measured both ways in
+[docs/nvim-window.md](docs/nvim-window.md). Either way voice-kb strips the
+chrome and sets prose wrapping over RPC, and writes committed text with
+`noautocmd` so a format-on-save cannot reflow a transcript.
 
 The unit assumes the checkout is at `~/Documents/voice-kb`; edit
 `WorkingDirectory`/`ExecStart` if it is not, and `WantedBy` if your session

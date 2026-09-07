@@ -23,6 +23,11 @@
 -- committed text is written with `noautocmd`, so a format-on-save cannot
 -- reflow dictated prose whatever the user's config does on write.
 
+-- Neovim's Lua bytecode cache. Free, and it is the first line of any config
+-- that cares about startup: modules are compiled once and loaded from
+-- $XDG_CACHE_HOME/nvim/luacache_chunks afterwards.
+vim.loader.enable()
+
 -- No chrome. The winbar is the whole UI: voice-kb draws the recording
 -- indicator and level meter there, and the preview hangs below the text as
 -- virtual lines. Everything else is noise in a window you are not editing in.
@@ -110,6 +115,38 @@ vim.api.nvim_create_autocmd("ColorScheme", {
   group = group,
   callback = inherit_terminal_background,
 })
+
+--- Load a colourscheme by name from wherever a plugin manager put it.
+---
+--- Only the one directory that actually provides it is added to the
+--- runtimepath -- not every installed plugin -- so this brings in the colours
+--- without the plugin scripts, autocommands or format-on-save that come with
+--- loading a whole configuration. Measured against this user's LazyVim setup:
+--- 0.78s to open the window with everything, 0.30s with just the theme.
+---
+--- Asking for a theme by name means wanting it whole, background included, so
+--- the terminal-inheriting autocommand is dropped when one loads.
+function _G.VoiceKbColorscheme(name)
+  local data = vim.fn.stdpath("data")
+  for _, pattern in ipairs({
+    data .. "/lazy/*/colors/" .. name .. ".*",
+    data .. "/site/pack/*/start/*/colors/" .. name .. ".*",
+    data .. "/site/pack/*/opt/*/colors/" .. name .. ".*",
+  }) do
+    local found = vim.fn.glob(pattern, false, true)
+    if #found > 0 then
+      vim.opt.runtimepath:append(vim.fn.fnamemodify(found[1], ":h:h"))
+      break
+    end
+  end
+  vim.api.nvim_clear_autocmds({ group = group, event = "ColorScheme" })
+  if not pcall(vim.cmd.colorscheme, name) then
+    -- Never a visible error: this window cannot take focus, so a message
+    -- waiting for a keypress in it would sit there unanswerable.
+    vim.notify("voice-kb: colourscheme " .. name .. " not found", vim.log.levels.WARN)
+    inherit_terminal_background()
+  end
+end
 
 -- Flash what you just yanked, the way nvim's own default configuration does.
 -- Built in (`vim.hl.on_yank`), no plugin: copying a line out of a transcript

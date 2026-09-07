@@ -153,17 +153,31 @@ replacements = {}
 trailing_space = false
 
 [nvim]
-# nvim config for the dictation window. Commented out -- the default -- means
-# nvim resolves its own, i.e. yours: your colourscheme, your keybindings, your
-# yank flash. The window is an editor and people want their editor.
+# nvim config for the dictation window.
 #
-# voice-kb still strips the chrome and sets prose wrapping over RPC whatever
-# config is loaded, and writes committed text with `noautocmd` so a
-# format-on-save cannot reflow a transcript.
+#   unset       your own ~/.config/nvim -- everything you have, and its cost
+#   "bundled"   voice-kb's own: no plugins, chrome off before the first frame
+#   "NONE"      a bare nvim
+#   <a path>    that file
 #
-# Point this at src/voice_kb/dictation_init.lua for a self-contained window on
-# a machine with no nvim config of its own; "NONE" gives a bare one.
-# init = "NONE"
+# Measured on a full LazyVim setup, key-down to a placed window answering RPC:
+# 0.73s unset against 0.21s bundled. The window is for watching a transcript
+# land rather than for editing, so a whole plugin set is startup cost with
+# little to show for it -- and the two things it did show for it survive
+# `bundled`: the yank flash is built into nvim, and `colorscheme` below loads
+# a theme without the configuration it normally lives in (0.23s with one).
+#
+# voice-kb strips the chrome and sets prose wrapping over RPC whatever is
+# loaded, and writes committed text with `noautocmd` so a format-on-save
+# cannot reflow a transcript.
+# init = "bundled"
+
+# Colourscheme for the window. With init = "bundled" this is what still makes
+# it look like your editor: only the one plugin directory providing the named
+# scheme is put on the runtimepath, so the colours arrive without the startup
+# cost of everything around them. Harmless with a full config, where it just
+# switches theme.
+# colorscheme = "tokyonight-moon"
 # Where the transcript goes: a floating neovim window, appended to over its
 # msgpack-RPC socket. Nothing is ever pasted into the window you are working
 # in, and no keystrokes are synthesised anywhere -- see docs/constraints.md.

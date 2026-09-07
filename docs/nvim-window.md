@@ -148,32 +148,44 @@ When previews stop (past `preview.max_seconds`) the winbar says
 long passage reads as lost audio rather than as a cost control — which is
 exactly how it was first reported.
 
-**It is your neovim.** `nvim.init` is unset by default, so the window runs
-your own configuration: your colourscheme, your keybindings, your yank flash.
+**Which nvim runs it is a choice, and the trade is measured.** `nvim.init`
+selects between three, and the numbers below are key-down to a placed window
+answering RPC, median of three, on a full LazyVim setup:
 
-This was tried the other way round first. A bundled config was the default for
-one afternoon and the verdict from use was plain — it never looked like the
-user's neovim, and every missing habit had to be reimplemented in it one at a
-time to no real end. A dictation window is still an editor, and people want
-their editor. The bundled `dictation_init.lua` survives as a fallback for a
-machine with no nvim configuration, and as the written-down statement of what
-this window needs; point `nvim.init` at it, or at `"NONE"` for a bare window.
+| `nvim.init` | opens in | theme | yank flash |
+|---|---|---|---|
+| unset (your `~/.config/nvim`) | **0.73 s** | yours | yours |
+| `"bundled"` | **0.21 s** | none | built-in |
+| `"bundled"` + `nvim.colorscheme` | **0.23 s** | yours | built-in |
 
-What voice-kb still enforces itself, so it holds under any configuration:
+The default is unset, because a dictation window is still an editor and people
+want their editor -- a bundled config was the default for one afternoon and
+never looked like the user's neovim. But the third row is what that argument
+was actually reaching for: the window is for *watching a transcript land*, not
+for editing, so a whole plugin set is startup cost with little to show for it,
+and the two things it did show for it both survive without it. The yank flash
+is built into nvim (`vim.hl.on_yank`), and `nvim.colorscheme` puts only the
+one directory providing the named scheme onto the runtimepath -- the colours,
+without the configuration they normally live in.
 
-- **The chrome comes off** — status line, tab line, line numbers, sign column,
-  fold column, cursorline — applied over RPC once attached and re-applied on
-  `BufWinEnter`/`WinNew`/`FileType`, because a plugin reacting to those events
-  would otherwise put it back.
+Neither of the fast rows is a default this project can pick, because the
+colourscheme name is the user's. `config.example.toml` documents the recipe.
+
+What voice-kb enforces itself, so it holds under any of them:
+
+- **The chrome comes off** -- status line, tab line, line numbers, sign
+  column, fold column, cursorline -- applied over RPC once attached and
+  re-applied on `BufWinEnter`/`WinNew`/`FileType`, because a plugin reacting
+  to those events would otherwise put it back.
 - **Prose wrapping** (`wrap`, `linebreak`) per window, so a long utterance
   reads as a paragraph and never splits mid-word.
 - **Committed text is written with `noautocmd`**, so a format-on-save cannot
   reflow dictated prose behind your back on the write after every utterance.
 
-The cost is a visible one, and it is the reason the bundled config existed:
-the window paints your normal editor for a moment before the chrome comes off,
-because that happens after nvim answers RPC rather than before it draws. The
-trade was made deliberately, in that direction.
+One visible cost belongs to the slow row only: with a full config the window
+paints a normal editor for a moment before the chrome comes off, because that
+happens after nvim answers RPC rather than before it draws. `"bundled"` has
+the chrome off in its first frame.
 
 ## Startup cost
 

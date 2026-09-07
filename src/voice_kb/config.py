@@ -277,6 +277,12 @@ class TextConfig:
     trailing_space: bool = False
 
 
+#: ``nvim.init`` value selecting voice-kb's own config, resolved from the
+#: installed package. A named value rather than a path because the file lives
+#: inside the package and a user config should not have to name a checkout
+#: directory that may move. nvim's own ``-u NONE`` is the same idea.
+BUNDLED_INIT = "bundled"
+
 _INSTANCE_PLACEHOLDER = "{instance}"
 _X_PLACEHOLDER = "{x}"
 _Y_PLACEHOLDER = "{y}"
@@ -366,8 +372,23 @@ class NvimConfig:
     is written with ``noautocmd``, so a format-on-save cannot reflow dictated
     prose behind the user's back either.
 
-    Point this at :attr:`bundled_init` for a self-contained window on a
-    machine with no nvim configuration, or at ``"NONE"`` for a bare one.
+    ``"bundled"`` selects voice-kb's own config instead: no plugins, chrome
+    off before the first frame, and **0.30 s to open the window against 0.78 s
+    for a full LazyVim setup** -- with :attr:`colorscheme` it still gets the
+    user's theme, because only that one plugin is put on the runtimepath.
+    ``"NONE"`` gives a bare nvim. Any other value is a path to a config file.
+    """
+
+    colorscheme: str | None = None
+    """Colourscheme to load in the dictation window. ``None`` changes nothing.
+
+    Mainly for use with ``init = "bundled"``, where it is what makes a
+    plugin-free window still look like the user's editor: the one directory
+    providing the named scheme is added to the runtimepath, and nothing else
+    is, so the colours arrive without the startup cost of the configuration
+    they normally live in.
+
+    Harmless with a full config loaded, where it simply switches theme.
     """
 
     window_instance: str = "voice-kb"
@@ -463,8 +484,26 @@ class NvimConfig:
             functools.reduce(lambda a, kv: a.replace(*kv), substitutions.items(), arg)
             for arg in self.terminal
         ]
-        init = ["-u", str(self.init)] if self.init is not None else []
-        return [*terminal, *self.editor, *init, "--listen", str(socket), str(target)]
+        init = ["-u", str(self.resolved_init)] if self.init is not None else []
+        theme = ["-c", _colorscheme_command(self.colorscheme)] if self.colorscheme else []
+        return [
+            *terminal,
+            *self.editor,
+            *init,
+            *theme,
+            "--listen",
+            str(socket),
+            str(target),
+        ]
+
+    @property
+    def resolved_init(self) -> Path:
+        """:attr:`init` with ``"bundled"`` resolved to the packaged file."""
+        if self.init is None:
+            raise ConfigError("nvim.init is unset; there is nothing to resolve")
+        if str(self.init) == BUNDLED_INIT:
+            return self.bundled_init
+        return self.init
 
     @property
     def bundled_init(self) -> Path:
@@ -666,6 +705,21 @@ def _resolve_model_dir(section: Mapping[str, Any], base_dir: Path | None) -> Map
     if not model_dir.is_absolute() and base_dir is not None:
         model_dir = base_dir / model_dir
     return {**section, "model_dir": model_dir}
+
+
+def _colorscheme_command(name: str) -> str:
+    """A ``-c`` command that applies ``name`` under either kind of config.
+
+    The bundled config defines ``VoiceKbColorscheme``, which finds the scheme
+    among installed plugins and puts only its directory on the runtimepath. A
+    user's own config already has its theme loaded, so a plain ``colorscheme``
+    is right there -- and ``pcall`` because a window that cannot take focus
+    must never be left showing a message waiting for a keypress.
+    """
+    return (
+        f"lua if _G.VoiceKbColorscheme then VoiceKbColorscheme({name!r}) "
+        f"else pcall(vim.cmd.colorscheme, {name!r}) end"
+    )
 
 
 def _resolve_vad_model(section: Mapping[str, Any], base_dir: Path | None) -> Mapping[str, Any]:
