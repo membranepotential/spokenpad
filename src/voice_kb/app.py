@@ -226,7 +226,9 @@ class _NvimBridge(QObject):
             self.open_failed.emit()
             return
         self._session.raise_window()
-        self.opened.emit(str(self._session.path))
+        # ensure() succeeded, so there is a path; str(None) would be a lie
+        # in the log rather than an error, which is worse.
+        self.opened.emit(str(self._session.path or "?"))
 
     def append(self, text: str) -> None:
         match self._session.append(text):

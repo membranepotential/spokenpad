@@ -243,12 +243,17 @@ class NvimConfig:
     dictation_dir: Path = field(default_factory=lambda: xdg_state_home() / "voice-kb" / "dictation")
     """Directory holding the dated dictation files."""
 
-    file_template: str = "dictation-%Y-%m-%d.md"
-    """:meth:`~datetime.date.strftime` template for the file name.
+    file_template: str = "dictation-%Y-%m-%d-%H%M%S.md"
+    """:meth:`~datetime.datetime.strftime` template for the file name.
 
-    A file per day, on disk, saved after every utterance: a transcript that
-    disappears because a scratch buffer was closed is the same failure as one
-    dropped by a streaming decoder.
+    A file per *window*, on disk, saved after every utterance. Closing the
+    window ends the passage; the next dictation starts a new file rather than
+    appending under everything said earlier. Include a time, not just a date,
+    or two sessions on the same day will share a page.
+
+    On disk rather than in a scratch buffer, because a transcript that
+    disappears because a buffer was closed is the same failure as one dropped
+    by a streaming decoder.
     """
 
     window_fraction: float = 0.5

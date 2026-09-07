@@ -127,7 +127,13 @@ window_instance = "voice-kb"
 socket_path = "/run/user/1000/voice-kb-nvim.sock"
 
 # Directory holding the dictation files, and the strftime template for their
-# names -- one file per day, saved after every single utterance.
+# names -- one file per WINDOW, saved after every single utterance.
+#
+# Closing the dictation window ends the passage: the next time you record,
+# voice-kb opens a new window on a new file rather than appending under
+# everything you said an hour ago. While the window stays open every utterance
+# goes into it, across a daemon restart included. Include a time in the
+# template, not just a date, or two sessions in one day share a page.
 #
 # A real file rather than a scratch buffer, deliberately: a transcript that
 # disappears because a buffer was closed is the same class of failure as one
@@ -136,7 +142,7 @@ socket_path = "/run/user/1000/voice-kb-nvim.sock"
 # dictation_dir defaults to $XDG_STATE_HOME/voice-kb/dictation, and to
 # ~/.local/state/voice-kb/dictation when XDG_STATE_HOME is unset.
 dictation_dir = "~/.local/state/voice-kb/dictation"
-file_template = "dictation-%Y-%m-%d.md"
+file_template = "dictation-%Y-%m-%d-%H%M%S.md"
 
 # How long to wait for a freshly spawned nvim to start listening.
 startup_timeout_s = 5.0

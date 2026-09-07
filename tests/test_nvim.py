@@ -15,7 +15,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 from collections.abc import Callable, Iterator
-from datetime import date
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -26,7 +26,21 @@ from voice_kb.state import Phase
 
 pytestmark = pytest.mark.skipif(shutil.which("nvim") is None, reason="nvim is not installed")
 
-_TODAY = date(2026, 1, 15)
+_START = datetime(2026, 1, 15, 9, 30, 0)
+
+
+def _clock_from(*moments: datetime) -> Callable[[], datetime]:
+    """A clock returning each moment once, then repeating the last.
+
+    Every *spawn* stamps a new file name, so a test that opens two windows
+    needs two distinct moments to tell the two files apart.
+    """
+    remaining = list(moments)
+
+    def _now() -> datetime:
+        return remaining.pop(0) if len(remaining) > 1 else remaining[0]
+
+    return _now
 
 
 @pytest.fixture
@@ -63,8 +77,12 @@ def make_session(nvim_config: NvimConfig) -> Iterator[Callable[..., NvimSession]
     """
     created: list[NvimSession] = []
 
-    def _make(config: NvimConfig | None = None, *, today: date | None = None) -> NvimSession:
-        session = NvimSession(config or nvim_config, today=today or _TODAY)
+    def _make(
+        config: NvimConfig | None = None,
+        *,
+        clock: Callable[[], datetime] | None = None,
+    ) -> NvimSession:
+        session = NvimSession(config or nvim_config, clock=clock or _clock_from(_START))
         created.append(session)
         return session
 
@@ -81,17 +99,29 @@ def make_session(nvim_config: NvimConfig) -> Iterator[Callable[..., NvimSession]
                 process.kill()
 
 
+def _read(session: NvimSession) -> str:
+    """The dictation file's contents. Asserts there is one, so a test that
+    silently lost its path fails on that rather than on a confusing None."""
+    assert session.path is not None
+    return session.path.read_text(encoding="utf-8")
+
+
 # -- lifecycle -----------------------------------------------------------------
 
 
-def test_ensure_spawns_connects_and_opens_todays_file(
+def test_ensure_spawns_connects_and_opens_a_timestamped_file(
     make_session: Callable[..., NvimSession],
 ) -> None:
     session = make_session()
+    # Bound to a local: asserting on the property itself narrows it to None
+    # for the rest of the function, and every later assertion goes unchecked.
+    before = session.path
+    assert before is None, "no file until a window has been opened"
 
     assert session.ensure() is True
     assert session.connected is True
-    assert session.path.name == "dictation-2026-01-15.md"
+    assert session.path is not None
+    assert session.path.name == "dictation-2026-01-15-093000.md"
     assert session.path.parent == session._config.dictation_dir
 
 
@@ -183,6 +213,7 @@ def test_append_lands_on_disk(make_session: Callable[..., NvimSession]) -> None:
     result = session.append("hello world")
 
     assert isinstance(result, Appended)
+    assert session.path is not None
     assert session.path.read_text(encoding="utf-8") == "hello world\n"
 
 
@@ -196,7 +227,7 @@ def test_two_appends_are_one_blank_line_apart_with_no_leading_blank(
     session.append("second utterance")
 
     assert (
-        session.path.read_text(encoding="utf-8")
+        _read(session)
         == "first utterance\n\nsecond utterance\n"
     )
 
@@ -244,7 +275,7 @@ def test_preview_is_virtual_text_never_buffer_content_or_file_content(
 
     lines = nvim.api.buf_get_lines(buf, 0, -1, False)
     assert "not committed" not in "\n".join(lines)
-    assert "not committed" not in session.path.read_text(encoding="utf-8")
+    assert "not committed" not in _read(session)
 
     ns = nvim.api.create_namespace("voice_kb")
     extmarks = nvim.api.buf_get_extmarks(buf, ns, 0, -1, {"details": True})
@@ -253,3 +284,62 @@ def test_preview_is_virtual_text_never_buffer_content_or_file_content(
     virt_lines = details["virt_lines"]
     rendered = "".join(chunk[0] for line in virt_lines for chunk in line)
     assert "not committed" in rendered
+
+
+# -- one file per window -------------------------------------------------------
+
+
+def test_a_second_window_starts_a_new_file(
+    make_session: Callable[..., NvimSession], nvim_config: NvimConfig
+) -> None:
+    """A closed window ends the passage. The next dictation must open a clean
+    page rather than appending under everything said earlier -- which is the
+    behaviour that made the day-long file wrong.
+    """
+    first = make_session(clock=_clock_from(_START))
+    assert first.ensure() is True
+    first.append("from the first window")
+    first_path = first.path
+    assert first_path is not None
+
+    # The user closes the window; the daemon keeps running.
+    process = first._process
+    assert process is not None
+    process.terminate()
+    process.wait(timeout=5)
+    first.close()
+    nvim_config.socket_path.unlink(missing_ok=True)
+
+    later = _START.replace(hour=14, minute=5, second=1)
+    second = make_session(clock=_clock_from(later))
+    assert second.ensure() is True
+    second.append("from the second window")
+
+    assert second.path is not None
+    assert second.path != first_path
+    assert second.path.name == "dictation-2026-01-15-140501.md"
+    assert "from the first window" not in _read(second)
+    assert first_path.read_text(encoding="utf-8") == "from the first window\n"
+
+
+def test_reattaching_adopts_the_open_buffer_instead_of_starting_a_new_file(
+    make_session: Callable[..., NvimSession],
+) -> None:
+    """While the window is open the passage continues -- across a daemon
+    restart included. Opening a second file underneath a window the user is
+    still reading would split one passage across two places.
+    """
+    first = make_session(clock=_clock_from(_START))
+    assert first.ensure() is True
+    first.append("before the restart")
+    original = first.path
+    assert original is not None
+    first.close()  # detaches; deliberately leaves the nvim running
+
+    # A fresh daemon, with a clock that would name a different file.
+    restarted = make_session(clock=_clock_from(_START.replace(hour=16)))
+    assert restarted.ensure() is True
+    restarted.append("after the restart")
+
+    assert restarted.path == original
+    assert _read(restarted) == "before the restart\n\nafter the restart\n"

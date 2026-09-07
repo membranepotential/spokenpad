@@ -17,11 +17,17 @@ focus-steal this project already forbids for the overlay.
 
 The file
 --------
-The buffer is a real dated file under
+The buffer is a real timestamped file under
 :attr:`NvimConfig.dictation_dir`, saved after every committed utterance.
 A dictation that vanishes because a scratch buffer was closed is the same
 class of failure as one dropped by a streaming decoder, and this project
 exists to eliminate it.
+
+One file **per window**, not per day. Closing the window ends the passage, and
+the next dictation opens a new window on a new file rather than appending
+under everything said an hour ago. While the window stays open every utterance
+goes into it, including across a daemon restart -- reattaching adopts the
+buffer that is on screen instead of opening a second file underneath it.
 
 Reconnection
 ------------
@@ -40,8 +46,9 @@ import socket
 import subprocess
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date
+from datetime import datetime
 from importlib import resources
 from pathlib import Path
 from typing import Any, Final
@@ -63,6 +70,25 @@ _READY_PROBE_S: Final = 2.0
 _OPEN_BUFFER_LUA: Final = """
 vim.cmd.edit(vim.fn.fnameescape(...))
 return vim.api.nvim_get_current_buf()
+"""
+
+_ADOPT_BUFFER_LUA: Final = """
+-- Find a dictation buffer this nvim already holds, so reattaching to a window
+-- the user still has open keeps writing where they can see it, instead of
+-- opening a second file underneath them. Matched on the dictation directory
+-- rather than an exact name: the running window may have been opened by an
+-- earlier daemon, with an earlier timestamp in its file name.
+local dir = ...
+for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+  if vim.api.nvim_buf_is_loaded(buf) then
+    local name = vim.api.nvim_buf_get_name(buf)
+    if name:sub(1, #dir) == dir then
+      vim.cmd.edit(vim.fn.fnameescape(name))
+      return { vim.api.nvim_get_current_buf(), name }
+    end
+  end
+end
+return nil
 """
 
 _PHASE_NAMES: Final[dict[Phase, str]] = {
@@ -104,11 +130,12 @@ class NvimSession:
     :mod:`voice_kb.app`, the same way the recogniser is owned by the worker.
     """
 
-    def __init__(self, config: NvimConfig, *, today: date | None = None) -> None:
+    def __init__(self, config: NvimConfig, *, clock: Callable[[], datetime] | None = None) -> None:
         self._config = config
-        self._today = today or date.today()
+        self._clock = clock or datetime.now
         self._nvim: Any | None = None
         self._buffer: int | None = None
+        self._path: Path | None = None
         self._process: subprocess.Popen[bytes] | None = None
 
     # ------------------------------------------------------------------ queries
@@ -118,16 +145,29 @@ class NvimSession:
         return self._nvim is not None
 
     @property
-    def path(self) -> Path:
-        """The dated file this session dictates into."""
-        return self._config.dictation_dir / self._today.strftime(self._config.file_template)
+    def path(self) -> Path | None:
+        """The file this session is dictating into, once there is one.
+
+        ``None`` until a window has been opened. A *file per window*, not per
+        day: a closed window means the passage is finished, and the next one
+        starts on a clean page rather than under everything said earlier. The
+        old file stays on disk -- a fresh start is not the same as discarding
+        the previous transcript.
+        """
+        return self._path
+
+    def _new_path(self) -> Path:
+        return self._config.dictation_dir / self._clock().strftime(self._config.file_template)
 
     # ---------------------------------------------------------------- lifecycle
 
     def ensure(self) -> bool:
-        """Make sure a dictation nvim is up and bound to today's file.
+        """Make sure a dictation nvim is up and bound to a dictation buffer.
 
         Reattaches to a live socket if there is one, spawns a terminal if not.
+        Reattaching *adopts* the buffer the window already shows; spawning
+        starts a new file. That is the whole rule: an open window continues
+        the passage, a closed one ends it.
         Returns whether the session is usable; every failure is logged here
         rather than raised, because a dictation that cannot reach nvim must
         still leave the daemon running (and the text in the log) instead of
@@ -219,9 +259,23 @@ class NvimSession:
         self._i3("move workspace current")
 
     def place_window(self, rect: Rect) -> None:
-        """Size and position a freshly opened window. Called once, on spawn."""
+        """Float, size and position a freshly opened window. Once, on spawn.
+
+        ``floating enable`` is repeated here even though the window manager
+        rule already says it. i3 evaluates ``for_window`` when it takes the
+        window over, so a terminal that sets ``WM_CLASS`` late enough loses
+        the match and tiles instead -- pushing the user's work aside, which is
+        the one thing this window must never do. Saying it again once the
+        window certainly exists is idempotent and costs nothing, and it also
+        means placement is correct on a fresh machine before anyone has copied
+        the i3 rules in.
+
+        ``no_focus`` has no such fallback: it is genuinely only expressible as
+        a window manager rule, and there is no focus command in this project
+        to emulate it with.
+        """
         self._i3(
-            f"resize set {rect.width} {rect.height}, "
+            f"floating enable, resize set {rect.width} {rect.height}, "
             f"move position {rect.x} {rect.y}"
         )
 
@@ -322,16 +376,23 @@ class NvimSession:
             )
             self._config.socket_path.unlink(missing_ok=True)
             return False
-        self._bind(nvim)
+        if not self._adopt(nvim):
+            # A live nvim with no dictation buffer in it -- the user closed the
+            # file but kept the editor. Give them a fresh page rather than
+            # resurrecting the one they closed.
+            self._bind(nvim, self._new_path())
         log.info("reattached to the dictation nvim on %s", self._config.socket_path)
         return True
 
     def _spawn_and_attach(self) -> bool:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        # A new window is a new page. The timestamp is taken here, once, so
+        # every append for the life of this window goes to the same file.
+        target = self._new_path()
+        target.parent.mkdir(parents=True, exist_ok=True)
         self._config.socket_path.parent.mkdir(parents=True, exist_ok=True)
         self._config.socket_path.unlink(missing_ok=True)
 
-        argv = self._config.spawn_argv(socket=self._config.socket_path, target=self.path)
+        argv = self._config.spawn_argv(socket=self._config.socket_path, target=target)
         log.info("opening the dictation window: %s", " ".join(argv))
         try:
             process = subprocess.Popen(
@@ -352,7 +413,7 @@ class NvimSession:
         nvim = self._wait_for_socket(process)
         if nvim is None:
             return False
-        self._bind(nvim)
+        self._bind(nvim, target)
         placement = self._placement()
         if placement is not None:
             self.place_window(placement)
@@ -408,19 +469,39 @@ class NvimSession:
         )
         return None
 
-    def _bind(self, nvim: Any) -> None:
-        """Load the Lua half, open today's file, and point the indicator at it.
+    def _bind(self, nvim: Any, path: Path) -> None:
+        """Load the Lua half, open ``path``, and point the indicator at it.
 
-        Runs on every connection, including reattachment, so a nvim that was
-        started yesterday picks up today's file and a freshly reloaded
-        indicator rather than silently appending to the wrong buffer.
+        The Lua source is re-sent on every connection, including reattachment,
+        so a window opened by an earlier daemon picks up the current indicator
+        rather than whatever version it was started with.
         """
         nvim.exec_lua(_indicator_source())
-        buffer = int(nvim.exec_lua(_OPEN_BUFFER_LUA, str(self.path)))
+        buffer = int(nvim.exec_lua(_OPEN_BUFFER_LUA, str(path)))
         nvim.exec_lua("VoiceKb.setup(...)", buffer)
         self._nvim = nvim
         self._buffer = buffer
-        log.info("dictating into %s (buffer %d)", self.path, buffer)
+        self._path = path
+        log.info("dictating into %s (buffer %d)", path, buffer)
+
+    def _adopt(self, nvim: Any) -> bool:
+        """Bind to the dictation buffer a running window already shows.
+
+        Reattachment must not start a new page: the window being open is
+        exactly the case where the user is still working on the passage in it.
+        Only a *closed* window means the previous transcript is finished.
+        """
+        nvim.exec_lua(_indicator_source())
+        found = nvim.exec_lua(_ADOPT_BUFFER_LUA, str(self._config.dictation_dir))
+        if not found:
+            return False
+        buffer, name = int(found[0]), str(found[1])
+        nvim.exec_lua("VoiceKb.setup(...)", buffer)
+        self._nvim = nvim
+        self._buffer = buffer
+        self._path = Path(name)
+        log.info("adopted the open dictation buffer %s (buffer %d)", name, buffer)
+        return True
 
     def _drop(self, why: str) -> None:
         """Forget the connection so the next :meth:`ensure` rebuilds it."""
@@ -432,3 +513,7 @@ class NvimSession:
                 self._nvim.close()
         self._nvim = None
         self._buffer = None
+        # The path goes too. It is re-decided on the next connection: adopted
+        # from a window that is still open, or freshly timestamped for a new
+        # one. Keeping it here would let a closed window's file be reopened.
+        self._path = None

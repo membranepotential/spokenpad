@@ -7,7 +7,8 @@ no subprocess, no X server. See ``conftest.py`` for how they get wired in.
 
 from __future__ import annotations
 
-from datetime import date
+from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -129,9 +130,11 @@ class FakeNvimSession:
     reason ``NvimSession`` reports those as values instead of raising.
     """
 
-    def __init__(self, config: NvimConfig | None = None, *, today: date | None = None) -> None:
+    def __init__(
+        self, config: NvimConfig | None = None, *, clock: Callable[[], datetime] | None = None
+    ) -> None:
         self.config = config
-        self.today = today
+        self.clock = clock
         self.appended: list[str] = []
         self.states: list[dict[str, Phase | float | str]] = []
         self.ensure_calls = 0
@@ -143,7 +146,7 @@ class FakeNvimSession:
         self._path = Path("/tmp/voice-kb-test/dictation-fake.md")
 
     @property
-    def path(self) -> Path:
+    def path(self) -> Path | None:
         return self._path
 
     @property

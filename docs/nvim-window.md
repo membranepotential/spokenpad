@@ -88,9 +88,19 @@ invisible forever after.
 
 ## The file
 
-One markdown file per day under `nvim.dictation_dir`, named by
-`nvim.file_template` (`dictation-%Y-%m-%d.md`), written after **every**
+One markdown file per **window** under `nvim.dictation_dir`, named by
+`nvim.file_template` (`dictation-%Y-%m-%d-%H%M%S.md`), written after **every**
 utterance with `noautocmd write`.
+
+A window is a passage. Closing it ends the passage, and the next dictation
+opens a new window on a new file rather than appending under everything said
+an hour ago — dictation started as a day-long log and that was wrong in use.
+While the window stays open, every utterance goes into it, across a daemon
+restart included: reattaching *adopts* the buffer already on screen (matched
+on the dictation directory, since the running window may carry an earlier
+timestamp) rather than opening a second file underneath it. The previous
+file is never touched — a fresh page is not the same as discarding what came
+before.
 
 * **A real file, not a scratch buffer**, because a transcript that disappears
   because a buffer was closed is the same class of failure as one dropped by
