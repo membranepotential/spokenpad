@@ -398,3 +398,24 @@ def test_no_colorscheme_adds_no_command() -> None:
     argv = NvimConfig().spawn_argv(socket=Path("/tmp/x.sock"), target=Path("/tmp/x.md"), at=None)
 
     assert "-c" not in argv
+
+
+def test_the_window_is_transparent_by_default() -> None:
+    """A theme loaded from its plugin directory is the theme's defaults, not
+    the theme as its owner configured it. Someone running it with
+    ``transparent = true`` would otherwise get an opaque block of the theme's
+    own background inside their terminal's border."""
+    command = _colorscheme_argument(NvimConfig(colorscheme="tokyonight-moon"))
+
+    assert command.endswith("false) else pcall(vim.cmd.colorscheme, 'tokyonight-moon') end")
+
+
+def test_opting_out_of_transparency_is_passed_through() -> None:
+    command = _colorscheme_argument(NvimConfig(colorscheme="tokyonight-moon", transparent=False))
+
+    assert "VoiceKbColorscheme('tokyonight-moon', true)" in command
+
+
+def _colorscheme_argument(cfg: NvimConfig) -> str:
+    argv = cfg.spawn_argv(socket=Path("/tmp/x.sock"), target=Path("/tmp/x.md"), at=None)
+    return argv[argv.index("-c") + 1]

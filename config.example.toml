@@ -178,6 +178,14 @@ trailing_space = false
 # cost of everything around them. Harmless with a full config, where it just
 # switches theme.
 # colorscheme = "tokyonight-moon"
+
+# Let the terminal's background show through. On by default, and it is what
+# makes `colorscheme` above look right: a theme loaded straight from its plugin
+# directory is the theme's DEFAULTS, not the theme as you configured it, so one
+# you run with `transparent = true` arrives opaque here and paints a block of
+# its own background inside your terminal's border. Set false to take the
+# colourscheme's own background instead.
+# transparent = true
 # Where the transcript goes: a floating neovim window, appended to over its
 # msgpack-RPC socket. Nothing is ever pasted into the window you are working
 # in, and no keystrokes are synthesised anywhere -- see docs/constraints.md.

@@ -99,6 +99,10 @@ local function inherit_terminal_background()
     "WinBar",
     "WinBarNC",
     "MsgArea",
+    "LineNr",
+    "FoldColumn",
+    "NonText",
+    "Folded",
   }) do
     local ok, hl = pcall(vim.api.nvim_get_hl, 0, { name = group })
     if ok then
@@ -124,9 +128,14 @@ vim.api.nvim_create_autocmd("ColorScheme", {
 --- loading a whole configuration. Measured against this user's LazyVim setup:
 --- 0.78s to open the window with everything, 0.30s with just the theme.
 ---
---- Asking for a theme by name means wanting it whole, background included, so
---- the terminal-inheriting autocommand is dropped when one loads.
-function _G.VoiceKbColorscheme(name)
+--- The background stays the terminal's unless `opaque` is passed. A theme
+--- loaded straight from its plugin directory is the theme's *defaults*, not
+--- the theme as the user configured it -- this one is set `transparent = true`
+--- in their config, so taking tokyonight's own #222436 painted a grey-blue
+--- block inside alacritty's black border and looked nothing like their
+--- editor. Inheriting reproduces `transparent = true` exactly, and is the
+--- right default for a window floating over a terminal regardless.
+function _G.VoiceKbColorscheme(name, opaque)
   local data = vim.fn.stdpath("data")
   for _, pattern in ipairs({
     data .. "/lazy/*/colors/" .. name .. ".*",
@@ -139,7 +148,9 @@ function _G.VoiceKbColorscheme(name)
       break
     end
   end
-  vim.api.nvim_clear_autocmds({ group = group, event = "ColorScheme" })
+  if opaque then
+    vim.api.nvim_clear_autocmds({ group = group, event = "ColorScheme" })
+  end
   if not pcall(vim.cmd.colorscheme, name) then
     -- Never a visible error: this window cannot take focus, so a message
     -- waiting for a keypress in it would sit there unanswerable.

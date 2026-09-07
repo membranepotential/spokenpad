@@ -391,6 +391,20 @@ class NvimConfig:
     Harmless with a full config loaded, where it simply switches theme.
     """
 
+    transparent: bool = True
+    """Let the terminal's background show through the window.
+
+    On by default, and it is what makes :attr:`colorscheme` look right. A
+    theme loaded straight from its plugin directory is the theme's
+    *defaults*, not the theme as the user configured it -- so a scheme someone
+    runs with ``transparent = true`` in their own config arrives opaque here,
+    painting a block of its own background inside the terminal's border.
+    Inheriting reproduces that setting, and is the right answer for a window
+    floating over a terminal in any case.
+
+    Set ``false`` to take the colourscheme's own background instead.
+    """
+
     window_instance: str = "voice-kb"
     """X11 instance name of the dictation window.
 
@@ -485,7 +499,11 @@ class NvimConfig:
             for arg in self.terminal
         ]
         init = ["-u", str(self.resolved_init)] if self.init is not None else []
-        theme = ["-c", _colorscheme_command(self.colorscheme)] if self.colorscheme else []
+        theme = (
+            ["-c", _colorscheme_command(self.colorscheme, transparent=self.transparent)]
+            if self.colorscheme
+            else []
+        )
         return [
             *terminal,
             *self.editor,
@@ -707,17 +725,19 @@ def _resolve_model_dir(section: Mapping[str, Any], base_dir: Path | None) -> Map
     return {**section, "model_dir": model_dir}
 
 
-def _colorscheme_command(name: str) -> str:
+def _colorscheme_command(name: str, *, transparent: bool) -> str:
     """A ``-c`` command that applies ``name`` under either kind of config.
 
     The bundled config defines ``VoiceKbColorscheme``, which finds the scheme
-    among installed plugins and puts only its directory on the runtimepath. A
-    user's own config already has its theme loaded, so a plain ``colorscheme``
-    is right there -- and ``pcall`` because a window that cannot take focus
-    must never be left showing a message waiting for a keypress.
+    among installed plugins, puts only its directory on the runtimepath, and
+    keeps the terminal's background unless told otherwise. A user's own config
+    already has its theme loaded and configured, so a plain ``colorscheme`` is
+    right there -- and ``pcall`` because a window that cannot take focus must
+    never be left showing a message waiting for a keypress.
     """
+    opaque = "true" if not transparent else "false"
     return (
-        f"lua if _G.VoiceKbColorscheme then VoiceKbColorscheme({name!r}) "
+        f"lua if _G.VoiceKbColorscheme then VoiceKbColorscheme({name!r}, {opaque}) "
         f"else pcall(vim.cmd.colorscheme, {name!r}) end"
     )
 

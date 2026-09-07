@@ -156,7 +156,7 @@ answering RPC, median of three, on a full LazyVim setup:
 |---|---|---|---|
 | unset (your `~/.config/nvim`) | **0.73 s** | yours | yours |
 | `"bundled"` | **0.21 s** | none | built-in |
-| `"bundled"` + `nvim.colorscheme` | **0.23 s** | yours | built-in |
+| `"bundled"` + `nvim.colorscheme` | **0.24 s** | yours | built-in |
 
 The default is unset, because a dictation window is still an editor and people
 want their editor -- a bundled config was the default for one afternoon and
@@ -167,6 +167,18 @@ and the two things it did show for it both survive without it. The yank flash
 is built into nvim (`vim.hl.on_yank`), and `nvim.colorscheme` puts only the
 one directory providing the named scheme onto the runtimepath -- the colours,
 without the configuration they normally live in.
+
+**A theme loaded this way is the theme's defaults, not the theme as its owner
+configured it**, and that difference is visible. This user runs tokyonight
+with `transparent = true`, so their real editor shows the terminal through;
+loading the plugin raw took tokyonight's own `#222436` instead and painted a
+grey-blue block inside alacritty's black border -- close to right, and clearly
+wrong. `nvim.transparent` (on by default) clears the background groups after
+any colourscheme loads, which reproduces that setting and is the right answer
+for a window floating over a terminal in any case. Verified against the full
+config: `Normal`, `NormalFloat`, `EndOfBuffer`, `SignColumn` and `WinBar` all
+come back with no background either way. Set it `false` to take the
+colourscheme's own.
 
 Neither of the fast rows is a default this project can pick, because the
 colourscheme name is the user's. `config.example.toml` documents the recipe.
