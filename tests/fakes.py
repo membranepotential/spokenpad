@@ -7,13 +7,17 @@ no subprocess, no X server. See ``conftest.py`` for how they get wired in.
 
 from __future__ import annotations
 
+from datetime import date
+from pathlib import Path
+
 import numpy as np
 
 from voice_kb.asr import TranscriptionResult
 from voice_kb.audio import MonoAudio
-from voice_kb.config import AsrConfig, AudioConfig, PasteConfig
+from voice_kb.config import AsrConfig, AudioConfig, NvimConfig
 from voice_kb.geometry import Output, Rect
-from voice_kb.inject import Injected, InjectResult
+from voice_kb.nvim import Appended, AppendResult
+from voice_kb.state import Phase
 
 
 class FakeAudioCapture:
@@ -103,20 +107,82 @@ class FakeTranscriber:
         return self.next_result
 
 
-class FakeInjector:
-    """Stands in for :func:`voice_kb.inject.inject_text`.
+class FakeNvimSession:
+    """Stands in for :class:`voice_kb.nvim.NvimSession`.
 
-    Recorded via ``calls`` so a test can assert exactly what text (and paste
-    config) reached the injection boundary.
+    Duck-typed, like the other fakes here -- ``_NvimBridge`` never learns
+    whether it is holding a real session or this one, so none of the
+    daemon's threading or signal wiring needs to change to be testable.
+
+    Every call is recorded so a test can assert on it exactly the way it
+    would assert on the real thing having happened: ``appended`` is the list
+    of every string ``append`` was called with (the "nothing vanishes"
+    guarantee, one level up from ``test_nvim.py``'s on-disk check), and
+    ``states`` is every ``dict`` a ``set_state`` call actually changed, in
+    order, so a test can find the last preview or phase pushed toward the
+    indicator.
+
+    ``ensure_result``/``append_result`` are settable *before* the call they
+    should affect, exactly like ``FakeTranscriber.next_result`` -- so the
+    failure paths (a window that cannot be opened, an append that cannot
+    land) are as easy to exercise as the happy path, which is the whole
+    reason ``NvimSession`` reports those as values instead of raising.
     """
 
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, PasteConfig]] = []
-        self.result: InjectResult = Injected(elapsed_ms=1.0, confirmed=True)
+    def __init__(self, config: NvimConfig | None = None, *, today: date | None = None) -> None:
+        self.config = config
+        self.today = today
+        self.appended: list[str] = []
+        self.states: list[dict[str, Phase | float | str]] = []
+        self.ensure_calls = 0
+        self.raise_calls = 0
+        self.close_calls = 0
+        self.place_calls: list[Rect] = []
+        self.ensure_result = True
+        self.append_result: AppendResult = Appended(line=1, elapsed_ms=1.0)
+        self._path = Path("/tmp/voice-kb-test/dictation-fake.md")
 
-    def __call__(self, text: str, config: PasteConfig) -> InjectResult:
-        self.calls.append((text, config))
-        return self.result
+    @property
+    def path(self) -> Path:
+        return self._path
+
+    @property
+    def connected(self) -> bool:
+        return self.ensure_calls > 0 and self.ensure_result
+
+    def ensure(self) -> bool:
+        self.ensure_calls += 1
+        return self.ensure_result
+
+    def append(self, text: str) -> AppendResult:
+        self.appended.append(text)
+        return self.append_result
+
+    def set_state(
+        self,
+        *,
+        phase: Phase | None = None,
+        level: float | None = None,
+        preview: str | None = None,
+    ) -> None:
+        update: dict[str, Phase | float | str] = {}
+        if phase is not None:
+            update["phase"] = phase
+        if level is not None:
+            update["level"] = level
+        if preview is not None:
+            update["preview"] = preview
+        if update:
+            self.states.append(update)
+
+    def raise_window(self) -> None:
+        self.raise_calls += 1
+
+    def place_window(self, rect: Rect) -> None:
+        self.place_calls.append(rect)
+
+    def close(self) -> None:
+        self.close_calls += 1
 
 
 class FakeX11:

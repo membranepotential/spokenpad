@@ -77,29 +77,103 @@ replacements = {}
 # a word immediately after dictating.
 trailing_space = false
 
-[paste]
-# Key combo used to paste the transcribed text, unless overridden below.
-default = "ctrl+v"
+[nvim]
+# Where the transcript goes: a floating neovim window, appended to over its
+# msgpack-RPC socket. Nothing is ever pasted into the window you are working
+# in, and no keystrokes are synthesised anywhere -- see docs/constraints.md.
 
-# How long to wait for evidence that the paste was actually served before
-# restoring the clipboard's previous contents. This is a ceiling, not a
-# fixed sleep: a confirmed paste restores as soon as it is observed. On
-# timeout the clipboard is restored anyway and the injection is logged as
-# unconfirmed rather than reported as a clean success.
-restore_delay_ms = 150
+# The terminal to run the editor in, with the editor's own argv appended.
+# The literal token {instance} is replaced with `window_instance` below.
+#
+# The default asks alacritty for X11 class "Floating" and instance
+# "voice-kb", which is what the window manager rules key on. Set to [] to run
+# `editor` directly, for a GUI editor that needs no terminal.
+terminal = ["alacritty", "--class", "Floating,{instance}", "-e"]
 
-# Per-window-class overrides, keyed by X11 WM_CLASS. Terminals commonly
-# need shift added so the emulator doesn't intercept the paste as a
-# different terminal control sequence.
-[paste.per_window_class]
-Alacritty = "ctrl+shift+v"
+# The editor. `--listen <socket>` and the dictation file are appended to
+# this, so anything here comes first: ["nvim", "-u", "NONE"] gets an editor
+# with none of your own config loaded.
+editor = ["nvim"]
 
-[overlay]
-# Show the recording/transcribing status overlay at all.
+# X11 instance name of the dictation window. It must match whatever your
+# window manager rules match on. voice-kb writes the i3 rules to
+# ~/.config/i3/i3.d/voice-kb.conf; see docs/nvim-window.md.
+#
+# Restricted to [A-Za-z0-9_-] because it is interpolated into an i3 criteria
+# string, and a config value must not be able to become i3 syntax.
+window_instance = "voice-kb"
+
+# Where nvim listens for RPC. voice-kb reattaches to a live socket rather
+# than opening a second window, so restarting the daemon does not litter the
+# desktop with terminals.
+#
+# Defaults to $XDG_RUNTIME_DIR/voice-kb-nvim.sock, falling back to the state
+# directory below if that variable is unset. Both ~ and $VAR are expanded
+# here -- but a $VAR that is not actually set is a hard error rather than a
+# literal directory named "$XDG_RUNTIME_DIR" in your home.
+socket_path = "/run/user/1000/voice-kb-nvim.sock"
+
+# Directory holding the dictation files, and the strftime template for their
+# names -- one file per day, saved after every single utterance.
+#
+# A real file rather than a scratch buffer, deliberately: a transcript that
+# disappears because a buffer was closed is the same class of failure as one
+# dropped by a streaming decoder, which is the failure this project exists to
+# eliminate.
+# dictation_dir defaults to $XDG_STATE_HOME/voice-kb/dictation, and to
+# ~/.local/state/voice-kb/dictation when XDG_STATE_HOME is unset.
+dictation_dir = "~/.local/state/voice-kb/dictation"
+file_template = "dictation-%Y-%m-%d.md"
+
+# How long to wait for a freshly spawned nvim to start listening.
+startup_timeout_s = 5.0
+
+[preview]
+# The rolling preview of the transcript, shown while the key is held.
+#
+# Cosmetic only. The text that actually gets committed is still produced by
+# exactly ONE decode of the complete captured buffer at key release -- a
+# preview is never appended, never merged into the final text, and never
+# influences it (see docs/constraints.md). In nvim it is not even buffer
+# content: it is an extmark's virtual text, so it cannot be saved, yanked, or
+# undone into the file.
 enabled = true
 
+# How often a preview decode is requested while recording. Must be >= 200.
+interval_ms = 1100
+
+# Stop previewing once the utterance is longer than this many seconds.
+#
+# Each preview decodes the WHOLE utterance so far, from its start. That is what
+# keeps words on screen once they appear. A trailing window was tried first and
+# it was wrong: it physically discarded the beginning of the sentence, so text
+# vanished in chunks while you were still speaking.
+#
+# Decoding from the start means cost grows with the utterance, and two things
+# bound it. The gap between previews is max(interval - last_decode,
+# last_decode), so the worker stays idle at least half the time; and past this
+# many seconds previews simply stop. Nothing disappears when they do -- the
+# last one stays on screen.
+#
+# This is a latency budget. A preview still QUEUED when you release the key is
+# dropped, but one already decoding cannot be interrupted, so the real decode
+# waits behind it. At ~14.6x real-time, 15s of audio costs ~1.0s -- that is the
+# worst a release can pay, ~0.5s expected. Raising this raises both in
+# proportion.
+max_seconds = 15.0
+
+[overlay]
+# Show the Qt status overlay at all.
+#
+# Off by default since the sink became nvim: the dictation window carries the
+# same indicator (phase, level meter, live preview) in its winbar, rendered
+# where the text is about to land instead of in a second widget elsewhere on
+# screen. Turn it back on if you want feedback before the dictation window
+# has finished opening. It still never takes focus.
+enabled = false
+
 # Width of the pill, and the height of its status row (dot, label, level
-# meter). With live_preview on, the widget is height + preview_height tall.
+# meter). With previews enabled the widget is height + preview_height tall.
 # Sizes are in Qt's LOGICAL pixels, not device pixels. On a HiDPI display
 # (Xft.dpi 192 gives a device pixel ratio of 2.0) the overlay is drawn twice
 # this size in real pixels, so it stays the same apparent size as it would on
@@ -114,38 +188,6 @@ margin_px = 32
 # rather than always on the primary output.
 follow_focus = true
 
-# Show a rolling preview of the transcript while the key is held.
-#
-# Cosmetic only. The text that actually gets injected is still produced by
-# exactly ONE decode of the complete captured buffer at key release -- a
-# preview is never injected, never merged into the final text, and never
-# influences it (see docs/constraints.md). Set to false for a status-only
-# pill; the overlay is then just `height` tall.
-live_preview = true
-
-# How often a preview decode is requested while recording. Must be >= 200.
-preview_interval_ms = 1100
-
-# Stop previewing once the utterance is longer than this many seconds.
-#
-# Each preview decodes the WHOLE utterance so far, from its start. That is what
-# keeps words on screen once they appear. A trailing window was tried first and
-# it was wrong: it physically discarded the beginning of the sentence, so text
-# vanished in chunks while you were still speaking.
-#
-# Decoding from the start means cost grows with the utterance, and two things
-# bound it. The gap between previews is max(interval - last_decode,
-# last_decode), so the worker stays idle at least half the time; and past this
-# many seconds previews simply stop. Nothing disappears when they do -- the
-# last one stays on screen, holding more text than the overlay can show.
-#
-# This is a latency budget. A preview still QUEUED when you release the key is
-# dropped, but one already decoding cannot be interrupted, so the real decode
-# waits behind it. At ~14.6x real-time, 15s of audio costs ~1.0s -- that is the
-# worst a release can pay, ~0.5s expected. Raising this raises both in
-# proportion.
-preview_max_seconds = 15.0
-
 # Extra pixels below the status row for the preview text (two lines, with
-# the oldest words elided away first). Ignored when live_preview = false.
+# the oldest words elided away first). Ignored when preview.enabled = false.
 preview_height = 64

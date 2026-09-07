@@ -73,7 +73,34 @@ def pick_output(outputs: Sequence[Output], window: Rect) -> Output:
     return next((o for o in outputs if o.primary), outputs[0])
 
 
-def overlay_rect(output: Rect, cfg: OverlayConfig) -> Rect:
+def dictation_rect(output: Rect, anchor: tuple[int, int] | None, fraction: float) -> Rect:
+    """Where the dictation window goes on ``output``.
+
+    ``fraction`` scales each axis, so the default of 0.5 gives a window
+    covering a quarter of the screen's area. ``anchor`` is the mouse pointer,
+    used as the window's *top-left* corner: the window appears next to what
+    the user is reading rather than in a fixed corner they have to look away
+    to find.
+
+    Clamped into ``output`` exactly like :func:`overlay_rect`, and for the
+    same reason -- a pointer near the right or bottom edge would otherwise
+    anchor a window that hangs off the screen. Clamping means a pointer in the
+    bottom-right corner lands the window flush in the bottom-right quarter,
+    which is also the placement used when ``anchor`` is ``None`` because the
+    pointer could not be read.
+    """
+    width = max(1, int(output.width * fraction))
+    height = max(1, int(output.height * fraction))
+    if anchor is None:
+        x, y = output.right - width, output.bottom - height
+    else:
+        x, y = anchor
+    x = max(output.x, min(x, output.right - width))
+    y = max(output.y, min(y, output.bottom - height))
+    return Rect(x=x, y=y, width=width, height=height)
+
+
+def overlay_rect(output: Rect, cfg: OverlayConfig, *, preview_band: bool) -> Rect:
     """Where the overlay goes on ``output``: horizontally centred, bottom-aligned
     with ``cfg.margin_px`` above the edge, and always fully inside ``output``.
 
@@ -82,12 +109,14 @@ def overlay_rect(output: Rect, cfg: OverlayConfig) -> Rect:
     the margin leaves room for must still land on-screen, not hang off the
     bottom edge the way the previous tool's overlay did.
 
-    Height comes from :attr:`OverlayConfig.total_height`, not ``height``: with
-    the live preview enabled the widget is taller than its status row, and
-    clamping the shorter number would put the preview band off-screen -- the
-    exact failure this clamp exists to prevent.
+    Height comes from :meth:`OverlayConfig.total_height`, not ``height``: with
+    the preview band shown the widget is taller than its status row, and
+    clamping the shorter number would put the band off-screen -- the exact
+    failure this clamp exists to prevent. ``preview_band`` is passed in rather
+    than read off ``cfg`` because previews are policy from ``[preview]`` now,
+    not an overlay setting.
     """
-    height = cfg.total_height
+    height = cfg.total_height(preview_band=preview_band)
     x = output.x + (output.width - cfg.width) // 2
     y = output.bottom - cfg.margin_px - height
     x = max(output.x, min(x, output.right - cfg.width))

@@ -108,9 +108,13 @@ class Overlay(QWidget):
     #: Emitted when the overlay decides it should be hidden (post-transcribe fade).
     finished = Signal()
 
-    def __init__(self, cfg: OverlayConfig) -> None:
+    def __init__(self, cfg: OverlayConfig, *, preview_band: bool) -> None:
         super().__init__(None)
         self._cfg = cfg
+        #: Whether the preview band is drawn at all. Passed in rather than
+        #: read off ``cfg``: previews are ``[preview]`` policy shared with the
+        #: nvim indicator, and this widget only decides how to draw them.
+        self._preview_band = preview_band
         self._phase = Phase.IDLE
         self._levels: deque[float] = deque([0.0] * _BAR_COUNT, maxlen=_BAR_COUNT)
         self._spin = 0.0
@@ -127,7 +131,7 @@ class Overlay(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         # Belt and braces: even if a WM ignores the flags, refuse the focus.
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.resize(cfg.width, cfg.total_height)
+        self.resize(cfg.width, cfg.total_height(preview_band=preview_band))
 
         self._timer = QTimer(self)
         self._timer.setInterval(_FRAME_MS)
@@ -171,7 +175,7 @@ class Overlay(QWidget):
         if text == self._preview:
             return
         self._preview = text
-        if self._cfg.live_preview:
+        if self._preview_band:
             self.update()
 
     # ------------------------------------------------------------------ internals
@@ -206,7 +210,7 @@ class Overlay(QWidget):
         # row derives from `status_h`, never from `h`, so turning the preview
         # on does not move the dot, the label or the meter.
         status_h = min(self._cfg.height, h)
-        radius = min(h / 2.0, _MAX_RADIUS) if self._cfg.live_preview else h / 2.0
+        radius = min(h / 2.0, _MAX_RADIUS) if self._preview_band else h / 2.0
 
         path = QPainterPath()
         path.addRoundedRect(0.5, 0.5, w - 1.0, h - 1.0, radius, radius)
@@ -265,7 +269,7 @@ class Overlay(QWidget):
         release (``docs/constraints.md``).
         """
         band_h = h - status_h
-        if not self._cfg.live_preview or band_h <= 0 or not self._preview:
+        if not self._preview_band or band_h <= 0 or not self._preview:
             return
 
         font = QFont(self.font())

@@ -55,6 +55,25 @@ def outputs() -> list[Output]:
     return found
 
 
+def pointer_position() -> tuple[int, int] | None:
+    """The mouse pointer in root coordinates, or ``None`` if it can't be read.
+
+    Device pixels, like everything else here -- it is compared against
+    ``xrandr`` output geometry to decide which monitor the user is looking at.
+    """
+    out = _run(["xdotool", "getmouselocation", "--shell"])
+    if out is None:
+        return None
+    values: dict[str, int] = {}
+    for line in out.splitlines():
+        key, _, raw = line.partition("=")
+        if raw.lstrip("-").isdigit():
+            values[key.strip()] = int(raw)
+    if "X" not in values or "Y" not in values:
+        return None
+    return values["X"], values["Y"]
+
+
 def focused_window_rect() -> Rect | None:
     """Geometry of the focused window in root coordinates.
 

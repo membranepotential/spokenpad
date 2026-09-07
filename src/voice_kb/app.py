@@ -6,36 +6,50 @@ onto the right thread.
 
 Threading
 ---------
-Three threads, deliberately:
+Four threads, deliberately:
 
 * the **evdev watcher**, which must never block or the hotkey lags;
 * the **Qt main thread**, which owns the overlay and the state machine;
-* one **worker**, which owns the recogniser and also performs injection --
-  both call out to slow things (seconds of CPU; ``xdotool``/``xclip``
-  subprocesses) and neither may stall the overlay or delay the next keypress.
+* one **worker**, which owns the recogniser -- seconds of CPU per decode,
+  which must not stall the UI or delay the next keypress;
+* one **nvim bridge**, which owns the RPC connection to the dictation window.
+  It is separate from the worker because the two block on different things
+  and must not queue behind each other: opening the window takes ~1s
+  (measured), and it happens *while* the first utterance is still being
+  recorded, so the window is up by the time there is text for it.
 
 Hotkey callbacks arrive on the watcher thread and are marshalled onto the Qt
 thread by Signal emission -- Qt queues cross-thread signals automatically. The
 state machine is therefore only ever touched from the Qt thread, so it needs no
 lock. :class:`~voice_kb.asr.Transcriber` is not thread-safe and is used only
-from the worker.
+from the worker; :class:`~voice_kb.nvim.NvimSession` likewise belongs to the
+bridge.
 
 Nothing is ever dropped silently. Every path that discards audio or a decode
 result says so in the log, because silent loss is the failure this project
 exists to eliminate.
 
+The sink
+--------
+The committed transcript is appended to a floating neovim over its RPC socket
+(:mod:`voice_kb.nvim`). Nothing is pasted anywhere and no window but that one
+is ever written to, so dictating never depends on -- or disturbs -- whatever
+happens to have focus.
+
 Live preview
 ------------
-While the key is held, the overlay shows a rolling preview of the transcript.
-It is cosmetic and strictly subordinate to the committed decode
+While the key is held, the indicators show a rolling preview of the
+transcript. It is cosmetic and strictly subordinate to the committed decode
 (``docs/constraints.md``, "One-shot committed decode"):
 
-1. the text that gets injected is still produced by *exactly one* decode of
-   the complete captured buffer at key release -- preview output is never
-   injected, never merged into it, and never influences it;
+1. the text that reaches the buffer is still produced by *exactly one*
+   decode of the complete captured buffer at key release -- preview output is
+   never committed, never merged into it, and never influences it. In nvim it
+   is not even buffer content: it is an extmark's virtual text, which cannot
+   be saved, yanked or undone into the file;
 2. a preview's cost is bounded -- by an adaptive cadence that keeps the
    worker idle at least half the time, and by a hard stop at
-   ``OverlayConfig.preview_max_seconds``, so it is bounded and
+   ``PreviewConfig.max_seconds``, so it is bounded and
    independent of how long the user has been speaking;
 3. a preview can never make the user wait: previews are *abandoned* the
    instant a committed decode (or a cancellation) is due, so a preview
@@ -66,10 +80,10 @@ from PySide6.QtWidgets import QApplication
 from voice_kb import x11
 from voice_kb.asr import ModelMissingError, Transcriber, ensure_model_files
 from voice_kb.audio import AudioCapture, MonoAudio
-from voice_kb.config import Config, PasteConfig
+from voice_kb.config import Config, xdg_state_home
 from voice_kb.geometry import Output, Rect, overlay_rect, pick_output
 from voice_kb.hotkey import HotkeyPermissionError, HotkeyWatcher
-from voice_kb.inject import Injected, InjectionFailed, inject_text
+from voice_kb.nvim import Appended, AppendFailed, NvimSession
 from voice_kb.overlay import Overlay, screen_rect
 from voice_kb.state import (
     AbortDecode,
@@ -94,6 +108,8 @@ from voice_kb.text import postprocess
 log = logging.getLogger("voice-kb")
 
 _LEVEL_POLL_MS = 33  # matches the overlay's own frame interval
+_NVIM_LEVEL_EVERY = 3  # so nvim's meter updates at ~10Hz, not 30
+_THREAD_SHUTDOWN_MS = 5000
 _OUTPUTS_TTL_S = 5.0
 
 
@@ -104,8 +120,6 @@ class _Worker(QObject):
     prepare_failed = Signal(str)
     decoded = Signal(str, float, int)  # text, elapsed, generation
     decode_failed = Signal(str, int)
-    injected = Signal(float, bool)
-    inject_failed = Signal(str)
     previewed = Signal(str, int)  # text, generation
 
     def __init__(self, config: Config) -> None:
@@ -159,7 +173,7 @@ class _Worker(QObject):
         self.decoded.emit(result.text, result.elapsed_seconds, generation)
 
     def run_preview(self, samples: MonoAudio, generation: int) -> None:
-        """Decode a trailing slice of the in-flight capture, for the overlay only.
+        """Decode the in-flight capture, for the indicators only.
 
         Deliberately toothless: it returns without decoding at all if previews
         have been abandoned, and it emits nothing if they were abandoned while
@@ -178,12 +192,61 @@ class _Worker(QObject):
             return
         self.previewed.emit(result.text, generation)
 
-    def run_inject(self, text: str, paste: PasteConfig) -> None:
-        match inject_text(text, paste):
-            case Injected(elapsed_ms=ms, confirmed=confirmed):
-                self.injected.emit(ms, confirmed)
-            case InjectionFailed(reason=reason):
-                self.inject_failed.emit(reason)
+class _NvimBridge(QObject):
+    """Owns the connection to the dictation window. Lives on its own QThread.
+
+    Every slot here is entered from a queued signal, so calls arrive in the
+    order the Qt thread emitted them -- which is what makes "open the window,
+    then append to it" correct without any explicit handshake.
+
+    Nothing in here raises: :class:`~voice_kb.nvim.NvimSession` reports
+    failure as a value or a log line, and this class turns that into a signal.
+    A dictation window that cannot be opened must not take down a daemon that
+    is otherwise recording and decoding perfectly well.
+    """
+
+    opened = Signal(str)  # path of the dictation file
+    open_failed = Signal()
+    appended = Signal(int, float)  # line count, elapsed ms
+    append_failed = Signal(str)
+
+    def __init__(self, config: Config) -> None:
+        super().__init__()
+        self._session = NvimSession(config.nvim)
+
+    def open(self) -> None:
+        """Ensure the window exists and is on the workspace the user is on.
+
+        Called on every key-down rather than once at startup: the window is
+        the user's to close, and reopening it on the next dictation is the
+        behaviour that needs no explanation.
+        """
+        if not self._session.ensure():
+            self.open_failed.emit()
+            return
+        self._session.raise_window()
+        self.opened.emit(str(self._session.path))
+
+    def append(self, text: str) -> None:
+        match self._session.append(text):
+            case Appended(line=line, elapsed_ms=ms):
+                self.appended.emit(line, ms)
+            case AppendFailed(reason=reason):
+                self.append_failed.emit(reason)
+
+    def set_phase(self, phase: object) -> None:
+        assert isinstance(phase, Phase)
+        self._session.set_state(phase=phase)
+
+    def set_level(self, level: float) -> None:
+        self._session.set_state(level=level)
+
+    def set_preview(self, text: str) -> None:
+        self._session.set_state(preview=text)
+
+    def shutdown(self) -> None:
+        self._session.close()
+
 
 
 class Daemon(QObject):
@@ -195,8 +258,14 @@ class Daemon(QObject):
     cancelled = Signal(float)
 
     _decode_requested = Signal(object, int)
-    _inject_requested = Signal(str, object)
     _preview_requested = Signal(object, int)
+
+    _nvim_open_requested = Signal()
+    _nvim_append_requested = Signal(str)
+    _nvim_phase_changed = Signal(object)
+    _nvim_level = Signal(float)
+    _nvim_preview = Signal(str)
+    _nvim_shutdown_requested = Signal()
 
     def __init__(self, config: Config) -> None:
         super().__init__()
@@ -216,6 +285,7 @@ class Daemon(QObject):
 
         #: When the current utterance's most recent preview was requested, and
         #: whether its cost has already been logged. Qt-thread-only.
+        self._level_tick = 0
         self._preview_requested_at = 0.0
         self._preview_seconds = 0.0
         self._preview_timed = False
@@ -228,22 +298,40 @@ class Daemon(QObject):
         ensure_model_files(config.asr)
 
         self._audio = AudioCapture(config.audio)
-        self._overlay = Overlay(config.overlay) if config.overlay.enabled else None
+        self._overlay = (
+            Overlay(config.overlay, preview_band=config.preview.enabled)
+            if config.overlay.enabled
+            else None
+        )
 
         self._worker = _Worker(config)
         self._thread = QThread()
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.prepare)
         self._decode_requested.connect(self._worker.run_decode)
-        self._inject_requested.connect(self._worker.run_inject)
         self._preview_requested.connect(self._worker.run_preview)
         self._worker.ready.connect(lambda: log.info("model ready"))
         self._worker.prepare_failed.connect(self._on_prepare_failed)
         self._worker.decoded.connect(self._on_decoded)
         self._worker.decode_failed.connect(self._on_decode_failed)
-        self._worker.injected.connect(self._on_injected)
         self._worker.previewed.connect(self._on_previewed)
-        self._worker.inject_failed.connect(lambda r: log.error("injection failed: %s", r))
+
+        # The bridge gets its own thread, not the worker's: opening a terminal
+        # blocks for a few hundred milliseconds and must not sit in front of a
+        # decode, nor a decode in front of it.
+        self._nvim = _NvimBridge(config)
+        self._nvim_thread = QThread()
+        self._nvim.moveToThread(self._nvim_thread)
+        self._nvim_open_requested.connect(self._nvim.open)
+        self._nvim_append_requested.connect(self._nvim.append)
+        self._nvim_phase_changed.connect(self._nvim.set_phase)
+        self._nvim_level.connect(self._nvim.set_level)
+        self._nvim_preview.connect(self._nvim.set_preview)
+        self._nvim_shutdown_requested.connect(self._nvim.shutdown)
+        self._nvim.opened.connect(lambda path: log.info("dictation window ready: %s", path))
+        self._nvim.open_failed.connect(self._on_nvim_unavailable)
+        self._nvim.appended.connect(self._on_appended)
+        self._nvim.append_failed.connect(self._on_append_failed)
 
         self.key_down.connect(lambda at: self._dispatch(KeyDown(at=at)))
         self.key_up.connect(lambda at: self._dispatch(KeyUp(at=at)))
@@ -260,11 +348,12 @@ class Daemon(QObject):
         self._level_timer.setInterval(_LEVEL_POLL_MS)
         self._level_timer.timeout.connect(self._poll_level)
 
-        # No overlay (or previews turned off) means there is nothing a preview
-        # could be *for*, so the timer is not created at all rather than
-        # created and left stopped.
+        # Previews turned off means there is nothing to schedule, so the timer
+        # is not created at all rather than created and left stopped. It is no
+        # longer conditional on the overlay: the nvim indicator shows previews
+        # too, and it is the one that is on by default.
         self._preview_timer: QTimer | None = None
-        if self._overlay is not None and config.overlay.live_preview:
+        if config.preview.enabled:
             self._preview_timer = QTimer(self)
             # Single-shot and re-armed after each result: the gap between
             # previews depends on how long the last one took. See
@@ -288,6 +377,7 @@ class Daemon(QObject):
         """
         try:
             self._thread.start()
+            self._nvim_thread.start()
             self._watcher.start()
         except Exception:
             self.stop()
@@ -300,9 +390,21 @@ class Daemon(QObject):
         self._level_timer.stop()
         self._abandon_previews()
         self._audio.close()
-        if self._thread.isRunning():
-            self._thread.quit()
-            self._thread.wait(5000)
+        # Ask the bridge to detach before the thread that owns the connection
+        # goes away. The editor itself is left running -- see
+        # NvimSession.close. Deliberately *not* a blocking invocation: the
+        # bridge may be part-way through opening a window, and an editor that
+        # wedges after answering its readiness probe would otherwise hang
+        # Ctrl-C forever. The queued call runs ahead of quit() if the thread
+        # is idle, and if it never runs, process exit closes the socket.
+        if self._nvim_thread.isRunning():
+            self._nvim_shutdown_requested.emit()
+        for name, thread in (("worker", self._thread), ("nvim bridge", self._nvim_thread)):
+            if not thread.isRunning():
+                continue
+            thread.quit()
+            if not thread.wait(_THREAD_SHUTDOWN_MS):
+                log.warning("the %s thread did not stop in time; exiting anyway", name)
         self._started = False
 
     # -------------------------------------------------------------- state machine
@@ -310,7 +412,7 @@ class Daemon(QObject):
     def _dispatch(self, event: Event) -> None:
         self._state, command = step(self._state, event)
         self._apply(command)
-        self._sync_overlay()
+        self._sync_indicators()
 
     def _apply(self, command: Command) -> None:
         match command:
@@ -319,6 +421,11 @@ class Daemon(QObject):
             case StartCapture():
                 self._audio.start_capture()
                 self._level_timer.start()
+                # Asked for on every key-down, and answered on the bridge
+                # thread while this utterance is still being spoken -- so the
+                # few hundred milliseconds a terminal takes to appear are paid
+                # in parallel with the recording, not added to it.
+                self._nvim_open_requested.emit()
                 self._arm_previews()
             case Decode(spoken_seconds=spoken):
                 self._level_timer.stop()
@@ -342,20 +449,25 @@ class Daemon(QObject):
 
     # ------------------------------------------------------------------- overlay
 
-    def _sync_overlay(self) -> None:
-        """Reposition only on a real phase change.
+    def _sync_indicators(self) -> None:
+        """Push a real phase change to the nvim winbar and the overlay.
 
-        This runs from every dispatched event, and positioning shells out to
-        xrandr and xdotool. Doing that per event is what previously stalled the
-        Qt thread; the overlay only needs moving when it appears, so anything
-        that leaves the phase unchanged must cost nothing.
+        This runs from every dispatched event, and overlay positioning shells
+        out to xrandr and xdotool. Doing that per event is what previously
+        stalled the Qt thread; the indicators only change when the phase does,
+        so anything that leaves the phase unchanged must cost nothing.
+
+        The phase-change test deliberately sits *above* the overlay check --
+        the overlay is off by default now, and gating the whole thing on it
+        would leave the nvim indicator frozen.
         """
-        if self._overlay is None:
-            return
         phase = phase_of(self._state)
         if phase == self._last_phase:
             return
         self._last_phase = phase
+        self._nvim_phase_changed.emit(phase)
+        if self._overlay is None:
+            return
         if phase is not Phase.IDLE:
             pos = self._overlay_position()
             if pos is not None:
@@ -390,7 +502,9 @@ class Daemon(QObject):
                 target.name,
             )
             qt_rect = target.rect
-        return overlay_rect(qt_rect, self._config.overlay)
+        return overlay_rect(
+            qt_rect, self._config.overlay, preview_band=self._config.preview.enabled
+        )
 
     def _cached_outputs(self) -> list[Output]:
         """Monitor layout, re-read at most every few seconds.
@@ -467,17 +581,29 @@ class Daemon(QObject):
         in the log and on the overlay, while the user is still holding the key
         and can do something about it.
         """
+        level = self._audio.current_level()
         if self._overlay is not None:
-            self._overlay.push_level(self._audio.current_level())
+            self._overlay.push_level(level)
+        # The overlay redraws locally at 30fps; nvim is across a socket, so it
+        # gets every third sample. A 24-cell text meter has nothing to gain
+        # from the other twenty, and the winbar redraw is nvim's main loop.
+        self._level_tick += 1
+        if self._level_tick % _NVIM_LEVEL_EVERY == 0:
+            self._nvim_level.emit(level)
         if self._audio.recover_if_dead():
             self._warn_no_audio()
 
     def _warn_no_audio(self) -> None:
-        """Tell the user, on the overlay, that the microphone went away."""
+        """Tell the user, where they are looking, that the microphone went away.
+
+        Both indicators, not just the overlay: with the overlay off by default
+        this warning would otherwise exist only in the log, which is precisely
+        where a user mid-utterance is not looking.
+        """
+        message = "no audio from the microphone -- reconnected, keep talking"
         if self._overlay is not None:
-            self._overlay.set_preview_text(
-                "no audio from the microphone -- reconnected, keep talking"
-            )
+            self._overlay.set_preview_text(message)
+        self._nvim_preview.emit(message)
 
     # -------------------------------------------------------------------- preview
 
@@ -490,8 +616,9 @@ class Daemon(QObject):
         self._preview_text = ""
         if self._overlay is not None:
             self._overlay.set_preview_text("")
+        self._nvim_preview.emit("")
         if self._preview_timer is not None:
-            self._preview_timer.start(self._config.overlay.preview_interval_ms)
+            self._preview_timer.start(self._config.preview.interval_ms)
 
     def _abandon_previews(self) -> None:
         """Stop previewing, and drop whatever is already queued on the worker.
@@ -521,14 +648,14 @@ class Daemon(QObject):
             return
         samples = self._audio.snapshot_capture()
         seconds = samples.size / self._config.audio.sample_rate
-        if seconds > self._config.overlay.preview_max_seconds:
+        if seconds > self._config.preview.max_seconds:
             # Cost grows with the utterance, so it has to stop somewhere. The
             # text stays exactly as it is -- this stops updating it, it does
             # not clear it -- and by now there is far more of it than the
             # overlay can show anyway.
             log.debug(
                 "utterance past %.0fs; no more previews for it (the last one stays on screen)",
-                self._config.overlay.preview_max_seconds,
+                self._config.preview.max_seconds,
             )
             return
         if samples.size == 0:
@@ -553,7 +680,7 @@ class Daemon(QObject):
         """
         if self._preview_timer is None or phase_of(self._state) is not Phase.RECORDING:
             return
-        interval = self._config.overlay.preview_interval_ms / 1000.0
+        interval = self._config.preview.interval_ms / 1000.0
         gap = max(interval - last_decode_seconds, last_decode_seconds)
         self._preview_timer.start(int(gap * 1000))
 
@@ -581,8 +708,6 @@ class Daemon(QObject):
                 round_trip * 1000,
                 self._preview_seconds,
             )
-        if self._overlay is None:
-            return
         cleaned = postprocess(text, self._config.text)
         # Each preview sees strictly more audio than the last, so the
         # transcript should only ever grow -- but the recogniser does not
@@ -599,7 +724,9 @@ class Daemon(QObject):
             log.debug("ignoring a preview that shrank: %r", cleaned[:40])
             return
         self._preview_text = cleaned
-        self._overlay.set_preview_text(cleaned)
+        if self._overlay is not None:
+            self._overlay.set_preview_text(cleaned)
+        self._nvim_preview.emit(cleaned)
 
     # -------------------------------------------------------------------- results
 
@@ -615,7 +742,7 @@ class Daemon(QObject):
         if not cleaned.strip():
             log.warning("decode produced no text")
         else:
-            self._inject_requested.emit(cleaned, self._config.paste)
+            self._nvim_append_requested.emit(cleaned)
         self._dispatch(DecodeFinished(at=time.monotonic()))
 
     def _on_decode_failed(self, reason: str, generation: int) -> None:
@@ -623,19 +750,25 @@ class Daemon(QObject):
             log.error("decode failed: %s", reason)
         self._dispatch(DecodeFinished(at=time.monotonic()))
 
-    def _on_injected(self, elapsed_ms: float, confirmed: bool) -> None:
-        if confirmed:
-            log.info("injected in %.0fms", elapsed_ms)
-        else:
-            # The clipboard was restored on a timeout rather than on evidence the
-            # paste was served. The text may not have landed -- say so, because a
-            # transcription disappearing without a trace is the whole reason this
-            # project exists.
-            log.warning(
-                "injected in %.0fms but the paste was never confirmed; "
-                "the text may not have landed in the target window",
-                elapsed_ms,
-            )
+    def _on_appended(self, line: int, elapsed_ms: float) -> None:
+        """The text is in the buffer *and* on disk -- nvim confirmed the line
+        count after writing the file, so this is evidence, not optimism."""
+        log.info("appended to the dictation buffer in %.0fms (line %d)", elapsed_ms, line)
+
+    def _on_append_failed(self, reason: str) -> None:
+        # The decode succeeded and the text exists; it just could not be
+        # delivered. It is already in the log at INFO from _on_decoded, which
+        # is the difference between a transcription that is recoverable and
+        # one that is gone.
+        log.error("could not append to the dictation buffer: %s", reason)
+
+    def _on_nvim_unavailable(self) -> None:
+        log.error(
+            "no dictation window: check that %r is installed and that "
+            "`%s` runs from a terminal",
+            self._config.nvim.editor[0],
+            " ".join(self._config.nvim.terminal[:1] or self._config.nvim.editor[:1]),
+        )
 
     def _on_prepare_failed(self, reason: str) -> None:
         # Without a model there is nothing this daemon can do; staying up would
@@ -644,11 +777,7 @@ class Daemon(QObject):
         QApplication.instance().quit()  # type: ignore[union-attr]
 
 
-DEFAULT_LOG_FILE = (
-    Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state"))
-    / "voice-kb"
-    / "voice-kb.log"
-)
+DEFAULT_LOG_FILE = xdg_state_home() / "voice-kb" / "voice-kb.log"
 
 
 def _configure_logging(*, verbose: bool, log_file: Path | None) -> None:

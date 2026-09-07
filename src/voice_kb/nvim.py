@@ -1,0 +1,428 @@
+"""The sink: a floating neovim the transcript is appended to.
+
+Nothing is pasted anywhere. The transcript reaches nvim over its msgpack-RPC
+socket -- no clipboard, no synthetic keystrokes, and no transcript text ever
+crossing a shell or an argv boundary, which is a stronger version of the rule
+in ``docs/constraints.md`` rather than a departure from it.
+
+The window
+----------
+voice-kb spawns its own terminal running ``nvim --listen <socket> <file>``
+with a distinct X11 instance name (:attr:`NvimConfig.window_instance`), so the
+window manager can be told once to float it and never focus it -- see
+``docs/nvim-window.md``. This module does not manage focus itself beyond
+asking i3 to bring an existing window to the current workspace; that is the
+WM's job, and reaching for ``xdotool windowfocus`` here would recreate the
+focus-steal this project already forbids for the overlay.
+
+The file
+--------
+The buffer is a real dated file under
+:attr:`NvimConfig.dictation_dir`, saved after every committed utterance.
+A dictation that vanishes because a scratch buffer was closed is the same
+class of failure as one dropped by a streaming decoder, and this project
+exists to eliminate it.
+
+Reconnection
+------------
+A session is reattached rather than respawned whenever the socket still
+answers, so closing and reopening the daemon does not litter the desktop with
+terminals, and quitting nvim simply means the next dictation opens a fresh
+one. Every entry point reports failure as a value or a log line; none of them
+raise into the Qt thread.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import logging
+import socket
+import subprocess
+import threading
+import time
+from dataclasses import dataclass
+from datetime import date
+from importlib import resources
+from pathlib import Path
+from typing import Any, Final
+
+import pynvim
+
+from voice_kb import x11
+from voice_kb.config import NvimConfig
+from voice_kb.geometry import Rect, dictation_rect, pick_output
+from voice_kb.state import Phase
+
+log = logging.getLogger("voice-kb.nvim")
+
+_CONNECT_POLL_S: Final = 0.1
+_I3_TIMEOUT_S: Final = 2.0
+_SOCKET_PROBE_S: Final = 0.25
+_READY_PROBE_S: Final = 2.0
+
+_OPEN_BUFFER_LUA: Final = """
+vim.cmd.edit(vim.fn.fnameescape(...))
+return vim.api.nvim_get_current_buf()
+"""
+
+_PHASE_NAMES: Final[dict[Phase, str]] = {
+    Phase.IDLE: "idle",
+    Phase.RECORDING: "recording",
+    Phase.TRANSCRIBING: "transcribing",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class Appended:
+    """The utterance is in the buffer and the file has been written."""
+
+    line: int
+    """The buffer's line count afterwards -- evidence the text landed."""
+
+    elapsed_ms: float
+
+
+@dataclass(frozen=True, slots=True)
+class AppendFailed:
+    """The utterance did not land. ``reason`` is for logs, not for parsing."""
+
+    reason: str
+
+
+type AppendResult = Appended | AppendFailed
+
+
+def _indicator_source() -> str:
+    """The Lua half of this module, shipped alongside it in the package."""
+    return resources.files("voice_kb").joinpath("nvim_indicator.lua").read_text(encoding="utf-8")
+
+
+class NvimSession:
+    """One dictation nvim: the process, the socket, and the buffer in it.
+
+    Not thread-safe, deliberately: it is owned by a single bridge thread in
+    :mod:`voice_kb.app`, the same way the recogniser is owned by the worker.
+    """
+
+    def __init__(self, config: NvimConfig, *, today: date | None = None) -> None:
+        self._config = config
+        self._today = today or date.today()
+        self._nvim: Any | None = None
+        self._buffer: int | None = None
+        self._process: subprocess.Popen[bytes] | None = None
+
+    # ------------------------------------------------------------------ queries
+
+    @property
+    def connected(self) -> bool:
+        return self._nvim is not None
+
+    @property
+    def path(self) -> Path:
+        """The dated file this session dictates into."""
+        return self._config.dictation_dir / self._today.strftime(self._config.file_template)
+
+    # ---------------------------------------------------------------- lifecycle
+
+    def ensure(self) -> bool:
+        """Make sure a dictation nvim is up and bound to today's file.
+
+        Reattaches to a live socket if there is one, spawns a terminal if not.
+        Returns whether the session is usable; every failure is logged here
+        rather than raised, because a dictation that cannot reach nvim must
+        still leave the daemon running (and the text in the log) instead of
+        taking the process down.
+        """
+        if self._nvim is not None and self._socket_alive():
+            return True
+        self._drop("reconnecting")
+        try:
+            if self._attach_existing() or self._spawn_and_attach():
+                return True
+        except Exception as e:  # pynvim raises a wide range; none may escape
+            log.error("could not open the dictation window: %s", e)
+            self._drop("connection failed")
+            return False
+        return False
+
+    def close(self) -> None:
+        """Detach. The nvim itself is left running -- the user may still be
+        editing what they dictated, and killing their editor because a daemon
+        exited would lose exactly the text this window exists to keep."""
+        self._drop("shutting down")
+
+    # ------------------------------------------------------------------ writing
+
+    def append(self, text: str) -> AppendResult:
+        """Append one committed utterance as its own paragraph, and save.
+
+        A *request*, not a notification: this is the one call whose failure
+        the user must hear about, so it waits for nvim to confirm the new
+        line count.
+        """
+        if self._nvim is None or self._buffer is None:
+            return AppendFailed(reason="not connected to nvim")
+        start = time.monotonic()
+        try:
+            line = int(self._nvim.exec_lua("return VoiceKb.append(...)", text))
+        except Exception as e:
+            self._drop("append failed")
+            return AppendFailed(reason=str(e))
+        return Appended(line=line, elapsed_ms=(time.monotonic() - start) * 1000)
+
+    def set_state(
+        self,
+        *,
+        phase: Phase | None = None,
+        level: float | None = None,
+        preview: str | None = None,
+    ) -> None:
+        """Update the indicator. Fire-and-forget, and never raises.
+
+        Sent as a notification: this runs many times a second while the key is
+        held, and a round trip per level sample would put nvim's event loop on
+        the dictation latency path for something purely cosmetic. Only the
+        fields given are changed.
+        """
+        if self._nvim is None:
+            return
+        update: dict[str, Any] = {}
+        if phase is not None:
+            update["phase"] = _PHASE_NAMES[phase]
+        if level is not None:
+            update["level"] = max(0.0, min(1.0, level))
+        if preview is not None:
+            update["preview"] = preview
+        if not update:
+            return
+        try:
+            self._nvim.exec_lua("VoiceKb.set_state(...)", update, async_=True)
+        except Exception as e:
+            log.debug("indicator update dropped: %s", e)
+            self._drop("indicator update failed")
+
+    def raise_window(self) -> None:
+        """Bring an existing dictation window to the workspace the user is on.
+
+        Only the workspace move, deliberately: it is *not* re-placed on every
+        dictation. A window that jumped back under the pointer every time the
+        key was pressed would fight anyone who had moved it somewhere they
+        wanted it, and the placement in :meth:`place_window` is a starting
+        position, not a policy to keep enforcing.
+        """
+        self._i3("move workspace current")
+
+    def place_window(self, rect: Rect) -> None:
+        """Size and position a freshly opened window. Called once, on spawn."""
+        self._i3(
+            f"resize set {rect.width} {rect.height}, "
+            f"move position {rect.x} {rect.y}"
+        )
+
+    def _i3(self, command: str) -> None:
+        """Run one i3 command against the dictation window.
+
+        Movement only -- there is no focus command anywhere in this module. i3
+        leaves focus with whatever the user was reading, which is the whole
+        point of the window. Silently does nothing when i3 is not the WM.
+        """
+        try:
+            done = subprocess.run(
+                ["i3-msg", f'[instance="{self._config.window_instance}"] {command}'],
+                capture_output=True,
+                timeout=_I3_TIMEOUT_S,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as e:
+            log.debug("could not reach i3 (%s); leaving the window where it is", e)
+            return
+        if done.returncode != 0:
+            log.debug("i3 refused %r: %s", command, done.stderr[:200])
+
+    # ------------------------------------------------------------------ internals
+
+    def _socket_alive(self) -> bool:
+        """Whether something is still accepting connections on the socket.
+
+        A plain ``connect``, not an RPC round trip. This runs on every
+        key-down, and a pynvim request has no timeout -- an editor busy with
+        its own startup would block the bridge thread on what is meant to be a
+        liveness check. Connecting cannot block longer than the timeout set
+        here, and a nvim that has quit either removed its socket or refuses
+        the connection, which is the case this exists to catch.
+        """
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+                probe.settimeout(_SOCKET_PROBE_S)
+                probe.connect(str(self._config.socket_path))
+        except OSError:
+            return False
+        return True
+
+    def _answers_rpc(self) -> bool:
+        """Whether nvim is far enough through startup to serve API requests.
+
+        Out of process, via ``nvim --server``, purely so it can be given a
+        hard timeout -- pynvim offers none, and this is exactly the wait that
+        needs one. Measured here: a full plugin configuration takes ~1s before
+        it answers, and the first ever open took 13.5s while the plugin
+        manager did one-time work. Attaching inside that window blocks the
+        bridge thread with no way out, which would in turn hang the daemon's
+        shutdown.
+        """
+        try:
+            done = subprocess.run(
+                [
+                    *self._config.editor[:1],
+                    "--server",
+                    str(self._config.socket_path),
+                    "--remote-expr",
+                    "1",
+                ],
+                capture_output=True,
+                timeout=_READY_PROBE_S,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return done.returncode == 0
+
+    def _attach_existing(self) -> bool:
+        """Reuse the nvim already listening on the socket, if any."""
+        if not self._config.socket_path.exists():
+            return False
+        if not self._socket_alive():
+            log.info("stale nvim socket at %s; starting a new one", self._config.socket_path)
+            self._config.socket_path.unlink(missing_ok=True)
+            return False
+        if not self._answers_rpc():
+            # Connectable but not serving: an editor still starting up, or one
+            # wedged. Either way, attaching would block indefinitely.
+            log.warning(
+                "nvim on %s is not answering; leaving it alone this time",
+                self._config.socket_path,
+            )
+            return False
+        try:
+            nvim = pynvim.attach("socket", path=str(self._config.socket_path))
+        except OSError as e:
+            # It answered the probe a moment ago, so this is a nvim that quit
+            # in between. Drop the socket so the spawn path is not tripped by
+            # it on the next dictation.
+            log.info(
+                "nvim on %s went away mid-connect (%s); starting a new one",
+                self._config.socket_path,
+                e,
+            )
+            self._config.socket_path.unlink(missing_ok=True)
+            return False
+        self._bind(nvim)
+        log.info("reattached to the dictation nvim on %s", self._config.socket_path)
+        return True
+
+    def _spawn_and_attach(self) -> bool:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._config.socket_path.parent.mkdir(parents=True, exist_ok=True)
+        self._config.socket_path.unlink(missing_ok=True)
+
+        argv = self._config.spawn_argv(socket=self._config.socket_path, target=self.path)
+        log.info("opening the dictation window: %s", " ".join(argv))
+        try:
+            process = subprocess.Popen(
+                argv,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                # Its own session, so Ctrl-C in the daemon's terminal does not
+                # take the user's editor -- and their unsaved text -- with it.
+                start_new_session=True,
+            )
+        except OSError as e:
+            log.error("could not start %r: %s", argv[0], e)
+            return False
+        self._process = process
+        # Nothing ever waits on this process, so a daemon thread reaps it.
+        threading.Thread(target=process.wait, daemon=True).start()
+
+        nvim = self._wait_for_socket(process)
+        if nvim is None:
+            return False
+        self._bind(nvim)
+        placement = self._placement()
+        if placement is not None:
+            self.place_window(placement)
+        return True
+
+    def _placement(self) -> Rect | None:
+        """Where a newly opened window should sit: under the pointer, on the
+        monitor the pointer is on. ``None`` when X cannot be queried at all,
+        in which case the window manager's own placement stands."""
+        screens = x11.outputs()
+        if not screens:
+            return None
+        pointer = x11.pointer_position()
+        if pointer is None:
+            target = next((s for s in screens if s.primary), screens[0])
+        else:
+            # A 1x1 rect at the pointer reuses the same "largest intersection,
+            # else primary" rule the overlay uses to pick an output.
+            target = pick_output(screens, Rect(x=pointer[0], y=pointer[1], width=1, height=1))
+        return dictation_rect(target.rect, pointer, self._config.window_fraction)
+
+    def _wait_for_socket(self, process: subprocess.Popen[bytes]) -> Any | None:
+        """Poll until nvim is *answering*, it dies, or the timeout expires.
+
+        Answering, not merely listening: the socket file appears, and accepts
+        connections, well before nvim has finished loading a configuration and
+        can serve API requests. Attaching in that window is what turns a slow
+        editor startup into a blocked bridge thread, so the readiness probe --
+        which is the one call here with a hard timeout -- gates the attach.
+        """
+        deadline = time.monotonic() + self._config.startup_timeout_s
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                log.error(
+                    "the dictation terminal exited immediately (status %d); "
+                    "check that %r runs on its own",
+                    process.returncode,
+                    self._config.terminal[0] if self._config.terminal else self._config.editor[0],
+                )
+                return None
+            if self._config.socket_path.exists() and self._answers_rpc():
+                try:
+                    return pynvim.attach("socket", path=str(self._config.socket_path))
+                except OSError as e:
+                    log.error("nvim answered but would not accept a connection: %s", e)
+                    return None
+            time.sleep(_CONNECT_POLL_S)
+        log.error(
+            "nvim did not start answering on %s within %.1fs -- raise "
+            "nvim.startup_timeout_s, or use a lighter nvim.editor",
+            self._config.socket_path,
+            self._config.startup_timeout_s,
+        )
+        return None
+
+    def _bind(self, nvim: Any) -> None:
+        """Load the Lua half, open today's file, and point the indicator at it.
+
+        Runs on every connection, including reattachment, so a nvim that was
+        started yesterday picks up today's file and a freshly reloaded
+        indicator rather than silently appending to the wrong buffer.
+        """
+        nvim.exec_lua(_indicator_source())
+        buffer = int(nvim.exec_lua(_OPEN_BUFFER_LUA, str(self.path)))
+        nvim.exec_lua("VoiceKb.setup(...)", buffer)
+        self._nvim = nvim
+        self._buffer = buffer
+        log.info("dictating into %s (buffer %d)", self.path, buffer)
+
+    def _drop(self, why: str) -> None:
+        """Forget the connection so the next :meth:`ensure` rebuilds it."""
+        if self._nvim is not None:
+            log.debug("dropping the nvim connection: %s", why)
+            # Already gone is the normal case here -- there is nothing to
+            # salvage from a connection we are discarding either way.
+            with contextlib.suppress(Exception):
+                self._nvim.close()
+        self._nvim = None
+        self._buffer = None

@@ -5,31 +5,35 @@ injected, a missing model silently produced nothing, and holding the hotkey
 spawned ~60 subprocesses/second and stalled the whole event loop. Unit tests
 on ``state.py``/``text.py``/etc. in isolation cannot see any of that -- these
 tests drive the real :class:`~voice_kb.app.Daemon` (state machine, ``_apply``,
-``_sync_overlay``, ``_on_decoded``, the generation counter) against fakes for
-every hardware/subprocess boundary, so a regression in how those pieces are
-wired together shows up here even when every module still passes in
+``_sync_indicators``, ``_on_decoded``, the generation counter) against fakes
+for every hardware/subprocess boundary, so a regression in how those pieces
+are wired together shows up here even when every module still passes in
 isolation.
 
 Hardware-free by construction: ``conftest.py`` sets
 ``QT_QPA_PLATFORM=offscreen`` before PySide6 is ever imported, and every
 ``Daemon`` built by the ``make_daemon`` fixture has a fake ``AudioCapture``,
-a fake ``inject_text``, and faked ``voice_kb.x11`` queries. No test here
+a fake ``NvimSession``, and faked ``voice_kb.x11`` queries. No test here
 starts ``HotkeyWatcher`` or ``Daemon.start()`` (that would open real
-``/dev/input`` nodes and touch a real X server) and no test pastes into a
-real window -- the whole point of a fake ``inject_text`` is that a bug can be
-caught without ever risking that again.
+``/dev/input`` nodes and touch a real X server), and no test spawns a real
+terminal or writes to a real nvim -- the whole point of a fake
+``NvimSession`` is that a regression in the append path can be caught
+without ever risking that again. (The real ``NvimSession``, against a real
+headless nvim, is exercised separately in ``test_nvim.py``.)
 
-Driving the worker: ``Daemon``'s worker thread is never started (see
-``make_daemon`` in ``conftest.py`` for why). Instead, wherever production
-code would cross to the worker thread via a queued signal
-(``_decode_requested`` -> ``_Worker.run_decode``, ``_inject_requested`` ->
-``_Worker.run_inject``, ``_preview_requested`` -> ``_Worker.run_preview``),
-tests call the real worker method directly on the main thread. Because the
-*receiving* end of ``_worker.decoded``/
-``decode_failed`` (``Daemon._on_decoded``/``_on_decode_failed``) lives on the
-main thread and the call happens from the main thread, Qt resolves that
-connection to a direct (synchronous) call -- so the real generation check in
-``_on_decoded`` still runs for real; only the thread hop itself is skipped.
+Driving the worker and the nvim bridge: ``Daemon``'s worker ``QThread`` and
+its nvim bridge ``QThread`` are both never started (see ``make_daemon`` and
+``fake_nvim`` in ``conftest.py`` for why). Instead, wherever production code
+would cross to one of those threads via a queued signal
+(``_decode_requested`` -> ``_Worker.run_decode``, ``_preview_requested`` ->
+``_Worker.run_preview``, ``_nvim_append_requested`` -> ``_NvimBridge.append``,
+...), tests call the real method directly on the main thread. Because the
+*receiving* end of the result signals (``_Worker.decoded``/``decode_failed``,
+``_NvimBridge.appended``/``append_failed``) lives on the main thread and the
+call happens from the main thread, Qt resolves that connection to a direct
+(synchronous) call -- so the real generation check in ``_on_decoded`` (and the
+real success/failure handling in ``_on_appended``/``_on_append_failed``)
+still run for real; only the thread hop itself is skipped.
 """
 
 from __future__ import annotations
@@ -42,24 +46,24 @@ from typing import cast
 
 import numpy as np
 import pytest
-from fakes import FakeAudioCapture, FakeInjector, FakeTranscriber, FakeX11
+from fakes import FakeAudioCapture, FakeNvimSession, FakeTranscriber, FakeX11
 from PySide6.QtWidgets import QApplication
 
 from voice_kb import x11
 from voice_kb.app import Daemon
 from voice_kb.asr import ModelMissingError, Transcriber, TranscriptionResult
 from voice_kb.audio import AudioCapture, MonoAudio
-from voice_kb.config import AsrConfig, Config, HotkeyConfig, PasteConfig
+from voice_kb.config import AsrConfig, Config, HotkeyConfig, OverlayConfig
 from voice_kb.geometry import Rect
 from voice_kb.hotkey import HotkeyWatcher
-from voice_kb.inject import inject_text
-from voice_kb.overlay import Overlay
+from voice_kb.nvim import AppendFailed, NvimSession
 from voice_kb.state import (
     MIN_HOLD_SECONDS,
     Cancelled,
     Idle,
     KeyDown,
     KeyUp,
+    Phase,
     Recording,
     SessionState,
     Transcribing,
@@ -70,17 +74,28 @@ pytestmark = pytest.mark.usefixtures("qapp")
 type DaemonFactory = Callable[[Config | None], Daemon]
 
 
-def _inject_spy(daemon: Daemon) -> list[tuple[str, PasteConfig]]:
-    """Records every ``(text, paste_config)`` the daemon asked to have
-    injected, by connecting straight to the ``_inject_requested`` signal.
+def _append_spy(daemon: Daemon) -> list[str]:
+    """Records every string the daemon asked to have appended to the
+    dictation buffer, by connecting straight to ``_nvim_append_requested``.
 
     A plain function connected to a Qt signal is always invoked directly
     (Qt has no thread affinity to queue against for a bare callable), so
     this fires synchronously the moment ``_on_decoded`` emits it -- no
-    worker thread required to observe it.
+    bridge thread required to observe it.
     """
-    calls: list[tuple[str, PasteConfig]] = []
-    daemon._inject_requested.connect(lambda text, paste: calls.append((text, paste)))
+    calls: list[str] = []
+    daemon._nvim_append_requested.connect(calls.append)
+    return calls
+
+
+def _nvim_preview_spy(daemon: Daemon) -> list[str]:
+    """Records every string the daemon pushed toward the nvim indicator's
+    preview field, the same way :func:`_append_spy` observes appends. This is
+    the "sink" a preview must never actually reach in committed form -- see
+    the invariants in the module docstring of ``voice_kb.app``.
+    """
+    calls: list[str] = []
+    daemon._nvim_preview.connect(calls.append)
     return calls
 
 
@@ -88,6 +103,20 @@ def _decode_spy(daemon: Daemon) -> list[int]:
     """Records every generation a decode was requested for."""
     calls: list[int] = []
     daemon._decode_requested.connect(lambda samples, generation: calls.append(generation))
+    return calls
+
+
+def _preview_spy(daemon: Daemon) -> list[tuple[MonoAudio, int]]:
+    """Records every ``(samples, generation)`` a preview was requested for.
+
+    As :func:`_decode_spy`: the worker thread is never started, so tests take
+    what the daemon asked for here and hand it to ``_Worker.run_preview``
+    themselves, exactly where Qt would have made the thread hop.
+    """
+    calls: list[tuple[MonoAudio, int]] = []
+    daemon._preview_requested.connect(
+        lambda samples, generation: calls.append((samples, generation))
+    )
     return calls
 
 
@@ -109,6 +138,13 @@ def _audio(daemon: Daemon) -> FakeAudioCapture:
     return cast(FakeAudioCapture, daemon._audio)
 
 
+def _nvim_session(daemon: Daemon) -> FakeNvimSession:
+    """As :func:`_transcriber`, for ``daemon._nvim._session`` (statically
+    ``NvimSession``, actually the single :class:`FakeNvimSession` the
+    ``fake_nvim`` fixture substitutes for every ``Daemon`` in a test)."""
+    return cast(FakeNvimSession, daemon._nvim._session)
+
+
 def _state(daemon: Daemon) -> SessionState:
     """A fresh read of ``daemon._state``, routed through a function call so
     mypy doesn't carry an ``isinstance`` narrowing of one variant (e.g.
@@ -119,16 +155,17 @@ def _state(daemon: Daemon) -> SessionState:
     return daemon._state
 
 
-# -- 1. cancelled decode is never injected -----------------------------------
+# -- 1. cancelled decode is never appended ------------------------------------
 
 
-def test_cancelled_decode_is_never_injected(make_daemon: DaemonFactory) -> None:
+def test_cancelled_decode_is_never_appended(make_daemon: DaemonFactory) -> None:
     """Regression: a decode that finishes after ``Cancelled`` must not reach
-    injection. This is exactly the bug where a stale in-flight decode landed
-    in whatever window happened to be focused seconds later.
+    the dictation buffer. This is exactly the bug where a stale in-flight
+    decode landed in whatever window happened to be focused seconds later
+    (now: got appended to the buffer regardless of the cancellation).
     """
     daemon = make_daemon(None)
-    inject_calls = _inject_spy(daemon)
+    append_calls = _append_spy(daemon)
 
     daemon._dispatch(KeyDown(at=0.0))
     daemon._dispatch(KeyUp(at=0.5))
@@ -147,15 +184,15 @@ def test_cancelled_decode_is_never_injected(make_daemon: DaemonFactory) -> None:
     # now, off-band, with the generation it was started under.
     daemon._worker.run_decode(_audio(daemon).next_samples, in_flight_generation)
 
-    assert inject_calls == []
+    assert append_calls == []
     assert isinstance(_state(daemon), Idle)
 
 
-def test_uncancelled_decode_is_injected(make_daemon: DaemonFactory) -> None:
+def test_uncancelled_decode_is_appended(make_daemon: DaemonFactory) -> None:
     """Control for the above: without a cancellation, the same shape of
-    decode-completing-later *does* reach injection."""
+    decode-completing-later *does* reach the append boundary."""
     daemon = make_daemon(None)
-    inject_calls = _inject_spy(daemon)
+    append_calls = _append_spy(daemon)
 
     daemon._dispatch(KeyDown(at=0.0))
     daemon._dispatch(KeyUp(at=0.5))
@@ -166,7 +203,7 @@ def test_uncancelled_decode_is_injected(make_daemon: DaemonFactory) -> None:
     )
     daemon._worker.run_decode(_audio(daemon).next_samples, generation)
 
-    assert inject_calls == [("on time result", daemon._config.paste)]
+    assert append_calls == ["on time result"]
     assert isinstance(_state(daemon), Idle)
 
 
@@ -179,9 +216,11 @@ def test_holding_key_does_not_cause_x11_subprocess_storm(
     """Regression: holding the hotkey used to reposition the overlay (and so
     shell out to xrandr/xdotool) on every single dispatched event -- ~2 calls
     per event, ~122 calls for a 2s hold. Repositioning must only happen on an
-    actual phase change.
+    actual phase change. The overlay is off by default now, so it is turned
+    on explicitly here -- otherwise this would pass trivially by never
+    reaching the placement code at all.
     """
-    daemon = make_daemon(None)
+    daemon = make_daemon(Config(overlay=OverlayConfig(enabled=True)))
 
     daemon._dispatch(KeyDown(at=0.0))
     # Simulate a 2-second hold's worth of events reaching the daemon without
@@ -224,14 +263,14 @@ def test_auto_repeat_never_invokes_any_callback() -> None:
 def test_stray_tap_is_discarded_not_decoded(make_daemon: DaemonFactory) -> None:
     daemon = make_daemon(None)
     decode_calls = _decode_spy(daemon)
-    inject_calls = _inject_spy(daemon)
+    append_calls = _append_spy(daemon)
 
     held = MIN_HOLD_SECONDS / 2
     daemon._dispatch(KeyDown(at=0.0))
     daemon._dispatch(KeyUp(at=held))
 
     assert decode_calls == []
-    assert inject_calls == []
+    assert append_calls == []
     assert isinstance(_state(daemon), Idle)
     assert _audio(daemon).start_calls == 1
     assert _audio(daemon).stop_calls == 1
@@ -240,15 +279,16 @@ def test_stray_tap_is_discarded_not_decoded(make_daemon: DaemonFactory) -> None:
 # -- 5. full happy path -------------------------------------------------------
 
 
-def test_happy_path_key_down_to_injected_postprocessed_text(
-    make_daemon: DaemonFactory, fake_injector: FakeInjector
+def test_happy_path_key_down_to_appended_postprocessed_text(
+    make_daemon: DaemonFactory,
 ) -> None:
-    """key down -> audio captured -> decode -> postprocess -> injected text
+    """key down -> audio captured -> decode -> postprocess -> appended text
     equals the expected post-processed string, proving filler stripping
     happened end to end (not just in ``test_text.py`` isolation), all the
-    way down to the real ``_Worker.run_inject`` -> ``inject_text`` seam."""
+    way down to the real ``_NvimBridge.append`` -> ``NvimSession.append``
+    seam."""
     daemon = make_daemon(None)
-    inject_calls = _inject_spy(daemon)
+    append_calls = _append_spy(daemon)
 
     daemon._dispatch(KeyDown(at=0.0))
     assert _audio(daemon).start_calls == 1
@@ -260,16 +300,15 @@ def test_happy_path_key_down_to_injected_postprocessed_text(
     )
     daemon._worker.run_decode(_audio(daemon).next_samples, generation)
 
-    assert inject_calls == [("hello world", daemon._config.paste)]
+    assert append_calls == ["hello world"]
     assert isinstance(_state(daemon), Idle)
 
-    # Drive the actual injection boundary too, with the exact text/paste
-    # config the daemon asked for, so the real seam between the worker and
-    # the outside world (faked here) is exercised as well.
-    text, paste = inject_calls[0]
-    daemon._worker.run_inject(text, paste)
+    # Drive the actual append boundary too, with the exact text the daemon
+    # asked for, so the real seam between the bridge and the dictation
+    # window (faked here) is exercised as well.
+    daemon._nvim.append(append_calls[0])
 
-    assert fake_injector.calls == [("hello world", daemon._config.paste)]
+    assert _nvim_session(daemon).appended == ["hello world"]
 
 
 # -- 6. a press during an in-flight decode starts a new capture --------------
@@ -279,7 +318,7 @@ def test_press_during_inflight_decode_starts_new_capture_and_both_results_land(
     make_daemon: DaemonFactory,
 ) -> None:
     daemon = make_daemon(None)
-    inject_calls = _inject_spy(daemon)
+    append_calls = _append_spy(daemon)
     transcriber = _transcriber(daemon)
 
     daemon._dispatch(KeyDown(at=0.0))
@@ -294,10 +333,10 @@ def test_press_during_inflight_decode_starts_new_capture_and_both_results_land(
     assert isinstance(_state(daemon), Recording)
     assert _audio(daemon).start_calls == 2
 
-    # The earlier decode now completes; its result must still be injected.
+    # The earlier decode now completes; its result must still be appended.
     transcriber.next_result = TranscriptionResult(text="first result", elapsed_seconds=0.1)
     daemon._worker.run_decode(first_samples, first_generation)
-    assert inject_calls[-1] == ("first result", daemon._config.paste)
+    assert append_calls[-1] == "first result"
     # The daemon is still mid-recording the second utterance.
     assert isinstance(_state(daemon), Recording)
 
@@ -307,10 +346,7 @@ def test_press_during_inflight_decode_starts_new_capture_and_both_results_land(
     transcriber.next_result = TranscriptionResult(text="second result", elapsed_seconds=0.1)
     daemon._worker.run_decode(_audio(daemon).next_samples, second_generation)
 
-    assert inject_calls == [
-        ("first result", daemon._config.paste),
-        ("second result", daemon._config.paste),
-    ]
+    assert append_calls == ["first result", "second result"]
     assert isinstance(_state(daemon), Idle)
 
 
@@ -335,7 +371,7 @@ def test_decode_that_raises_does_not_kill_daemon_and_returns_to_idle(
     make_daemon: DaemonFactory,
 ) -> None:
     daemon = make_daemon(None)
-    inject_calls = _inject_spy(daemon)
+    append_calls = _append_spy(daemon)
 
     daemon._dispatch(KeyDown(at=0.0))
     daemon._dispatch(KeyUp(at=0.5))
@@ -344,7 +380,7 @@ def test_decode_that_raises_does_not_kill_daemon_and_returns_to_idle(
     _transcriber(daemon).next_result = RuntimeError("decode blew up")
     daemon._worker.run_decode(_audio(daemon).next_samples, generation)
 
-    assert inject_calls == []
+    assert append_calls == []
     assert isinstance(_state(daemon), Idle)
 
     # The daemon is still alive and responsive to new events.
@@ -361,30 +397,10 @@ def test_decode_that_raises_does_not_kill_daemon_and_returns_to_idle(
 # a streaming decode that made the user wait and silently dropped audio.
 
 
-def _preview_spy(daemon: Daemon) -> list[tuple[MonoAudio, int]]:
-    """Records every ``(samples, generation)`` a preview was requested for.
-
-    As :func:`_decode_spy`: the worker thread is never started, so tests take
-    what the daemon asked for here and hand it to ``_Worker.run_preview``
-    themselves, exactly where Qt would have made the thread hop.
-    """
-    calls: list[tuple[MonoAudio, int]] = []
-    daemon._preview_requested.connect(
-        lambda samples, generation: calls.append((samples, generation))
-    )
-    return calls
-
-
-def _overlay(daemon: Daemon) -> Overlay:
-    """``daemon._overlay`` is statically ``Overlay | None``; every daemon these
-    tests build has ``overlay.enabled`` on, so it is always present."""
-    assert daemon._overlay is not None
-    return daemon._overlay
-
-
-def test_preview_mid_recording_reaches_the_overlay(make_daemon: DaemonFactory) -> None:
+def test_preview_mid_recording_reaches_the_nvim_indicator(make_daemon: DaemonFactory) -> None:
     daemon = make_daemon(None)
     requests = _preview_spy(daemon)
+    previews = _nvim_preview_spy(daemon)
 
     daemon._dispatch(KeyDown(at=0.0))
     daemon._request_preview()  # what the preview QTimer does, once a second
@@ -401,16 +417,17 @@ def test_preview_mid_recording_reaches_the_overlay(make_daemon: DaemonFactory) -
     )
     daemon._worker.run_preview(samples, generation)
 
-    # Post-processed on the way to the overlay, like the committed transcript.
-    assert _overlay(daemon)._preview == "hello world"
+    # Post-processed on the way to the indicator, like the committed transcript.
+    assert previews[-1] == "hello world"
 
 
 def test_preview_from_a_previous_generation_is_dropped(make_daemon: DaemonFactory) -> None:
-    """A preview requested before a cancellation must not land in the overlay
-    of the *next* utterance -- the same staleness rule the committed decode
-    already obeys."""
+    """A preview requested before a cancellation must not land in the
+    indicator of the *next* utterance -- the same staleness rule the
+    committed decode already obeys."""
     daemon = make_daemon(None)
     requests = _preview_spy(daemon)
+    previews = _nvim_preview_spy(daemon)
 
     daemon._dispatch(KeyDown(at=0.0))
     daemon._request_preview()
@@ -430,13 +447,15 @@ def test_preview_from_a_previous_generation_is_dropped(make_daemon: DaemonFactor
     )
     daemon._worker.run_preview(stale_samples, stale_generation)
 
-    assert _overlay(daemon)._preview == ""
+    assert "stale preview" not in previews
+    assert previews[-1] == ""
 
 
 def test_preview_arriving_after_key_up_is_dropped(make_daemon: DaemonFactory) -> None:
     """Once the key is up the daemon is transcribing, and a preview that
-    resolves late must not overwrite (or resurrect) the overlay text."""
+    resolves late must not overwrite (or resurrect) the indicator text."""
     daemon = make_daemon(None)
+    previews = _nvim_preview_spy(daemon)
 
     daemon._dispatch(KeyDown(at=0.0))
     generation = daemon._generation
@@ -447,7 +466,8 @@ def test_preview_arriving_after_key_up_is_dropped(make_daemon: DaemonFactory) ->
     # check, so this pins the *receiving* guard on its own.
     daemon._worker.previewed.emit("late preview", generation)
 
-    assert _overlay(daemon)._preview == ""
+    assert "late preview" not in previews
+    assert previews[-1] == ""
 
 
 def test_abandon_flag_skips_a_queued_preview_entirely(make_daemon: DaemonFactory) -> None:
@@ -459,6 +479,7 @@ def test_abandon_flag_skips_a_queued_preview_entirely(make_daemon: DaemonFactory
     """
     daemon = make_daemon(None)
     requests = _preview_spy(daemon)
+    previews = _nvim_preview_spy(daemon)
 
     daemon._dispatch(KeyDown(at=0.0))
     daemon._request_preview()
@@ -475,18 +496,20 @@ def test_abandon_flag_skips_a_queued_preview_entirely(make_daemon: DaemonFactory
     daemon._worker.run_preview(queued_samples, queued_generation)
 
     assert len(transcriber.calls) == decodes_before, "the preview was decoded anyway"
-    assert _overlay(daemon)._preview == ""
+    assert "never decoded" not in previews
+    assert previews[-1] == ""
 
 
-def test_injected_text_comes_only_from_the_committed_decode(
+def test_appended_text_comes_only_from_the_committed_decode(
     make_daemon: DaemonFactory,
 ) -> None:
     """Invariant 1: previews are cosmetic. Even with a preview that decoded to
-    something completely different, the injected text is produced by exactly
+    something completely different, the appended text is produced by exactly
     one decode of the complete captured buffer at key release.
     """
     daemon = make_daemon(None)
-    inject_calls = _inject_spy(daemon)
+    append_calls = _append_spy(daemon)
+    previews = _nvim_preview_spy(daemon)
     audio = _audio(daemon)
     audio.preview_samples = np.full(800, 0.5, dtype=np.float32)
     audio.next_samples = np.full(1600, 0.25, dtype=np.float32)
@@ -497,18 +520,19 @@ def test_injected_text_comes_only_from_the_committed_decode(
     daemon._request_preview()
     transcriber.next_result = TranscriptionResult(text="preview only", elapsed_seconds=0.02)
     daemon._worker.run_preview(*requests[0])
-    assert _overlay(daemon)._preview == "preview only"
+    assert previews[-1] == "preview only"
 
     daemon._dispatch(KeyUp(at=0.5))
     transcriber.next_result = TranscriptionResult(text="committed text", elapsed_seconds=0.1)
     daemon._worker.run_decode(audio.next_samples, daemon._generation)
 
-    assert inject_calls == [("committed text", daemon._config.paste)]
+    assert append_calls == ["committed text"]
     # Exactly one decode saw the full buffer, and the preview's window never
-    # reached injection in any form.
+    # reached the append boundary in any form.
     full_buffer_decodes = [c for c in transcriber.calls if c.size == audio.next_samples.size]
     assert len(full_buffer_decodes) == 1
     assert np.array_equal(full_buffer_decodes[0], audio.next_samples)
+    assert "preview only" not in append_calls
 
 
 # -- 10. the fakes still match the real interfaces ----------------------------
@@ -543,21 +567,23 @@ def test_a_stream_that_dies_mid_capture_is_caught_while_the_key_is_still_held(
     """
     daemon = make_daemon(None)
     audio = _audio(daemon)
+    previews = _nvim_preview_spy(daemon)
 
     daemon._dispatch(KeyDown(at=0.0))
     assert audio.recover_calls == 0
 
     daemon._poll_level()  # healthy: polls, finds nothing wrong, says nothing
     assert audio.recover_calls == 1
-    assert _overlay(daemon)._preview == ""
+    assert previews[-1] == ""
 
     audio.dead = True
     daemon._poll_level()
 
-    # Recovered, and the user is told on the overlay -- silence in the meter is
-    # ambiguous (a quiet room looks identical to a dead device), so the overlay
-    # has to say which one it is while they can still act on it.
-    assert "no audio" in _overlay(daemon)._preview
+    # Recovered, and the user is told on the nvim indicator -- silence in the
+    # meter is ambiguous (a quiet room looks identical to a dead device), so
+    # it has to say which one it is while they can still act on it. This is
+    # pushed unconditionally, not gated on the overlay (off by default).
+    assert "no audio" in previews[-1]
 
 
 def test_the_level_poll_does_not_touch_the_stream_when_idle(
@@ -613,7 +639,8 @@ def test_overlay_is_placed_from_qt_geometry_not_xrandr_geometry(
     because a render test never involves a screen.
 
     So: pick the output with xrandr, place on it with Qt's own rect. This pins
-    that the *Qt* rect is what reaches the placement maths.
+    that the *Qt* rect is what reaches the placement maths. (The placement
+    computation itself does not care whether the overlay widget is enabled.)
     """
     daemon = make_daemon(None)
 
@@ -629,8 +656,9 @@ def test_overlay_is_placed_from_qt_geometry_not_xrandr_geometry(
     # Centred and bottom-aligned within the QT rect (960x540), not the 1920x1080
     # one the fake xrandr reports.
     cfg = daemon._config.overlay
+    height = cfg.total_height(preview_band=daemon._config.preview.enabled)
     assert position.x == (960 - cfg.width) // 2
-    assert position.y == 540 - cfg.margin_px - cfg.total_height
+    assert position.y == 540 - cfg.margin_px - height
 
 
 def test_overlay_falls_back_to_xrandr_when_qt_does_not_know_the_screen(
@@ -647,7 +675,8 @@ def test_overlay_falls_back_to_xrandr_when_qt_does_not_know_the_screen(
 
     assert position is not None
     cfg = daemon._config.overlay
-    assert position.y == 1080 - cfg.margin_px - cfg.total_height
+    height = cfg.total_height(preview_band=daemon._config.preview.enabled)
+    assert position.y == 1080 - cfg.margin_px - height
 
 
 def test_previews_stop_past_the_cap_without_clearing_what_is_on_screen(
@@ -657,13 +686,14 @@ def test_previews_stop_past_the_cap_without_clearing_what_is_on_screen(
 
     Stopping must not look like the failure it was introduced to fix: the text
     already shown stays exactly where it is. Silence from the previewer is not
-    the same as an empty overlay.
+    the same as a cleared indicator.
     """
     daemon = make_daemon(None)
     requests = _preview_spy(daemon)
+    previews = _nvim_preview_spy(daemon)
     audio = _audio(daemon)
     rate = daemon._config.audio.sample_rate
-    cap = daemon._config.overlay.preview_max_seconds
+    cap = daemon._config.preview.max_seconds
 
     daemon._dispatch(KeyDown(at=0.0))
     audio.preview_samples = np.zeros(int((cap - 1) * rate), dtype=np.float32)
@@ -675,13 +705,13 @@ def test_previews_stop_past_the_cap_without_clearing_what_is_on_screen(
         text="everything said so far", elapsed_seconds=0.5
     )
     daemon._worker.run_preview(samples, generation)
-    assert _overlay(daemon)._preview == "everything said so far"
+    assert previews[-1] == "everything said so far"
 
     # Past the cap: no new request, and critically the old text is untouched.
     audio.preview_samples = np.zeros(int((cap + 5) * rate), dtype=np.float32)
     daemon._request_preview()
     assert len(requests) == 1, "no preview should be issued past the cap"
-    assert _overlay(daemon)._preview == "everything said so far"
+    assert previews[-1] == "everything said so far"
 
 
 def test_preview_cadence_backs_off_so_the_worker_stays_half_idle(
@@ -697,7 +727,7 @@ def test_preview_cadence_backs_off_so_the_worker_stays_half_idle(
     assert timer is not None
     assert timer.isSingleShot(), "a repeating timer cannot express an adaptive gap"
 
-    interval = daemon._config.overlay.preview_interval_ms / 1000.0
+    interval = daemon._config.preview.interval_ms / 1000.0
     daemon._dispatch(KeyDown(at=0.0))
 
     # Cheap decode: keep the configured cadence exactly.
@@ -720,6 +750,7 @@ def test_a_preview_that_shrank_never_replaces_a_longer_one(
     instability and the previous text stands."""
     daemon = make_daemon(None)
     requests = _preview_spy(daemon)
+    previews = _nvim_preview_spy(daemon)
     daemon._dispatch(KeyDown(at=0.0))
 
     daemon._request_preview()
@@ -728,13 +759,13 @@ def test_a_preview_that_shrank_never_replaces_a_longer_one(
         text="Okay, we are now at the new model.", elapsed_seconds=0.3
     )
     daemon._worker.run_preview(samples, generation)
-    assert _overlay(daemon)._preview == "Okay, we are now at the new model."
+    assert previews[-1] == "Okay, we are now at the new model."
 
     daemon._request_preview()
     samples, generation = requests[-1]
     _transcriber(daemon).next_result = TranscriptionResult(text="Okay.", elapsed_seconds=0.4)
     daemon._worker.run_preview(samples, generation)
-    assert _overlay(daemon)._preview == "Okay, we are now at the new model."
+    assert previews[-1] == "Okay, we are now at the new model."
 
     # Growth still lands, so this is not a freeze.
     daemon._request_preview()
@@ -743,7 +774,7 @@ def test_a_preview_that_shrank_never_replaces_a_longer_one(
         text="Okay, we are now at the new model. The overlay is there.", elapsed_seconds=0.5
     )
     daemon._worker.run_preview(samples, generation)
-    assert _overlay(daemon)._preview.endswith("The overlay is there.")
+    assert previews[-1].endswith("The overlay is there.")
 
 
 def test_each_utterance_starts_its_preview_from_nothing(
@@ -753,6 +784,7 @@ def test_each_utterance_starts_its_preview_from_nothing(
     dictation would suppress every shorter preview of the next one."""
     daemon = make_daemon(None)
     requests = _preview_spy(daemon)
+    previews = _nvim_preview_spy(daemon)
 
     daemon._dispatch(KeyDown(at=0.0))
     daemon._request_preview()
@@ -768,7 +800,7 @@ def test_each_utterance_starts_its_preview_from_nothing(
     samples, generation = requests[-1]
     _transcriber(daemon).next_result = TranscriptionResult(text="short", elapsed_seconds=0.2)
     daemon._worker.run_preview(samples, generation)
-    assert _overlay(daemon)._preview == "short"
+    assert previews[-1] == "short"
 
 
 def test_every_fake_still_matches_the_interface_it_stands_in_for() -> None:
@@ -779,6 +811,63 @@ def test_every_fake_still_matches_the_interface_it_stands_in_for() -> None:
     """
     _assert_stands_in_for(FakeAudioCapture, AudioCapture)
     _assert_stands_in_for(FakeTranscriber, Transcriber)
+    _assert_stands_in_for(FakeNvimSession, NvimSession)
     for name in ("outputs", "focused_window_rect"):
         assert _params(getattr(FakeX11, name)) == _params(getattr(x11, name))
-    assert _params(FakeInjector.__call__) == _params(inject_text)
+
+
+# -- 11. the nvim seam: opening, appending, and phase changes -----------------
+
+
+def test_key_down_opens_the_dictation_window(make_daemon: DaemonFactory) -> None:
+    """Asked for on every key-down, not just once at startup: the window is
+    the user's to close, so the next dictation must reopen it. Requested while
+    the utterance is still being spoken, in parallel with the recording."""
+    daemon = make_daemon(None)
+    open_calls: list[None] = []
+    daemon._nvim_open_requested.connect(lambda: open_calls.append(None))
+
+    daemon._dispatch(KeyDown(at=0.0))
+
+    assert len(open_calls) == 1
+
+
+def test_failed_append_is_reported_and_does_not_take_the_daemon_down(
+    make_daemon: DaemonFactory,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The decode succeeded and the text exists; it just could not be
+    delivered to the dictation buffer. That must be visible in the log and
+    must not take the daemon down -- the text is recoverable (it is already
+    logged at INFO from ``_on_decoded``), and a broken editor connection is
+    not a reason to stop listening for the next dictation.
+    """
+    daemon = make_daemon(None)
+    _nvim_session(daemon).append_result = AppendFailed(reason="nvim went away")
+
+    with caplog.at_level(logging.ERROR, logger="voice-kb"):
+        daemon._nvim.append("some text")
+
+    assert "could not append" in caplog.text
+    assert "nvim went away" in caplog.text
+
+    # Still alive and responsive to the next dictation.
+    daemon._dispatch(KeyDown(at=0.0))
+    assert isinstance(_state(daemon), Recording)
+
+
+def test_phase_changes_reach_the_nvim_bridge_even_when_the_overlay_is_disabled(
+    make_daemon: DaemonFactory,
+) -> None:
+    """Regression risk called out explicitly: the phase-change detection used
+    to sit behind an ``if self._overlay is None: return``, which would freeze
+    the nvim winbar the moment the overlay -- off by default now -- was
+    disabled."""
+    daemon = make_daemon(None)
+    assert daemon._overlay is None
+    phases: list[Phase] = []
+    daemon._nvim_phase_changed.connect(phases.append)
+
+    daemon._dispatch(KeyDown(at=0.0))
+
+    assert phases == [Phase.RECORDING]

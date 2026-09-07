@@ -11,8 +11,9 @@ from voice_kb.config import (
     Config,
     ConfigError,
     HotkeyConfig,
+    NvimConfig,
     OverlayConfig,
-    PasteConfig,
+    PreviewConfig,
     TextConfig,
 )
 
@@ -61,10 +62,12 @@ def test_toml_round_trip(tmp_path: Path) -> None:
         width = 300
         height = 120
         margin_px = 10
-        live_preview = false
-        preview_interval_ms = 500
-        preview_max_seconds = 6.5
         preview_height = 40
+
+        [preview]
+        enabled = false
+        interval_ms = 500
+        max_seconds = 6.5
         """,
         encoding="utf-8",
     )
@@ -79,15 +82,8 @@ def test_toml_round_trip(tmp_path: Path) -> None:
     assert cfg.text.fillers == ("uh", "erm")
     assert cfg.text.replacements == {"teh": "the"}
     assert cfg.text.trailing_space is True
-    assert cfg.overlay == OverlayConfig(
-        width=300,
-        height=120,
-        margin_px=10,
-        live_preview=False,
-        preview_interval_ms=500,
-        preview_max_seconds=6.5,
-        preview_height=40,
-    )
+    assert cfg.overlay == OverlayConfig(width=300, height=120, margin_px=10, preview_height=40)
+    assert cfg.preview == PreviewConfig(enabled=False, interval_ms=500, max_seconds=6.5)
 
 
 # -- unknown section / key ---------------------------------------------------
@@ -136,13 +132,13 @@ def test_out_of_range_hotkey_code_is_rejected() -> None:
 
 
 def test_too_frequent_preview_interval_is_rejected() -> None:
-    with pytest.raises(ConfigError, match="preview_interval_ms"):
-        Config.from_mapping({"overlay": {"preview_interval_ms": 199}})
+    with pytest.raises(ConfigError, match="interval_ms"):
+        Config.from_mapping({"preview": {"interval_ms": 199}})
 
 
 def test_non_positive_preview_window_is_rejected() -> None:
-    with pytest.raises(ConfigError, match="preview_max_seconds"):
-        Config.from_mapping({"overlay": {"preview_max_seconds": 0}})
+    with pytest.raises(ConfigError, match="max_seconds"):
+        Config.from_mapping({"preview": {"max_seconds": 0}})
 
 
 def test_negative_preview_height_is_rejected() -> None:
@@ -153,11 +149,10 @@ def test_negative_preview_height_is_rejected() -> None:
 def test_total_height_includes_the_preview_band_only_when_it_is_enabled() -> None:
     """The overlay widget and its placement both size off ``total_height``, so
     this is the single place the preview band's existence is expressed."""
-    with_preview = OverlayConfig(height=96, preview_height=64, live_preview=True)
-    without = OverlayConfig(height=96, preview_height=64, live_preview=False)
+    cfg = OverlayConfig(height=96, preview_height=64)
 
-    assert with_preview.total_height == 160
-    assert without.total_height == 96
+    assert cfg.total_height(preview_band=True) == 160
+    assert cfg.total_height(preview_band=False) == 96
 
 
 # -- relative model_dir resolution -------------------------------------------
@@ -192,41 +187,64 @@ def test_text_config_replacements_default_is_empty() -> None:
     assert TextConfig().replacements == {}
 
 
-# -- PasteConfig combo validation ---------------------------------------------
+# -- NvimConfig validation -----------------------------------------------------
 
 
-def test_default_paste_combos_construct() -> None:
-    cfg = PasteConfig()
-    assert cfg.combo_for(None) == "ctrl+v"
-    assert cfg.combo_for("Alacritty") == "ctrl+shift+v"
+def test_nvim_window_instance_rejects_a_name_with_a_quote() -> None:
+    with pytest.raises(ConfigError, match="window_instance"):
+        NvimConfig(window_instance='voice"kb')
 
 
-def test_good_custom_combo_is_accepted() -> None:
-    cfg = PasteConfig(default="ctrl+shift+v", per_window_class={"Foo": "super+alt+x"})
-    assert cfg.combo_for(None) == "ctrl+shift+v"
-    assert cfg.combo_for("Foo") == "super+alt+x"
+def test_nvim_window_instance_rejects_a_name_with_a_bracket() -> None:
+    with pytest.raises(ConfigError, match="window_instance"):
+        NvimConfig(window_instance="voice[kb]")
 
 
-def test_non_ascii_key_is_rejected() -> None:
-    with pytest.raises(ConfigError, match="disallowed key"):
-        PasteConfig(default="ctrl+ü")
+def test_nvim_empty_editor_is_rejected() -> None:
+    with pytest.raises(ConfigError, match="editor"):
+        NvimConfig(editor=())
 
 
-def test_unknown_modifier_is_rejected() -> None:
-    with pytest.raises(ConfigError, match="unknown modifier"):
-        PasteConfig(default="hyper+v")
+def test_nvim_file_template_rendering_with_a_slash_is_rejected() -> None:
+    """A template that renders with a path separator would make the dictation
+    file land in a directory named for it rather than under ``dictation_dir``
+    -- or escape it entirely with a leading ``/``."""
+    with pytest.raises(ConfigError, match="file_template"):
+        NvimConfig(file_template="%Y/%m/%d.md")
 
 
-def test_bare_key_with_no_modifier_is_rejected() -> None:
-    with pytest.raises(ConfigError, match="no modifier"):
-        PasteConfig(default="v")
+def test_nvim_non_positive_startup_timeout_is_rejected() -> None:
+    with pytest.raises(ConfigError, match="startup_timeout_s"):
+        NvimConfig(startup_timeout_s=0)
 
 
-def test_bad_combo_in_per_window_class_names_the_window_class() -> None:
-    with pytest.raises(ConfigError, match=r"per_window_class\[.*Alacritty.*\]"):
-        PasteConfig(per_window_class={"Alacritty": "ctrl+ü"})
+def test_nvim_window_fraction_out_of_range_is_rejected() -> None:
+    with pytest.raises(ConfigError, match="window_fraction"):
+        NvimConfig(window_fraction=0.0)
+    with pytest.raises(ConfigError, match="window_fraction"):
+        NvimConfig(window_fraction=1.5)
 
 
-def test_paste_combo_validated_through_toml_load() -> None:
-    with pytest.raises(ConfigError, match="disallowed key"):
-        Config.from_mapping({"paste": {"default": "ctrl+ü"}})
+def test_nvim_window_fraction_of_one_is_accepted() -> None:
+    assert NvimConfig(window_fraction=1.0).window_fraction == 1.0
+
+
+def test_nvim_spawn_argv_substitutes_instance_and_appends_listen_and_target() -> None:
+    cfg = NvimConfig(
+        terminal=("alacritty", "--class", "Floating,{instance}", "-e"),
+        editor=("nvim",),
+        window_instance="voice-kb-test",
+    )
+
+    argv = cfg.spawn_argv(socket=Path("/tmp/x.sock"), target=Path("/tmp/x.md"))
+
+    assert argv == [
+        "alacritty",
+        "--class",
+        "Floating,voice-kb-test",
+        "-e",
+        "nvim",
+        "--listen",
+        "/tmp/x.sock",
+        "/tmp/x.md",
+    ]

@@ -14,7 +14,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from collections.abc import Callable, Iterator
 
 import pytest
-from fakes import FakeAudioCapture, FakeInjector, FakeTranscriber, FakeX11
+from fakes import FakeAudioCapture, FakeNvimSession, FakeTranscriber, FakeX11
 from PySide6.QtWidgets import QApplication
 
 from voice_kb import app as app_module
@@ -45,12 +45,24 @@ def fake_x11(monkeypatch: pytest.MonkeyPatch) -> FakeX11:
 
 
 @pytest.fixture
-def fake_injector(monkeypatch: pytest.MonkeyPatch) -> FakeInjector:
-    """Replaces ``inject_text`` as seen from ``voice_kb.app`` (where
-    ``_Worker.run_inject`` looks it up), so injection never touches a real
-    clipboard or sends a real key event into whatever window has focus."""
-    fake = FakeInjector()
-    monkeypatch.setattr(app_module, "inject_text", fake)
+def fake_nvim(monkeypatch: pytest.MonkeyPatch) -> FakeNvimSession:
+    """Replaces ``voice_kb.nvim.NvimSession`` as seen from ``voice_kb.app``
+    (where ``_NvimBridge.__init__`` constructs it: ``self._session =
+    NvimSession(config.nvim)``), so opening the dictation window, appending
+    to it, and pushing indicator state never touch a real socket or spawn a
+    real terminal.
+
+    A single fake is returned regardless of the arguments the bridge passes
+    to the constructor, since a test only ever has one ``Daemon`` (and so one
+    ``_NvimBridge``) to inspect. As with the worker's ``QThread``, the
+    bridge's ``QThread`` is deliberately never started: tests drive
+    ``daemon._nvim.open()`` / ``.append(text)`` / ``.set_phase(phase)``
+    directly on the main thread, exactly where production code would have
+    crossed to the bridge thread via a queued signal -- see ``make_daemon``
+    below for why that is both faster and deterministic.
+    """
+    fake = FakeNvimSession()
+    monkeypatch.setattr(app_module, "NvimSession", lambda config, **kwargs: fake)
     return fake
 
 
@@ -59,7 +71,7 @@ def make_daemon(
     qapp: QApplication,
     monkeypatch: pytest.MonkeyPatch,
     fake_x11: FakeX11,
-    fake_injector: FakeInjector,
+    fake_nvim: FakeNvimSession,
 ) -> Iterator[Callable[[Config | None], Daemon]]:
     """Builds a :class:`Daemon` wired entirely to fakes, and stops every
     daemon it built at teardown so no ``QThread`` leaks between tests.
@@ -68,12 +80,13 @@ def make_daemon(
     in these tests calls ``Daemon.start()`` (that would also start the real
     ``HotkeyWatcher``, which is off-limits here -- see the module docstring
     of ``test_e2e.py``). Instead each test sets ``daemon._worker._transcriber``
-    directly and calls ``daemon._worker.run_decode``/``run_inject`` itself
+    directly and calls ``daemon._worker.run_decode``/``run_preview`` itself
     wherever production code would have crossed threads via a queued signal.
     That queued connection is otherwise inert without a running event loop
     on the worker thread, so leaving it unstarted and driving the worker
     methods directly is what makes these tests both fast and deterministic
-    rather than racing real thread scheduling.
+    rather than racing real thread scheduling. The bridge's ``QThread`` is
+    left unstarted for the same reason -- see ``fake_nvim`` above.
     """
     monkeypatch.setattr(app_module, "ensure_model_files", lambda config: None)
     monkeypatch.setattr(app_module, "AudioCapture", FakeAudioCapture)

@@ -7,9 +7,12 @@ against a missing key or a negative duration.
 
 from __future__ import annotations
 
+import os
+import re
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
+from datetime import date
 from pathlib import Path
 from typing import Any, Literal, Self
 
@@ -133,89 +136,209 @@ class TextConfig:
     trailing_space: bool = False
 
 
-_PASTE_MODIFIERS = frozenset({"ctrl", "shift", "alt", "super", "meta"})
-"""Allowed modifier names in a paste combo, lowercase."""
+_INSTANCE_PLACEHOLDER = "{instance}"
+"""Token in :attr:`NvimConfig.terminal` replaced by the window instance name.
 
-_PASTE_NAMED_KEYS = frozenset({"Insert", "Return", "Tab", "space", "BackSpace", "Delete"})
-"""Allowed non-alphanumeric final keys, on top of a single ASCII alphanumeric.
+Substituted with :meth:`str.replace`, not :meth:`str.format`, so a terminal
+argument that happens to contain braces is passed through untouched rather
+than raising or being reinterpreted.
+"""
 
-Deliberately short: this is an allowlist for the small set of real paste
-combos (``ctrl+v``, ``ctrl+shift+v``, ``shift+Insert``, ...), not a general
-key-name validator.
+_INSTANCE_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+"""Allowed window instance names.
+
+An allowlist, because this name is interpolated into an i3 criteria string
+(``[instance="..."]``) in :meth:`voice_kb.nvim.NvimSession.raise_window`. A
+name containing a quote or a bracket would let a config value become i3
+syntax; the same reasoning that keeps transcript text out of argv keeps
+config values out of another program's grammar.
 """
 
 
-def _validate_combo(combo: str, *, context: str) -> None:
-    """Raise :class:`ConfigError` unless ``combo`` is ``modifier+...+key``
-    with every modifier in :data:`_PASTE_MODIFIERS` and a conservative final
-    key -- a single ASCII alphanumeric character or a name from
-    :data:`_PASTE_NAMED_KEYS`.
+def xdg_state_home() -> Path:
+    return Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state")
 
-    This is an allowlist, not a denylist, on purpose: ``combo`` reaches
-    ``xdotool key`` verbatim (see :mod:`voice_kb.inject`), and an
-    unconstrained key name -- most dangerously a non-ASCII character such as
-    ``ctrl+ü`` -- forces xdotool to remap a scratch keycode in the *core* X
-    keymap to find a keysym for it, which is exactly the mechanism that
-    destroyed the user's per-device ``setxkbmap`` layout in the tool this
-    project replaced (see ``docs/constraints.md``).
+
+def _xdg_runtime_dir() -> Path:
+    """The user's runtime directory, falling back to the state directory.
+
+    ``XDG_RUNTIME_DIR`` is where a socket belongs -- it is user-private and
+    cleared at logout, so a stale socket cannot outlive the session that made
+    it. It is not guaranteed to exist, hence the fallback.
     """
-    parts = combo.split("+")
-    *modifiers, key = parts
-    if not modifiers:
-        raise ConfigError(
-            f"paste combo for {context} must be 'modifier+...+key', got {combo!r} "
-            "(no modifier)"
-        )
-    for mod in modifiers:
-        if mod not in _PASTE_MODIFIERS:
-            raise ConfigError(
-                f"paste combo for {context} has unknown modifier {mod!r} in {combo!r}; "
-                f"allowed modifiers: {', '.join(sorted(_PASTE_MODIFIERS))}"
-            )
-    if key in _PASTE_NAMED_KEYS:
-        return
-    if len(key) == 1 and key.isascii() and key.isalnum():
-        return
-    raise ConfigError(
-        f"paste combo for {context} has disallowed key {key!r} in {combo!r}; "
-        "must be a single ASCII alphanumeric character or one of "
-        f"{', '.join(sorted(_PASTE_NAMED_KEYS))}"
-    )
+    runtime = os.environ.get("XDG_RUNTIME_DIR")
+    return Path(runtime) if runtime else xdg_state_home()
 
 
 @dataclass(frozen=True, slots=True)
-class PasteConfig:
-    default: str = "ctrl+v"
-    per_window_class: Mapping[str, str] = field(
-        default_factory=lambda: {"Alacritty": "ctrl+shift+v"}
-    )
-    """Keyed by X11 ``WM_CLASS``; terminals need shift."""
+class NvimConfig:
+    """Where the transcript goes: a floating neovim, never the clipboard."""
 
-    restore_delay_ms: int = 150
-    """Max time to wait for evidence that the paste was served before
-    restoring the previous clipboard contents (see
-    :func:`voice_kb.inject.inject_text`)."""
+    terminal: tuple[str, ...] = (
+        "alacritty",
+        "--class",
+        f"Floating,{_INSTANCE_PLACEHOLDER}",
+        "-e",
+    )
+    """Terminal to run the editor in, with the editor's argv appended.
+
+    Empty means run :attr:`editor` directly, for a GUI editor that needs no
+    terminal. The default names the window ``Floating`` (class) /
+    ``voice-kb`` (instance) so a window manager rule can float it and refuse
+    it focus -- see ``docs/nvim-window.md``.
+    """
+
+    editor: tuple[str, ...] = ("nvim",)
+    """The editor itself. ``--listen <socket>`` and the dictation file are
+    appended; anything here is passed before them, so ``("nvim", "-u", "NONE")``
+    gets a config-free editor."""
+
+    window_instance: str = "voice-kb"
+    """X11 instance name of the dictation window.
+
+    Substituted into :attr:`terminal` and used to find the window again. It
+    must match whatever the window manager rules key on.
+    """
+
+    socket_path: Path = field(default_factory=lambda: _xdg_runtime_dir() / "voice-kb-nvim.sock")
+    """Where nvim listens for RPC. Reconnected to rather than recreated."""
+
+    dictation_dir: Path = field(default_factory=lambda: xdg_state_home() / "voice-kb" / "dictation")
+    """Directory holding the dated dictation files."""
+
+    file_template: str = "dictation-%Y-%m-%d.md"
+    """:meth:`~datetime.date.strftime` template for the file name.
+
+    A file per day, on disk, saved after every utterance: a transcript that
+    disappears because a scratch buffer was closed is the same failure as one
+    dropped by a streaming decoder.
+    """
+
+    window_fraction: float = 0.5
+    """Size of the dictation window, as a fraction of each screen axis.
+
+    0.5 covers a quarter of the screen's area. The window is placed with its
+    top-left corner at the mouse pointer, so it opens beside whatever the user
+    is reading, and is clamped on-screen -- which puts it flush in the
+    bottom-right quarter when the pointer is already down there, or when the
+    pointer cannot be read at all.
+    """
+
+    startup_timeout_s: float = 20.0
+    """How long to wait for a freshly spawned nvim to start answering RPC.
+
+    Generous on purpose. A full plugin configuration takes seconds before it
+    serves API requests -- ~4s measured here for LazyVim, and far longer the
+    first time a plugin manager installs. Waiting costs nothing the user
+    feels: the window is opened on key-down, from a thread of its own, while
+    the utterance is still being spoken, and the append that follows simply
+    queues behind it.
+    """
 
     def __post_init__(self) -> None:
-        _validate_combo(self.default, context="paste.default")
-        for window_class, combo in self.per_window_class.items():
-            _validate_combo(combo, context=f"paste.per_window_class[{window_class!r}]")
+        if not self.editor:
+            raise ConfigError("nvim.editor must name an executable")
+        if not _INSTANCE_RE.match(self.window_instance):
+            raise ConfigError(
+                f"nvim.window_instance must match {_INSTANCE_RE.pattern}: "
+                f"{self.window_instance!r}"
+            )
+        if not 0.0 < self.window_fraction <= 1.0:
+            raise ConfigError(
+                f"nvim.window_fraction must be in (0, 1]: {self.window_fraction}"
+            )
+        if self.startup_timeout_s <= 0:
+            raise ConfigError(
+                f"nvim.startup_timeout_s must be positive: {self.startup_timeout_s}"
+            )
+        rendered = date(2000, 1, 2).strftime(self.file_template)
+        if not rendered or "/" in rendered or rendered in {".", ".."}:
+            raise ConfigError(
+                "nvim.file_template must render to a single file name, "
+                f"got {rendered!r} from {self.file_template!r}"
+            )
 
-    def combo_for(self, window_class: str | None) -> str:
-        """The validated paste combo for ``window_class``.
+    def spawn_argv(self, *, socket: Path, target: Path) -> list[str]:
+        """The full command line for a new dictation window.
 
-        Every combo this can return was checked by :func:`_validate_combo`
-        in ``__post_init__`` -- there is no path from an unvalidated string
-        to the caller.
+        ``target`` is passed as its own argument rather than through a shell,
+        so a path with spaces in it needs no quoting and cannot be re-parsed.
         """
-        if window_class is None:
-            return self.default
-        return self.per_window_class.get(window_class, self.default)
+        terminal = [
+            arg.replace(_INSTANCE_PLACEHOLDER, self.window_instance) for arg in self.terminal
+        ]
+        return [*terminal, *self.editor, "--listen", str(socket), str(target)]
+
+
+
+@dataclass(frozen=True, slots=True)
+class PreviewConfig:
+    """The live transcript preview, shown while the key is held.
+
+    Its own section rather than a corner of ``[overlay]``: the preview now
+    feeds the nvim indicator, which is the primary UI, and the overlay is off
+    by default. Tying "do I see what I am saying" to "is the Qt pill enabled"
+    would be a lie about what these settings control.
+
+    A preview is *cosmetic only*. The text that actually gets committed is
+    still produced by exactly one decode of the complete captured buffer at
+    key release (``docs/constraints.md``, "One-shot committed decode"):
+    preview output is never appended, never merged into the final text, and
+    never influences it.
+    """
+
+    enabled: bool = True
+
+    interval_ms: int = 1100
+    """Minimum time between preview decodes while recording.
+
+    A floor, not a fixed period: the real gap is
+    ``max(interval_ms - last_decode, last_decode)``, which keeps the worker
+    idle at least half the time however long the utterance gets. See
+    :attr:`max_seconds` for why that idle fraction is the thing being
+    protected.
+    """
+
+    max_seconds: float = 15.0
+    """Stop previewing once the utterance is longer than this.
+
+    Each preview decodes the whole utterance so far, from its beginning. That
+    is what keeps already-transcribed words on screen: a trailing window was
+    tried first and it *physically discarded* the start of the sentence, so
+    text vanished in chunks while the user was still speaking.
+
+    Decoding from the start means preview cost grows with the utterance, and
+    two things bound it. The cadence adapts (see :attr:`interval_ms`) so the
+    worker stays idle at least half the time; and past this many seconds
+    previews stop being issued altogether. Nothing disappears when they do --
+    the last full preview simply stays on screen.
+
+    The number is a latency budget. A *queued* preview is dropped the instant
+    the key is released, but one already inside ``decode_stream`` cannot be
+    interrupted, so the committed decode waits for it. This model decodes at
+    ~14.6x real-time, so 15s of audio costs ~1.0s: that is the worst case a
+    release can pay, with ~0.5s expected from the duty cycle. Raising this
+    raises both, in direct proportion.
+    """
+
+    def __post_init__(self) -> None:
+        if self.interval_ms < 200:
+            raise ConfigError(f"preview.interval_ms must be >= 200: {self.interval_ms}")
+        if self.max_seconds <= 0:
+            raise ConfigError(f"preview.max_seconds must be positive: {self.max_seconds}")
 
 
 @dataclass(frozen=True, slots=True)
 class OverlayConfig:
-    enabled: bool = True
+    enabled: bool = False
+    """Off by default since the transcript sink became nvim.
+
+    The nvim window carries the indicator now (``nvim_indicator.lua``): the
+    same phase, level meter and live preview, rendered where the text is
+    about to land instead of in a second widget elsewhere on screen. This
+    overlay still works and still never takes focus -- turn it back on if you
+    want feedback before the dictation window has opened.
+    """
 
     # Sizes below are in Qt's *logical* pixels, which is what Qt's resize()
     # takes. On a display with a device pixel ratio above 1 -- Xft.dpi 192
@@ -235,68 +358,21 @@ class OverlayConfig:
     follow_focus: bool = True
     """Place the overlay on the output holding the focused window."""
 
-    live_preview: bool = True
-    """Show a rolling preview of the transcript while the key is held.
-
-    A preview is *cosmetic only*. The text that actually gets injected is
-    still produced by exactly one decode of the complete captured buffer at
-    key release (``docs/constraints.md``, "One-shot committed decode"):
-    preview output is never injected, never merged into the final text, and
-    never influences it. Set to ``false`` to go back to a status-only pill.
-    """
-
-    preview_interval_ms: int = 1100
-    """Minimum time between preview decodes while recording.
-
-    A floor, not a fixed period: the real gap is
-    ``max(preview_interval_ms - last_decode, last_decode)``, which keeps the
-    worker idle at least half the time however long the utterance gets. See
-    :attr:`preview_max_seconds` for why that idle fraction is the thing being
-    protected.
-    """
-
-    preview_max_seconds: float = 15.0
-    """Stop previewing once the utterance is longer than this.
-
-    Each preview decodes the whole utterance so far, from its beginning. That
-    is what keeps already-transcribed words on screen: a trailing window was
-    tried first and it *physically discarded* the start of the sentence, so
-    text vanished in chunks while the user was still speaking.
-
-    Decoding from the start means preview cost grows with the utterance, and
-    two things bound it. The cadence adapts (see
-    :attr:`preview_interval_ms`) so the worker stays idle at least half the
-    time; and past this many seconds previews stop being issued altogether.
-    Nothing disappears when they do -- the last full preview simply stays on
-    screen, which by then holds far more text than the overlay can show.
-
-    The number is a latency budget. A *queued* preview is dropped the instant
-    the key is released, but one already inside ``decode_stream`` cannot be
-    interrupted, so the committed decode waits for it. This model decodes at
-    ~14.6x real-time, so 15s of audio costs ~1.0s: that is the worst case a
-    release can pay, with ~0.5s expected from the duty cycle. Raising this
-    raises both, in direct proportion.
-    """
-
     preview_height: int = 64
-    """Extra pixels below the status row for the preview text area."""
+    """Extra pixels below the status row for the preview band.
+
+    Only consulted when previews are on (:attr:`PreviewConfig.enabled`); the
+    policy for previews themselves lives in ``[preview]``, because they now
+    feed the nvim indicator as well as this overlay.
+    """
 
     def __post_init__(self) -> None:
-        if self.preview_interval_ms < 200:
-            raise ConfigError(
-                f"overlay.preview_interval_ms must be >= 200: {self.preview_interval_ms}"
-            )
-        if self.preview_max_seconds <= 0:
-            raise ConfigError(
-                f"overlay.preview_max_seconds must be positive: {self.preview_max_seconds}"
-            )
         if self.preview_height < 0:
             raise ConfigError(f"overlay.preview_height must not be negative: {self.preview_height}")
 
-    @property
-    def total_height(self) -> int:
-        """Full widget height: the status row plus the preview area when enabled."""
-        return self.height + self.preview_height if self.live_preview else self.height
+    def total_height(self, *, preview_band: bool) -> int:
+        """Full widget height: the status row, plus the preview band if shown."""
+        return self.height + self.preview_height if preview_band else self.height
 
 
 @dataclass(frozen=True, slots=True)
@@ -305,7 +381,8 @@ class Config:
     audio: AudioConfig = field(default_factory=AudioConfig)
     asr: AsrConfig = field(default_factory=AsrConfig)
     text: TextConfig = field(default_factory=TextConfig)
-    paste: PasteConfig = field(default_factory=PasteConfig)
+    nvim: NvimConfig = field(default_factory=NvimConfig)
+    preview: PreviewConfig = field(default_factory=PreviewConfig)
     overlay: OverlayConfig = field(default_factory=OverlayConfig)
 
     @classmethod
@@ -322,7 +399,7 @@ class Config:
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any], base_dir: Path | None = None) -> Self:
-        known = {"hotkey", "audio", "asr", "text", "paste", "overlay"}
+        known = {"hotkey", "audio", "asr", "text", "nvim", "preview", "overlay"}
         if unknown := set(raw) - known:
             raise ConfigError(f"unknown config section(s): {', '.join(sorted(unknown))}")
 
@@ -336,7 +413,13 @@ class Config:
                 tuple_fields=("vocabulary",),
             ),
             text=_build(TextConfig, raw.get("text", {}), "text", tuple_fields=("fillers",)),
-            paste=_build(PasteConfig, raw.get("paste", {}), "paste"),
+            nvim=_build(
+                NvimConfig,
+                _resolve_nvim_paths(raw.get("nvim", {})),
+                "nvim",
+                tuple_fields=("terminal", "editor"),
+            ),
+            preview=_build(PreviewConfig, raw.get("preview", {}), "preview"),
             overlay=_build(OverlayConfig, raw.get("overlay", {}), "overlay"),
         )
 
@@ -353,6 +436,32 @@ def _resolve_model_dir(section: Mapping[str, Any], base_dir: Path | None) -> Map
     if not model_dir.is_absolute() and base_dir is not None:
         model_dir = base_dir / model_dir
     return {**section, "model_dir": model_dir}
+
+
+_NVIM_PATH_KEYS = ("socket_path", "dictation_dir")
+
+
+def _resolve_nvim_paths(section: Mapping[str, Any]) -> Mapping[str, Any]:
+    """TOML has no path type, so the path-valued keys arrive as strings.
+
+    Both ``~`` and ``$VAR`` are expanded here, at the boundary, so nothing
+    downstream has to remember to. ``$XDG_RUNTIME_DIR`` in particular is the
+    natural way to write the socket path, and a literal ``$XDG_RUNTIME_DIR``
+    directory appearing in the user's home is not a failure worth shipping.
+    An unset variable is left as-is by :func:`os.path.expandvars`, which would
+    do exactly that, so it is rejected instead.
+    """
+    resolved = dict(section)
+    for key in _NVIM_PATH_KEYS:
+        if key not in resolved:
+            continue
+        expanded = os.path.expandvars(str(resolved[key]))
+        if "$" in expanded:
+            raise ConfigError(
+                f"nvim.{key} references an unset environment variable: {resolved[key]!r}"
+            )
+        resolved[key] = Path(expanded).expanduser()
+    return resolved
 
 
 def _build[T](
