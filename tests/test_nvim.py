@@ -456,3 +456,66 @@ def test_a_stale_preview_never_greets_the_next_utterance(
     session.set_state(phase=Phase.RECORDING)
 
     assert _preview_lines(session) == []
+
+
+# ------------------------------------------------ the bundled config's editing
+
+
+def _bundled_nvim(script: str) -> str:
+    """Run ``script`` in a headless nvim under voice-kb's bundled config.
+
+    A subprocess rather than the session fixture above, which deliberately
+    starts nvim with ``-u NONE``: these assertions are *about* the bundled
+    config, so it has to be the thing loaded.
+    """
+    init = NvimConfig().bundled_init
+    done = subprocess.run(
+        ["nvim", "--headless", "-u", str(init), "-c", f"lua {script}", "-c", "qa!"],
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    return (done.stdout + done.stderr).strip()
+
+
+def test_j_and_k_move_by_screen_line_so_a_paragraph_is_readable() -> None:
+    """An utterance is one buffer line wrapped over many screen rows, so plain
+    ``j`` leaps a whole paragraph and reading a long transcript by keyboard is
+    unusable. Four presses should still be inside the first paragraph."""
+    out = _bundled_nvim(
+        "vim.api.nvim_buf_set_lines(0, 0, -1, false, {string.rep('wort ', 400), 'zweiter absatz'});"
+        "vim.api.nvim_win_set_width(0, 40);"
+        "vim.api.nvim_feedkeys("
+        "  vim.api.nvim_replace_termcodes('ggjjjj', true, false, true), 'mx', false);"
+        "print(vim.api.nvim_win_get_cursor(0)[1] .. ',' .. vim.api.nvim_win_get_cursor(0)[2])"
+    )
+    line, _, column = out.rpartition(",")
+
+    assert line.endswith("1"), f"should still be on the first paragraph, got {out!r}"
+    assert int(column) > 0, "and further into it than where gg left the cursor"
+
+
+def test_a_counted_motion_still_means_buffer_lines() -> None:
+    """``5j`` has to keep meaning what it always did; that is why the mapping
+    is an expression that checks the count rather than a plain remap."""
+    out = _bundled_nvim(
+        "vim.api.nvim_buf_set_lines(0, 0, -1, false, {'a', 'b', 'c', 'd', 'e'});"
+        "vim.api.nvim_feedkeys("
+        "  vim.api.nvim_replace_termcodes('gg3j', true, false, true), 'mx', false);"
+        "print(vim.api.nvim_win_get_cursor(0)[1])"
+    )
+
+    assert out.endswith("4"), f"3j should reach buffer line 4, got {out!r}"
+
+
+def test_gg_goes_to_the_very_start() -> None:
+    """It always did -- asserted so the screen-line mappings above cannot
+    quietly break the one motion that has to keep working."""
+    out = _bundled_nvim(
+        "vim.api.nvim_buf_set_lines(0, 0, -1, false, {'  eingerueckt', 'b', 'c'});"
+        "vim.api.nvim_feedkeys("
+        "  vim.api.nvim_replace_termcodes('Ggg', true, false, true), 'mx', false);"
+        "local c = vim.api.nvim_win_get_cursor(0); print(c[1] .. ',' .. c[2])"
+    )
+
+    assert out.endswith("1,0"), f"gg should land on line 1 column 0, got {out!r}"

@@ -180,3 +180,15 @@ vim.opt.winbar = ""
 -- `q` closes the window (which ends the passage -- the next dictation starts
 -- a new file), and the usual write/quit still work.
 vim.keymap.set("n", "q", "<Cmd>quit<CR>", { desc = "close the dictation window" })
+
+-- Move by what you can see, not by what is in the file. An utterance is one
+-- buffer line wrapped over many screen rows, so plain `j` leaps a whole
+-- paragraph and reading a long transcript by keyboard is unusable. `gg`, `G`
+-- and a counted `5j` keep meaning exactly what they always did -- the count
+-- check is what preserves that, and it is why this is an expression mapping
+-- rather than a plain one.
+for _, key in ipairs({ "j", "k" }) do
+  vim.keymap.set({ "n", "x" }, key, function()
+    return vim.v.count == 0 and ("g" .. key) or key
+  end, { expr = true, desc = "move by screen line in wrapped prose" })
+end
