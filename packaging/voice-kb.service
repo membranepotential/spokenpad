@@ -1,0 +1,34 @@
+[Unit]
+Description=voice-kb push-to-talk dictation
+Documentation=https://github.com/felixpeppert/voice-kb
+# Dies with the graphical session: the hotkey watcher, the overlay and the
+# dictation window all need X, and a daemon outliving the session it was
+# started for would hold /dev/input readers open for nothing.
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=exec
+
+# The default asr.model_dir is relative ("models/parakeet-tdt-0.6b-v3-int8"),
+# so the daemon has to run from the checkout. Set this rather than making the
+# path absolute in a config file: moving the checkout then needs one edit
+# here, not two in different places.
+WorkingDirectory=%h/Documents/voice-kb
+ExecStart=%h/Documents/voice-kb/.venv/bin/voice-kb
+
+# Not -v: DEBUG still goes to the rotating file at
+# $XDG_STATE_HOME/voice-kb/voice-kb.log regardless, and duplicating it into
+# the journal buys nothing but noise. `journalctl --user -u voice-kb` shows
+# the INFO line per dictation, which is what you want when watching it live.
+
+Restart=on-failure
+RestartSec=3
+
+# Exit 2 is "model files missing" and exit 3 is "not in the input group".
+# Neither becomes true by trying again, and restarting on them turns one
+# clear error into an endless loop that buries it.
+RestartPreventExitStatus=2 3
+
+[Install]
+WantedBy=i3-session.target

@@ -83,6 +83,20 @@ no_focus   [instance="voice-kb"]
 Everything else -- size, position, the file it writes -- is voice-kb's own;
 see [docs/nvim-window.md](docs/nvim-window.md).
 
+To run it as a service that starts with your i3 session:
+
+```sh
+install -Dm644 packaging/voice-kb.service ~/.config/systemd/user/voice-kb.service
+systemctl --user daemon-reload
+systemctl --user enable --now voice-kb.service
+```
+
+The unit assumes the checkout is at `~/Documents/voice-kb`; edit
+`WorkingDirectory`/`ExecStart` if it is not, and `WantedBy` if your session
+target is not `i3-session.target`. Watch it with
+`journalctl --user -u voice-kb -f`; the full DEBUG log is in
+`$XDG_STATE_HOME/voice-kb/voice-kb.log` either way.
+
 ## Note on `bpe.vocab`
 
 sherpa-onnx needs a `bpe_vocab` file to encode hotwords, and the published
