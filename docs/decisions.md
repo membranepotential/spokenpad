@@ -104,6 +104,52 @@ Rejected alternatives:
   the one worker is what guarantees a preview and the committed decode never
   overlap.
 
+## The sink is neovim, not the clipboard
+
+**2026-09-07.** The transcript is appended to a floating neovim window over
+that editor's msgpack-RPC socket. Nothing is pasted anywhere, and
+`inject.py` — the clipboard round trip and its window-class-aware paste combo
+— is deleted.
+
+The driving use case changed: not "text lands at the cursor while I work",
+but "record long passages quickly, for example while reading through a
+generated document". Under that use, pasting into the focused window is not a
+feature to preserve, it is the problem — the focused window is the document
+being read.
+
+What this buys, beyond matching the use case:
+
+* **No race with focus.** The old sink wrote wherever focus happened to be
+  when a decode landed, which is a second or more after the key was released.
+* **No dependence on the target application.** No per-window-class paste
+  combo, no clipboard-restore race (`Injected.confirmed` existed precisely
+  because that race could not be closed), no terminal swallowing `ctrl+v`.
+* **A stronger version of the no-synthesis rule.** The text crosses no shell
+  and no argv boundary — it is a msgpack string argument. A dictated
+  `$(rm -rf ~)` is just text. See [constraints.md](constraints.md).
+* **The preview invariant becomes physical.** In nvim the live preview is an
+  extmark's virtual text, not buffer content: it *cannot* be saved, yanked,
+  or undone into the file. What was previously a discipline enforced by code
+  review is now enforced by the data model.
+
+**Rejected: keeping the paste path as a second, selectable sink.** It would
+have cost nothing to leave in, and that is the trap — a second sink with no
+caller is a code path that rots untested while looking maintained. It is one
+`git revert` away if the need returns.
+
+**Consequences.** The Qt overlay is off by default; the same indicator (phase,
+level meter, live preview) is rendered in the nvim window's winbar by
+`nvim_indicator.lua`, where the text is about to land. Preview settings moved
+out of `[overlay]` into their own `[preview]` section, because they are no
+longer an overlay concern. A fourth thread was added for the RPC connection
+(see [architecture.md](architecture.md)). `pynvim` is a new dependency.
+
+**Measured on this machine, 2026-09-07:** cold open of the dictation window
+1.0-1.2 s (the first ever open took 13.5 s while the user's plugin manager
+did one-time work); reattach to a running nvim 430 ms; append 19-62 ms. All
+of it off the user's latency path — the window is opened on key-down, on its
+own thread, while the utterance is still being spoken.
+
 ## Cloud ASR (Gladia) captured as issue #1, rejected as the default
 
 [Issue #1](https://github.com/membranepotential/voice-kb/issues/1) proposes

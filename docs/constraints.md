@@ -15,10 +15,11 @@ running system.
 |---|---|---|
 | Read `/dev/input/event*` **read-only** | uinput clone inherited the default XKB layout | yes |
 | **Never** synthesise characters (`xdotool type` / enigo) | rewrote the core X keymap | yes |
+| **Never write to a window the user did not open for this** | text pasted into whatever had focus | no |
 | **One-shot *committed* decode** at key release, over the whole buffer | growing-buffer re-decode dropped long utterances | no (functional, silent) |
 | **CPU only** | auto-selection bound the model to the 4 GB GTX 1650 | no |
 | **Bias vocabulary at decode time**, never fuzzy replacement | edit-distance rewrite turned real words into wrong ones | no |
-| **Overlay must not steal focus** | focus steal aborted transcription mid-utterance | no |
+| **No window voice-kb opens may take focus** | focus steal aborted transcription mid-utterance | no |
 
 ## Read evdev read-only
 
@@ -48,13 +49,16 @@ It is also slow. Measured on this project's hardware: **183 ms** via
 clipboard + `ctrl+v` versus **3.3 s** via character synthesis for the same
 159-character string (README.md).
 
-**Rule:** voice-kb never synthesises characters. It writes the transcript to
-the clipboard and injects a paste keystroke (`inject.py`, not yet
-implemented), restoring the previous clipboard contents afterward
-(`PasteConfig.restore_delay_ms` in
-[`config.py`](../src/voice_kb/config.py)). The paste combo is window-class
-aware — terminals like Alacritty need `ctrl+shift+v`
-(`PasteConfig.per_window_class`).
+**Rule:** voice-kb never synthesises characters.
+
+Since 2026-09-07 it does not touch the clipboard either. The transcript is
+appended to a neovim buffer over that editor's msgpack-RPC socket
+([`nvim.py`](../src/voice_kb/nvim.py)), which is strictly stronger than the
+clipboard sink it replaced: no keystroke is sent anywhere, no global X state
+is read or written, and the transcript never crosses a shell or an argv
+boundary — it is a msgpack string argument, so a dictated `$(rm -rf ~)` is
+just text. The clipboard round trip (`inject.py`) is deleted; see
+[decisions.md](decisions.md#the-sink-is-neovim-not-the-clipboard).
 
 ## One-shot committed decode, never streaming
 
@@ -75,7 +79,7 @@ no growing-buffer cost and no silent length cap.
 ### The one relaxation: cosmetic previews
 
 The overlay shows a live transcript preview while the key is held
-(`OverlayConfig.live_preview`). That is an extra decode, so it is worth being
+(`PreviewConfig.enabled`). That is an extra decode, so it is worth being
 precise about what this constraint does and does not forbid. What broke Handy
 was not "more than one decode" — it was that the *result the user got* came
 from a streaming pipeline whose cost grew with the utterance and which
@@ -83,8 +87,11 @@ silently truncated it. Three invariants keep previews on the safe side of
 that line, and they are asserted in `tests/test_e2e.py`:
 
 1. **The committed text is still one shot over the whole buffer.** Preview
-   output is never injected, never merged into the final text, and never
-   influences it. `AudioCapture.snapshot_capture` is non-destructive: the
+   output is never appended, never merged into the final text, and never
+   influences it. In the nvim window this is enforced *physically* rather
+   than by discipline: the preview is an extmark's virtual text, not buffer
+   content, so it cannot be written to the file, yanked, or undone into the
+   buffer even deliberately. `AudioCapture.snapshot_capture` is non-destructive: the
    capture keeps accumulating and `stop_capture` still returns everything.
 2. **Preview cost is bounded.** Not *constant* — this is weaker than it was,
    deliberately. Previews originally decoded a fixed-length trailing window,
@@ -97,7 +104,7 @@ that line, and they are asserted in `tests/test_e2e.py`:
    Two things bound that growth. The gap between previews is
    `max(interval - last_decode, last_decode)`, so the worker is idle at least
    half the time however long the utterance runs; and past
-   `OverlayConfig.preview_max_seconds` (15 s) previews stop being issued at
+   `PreviewConfig.max_seconds` (15 s) previews stop being issued at
    all. Nothing is cleared when they stop — the last one stays on screen.
 
    The budget this buys: at ~14.6x real-time a 15 s utterance costs ~1.0 s,
@@ -119,7 +126,7 @@ that line, and they are asserted in `tests/test_e2e.py`:
    text the user is waiting for.
 
 There is still no time cap, no incremental re-decode of a growing buffer, and
-nothing the user sees mid-recording can reach the clipboard. See
+nothing the user sees mid-recording can reach the buffer. See
 [decisions.md](decisions.md#live-transcript-preview-as-a-cosmetic-second-decode).
 
 ## CPU only
@@ -149,14 +156,38 @@ measured tuning table). `TextConfig.replacements` still exists for exact,
 whole-word substitutions only — never fuzzy/edit-distance matching — and is
 explicitly a secondary tool, not the primary correction mechanism.
 
-## Overlay must not steal focus
+## Never write to a window the user did not open for this
+
+The clipboard sink wrote into whatever happened to have focus at the moment a
+decode finished. That is a race with the user: focus can move between the key
+release and the decode landing a second later, and the text goes wherever
+focus went. It also meant every dictation depended on the target application
+cooperating — a per-window-class paste combo, a target that reads the
+clipboard slowly enough to race the restore, a terminal that swallows
+`ctrl+v`.
+
+**Rule:** the transcript only ever goes to a window voice-kb opened for the
+purpose. The daemon spawns its own neovim and appends to a buffer in it. No
+other window is ever written to, and nothing is pasted anywhere.
+
+## No window voice-kb opens may take focus
 
 Handy's status overlay was a focusable window. When it appeared during
 recording, it could take focus away from the application the user was
 dictating into, aborting the transcription in progress.
 
-**Rule:** `OverlayConfig` defaults the overlay to enabled, borderless, and
-positioned without stealing input focus (`no_focus` — the window must never
-receive keyboard focus at any point in its lifecycle). This requirement
-directly shaped the UI toolkit choice; see
-[decisions.md](decisions.md#pyside6-over-gtk4).
+**Rule:** no window this project opens may receive keyboard focus at any
+point in its lifecycle. That covers both windows it can open:
+
+* the **overlay** is borderless and non-focusable by construction
+  (`WA_ShowWithoutActivating`, `WindowDoesNotAcceptFocus`, the `Tool` window
+  type). The requirement directly shaped the UI toolkit choice; see
+  [decisions.md](decisions.md#pyside6-over-gtk4);
+* the **dictation window** is refused focus by the window manager, via a
+  `no_focus` rule keyed on its X11 instance name. There is deliberately no
+  focus call anywhere in [`nvim.py`](../src/voice_kb/nvim.py) — not even a
+  "restore the previous focus" one, which would be a focus change of its own.
+  See [nvim-window.md](nvim-window.md).
+
+Verified live on 2026-09-07: opening the dictation window left the focused
+window unchanged, and i3 reported the new window as `focused: false`.

@@ -7,15 +7,17 @@ the live dashboard in [STATUS.md](../STATUS.md).
 ## Reading order
 
 1. **[architecture.md](architecture.md)** — the functional-core / imperative-shell
-   split, the module map, and the keypress-to-injected-text event flow.
+   split, the module map, and the keypress-to-text-in-the-buffer event flow.
 2. **[constraints.md](constraints.md)** — the hard rules this project will not
    break, each traced to a specific Handy 0.9.6 failure.
-3. **[asr.md](asr.md)** — the ASR model, the measured decode speed, and the
+3. **[nvim-window.md](nvim-window.md)** — the dictation window: how it is
+   opened, placed, refused focus, and what runs inside it.
+4. **[asr.md](asr.md)** — the ASR model, the measured decode speed, and the
 - [evaluation.md](evaluation.md) — the regression harness: WER, per-error checks, and how to tune `hotwords_score` without guessing.
    `bpe.vocab` reconstruction that makes hotword biasing possible.
-4. **[hardware.md](hardware.md)** — the exact keyboard, keycode, and display
+5. **[hardware.md](hardware.md)** — the exact keyboard, keycode, and display
    setup this is built and tuned against.
-5. **[decisions.md](decisions.md)** — an ADR-style log of what was chosen,
+6. **[decisions.md](decisions.md)** — an ADR-style log of what was chosen,
    what was rejected, and why.
 
 ## Scope

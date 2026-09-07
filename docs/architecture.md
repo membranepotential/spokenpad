@@ -21,8 +21,9 @@ defensively.
 | [`hotkey.py`](../src/voice_kb/hotkey.py) | shell | evdev (read-only) | implemented |
 | [`audio.py`](../src/voice_kb/audio.py) | shell | PipeWire capture | implemented |
 | [`asr.py`](../src/voice_kb/asr.py) | shell | sherpa-onnx / CPU inference | implemented |
-| [`inject.py`](../src/voice_kb/inject.py) | shell | X11 clipboard + paste | implemented |
-| [`overlay.py`](../src/voice_kb/overlay.py) | shell | X11 window (PySide6) | implemented |
+| [`nvim.py`](../src/voice_kb/nvim.py) | shell | nvim RPC socket, i3 | implemented |
+| [`nvim_indicator.lua`](../src/voice_kb/nvim_indicator.lua) | — | runs *inside* nvim | implemented |
+| [`overlay.py`](../src/voice_kb/overlay.py) | shell | X11 window (PySide6) | off by default |
 | [`x11.py`](../src/voice_kb/x11.py) | shell | xrandr / xdotool queries | implemented |
 | [`app.py`](../src/voice_kb/app.py) | shell | wires everything together | implemented |
 
@@ -35,7 +36,8 @@ docstring). `state.py` is a closed state machine — see below.
 
 The shell modules do the opposite job: they are thin, mostly untested-by-unit-test
 adapters between a pure decision (a `Command`) and a real side effect (open a
-stream, run inference, write the clipboard, move a window). Keeping them thin
+stream, run inference, append to a buffer over a socket, move a window).
+Keeping them thin
 is the point — the harder the module is to reason about (evdev quirks, X11
 window hints, ONNX runtime setup), the less logic should live inside it.
 
@@ -94,15 +96,24 @@ app.py                -- interprets the command
 text.py               -- post-process: strip fillers, apply exact replacements
     │
     ▼
-inject.py             -- clipboard + paste keystroke, window-class aware
-    │
+nvim.py               -- appended over msgpack-RPC to the dictation buffer,
+    │                    which nvim then writes to a dated file
     ▼
-text lands at the cursor
+text lands in the floating nvim window; nothing is pasted anywhere
 ```
 
+The sink is a neovim the daemon opens itself, floating and never focused
+(see [nvim-window.md](nvim-window.md)). Nothing is written to the window the
+user is working in, so dictating neither depends on nor disturbs whatever has
+focus — which retires a whole class of failure the clipboard-and-paste sink
+had (a paste that raced the clipboard restore, a target that swallowed
+`ctrl+v`, a window-class-specific paste combo).
+
 `overlay.py` sits to the side of this pipeline, reading `Phase` off the
-current `SessionState` to show idle/recording/transcribing, without being on
-the critical path from keypress to injected text.
+current `SessionState`. It is off by default now: the same phase, level meter
+and preview are rendered in the nvim window's winbar by
+[`nvim_indicator.lua`](../src/voice_kb/nvim_indicator.lua), where the text is
+about to land rather than in a second widget elsewhere on screen.
 
 The live transcript preview is the one place the overlay reads audio rather
 than just phase: while recording, a timer on the Qt thread snapshots a
@@ -110,7 +121,7 @@ fixed-length trailing window (non-destructively — `snapshot_capture` never
 consumes the buffer) and asks the *same* worker for a throwaway decode. It is
 still off the critical path by construction: previews are abandoned before the
 committed decode is requested, and nothing a preview produces can reach the
-clipboard. See
+buffer. See
 [constraints.md](constraints.md#the-one-relaxation-cosmetic-previews). No
 event, command or state was added for it — a preview is a shell concern, so
 `state.py` is untouched.
@@ -188,19 +199,27 @@ this project now concentrates its defensive code and its manual testing.
 
 ## Threading
 
-Three threads, and the boundaries matter:
+Four threads, and the boundaries matter:
 
 | Thread | Owns | Must never |
 |---|---|---|
 | evdev watcher | `/dev/input/event*` reads | block; it is the hotkey's latency budget |
 | Qt main | the state machine, the overlay | do slow work -- see below |
-| worker | the `Transcriber`, and injection | be touched from the Qt thread |
+| worker | the `Transcriber` | be touched from the Qt thread |
+| nvim bridge | the `NvimSession` | share the worker's queue -- see below |
+
+The bridge is a separate thread from the worker rather than a second job on
+it, because the two block on unrelated things and must not queue behind each
+other. Opening a terminal takes ~1s (measured; a plugin manager installing on
+first run takes far longer), and it happens *while* the first utterance is
+still being spoken — so the window is up by the time there is text for it. Put
+that wait on the worker and it would sit in front of a decode.
 
 Hotkey callbacks are emitted as Qt Signals from the watcher thread and Qt
 queues them onto the Qt thread, so `SessionState` is only ever mutated in one
 place and needs no lock.
 
-The Qt-thread rule is not theoretical. `_sync_overlay` once shelled out to
+The Qt-thread rule is not theoretical. `_sync_indicators` once shelled out to
 xrandr and xdotool on *every* dispatched event; evdev auto-repeat fires around
 30 times a second while a key is held, so holding the hotkey spawned roughly 60
 subprocesses per second. That stalled the event loop badly enough to delay the

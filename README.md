@@ -1,10 +1,17 @@
 # voice-kb
 
 Local push-to-talk dictation for Linux/X11 (i3). Hold a key, speak, release —
-text lands at the cursor. Fully local, CPU-only.
+the text appears in a floating neovim window that never takes focus. Fully
+local, CPU-only.
 
-Built for dictating Claude prompts and shell commands, which is a narrower and
-more technical vocabulary than prose dictation tools assume.
+Built for recording long passages quickly — dictating notes while reading
+through a document, or drafting a prompt — over a narrower, more technical
+vocabulary than prose dictation tools assume.
+
+Nothing is pasted anywhere. The transcript is appended to a dated markdown
+file in a neovim the daemon opens itself, so dictating neither depends on nor
+disturbs whatever window you are working in. See
+[docs/nvim-window.md](docs/nvim-window.md).
 
 ## Status
 
@@ -22,11 +29,13 @@ this project's hard constraints:
   keyboards through uinput — the clones inherit the default XKB layout and
   destroy per-device `setxkbmap` configuration.
 - Never synthesise characters (`xdotool type` / enigo). It rewrites the *core*
-  X keymap. Clipboard + `ctrl+v` instead: measured 183 ms vs 3.3 s.
+  X keymap. The transcript goes over neovim's msgpack-RPC socket instead — no
+  keystrokes, no clipboard, and the text crosses no shell or argv boundary.
 - One-shot *committed* decode at key release. Streaming models re-decode a
-  growing buffer and silently drop long utterances. The live overlay preview is
-  a bounded, throwaway decode that is never injected and never delays the real
-  one -- see `docs/constraints.md`.
+  growing buffer and silently drop long utterances. The live preview is a
+  bounded, throwaway decode that is never committed and never delays the real
+  one -- in nvim it is virtual text, so it *cannot* reach the file. See
+  `docs/constraints.md`.
 - Bias vocabulary at decode time, never by fuzzy string replacement
   (`set`→`sed`, `reset`→`rust`).
 
@@ -49,6 +58,8 @@ this replaces managed 1.37× on the same hardware and silently discarded the
 | | |
 |---|---|
 | VRAM used | none |
+| dictation window, cold open | 1.0-1.2 s, off the latency path |
+| append to the buffer | 19-62 ms |
 
 ## Setup
 
@@ -56,6 +67,17 @@ this replaces managed 1.37× on the same hardware and silently discarded the
 uv sync
 uv run scripts/fetch_model.py     # ~630 MB, not committed
 ```
+
+Then tell your window manager to float the dictation window and never focus
+it. For i3, `~/.config/i3/i3.d/voice-kb.conf`:
+
+```
+for_window [instance="voice-kb"] floating enable
+no_focus   [instance="voice-kb"]
+```
+
+Everything else -- size, position, the file it writes -- is voice-kb's own;
+see [docs/nvim-window.md](docs/nvim-window.md).
 
 ## Note on `bpe.vocab`
 
