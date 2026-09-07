@@ -6,54 +6,51 @@ that never takes focus. Fully local, CPU-only (the 4 GB GTX 1650 stays free).
 For recording long passages while reading something else.
 
 ## Now
-- **Pivoted 2026-09-07: the sink is neovim, not the clipboard.** Transcript
-  appended over msgpack-RPC to a floating nvim that never takes focus, one
-  file per window. Nothing pasted anywhere; `inject.py` deleted.
-- **Used live, German and English, hold and latch.** Daily-use shape.
-- ruff + mypy --strict + **139 tests** green, incl. 12 driving a real nvim.
-- **In flight (2026-09-07):** empty-transcript fix + incremental decode (VAD),
-  preview persisting through decode, smoother/faster window open, and pulling
-  the i3 + nvim config into the repo. Four commits, main session.
+- **Pivoted 2026-09-07: the sink is neovim, not the clipboard.** Appended over
+  msgpack-RPC to a floating nvim that never takes focus, one file per window.
+- **Used live, German and English, hold and latch.** ruff + mypy --strict +
+  **175 tests** green, incl. 18 driving a real nvim.
+- **Self-contained:** `scripts/install.py` symlinks the i3 rules and systemd
+  unit out of `packaging/`; the window's nvim config is bundled too.
 
 ## Done
-- Rejected Handy 0.9.6 (README); every change reverted. v1 built and reviewed,
-  all 10 findings fixed. All 5 references verified 2026-08-27.
 - Live preview: whole-utterance re-decode, monotonic, adaptive, capped at 30s.
-- nvim sink: `nvim.py` + `nvim_indicator.lua`, pointer-anchored one-third
-  placement, winbar indicator, preview as wrapped virtual text, one file per
-  window. Overlay off by default. See `docs/nvim-window.md` + ADR.
+- nvim sink: pointer-anchored one-third window, winbar indicator, preview as
+  virtual text, one file per window. `docs/nvim-window.md` + ADR.
 - Latched recording: shift+M4 records until M4 is pressed again.
-- **systemd `--user` unit** (`packaging/voice-kb.service`), enabled, running,
-  `WantedBy=i3-session.target`.
+- **VAD segmentation** (`vad.py`): fixes short utterances decoding to nothing;
+  transcript lands progressively. Preview now survives the decode.
+- **One-frame window open:** placed by the terminal, chrome from a bundled nvim
+  config, msgpack readiness probe, X warm-up at start.
+- **systemd `--user` unit**, enabled, `WantedBy=i3-session.target`.
 
 ## Measured (i7-9850H, 6 threads, CPU, 0 VRAM)
-- Warm, idle: 20 s -> 1.19 s (**16.8x**), 37 s -> 2.55 s. Linear; no cliff.
-  Handy managed 1.37x and dropped the 37 s clip at its 30 s cap.
-- WER on 5 refs, no vocabulary: **13.4% vs Handy's 48.7%** — but that gap is all
-  the clip Handy dropped; on the other four, 18.4% vs **15.8%**.
+- Warm, idle: 20 s -> 1.19 s (**16.8x**); Handy managed 1.37x and dropped a
+  37 s clip at its 30 s cap. WER 13.4% vs its 48.7% (15.8/18.4 excluding that).
 - Live: 11.2s held -> 0.78s decode + ~40ms append = **~0.8s to text**.
-- Window: cold open 1.0-1.2s, reattach 430ms, append 19-62ms — off the path.
-- Hotwords stay viable: `bpe_vocab` is the two-column SentencePiece `.vocab`,
-  not the protobuf; rebuild from `tokens.txt` as score = `-index`.
+- VAD-segmented decode: **first text in 0.27-0.49s** (was 2.2-3.4s), rest
+  streams in. Throughput unchanged (12.4x -> 11.4x); 6 threads already optimal.
+- Window: cold open **244ms**, reattach 92ms, append 14-62ms — off the path.
 
 ## Hard constraints — full rationale in `docs/constraints.md`
 Read evdev **read-only** (no `EVIOCGRAB`, no uinput clones); **never synthesise
 characters** (no `xdotool type`/enigo) — both destroy per-device `setxkbmap`.
-One-shot **committed** decode. CPU only. Bias vocabulary at decode time, never
-fuzzy replacement. **No window voice-kb opens may take focus**, and nothing is
-written to a window it did not open. M4 = evdev `186` (`KEY_F16`) → X keycode
-`194`, keysym `XF86Launch7`, which keysym-based hotkey libraries cannot bind.
+One decode per sample, split at silence, never on a growing buffer. CPU only.
+Bias vocabulary at decode time, never fuzzy replacement. **No window voice-kb
+opens may take focus**, and nothing is written to a window it did not open.
+M4 = evdev `186` (`KEY_F16`) → X keycode `194`, keysym `XF86Launch7`,
+unbindable by keysym-based hotkey libraries.
 
 ## Next
-- **A latched recording has no upper bound.** ~64 KB/s of audio held in memory,
-  decode ~14.6x real-time: an hour latched is ~230 MB and a ~4 min decode.
-- Dying input stream: root cause unknown (3rd occurrence). Watchdogs recover it.
-- `cd home` -> `C D home.` — short commands spell out (Handy got this right).
+- **A latched recording has no upper bound in memory** (~64 KB/s: an hour is
+  ~230 MB). Decode is no longer the worry — segments land progressively.
+- Dying input stream: root cause unknown (3rd). Watchdogs recover it.
+- `cd home` -> `C D home.` — short commands spell out.
 
 ## Open questions
 - Cloud ASR (Gladia) as a second backend — issue #1. Not the default.
 - Is an LLM cleanup pass worth it? The technical vocabulary gap (mkdir, udev,
-  `cd home`) is unaddressed while hotwords stay deferred.
+  `cd home`) is open while hotwords stay deferred (`bpe.vocab` note in README).
 - Should a latched recording auto-commit at some length, or keep growing?
 
 ## Decided

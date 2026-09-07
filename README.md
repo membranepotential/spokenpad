@@ -69,27 +69,29 @@ this replaces managed 1.37× on the same hardware and silently discarded the
 
 ```sh
 uv sync
-uv run scripts/fetch_model.py     # ~630 MB, not committed
+uv run scripts/fetch_model.py     # ~630 MB ASR + ~2 MB VAD, not committed
+uv run scripts/install.py         # window manager rules + systemd unit
+systemctl --user daemon-reload && systemctl --user enable --now voice-kb
 ```
 
-Then tell your window manager to float the dictation window and never focus
-it. For i3, `~/.config/i3/i3.d/voice-kb.conf`:
+`install.py` symlinks the two files voice-kb needs outside the repository:
 
-```
-for_window [instance="voice-kb"] floating enable
-no_focus   [instance="voice-kb"]
-```
+| from | to | why it cannot live in the repo |
+|---|---|---|
+| `packaging/i3/voice-kb.conf` | `~/.config/i3/i3.d/voice-kb.conf` | i3 reads its rules from its own config directory |
+| `packaging/voice-kb.service` | `~/.config/systemd/user/voice-kb.service` | systemd reads units from its own unit directory |
 
-Everything else -- size, position, the file it writes -- is voice-kb's own;
-see [docs/nvim-window.md](docs/nvim-window.md).
+Symlinks, so editing them here takes effect on the next reload with no second
+step and no copy to drift; `--copy` installs independent copies instead. It is
+idempotent, it refuses to overwrite a file it did not write, it warns if your
+i3 config has no `include i3.d/*.conf` line, and `--uninstall` removes both.
 
-To run it as a service that starts with your i3 session:
-
-```sh
-install -Dm644 packaging/voice-kb.service ~/.config/systemd/user/voice-kb.service
-systemctl --user daemon-reload
-systemctl --user enable --now voice-kb.service
-```
+Everything else voice-kb needs is inside the repository, including the nvim
+configuration the dictation window runs under
+(`src/voice_kb/dictation_init.lua`) — so the window behaves the same on a
+fresh machine, and a change to your dotfiles cannot change what voice-kb does.
+Point `nvim.init` at your own config if you would rather have your keybindings
+in that window; see [docs/nvim-window.md](docs/nvim-window.md).
 
 The unit assumes the checkout is at `~/Documents/voice-kb`; edit
 `WorkingDirectory`/`ExecStart` if it is not, and `WantedBy` if your session

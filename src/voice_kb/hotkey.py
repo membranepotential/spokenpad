@@ -37,7 +37,7 @@ from evdev import ecodes
 
 from voice_kb.config import HotkeyConfig
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("voice-kb.hotkey")
 
 type KeyEventCallback = Callable[[float], None]
 """Invoked on the watcher's background thread with ``time.monotonic()`` at

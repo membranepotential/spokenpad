@@ -179,3 +179,18 @@ def test_a_corrupt_model_is_reported_and_not_raised(tmp_path: Path) -> None:
     broken.write_bytes(b"not an onnx file")
 
     assert load_segmenter(VadConfig(model=broken), RATE) is None
+
+
+def test_its_log_lines_reach_the_daemons_log() -> None:
+    """Loggers here are named explicitly rather than from ``__name__``.
+
+    ``voice_kb.vad`` is not under ``voice-kb`` -- underscore against hyphen --
+    so a ``getLogger(__name__)`` here produced a module whose warnings, "no
+    VAD model" among them, went nowhere at all. Caught in use: the daemon
+    started with segmentation silently unavailable and said nothing.
+    """
+    from voice_kb import hotkey, vad
+
+    for module in (vad, hotkey):
+        name = getattr(module, "log", None) or module.logger
+        assert name.name.startswith("voice-kb."), f"{module.__name__} logs outside the tree"

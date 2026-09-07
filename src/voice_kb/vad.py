@@ -68,7 +68,7 @@ import numpy as np
 from voice_kb.audio import MonoAudio
 from voice_kb.config import VadConfig
 
-log = logging.getLogger(__name__)
+log = logging.getLogger("voice-kb.vad")
 
 #: Silero consumes fixed-size frames. sherpa-onnx exposes this as
 #: ``window_size`` and rejects a mismatch, so feed it exactly this many
