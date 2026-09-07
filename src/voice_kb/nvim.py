@@ -292,17 +292,6 @@ class NvimSession:
             log.debug("indicator update dropped: %s", e)
             self._drop("indicator update failed")
 
-    def raise_window(self) -> None:
-        """Bring an existing dictation window to the workspace the user is on.
-
-        Only the workspace move, deliberately: it is *not* re-placed on every
-        dictation. A window that jumped back under the pointer every time the
-        key was pressed would fight anyone who had moved it somewhere they
-        wanted it, and the placement in :meth:`place_window` is a starting
-        position, not a policy to keep enforcing.
-        """
-        self._i3("move workspace current")
-
     def place_window(self, rect: Rect) -> None:
         """Float, size and position a freshly opened window. Once, on spawn.
 

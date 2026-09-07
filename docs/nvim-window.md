@@ -148,6 +148,21 @@ When previews stop (past `preview.max_seconds`) the winbar says
 long passage reads as lost audio rather than as a cost control — which is
 exactly how it was first reported.
 
+**It looks like your terminal.** No colourscheme is loaded; `Normal` and the
+other background groups are cleared so alacritty's own colours show through.
+Bundling a colourscheme (`habamax`) was tried and was wrong -- it painted its
+own grey over a black TokyoNight terminal and read as broken, which is exactly
+what a window that is meant to sit unobtrusively beside your work must not do.
+Inheriting costs nothing, needs no plugin, and matches whatever theme the rest
+of the desktop already has.
+
+**Yank reaches the system clipboard** (`clipboard=unnamedplus`). This is a
+window for reading a transcript and copying a piece of it out, so a `y` that
+goes nowhere makes it useless for its actual job. That is not in tension with
+voice-kb never touching the clipboard itself: that rule is about the *daemon*
+not writing where it was not asked to. A person pressing `y` in their own
+editor has asked.
+
 **The chrome is off before the first frame.** The window runs voice-kb's own
 `dictation_init.lua` (`nvim -u`), which turns off the status line, tab line,
 line numbers, sign column, fold column and cursorline, sets prose wrapping,

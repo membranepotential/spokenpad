@@ -140,6 +140,17 @@ class _Worker(QObject):
         #: between segments so a cancelled long decode stops appending rather
         #: than running to the end of a passage the user has abandoned.
         self._abandon_decode = threading.Event()
+        #: Preview text for chunks of this utterance that are already closed,
+        #: and how much audio it accounts for. Worker-thread-only, and reset
+        #: per utterance. This is what makes a preview cost the same at ten
+        #: seconds as at ten minutes: only the open tail is ever re-decoded.
+        #:
+        #: It cannot reach the committed transcript. `run_decode` never reads
+        #: it, and decodes the capture from zero -- the invariant in
+        #: docs/constraints.md that preview output is never merged into the
+        #: final text holds exactly as before.
+        self._preview_prefix = ""
+        self._preview_from = 0
 
     @property
     def abandon_previews(self) -> threading.Event:
@@ -197,21 +208,58 @@ class _Worker(QObject):
                 else [Segment(samples=samples, start_seconds=0.0)]
             )
             texts: list[str] = []
+            cancelled = False
             for index, segment in enumerate(segments):
                 if self._abandon_decode.is_set():
-                    log.info(
-                        "decode cancelled after %d of %d segments", index, len(segments)
-                    )
+                    log.info("decode cancelled after %d of %d chunks", index, len(segments))
+                    cancelled = True
                     break
                 text = self._transcriber.transcribe(segment.samples, rate).text
+                # Every chunk, with where it came from, at DEBUG. Words going
+                # missing from the front of a dictation is the one report that
+                # cannot be diagnosed after the fact without this: it says
+                # whether the first chunk covered the start of the capture and
+                # what it decoded to, which separates "the audio was not
+                # there" from "the recogniser returned nothing for it".
+                log.debug(
+                    "chunk %d/%d at %.1fs, %.1fs long -> %d chars: %r",
+                    index + 1,
+                    len(segments),
+                    segment.start_seconds,
+                    segment.samples.size / rate,
+                    len(text),
+                    text[:60],
+                )
                 if not text.strip():
                     continue
                 texts.append(text)
                 self.segment_decoded.emit(text, generation)
+
+            # Chunking must never lose a whole utterance. It has: a 2.8s
+            # capture at peak 0.28 -- unmistakably speech -- came back empty
+            # from every chunk, and the words were simply gone. Whatever the
+            # detector did there, the audio is still in hand, so decode it the
+            # old way rather than report nothing.
+            #
+            # Costs one extra decode, and only in a case that was already a
+            # total failure. The floor this buys is worth stating plainly:
+            # segmentation can now never do worse than not segmenting.
+            if not texts and not cancelled and len(segments) != 1:
+                log.warning(
+                    "all %d chunks decoded to nothing; retrying the whole %.1fs buffer",
+                    len(segments),
+                    samples.size / rate,
+                )
+                text = self._transcriber.transcribe(samples, rate).text
+                if text.strip():
+                    log.info("the whole-buffer retry recovered the utterance")
+                    texts.append(text)
+                    self.segment_decoded.emit(text, generation)
         except Exception as e:
             log.exception("decode raised")
             self.decode_failed.emit(str(e), generation)
             return
+        self._reset_preview()
         self.decoded.emit(" ".join(texts), time.perf_counter() - start, generation)
 
     def run_preview(self, samples: MonoAudio, generation: int) -> None:
@@ -225,14 +273,59 @@ class _Worker(QObject):
         """
         if self._abandon_previews.is_set() or self._transcriber is None or samples.size == 0:
             return
+        # The capture restarting is how this thread learns a new utterance
+        # began: it is the one signal that arrives without a round trip to the
+        # Qt thread, and a preview carrying the last utterance's words would
+        # be worse than no preview at all.
+        if samples.size < self._preview_from:
+            self._reset_preview()
         try:
-            result = self._transcriber.transcribe(samples, self._config.audio.sample_rate)
+            text = self._preview_text(samples)
         except Exception as e:
             log.debug("preview decode failed, ignoring: %s", e)
             return
         if self._abandon_previews.is_set():
             return
-        self.previewed.emit(result.text, generation)
+        self.previewed.emit(text, generation)
+
+    def _reset_preview(self) -> None:
+        self._preview_prefix = ""
+        self._preview_from = 0
+
+    def _preview_text(self, samples: MonoAudio) -> str:
+        """The utterance so far: settled chunks remembered, open tail decoded.
+
+        Previews used to decode the whole utterance every time, which made
+        each one cost more than the last -- ~4s by the one-minute mark -- and
+        is why they had to stop being issued at all past a time limit. Neither
+        is acceptable in the window someone is watching while they speak.
+
+        Once the detector closes a chunk, that audio is final: no later speech
+        changes it, so its text is kept and its samples are never looked at
+        again. Only the open tail is re-decoded, which bounds a preview by the
+        chunk rather than by the utterance -- the same cost at ten minutes as
+        at ten seconds.
+        """
+        assert self._transcriber is not None
+        rate = self._config.audio.sample_rate
+        if self._segmenter is None:
+            return self._transcriber.transcribe(samples, rate).text
+
+        chunks = self._segmenter.split(samples[self._preview_from :])
+        # The last chunk is still open -- the user may be mid-sentence in it --
+        # so only the ones before it are settled.
+        for chunk in chunks[:-1]:
+            settled = self._transcriber.transcribe(chunk.samples, rate).text
+            if settled.strip():
+                self._preview_prefix = f"{self._preview_prefix} {settled}".strip()
+            self._preview_from += chunk.samples.size
+            if self._abandon_previews.is_set():
+                # Mid-fold, but the prefix and the offset moved together, so
+                # what is kept is consistent and the next preview resumes here.
+                return self._preview_prefix
+
+        tail = self._transcriber.transcribe(chunks[-1].samples, rate).text
+        return f"{self._preview_prefix} {tail}".strip()
 
 class _NvimBridge(QObject):
     """Owns the connection to the dictation window. Lives on its own QThread.
@@ -266,7 +359,7 @@ class _NvimBridge(QObject):
         self._session.warm_up()
 
     def open(self) -> None:
-        """Ensure the window exists and is on the workspace the user is on.
+        """Ensure a dictation window exists, opening one if it does not.
 
         Called on every key-down rather than once at startup: the window is
         the user's to close, and reopening it on the next dictation is the
@@ -275,7 +368,15 @@ class _NvimBridge(QObject):
         if not self._session.ensure():
             self.open_failed.emit()
             return
-        self._session.raise_window()
+        # Nothing moves the window after it opens. It used to be pulled to the
+        # current workspace on every key-down, which meant it followed the user
+        # between screens -- reported as wrong, and it is: where the window
+        # sits is the user's decision from the moment it exists. Placement is a
+        # starting position, not a policy to keep enforcing.
+        #
+        # A window left on another workspace therefore stays there, and the
+        # transcript still lands in it and on disk. Closing it is how you get a
+        # new one where you are.
         # ensure() succeeded, so there is a path; str(None) would be a lie
         # in the log rather than an error, which is worse.
         self.opened.emit(str(self._session.path or "?"))

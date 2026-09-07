@@ -69,13 +69,77 @@ vim.opt.undofile = false
 vim.opt.autoread = true
 
 vim.opt.mouse = "a"
-vim.opt.clipboard = ""
 vim.opt.termguicolors = true
 
--- A quiet, readable default that does not depend on a colorscheme being
--- installed. `background` follows the terminal, so this inherits whatever
--- the user's alacritty theme already is rather than fighting it.
-vim.cmd.colorscheme("habamax")
+-- Yank goes to the system clipboard, as it does in almost everyone's config.
+-- This window is where you read a transcript and copy a piece of it out, so a
+-- `y` that does not reach the clipboard makes it useless for its actual job.
+--
+-- Not in tension with voice-kb never touching the clipboard itself: that rule
+-- is about the *daemon* not writing anywhere the user did not ask it to. A
+-- person pressing `y` in their own editor has asked.
+vim.opt.clipboard = "unnamedplus"
+
+-- No colourscheme, deliberately: this inherits the terminal's own colours, so
+-- the window looks like every other terminal on the desktop instead of like
+-- whatever theme happened to be bundled. Setting one (`habamax`) painted its
+-- own grey background over a black alacritty and looked broken, which is
+-- exactly the failure this avoids.
+--
+-- The background is cleared explicitly rather than merely left alone. nvim
+-- paints `Normal` opaquely by default, so without this the terminal's
+-- background never shows through and a themed alacritty is overpainted.
+local function inherit_terminal_background()
+  for _, group in ipairs({
+    "Normal",
+    "NormalNC",
+    "NormalFloat",
+    "EndOfBuffer",
+    "SignColumn",
+    "WinBar",
+    "WinBarNC",
+    "MsgArea",
+  }) do
+    local ok, hl = pcall(vim.api.nvim_get_hl, 0, { name = group })
+    if ok then
+      hl.bg, hl.ctermbg = nil, nil
+      pcall(vim.api.nvim_set_hl, 0, group, hl)
+    end
+  end
+end
+
+inherit_terminal_background()
+-- Re-applied after any `:colorscheme`, so `nvim.colorscheme` can set a theme
+-- for the syntax colours while the background still comes from the terminal.
+vim.api.nvim_create_autocmd("ColorScheme", {
+  group = vim.api.nvim_create_augroup("VoiceKbInit", { clear = true }),
+  callback = inherit_terminal_background,
+})
+
+--- Load a colourscheme by name from wherever a plugin manager put it.
+---
+--- Only the one directory that actually provides it is added to the
+--- runtimepath -- not every installed plugin -- so this cannot drag in plugin
+--- scripts, autocommands or a format-on-save along with the colours.
+function _G.VoiceKbColorscheme(name)
+  if vim.fn.exists("g:colors_name") == 1 and vim.g.colors_name == name then
+    return
+  end
+  local data = vim.fn.stdpath("data")
+  for _, pattern in ipairs({
+    data .. "/lazy/*/colors/" .. name .. ".*",
+    data .. "/site/pack/*/start/*/colors/" .. name .. ".*",
+    data .. "/site/pack/*/opt/*/colors/" .. name .. ".*",
+  }) do
+    local found = vim.fn.glob(pattern, false, true)
+    if #found > 0 then
+      vim.opt.runtimepath:append(vim.fn.fnamemodify(found[1], ":h:h"))
+      break
+    end
+  end
+  pcall(vim.cmd.colorscheme, name)
+end
+
 vim.opt.winbar = ""
 
 -- Enough of an editor to fix a misheard word without reaching for a manual:

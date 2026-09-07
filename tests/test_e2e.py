@@ -892,18 +892,26 @@ def test_phase_changes_reach_the_nvim_bridge_even_when_the_overlay_is_disabled(
 class _FakeSegmenter:
     """Splits a capture into ``count`` equal pieces, like a VAD that found
     ``count`` runs of speech. Stands in for ``voice_kb.vad.SpeechSegmenter``
-    so these tests need no model and no real audio."""
+    so these tests need no model and no real audio.
 
-    def __init__(self, count: int) -> None:
+    ``counts`` scripts a different number per call, which is what previews
+    need: the real segmenter sees a shorter tail each time as settled chunks
+    are consumed, and so returns fewer chunks, while a fixed ``count`` would
+    keep splitting whatever remains into the same number of pieces forever.
+    """
+
+    def __init__(self, count: int, counts: list[int] | None = None) -> None:
         self.count = count
+        self.counts = counts or []
         self.calls: list[MonoAudio] = []
 
     def split(self, samples: MonoAudio) -> list[Segment]:
         self.calls.append(samples)
-        step = max(1, samples.size // self.count)
+        n = self.counts.pop(0) if self.counts else self.count
+        step = max(1, samples.size // n)
         return [
             Segment(samples=samples[i * step : (i + 1) * step], start_seconds=float(i))
-            for i in range(self.count)
+            for i in range(n)
         ]
 
 
@@ -1023,3 +1031,150 @@ def test_without_a_segmenter_the_whole_buffer_is_decoded_exactly_as_before(
 
     assert paragraphs == [("the whole thing", False)]
     assert len(_transcriber(daemon).calls) == 1
+
+
+# ------------------------------------------------- the chunking safety net
+
+
+def test_an_utterance_is_never_lost_to_chunking(make_daemon: DaemonFactory) -> None:
+    """If every chunk decodes to nothing, the whole buffer is decoded instead.
+
+    This is not hypothetical: a 2.8s capture at peak 0.28 -- unmistakably
+    speech -- came back empty from every chunk in real use, and the words were
+    simply gone. The floor this buys is that segmentation can never do worse
+    than not segmenting.
+    """
+    daemon = make_daemon(None)
+    appended = _append_spy(daemon)
+    daemon._worker._segmenter = cast(SpeechSegmenter, _FakeSegmenter(3))
+
+    daemon._dispatch(KeyDown(at=0.0))
+    daemon._dispatch(KeyUp(at=0.5))
+    _transcriber(daemon).results = [
+        TranscriptionResult(text="", elapsed_seconds=0.1),
+        TranscriptionResult(text="", elapsed_seconds=0.1),
+        TranscriptionResult(text="", elapsed_seconds=0.1),
+        TranscriptionResult(text="the whole thing after all", elapsed_seconds=0.3),
+    ]
+
+    daemon._worker.run_decode(_audio(daemon).next_samples, daemon._generation)
+
+    assert appended == ["the whole thing after all"]
+    assert len(_transcriber(daemon).calls) == 4, "three chunks, then the retry"
+
+
+def test_the_retry_does_not_fire_when_a_chunk_produced_text(
+    make_daemon: DaemonFactory,
+) -> None:
+    """A partly-empty decode is a normal decode -- pauses produce empty chunks
+    all the time. Retrying then would decode everything twice."""
+    daemon = make_daemon(None)
+    daemon._worker._segmenter = cast(SpeechSegmenter, _FakeSegmenter(3))
+
+    daemon._dispatch(KeyDown(at=0.0))
+    daemon._dispatch(KeyUp(at=0.5))
+    _transcriber(daemon).results = [
+        TranscriptionResult(text="", elapsed_seconds=0.1),
+        TranscriptionResult(text="something", elapsed_seconds=0.1),
+        TranscriptionResult(text="", elapsed_seconds=0.1),
+    ]
+
+    daemon._worker.run_decode(_audio(daemon).next_samples, daemon._generation)
+
+    assert len(_transcriber(daemon).calls) == 3, "no retry"
+
+
+def test_a_cancelled_decode_is_not_retried(make_daemon: DaemonFactory) -> None:
+    """Cancelling means stop working, not fall back to the slow path."""
+    daemon = make_daemon(None)
+    daemon._worker._segmenter = cast(SpeechSegmenter, _FakeSegmenter(3))
+    daemon._dispatch(KeyDown(at=0.0))
+    daemon._dispatch(KeyUp(at=0.5))
+    daemon._worker.abandon_decode.set()
+
+    daemon._worker.run_decode(_audio(daemon).next_samples, daemon._generation)
+
+    assert _transcriber(daemon).calls == []
+
+
+# --------------------------------------------------------- incremental preview
+
+
+def test_a_preview_only_decodes_the_open_tail(make_daemon: DaemonFactory) -> None:
+    """Settled chunks are remembered, not decoded again.
+
+    This is what makes a preview cost the same at ten minutes as at ten
+    seconds. Decoding from the beginning every time is why previews used to
+    have to stop being issued past a time limit at all.
+    """
+    daemon = make_daemon(None)
+    previews = _nvim_preview_spy(daemon)
+    # Three chunks on the first preview, then only the still-open tail.
+    daemon._worker._segmenter = cast(SpeechSegmenter, _FakeSegmenter(1, counts=[3, 1]))
+    daemon._dispatch(KeyDown(at=0.0))
+
+    _transcriber(daemon).results = [
+        TranscriptionResult(text="first settled", elapsed_seconds=0.1),
+        TranscriptionResult(text="second settled", elapsed_seconds=0.1),
+        TranscriptionResult(text="open tail", elapsed_seconds=0.1),
+    ]
+    daemon._worker.run_preview(_audio(daemon).preview_samples, daemon._generation)
+    assert previews[-1] == "first settled second settled open tail"
+
+    # The next preview re-decodes only the tail: the two settled chunks are
+    # already in the prefix and their audio is never looked at again.
+    calls_before = len(_transcriber(daemon).calls)
+    _transcriber(daemon).results = [TranscriptionResult(text="longer tail", elapsed_seconds=0.1)]
+    daemon._worker.run_preview(_audio(daemon).preview_samples, daemon._generation)
+
+    assert len(_transcriber(daemon).calls) - calls_before == 1
+    assert previews[-1] == "first settled second settled longer tail"
+
+
+def test_preview_state_does_not_leak_into_the_next_utterance(
+    make_daemon: DaemonFactory,
+) -> None:
+    """A preview carrying the previous utterance's words would be worse than
+    no preview at all."""
+    daemon = make_daemon(None)
+    previews = _nvim_preview_spy(daemon)
+    daemon._worker._segmenter = cast(SpeechSegmenter, _FakeSegmenter(2))
+    daemon._dispatch(KeyDown(at=0.0))
+    _transcriber(daemon).next_result = TranscriptionResult(text="old words", elapsed_seconds=0.1)
+    daemon._worker.run_preview(_audio(daemon).preview_samples, daemon._generation)
+    assert "old words" in previews[-1]
+
+    daemon._dispatch(KeyUp(at=0.5))
+    daemon._worker.run_decode(_audio(daemon).next_samples, daemon._generation)
+
+    daemon._dispatch(KeyDown(at=1.0))
+    _transcriber(daemon).next_result = TranscriptionResult(text="new words", elapsed_seconds=0.1)
+    daemon._worker.run_preview(_audio(daemon).preview_samples, daemon._generation)
+
+    assert previews[-1] == "new words new words", "only this utterance's chunks"
+
+
+def test_the_committed_decode_never_reads_preview_state(
+    make_daemon: DaemonFactory,
+) -> None:
+    """The invariant in docs/constraints.md: preview output is never merged
+    into the committed text. Previews now carry state across calls, so this is
+    worth asserting directly rather than by inspection."""
+    daemon = make_daemon(None)
+    appended = _append_spy(daemon)
+    daemon._worker._segmenter = cast(SpeechSegmenter, _FakeSegmenter(2))
+    daemon._dispatch(KeyDown(at=0.0))
+    _transcriber(daemon).next_result = TranscriptionResult(
+        text="preview only", elapsed_seconds=0.1
+    )
+    daemon._worker.run_preview(_audio(daemon).preview_samples, daemon._generation)
+
+    daemon._dispatch(KeyUp(at=0.5))
+    _transcriber(daemon).results = [
+        TranscriptionResult(text="committed a", elapsed_seconds=0.1),
+        TranscriptionResult(text="committed b", elapsed_seconds=0.1),
+    ]
+    daemon._worker.run_decode(_audio(daemon).next_samples, daemon._generation)
+
+    assert appended == ["committed a", "committed b"]
+    assert not any("preview only" in text for text in appended)

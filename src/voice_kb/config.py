@@ -215,6 +215,21 @@ class VadConfig:
     whole-buffer decoding with a longer wait for the first words.
     """
 
+    edge_pad_seconds: float = 2.0
+    """Extra audio kept before the first chunk and after the last one.
+
+    The edges of a capture are where losing audio actually costs something: a
+    word clipped off the front of a dictation is the first word of the
+    sentence, and nobody notices a word trimmed from the middle of a pause.
+    So the outer edges get a wider margin than the interior boundaries do.
+
+    Bounded rather than "extend to the ends of the buffer", because a chunk
+    swamped by silence is exactly what makes the recogniser return nothing --
+    the failure ``voice_kb.vad`` exists to prevent. It applies only to chunks
+    with real speech in them (see ``_EDGE_MARGIN_MIN_SPEECH_S``), so a short
+    utterance buried in a long quiet capture is still trimmed tightly.
+    """
+
     pad_seconds: float = 0.5
     """Audio kept either side of a chunk, beyond what the detector marked.
 
@@ -227,8 +242,10 @@ class VadConfig:
     def __post_init__(self) -> None:
         if not 0.0 < self.threshold < 1.0:
             raise ConfigError(f"vad.threshold must be between 0 and 1: {self.threshold}")
-        if self.pad_seconds < 0:
-            raise ConfigError(f"vad.pad_seconds must not be negative: {self.pad_seconds}")
+        for name in ("pad_seconds", "edge_pad_seconds"):
+            padding: float = getattr(self, name)
+            if padding < 0:
+                raise ConfigError(f"vad.{name} must not be negative: {padding}")
         if self.chunk_seconds < 0:
             raise ConfigError(f"vad.chunk_seconds must not be negative: {self.chunk_seconds}")
         for name in ("min_silence_seconds", "min_speech_seconds", "max_speech_seconds"):
@@ -274,7 +291,7 @@ _INSTANCE_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 """Allowed window instance names.
 
 An allowlist, because this name is interpolated into an i3 criteria string
-(``[instance="..."]``) in :meth:`voice_kb.nvim.NvimSession.raise_window`. A
+(``[instance="..."]``) in :meth:`voice_kb.nvim.NvimSession.place_window`. A
 name containing a quote or a bracket would let a config value become i3
 syntax; the same reasoning that keeps transcript text out of argv keeps
 config values out of another program's grammar.
@@ -507,32 +524,33 @@ class PreviewConfig:
     protected.
     """
 
-    max_seconds: float = 30.0
-    """Stop previewing once the utterance is longer than this.
+    max_seconds: float = 600.0
+    """Stop previewing once the utterance is longer than this. A backstop.
 
-    Each preview decodes the whole utterance so far, from its beginning. That
-    is what keeps already-transcribed words on screen: a trailing window was
-    tried first and it *physically discarded* the start of the sentence, so
-    text vanished in chunks while the user was still speaking.
+    Previews used to decode the whole utterance from its beginning every time,
+    so each cost more than the last -- ~4s by the one-minute mark -- and this
+    limit was load-bearing: past it they stopped being issued at all, and the
+    winbar had to explain that a frozen preview was not lost audio. In use
+    that was reported straight back as the wrong behaviour, which it was. The
+    limit was 30s and ordinary passages ran longer.
 
-    Decoding from the start means preview cost grows with the utterance, and
-    two things bound it. The cadence adapts (see :attr:`interval_ms`) so the
-    worker stays idle at least half the time; and past this many seconds
-    previews stop being issued altogether. Nothing disappears when they do --
-    the last full preview simply stays on screen.
+    A preview now costs the same at ten minutes as at ten seconds. Chunks the
+    detector has closed are settled -- no later speech changes them -- so
+    their text is kept and only the open tail is re-decoded (see
+    ``_Worker._preview_text``). Cost is bounded by ``vad.chunk_seconds``, not
+    by the utterance, so there is nothing left for a time limit to protect
+    against.
 
-    The number is a latency budget. A *queued* preview is dropped the instant
-    the key is released, but one already inside ``decode_stream`` cannot be
-    interrupted, so the committed decode waits for it. This model decodes at
-    ~14.6x real-time, so 30s of audio costs ~2.0s: that is the worst case a
-    release can pay, with ~1.0s expected from the duty cycle. Raising this
-    raises both, in direct proportion.
+    It stays as a backstop for the case that reasoning does not cover: no VAD
+    model, where previews fall back to decoding the whole buffer and the old
+    growth returns. Ten minutes is far past any dictation and still short of
+    a runaway.
 
-    Raised from 15s once dictation moved to nvim, because the passages being
-    recorded got longer -- 30-38s measured in the first real session, which
-    left the preview frozen for half of every one of them. The freeze is now
-    also shown in the winbar, so a stopped preview reads as "still recording,
-    just not showing you" rather than as lost audio.
+    The number is a latency budget either way. A *queued* preview is dropped
+    the instant the key is released, but one already inside ``decode_stream``
+    cannot be interrupted, so the committed decode waits for it. With chunking
+    that wait is one chunk (~0.8s worst case, ~0.4s expected from the duty
+    cycle) regardless of what this is set to.
     """
 
     def __post_init__(self) -> None:

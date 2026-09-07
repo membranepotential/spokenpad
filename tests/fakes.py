@@ -150,7 +150,6 @@ class FakeNvimSession:
         self.states: list[dict[str, Phase | float | str]] = []
         self.ensure_calls = 0
         self.warm_up_calls = 0
-        self.raise_calls = 0
         self.close_calls = 0
         self.place_calls: list[Rect] = []
         self.ensure_result = True
@@ -199,9 +198,6 @@ class FakeNvimSession:
             update["preview"] = preview
         if update:
             self.states.append(update)
-
-    def raise_window(self) -> None:
-        self.raise_calls += 1
 
     def place_window(self, rect: Rect) -> None:
         self.place_calls.append(rect)

@@ -94,6 +94,14 @@ _WINDOW: Final = 512
 #: not segments. Two maximal segments is headroom nothing realistic reaches.
 _BUFFER_HEADROOM: Final = 2.0
 
+#: Speech a chunk must already hold before its outer edge is widened by
+#: ``VadConfig.edge_pad_seconds``. Below this the chunk is small enough that
+#: extra silence could dominate it, which is the condition that makes the
+#: recogniser return nothing -- so a brief utterance in a quiet capture keeps
+#: the tight trim that fixes that bug, and only substantial speech gets the
+#: wider margin that protects a first or last word.
+_EDGE_MARGIN_MIN_SPEECH_S: Final = 3.0
+
 
 @dataclass(frozen=True, slots=True)
 class Segment:
@@ -132,6 +140,7 @@ class SpeechSegmenter:
         self._sample_rate = sample_rate
         self._chunk_seconds = config.chunk_seconds
         self._pad_seconds = config.pad_seconds
+        self._edge_pad_seconds = config.edge_pad_seconds
         self._detector = sherpa_onnx.VoiceActivityDetector(
             model, buffer_size_in_seconds=config.max_speech_seconds * _BUFFER_HEADROOM
         )
@@ -165,29 +174,41 @@ class SpeechSegmenter:
             return [Segment(samples=samples, start_seconds=0.0)]
 
         pad = int(self._pad_seconds * self._sample_rate)
+        edge = int(self._edge_pad_seconds * self._sample_rate)
+        merged = self._merged(spans)
         chunks = []
-        for start, end in self._merged(spans):
+        for index, (start, end, speech) in enumerate(merged):
+            # A wider margin at the very start and end of the capture, where
+            # a clipped word is the first or last word of what was said.
+            wide = speech >= _EDGE_MARGIN_MIN_SPEECH_S * self._sample_rate
+            lead = edge if wide and index == 0 else pad
+            trail = edge if wide and index == len(merged) - 1 else pad
             # `start_seconds` describes the samples actually returned, padding
             # included, so it always locates them in the capture rather than
             # pointing a little after where they begin.
-            padded_start = max(0, start - pad)
+            padded_start = max(0, start - lead)
             chunks.append(
                 Segment(
-                    samples=samples[padded_start : min(samples.size, end + pad)],
+                    samples=samples[padded_start : min(samples.size, end + trail)],
                     start_seconds=padded_start / self._sample_rate,
                 )
             )
         return chunks
 
-    def _merged(self, spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
-        """Group ``(start, end)`` sample spans into chunks of enough speech.
+    def _merged(self, spans: list[tuple[int, int]]) -> list[tuple[int, int, int]]:
+        """Group spans into ``(start, end, speech)`` chunks of enough speech.
+
+        ``speech`` is how many samples of the chunk the detector actually
+        called speech, as opposed to the pauses between them that the chunk
+        also spans. It decides whether the chunk is substantial enough to earn
+        the wider edge margin.
 
         Merging is by *speech* accumulated, not elapsed time, so a passage
         with long thinking pauses in it still produces chunks the recogniser
         has enough context to work with rather than one chunk per phrase.
         """
         target = self._chunk_seconds * self._sample_rate
-        chunks: list[tuple[int, int]] = []
+        chunks: list[tuple[int, int, int]] = []
         start: int | None = None
         speech = 0
         for span_start, span_end in spans:
@@ -195,10 +216,10 @@ class SpeechSegmenter:
                 start = span_start
             speech += span_end - span_start
             if speech >= target:
-                chunks.append((start, span_end))
+                chunks.append((start, span_end, speech))
                 start, speech = None, 0
         if start is not None:
-            chunks.append((start, spans[-1][1]))
+            chunks.append((start, spans[-1][1], speech))
         return chunks
 
     def _speech_spans(self, samples: MonoAudio) -> list[tuple[int, int]]:

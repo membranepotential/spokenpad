@@ -141,40 +141,47 @@ that line, and they are asserted in `tests/test_e2e.py`:
    content, so it cannot be written to the file, yanked, or undone into the
    buffer even deliberately. `AudioCapture.snapshot_capture` is non-destructive: the
    capture keeps accumulating and `stop_capture` still returns everything.
-2. **Preview cost is bounded.** Not *constant* — this is weaker than it was,
-   deliberately. Previews originally decoded a fixed-length trailing window,
-   which made cost independent of utterance length but physically discarded
-   the start of the sentence: text the user had already watched appear
-   vanished in chunks while they were still speaking. A preview whose whole
-   job is to show what was heard cannot throw away what was heard, so it now
-   decodes the entire utterance so far and cost grows with it.
+2. **Preview cost is bounded** -- now by the chunk rather than by the
+   utterance. Previews originally decoded a fixed-length trailing window,
+   which made cost constant but physically discarded the start of the
+   sentence: text the user had already watched appear vanished in chunks
+   while they were still speaking. So they moved to decoding the whole
+   utterance every time, which kept the words but made each preview cost more
+   than the last -- ~4 s by the one-minute mark, ~13 s by two -- and needed a
+   time limit past which previews stopped being issued at all. That limit was
+   reported in use as the wrong behaviour, and it was: ordinary passages ran
+   past it, and a frozen preview reads as lost audio however the winbar
+   explains it.
 
-   Two things bound that growth. The gap between previews is
-   `max(interval - last_decode, last_decode)`, so the worker is idle at least
-   half the time however long the utterance runs; and past
-   `PreviewConfig.max_seconds` (15 s) previews stop being issued at
-   all. Nothing is cleared when they stop — the last one stays on screen.
+   Chunking resolves the dilemma the two earlier designs were stuck between.
+   Once the detector closes a chunk, that audio is *settled* -- no later
+   speech changes it -- so its text is kept and its samples are never decoded
+   again, and only the open tail is re-decoded. Nothing is discarded and
+   nothing grows: a preview costs the same at ten minutes as at ten seconds.
+   `PreviewConfig.max_seconds` survives only as a backstop for a daemon
+   running without a VAD model, where the old growth returns.
 
-   The budget this buys: at ~14.6x real-time a 15 s utterance costs ~1.0 s,
-   which is the worst a key release can wait on an in-flight preview, ~0.5 s
-   expected from the duty cycle.
+   The guard against a preview that comes back *shorter* stays. Each preview
+   still sees strictly more audio than the last, so the transcript should only
+   grow, but the recogniser does not guarantee it -- decoding 4.4 s of a real
+   sample returned `"Okay."` where 3.3 s of the same sample had returned a
+   full sentence. (That is the same collapse `voice_kb.vad` exists for, seen
+   one preview at a time.) A preview that shrank is treated as instability
+   rather than news, and the previous text stands.
 
-   One further guard, for the same reason the window was dropped: each
-   preview sees strictly more audio than the last, so the transcript *should*
-   only grow, but the recogniser does not guarantee it — decoding 4.4 s of a
-   real sample returned `"Okay."` where 3.3 s of the same sample had returned
-   `"Okay, we are now at the new model."`. A preview that comes back shorter
-   is treated as instability rather than news, and the previous text stands.
-   The guard resets per utterance, or a long dictation would suppress every
-   shorter preview of the next one.
 3. **A preview can never make the user wait.** Previews are *abandoned* the
    instant a committed decode (or a cancellation) is due: `Daemon` sets the
    worker's abandon flag before it requests the decode, so a preview already
    queued on the single worker thread is dropped rather than run ahead of the
    text the user is waiting for.
 
-There is still no time cap, no incremental re-decode of a growing buffer, and
-nothing the user sees mid-recording can reach the buffer. See
+   One thing the abandon flag now also covers: a preview folding several
+   settled chunks into its prefix checks the flag between them, and the
+   prefix and the audio offset move together, so an abandoned preview leaves
+   consistent state that the next one resumes from.
+
+Nothing the user sees mid-recording can reach the buffer -- `run_decode`
+never reads preview state and decodes the capture from zero. See
 [decisions.md](decisions.md#live-transcript-preview-as-a-cosmetic-second-decode).
 
 ## CPU only

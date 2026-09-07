@@ -123,6 +123,15 @@ chunk_seconds = 10.0
 # points at every chunk size tried.
 pad_seconds = 0.5
 
+# A wider margin before the FIRST chunk and after the LAST one. The edges of a
+# capture are where losing audio costs something: a word clipped off the front
+# is the first word of the sentence, while one trimmed from the middle of a
+# pause is nobody's loss. Applies only to chunks that already hold 3s of
+# speech, so a brief utterance in a quiet capture keeps its tight trim -- a
+# chunk swamped by silence is exactly what makes the recogniser return
+# nothing, which is the bug this whole section exists to prevent.
+edge_pad_seconds = 2.0
+
 [text]
 # Strip standalone filler words (see `fillers` below) from the transcript.
 strip_fillers = true

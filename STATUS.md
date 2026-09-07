@@ -11,25 +11,25 @@ For recording long passages while reading something else.
 - **Used live, German and English, hold and latch.** ruff + mypy --strict +
   **175 tests** green, incl. 18 driving a real nvim.
 - **Self-contained:** `scripts/install.py` symlinks the i3 rules and systemd
-  unit out of `packaging/`; the window's nvim config is bundled too.
+  unit out of `packaging/`; the window's nvim config is bundled.
 
 ## Done
-- Live preview: whole-utterance re-decode, monotonic, adaptive, capped at 30s.
 - nvim sink: pointer-anchored one-third window, winbar indicator, preview as
   virtual text, one file per window. `docs/nvim-window.md` + ADR.
 - Latched recording: shift+M4 records until M4 is pressed again.
-- **VAD segmentation** (`vad.py`): fixes short utterances decoding to nothing;
-  transcript lands progressively. Preview now survives the decode.
+- **VAD chunking** (`vad.py`): fixes short utterances decoding to nothing;
+  transcript lands progressively; previews decode only the open tail.
 - **One-frame window open:** placed by the terminal, chrome from a bundled nvim
   config, msgpack readiness probe, X warm-up at start.
 - **systemd `--user` unit**, enabled, `WantedBy=i3-session.target`.
 
 ## Measured (i7-9850H, 6 threads, CPU, 0 VRAM)
-- Warm, idle: 20 s -> 1.19 s (**16.8x**); Handy managed 1.37x and dropped a
-  37 s clip at its 30 s cap. WER 13.4% vs its 48.7% (15.8/18.4 excluding that).
+- Warm, idle: 20 s -> 1.19 s (**16.8x**); Handy managed 1.37x, dropped a 37 s
+  clip at its cap, and scored 48.7% WER against ours.
 - Live: 11.2s held -> 0.78s decode + ~40ms append = **~0.8s to text**.
 - VAD-chunked decode: first text after ~1s at any recording length, rest
-  streams in. **WER unchanged at 13.4%** (`eval.py --vad`); 6 threads optimal.
+  streams in. **WER 12.8%** vs 13.4% whole-buffer (`eval.py --vad`).
+- Preview cost now flat: median 1.10s over a 142s passage (was growing to 13s).
 - Window: cold open **244ms**, reattach 92ms, append 14-62ms — off the path.
 
 ## Hard constraints — full rationale in `docs/constraints.md`
@@ -44,11 +44,13 @@ unbindable by keysym-based hotkey libraries.
 ## Next
 - **A latched recording has no upper bound in memory** (~64 KB/s: an hour is
   ~230 MB). Decode is no longer the worry — segments land progressively.
+- **First words lost on some long dictations** (reported 2026-09-07, book
+  titles). Not reproduced: VAD onset is clean to 0.1x gain, the 600s cap trims
+  the end. Wider edge margin + per-chunk DEBUG logging added to catch it.
 - Dying input stream: root cause unknown (3rd). Watchdogs recover it.
 - `cd home` -> `C D home.` — short commands spell out.
 
 ## Open questions
-- Cloud ASR (Gladia) as a second backend — issue #1. Not the default.
 - Is an LLM cleanup pass worth it? The technical vocabulary gap (mkdir, udev,
   `cd home`) is open while hotwords stay deferred (`bpe.vocab` note in README).
 - Should a latched recording auto-commit at some length, or keep growing?

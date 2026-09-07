@@ -51,8 +51,8 @@ def nvim_config(tmp_path: Path) -> NvimConfig:
 
     ``window_instance`` is deliberately not the default ``"voice-kb"``: this
     suite runs against the real X server (``NvimSession.place_window`` and
-    ``raise_window`` shell out to real ``i3-msg``), and a headless nvim opens
-    no window for either to find -- but a distinct instance name means that
+    shells out to real ``i3-msg``), and a headless nvim opens
+    no window for it to find -- but a distinct instance name means that
     even a no-op ``i3-msg`` call from these tests can never be mistaken for
     one aimed at an actual, currently-running dictation window.
     """

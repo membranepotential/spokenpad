@@ -23,6 +23,9 @@ from voice_kb.vad import SpeechSegmenter, load_segmenter
 
 RATE = 16000
 SAMPLE = Path("eval-samples/handy-1787827474.wav")
+#: A sample with enough continuous speech to earn the wide edge margin; the
+#: short one above is deliberately brief and would not.
+LONG_SAMPLE = Path("eval-samples/handy-1787827701.wav")
 
 
 @pytest.fixture(scope="module")
@@ -257,3 +260,43 @@ def test_padding_never_runs_off_either_end_of_the_capture() -> None:
         for chunk in built.split(audio):
             assert chunk.start_seconds >= 0.0
             assert chunk.samples.size <= audio.size
+
+
+@pytest.mark.skipif(not LONG_SAMPLE.exists(), reason="eval sample not present")
+def test_the_first_and_last_chunk_get_a_wider_margin_than_interior_ones() -> None:
+    """A word clipped off the front of a dictation is the first word of the
+    sentence; one trimmed from the middle of a pause is nobody's loss. So the
+    outer edges keep more audio than the interior boundaries do."""
+    config = Config().vad
+    if not config.model.exists():
+        pytest.skip("no VAD model")
+    built = load_segmenter(config, RATE)
+    assert built is not None
+
+    speech = _load(LONG_SAMPLE)
+    lead = 3.0
+    audio = np.concatenate([np.zeros(int(lead * RATE), dtype=np.float32), speech])
+
+    first = built.split(audio)[0]
+
+    # The chunk holds real speech, so it earns the wide margin: it should reach
+    # back further than the ordinary pad_seconds would allow.
+    assert first.start_seconds < lead - config.pad_seconds
+
+
+def test_a_brief_utterance_in_a_quiet_capture_keeps_its_tight_trim() -> None:
+    """The wide margin must not undo the fix it sits next to. A chunk swamped
+    by silence is exactly what makes the recogniser return nothing, so a short
+    utterance in a long quiet capture is still trimmed close."""
+    config = Config().vad
+    if not config.model.exists():
+        pytest.skip("no VAD model")
+    built = load_segmenter(config, RATE)
+    assert built is not None
+
+    brief = _speech_core(_load(SAMPLE))[: int(0.6 * RATE)]
+    audio = _padded(brief, seconds=6.0)
+
+    chunk = built.split(audio)[0]
+
+    assert chunk.samples.size < audio.size / 2, "a brief utterance must stay tightly trimmed"
