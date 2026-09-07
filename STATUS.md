@@ -19,8 +19,8 @@ For recording long passages while reading something else.
 - Latched recording: shift+M4 records until M4 is pressed again.
 - **VAD chunking** (`vad.py`): fixes short utterances decoding to nothing;
   transcript lands progressively; previews decode only the open tail.
-- **One-frame window open:** placed by the terminal, chrome from a bundled nvim
-  config, msgpack readiness probe, X warm-up at start.
+- **One-frame window open:** placed by the terminal, bundled nvim config,
+  msgpack readiness probe, X warm-up at start. Never moves once open.
 - **systemd `--user` unit**, enabled, `WantedBy=i3-session.target`.
 
 ## Measured (i7-9850H, 6 threads, CPU, 0 VRAM)
@@ -44,19 +44,17 @@ unbindable by keysym-based hotkey libraries.
 ## Next
 - **A latched recording has no upper bound in memory** (~64 KB/s: an hour is
   ~230 MB). Decode is no longer the worry — segments land progressively.
-- **First words lost on some long dictations** (reported 2026-09-07, book
-  titles). Not reproduced: VAD onset is clean to 0.1x gain, the 600s cap trims
-  the end. Wider edge margin + per-chunk DEBUG logging added to catch it.
+- **First words lost on some long dictations** (2026-09-07, book titles). Not
+  reproduced; wider edge margin + per-chunk DEBUG logging added to catch it.
 - Dying input stream: root cause unknown (3rd). Watchdogs recover it.
 - `cd home` -> `C D home.` — short commands spell out.
 
 ## Open questions
-- Is an LLM cleanup pass worth it? The technical vocabulary gap (mkdir, udev,
-  `cd home`) is open while hotwords stay deferred (`bpe.vocab` note in README).
+- LLM cleanup pass? Technical vocabulary (mkdir, udev) is open. Gladia: #1.
 - Should a latched recording auto-commit at some length, or keep growing?
 
 ## Decided
-- Python + `uv`; TOML config. **PySide6** overlay — GTK4 has no `move()` on X11.
-- **No hotwords** — biasing is risky on pairs like set/sed, gap ~2.6 pts.
-- **Deleted the paste path** rather than keep a second sink: one with no caller
-  rots untested while looking maintained; one `git revert` away.
+- Python + `uv`; TOML config. **PySide6** overlay (GTK4 has no X11 `move()`).
+  **No hotwords** — biasing is risky on set/sed, gap ~2.6 pts.
+- **Deleted the paste path** rather than keep a second sink: one with no
+  caller rots untested while looking maintained.
