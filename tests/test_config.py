@@ -309,17 +309,25 @@ def test_a_relative_vad_model_resolves_against_the_config_file(tmp_path: Path) -
     assert Config.load(config_file).vad.model == tmp_path / "models" / "silero_vad.onnx"
 
 
-def test_the_dictation_window_uses_the_bundled_nvim_config_by_default() -> None:
-    """The repo owns the window's behaviour: no config option set means the
-    file shipped inside the package, not whatever is in the user's dotfiles."""
-    init = NvimConfig().init_path
+def test_the_window_runs_the_users_own_nvim_config_by_default() -> None:
+    """No ``-u`` at all, so nvim resolves its configuration the way it always
+    does. The window *is* the user's editor -- their colourscheme, their
+    keybindings, their yank flash. A bundled config was the default first and
+    the verdict from use was that it never looked like their neovim."""
+    argv = NvimConfig().spawn_argv(socket=Path("/tmp/x.sock"), target=Path("/tmp/x.md"), at=None)
 
-    assert init.name == "dictation_init.lua"
-    assert init.exists(), "the bundled config must ship with the package"
+    assert "-u" not in argv
 
 
-def test_pointing_init_somewhere_else_wins() -> None:
-    assert NvimConfig(init=Path("/tmp/mine.lua")).init_path == Path("/tmp/mine.lua")
+def test_the_bundled_config_is_available_for_a_machine_without_one() -> None:
+    bundled = NvimConfig().bundled_init
+    assert bundled.name == "dictation_init.lua"
+    assert bundled.exists(), "the fallback config must ship with the package"
+
+    argv = NvimConfig(init=bundled).spawn_argv(
+        socket=Path("/tmp/x.sock"), target=Path("/tmp/x.md"), at=None
+    )
+    assert argv[argv.index("-u") + 1] == str(bundled)
 
 
 def test_spawn_argv_tells_the_terminal_where_to_open() -> None:

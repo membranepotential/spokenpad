@@ -62,7 +62,7 @@ this replaces managed 1.37× on the same hardware and silently discarded the
 | | |
 |---|---|
 | VRAM used | none |
-| dictation window, cold open | 244 ms, off the latency path (92 ms to reattach) |
+| dictation window, cold open | ~820 ms with your nvim config, off the latency path (92 ms to reattach) |
 | append to the buffer | 19-62 ms |
 
 ## Setup
@@ -86,12 +86,11 @@ step and no copy to drift; `--copy` installs independent copies instead. It is
 idempotent, it refuses to overwrite a file it did not write, it warns if your
 i3 config has no `include i3.d/*.conf` line, and `--uninstall` removes both.
 
-Everything else voice-kb needs is inside the repository, including the nvim
-configuration the dictation window runs under
-(`src/voice_kb/dictation_init.lua`) — so the window behaves the same on a
-fresh machine, and a change to your dotfiles cannot change what voice-kb does.
-Point `nvim.init` at your own config if you would rather have your keybindings
-in that window; see [docs/nvim-window.md](docs/nvim-window.md).
+The dictation window runs **your** nvim configuration by default — your
+colourscheme, your keybindings, your yank flash — while voice-kb strips the
+chrome and sets prose wrapping over RPC regardless. A self-contained fallback
+config ships at `src/voice_kb/dictation_init.lua` for a machine without one;
+point `nvim.init` at it. See [docs/nvim-window.md](docs/nvim-window.md).
 
 The unit assumes the checkout is at `~/Documents/voice-kb`; edit
 `WorkingDirectory`/`ExecStart` if it is not, and `WantedBy` if your session

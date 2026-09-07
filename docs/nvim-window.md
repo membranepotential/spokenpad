@@ -148,40 +148,32 @@ When previews stop (past `preview.max_seconds`) the winbar says
 long passage reads as lost audio rather than as a cost control — which is
 exactly how it was first reported.
 
-**It looks like your terminal.** No colourscheme is loaded; `Normal` and the
-other background groups are cleared so alacritty's own colours show through.
-Bundling a colourscheme (`habamax`) was tried and was wrong -- it painted its
-own grey over a black TokyoNight terminal and read as broken, which is exactly
-what a window that is meant to sit unobtrusively beside your work must not do.
-Inheriting costs nothing, needs no plugin, and matches whatever theme the rest
-of the desktop already has.
+**It is your neovim.** `nvim.init` is unset by default, so the window runs
+your own configuration: your colourscheme, your keybindings, your yank flash.
 
-**Yank reaches the system clipboard** (`clipboard=unnamedplus`). This is a
-window for reading a transcript and copying a piece of it out, so a `y` that
-goes nowhere makes it useless for its actual job. That is not in tension with
-voice-kb never touching the clipboard itself: that rule is about the *daemon*
-not writing where it was not asked to. A person pressing `y` in their own
-editor has asked.
+This was tried the other way round first. A bundled config was the default for
+one afternoon and the verdict from use was plain — it never looked like the
+user's neovim, and every missing habit had to be reimplemented in it one at a
+time to no real end. A dictation window is still an editor, and people want
+their editor. The bundled `dictation_init.lua` survives as a fallback for a
+machine with no nvim configuration, and as the written-down statement of what
+this window needs; point `nvim.init` at it, or at `"NONE"` for a bare window.
 
-**The chrome is off before the first frame.** The window runs voice-kb's own
-`dictation_init.lua` (`nvim -u`), which turns off the status line, tab line,
-line numbers, sign column, fold column and cursorline, sets prose wrapping,
-and disables swap/backup/undo files so a killed daemon cannot leave a
-recovery prompt in a window that is not allowed to take focus. The indicator
-re-applies the display half on `BufWinEnter`/`WinNew`/`FileType` as well,
-because a plugin reacting to those events would otherwise put it back — that
-still matters when `nvim.init` points at a config with plugins in it.
+What voice-kb still enforces itself, so it holds under any configuration:
 
-This used to be done over RPC after attaching, which worked but meant the
-window had already painted a normal editor for a moment before settling.
-Bundling it also means the window's behaviour lives in this repository rather
-than in whoever's dotfiles, so it is the same on a fresh machine.
+- **The chrome comes off** — status line, tab line, line numbers, sign column,
+  fold column, cursorline — applied over RPC once attached and re-applied on
+  `BufWinEnter`/`WinNew`/`FileType`, because a plugin reacting to those events
+  would otherwise put it back.
+- **Prose wrapping** (`wrap`, `linebreak`) per window, so a long utterance
+  reads as a paragraph and never splits mid-word.
+- **Committed text is written with `noautocmd`**, so a format-on-save cannot
+  reflow dictated prose behind your back on the write after every utterance.
 
-The trade is that the dictation window does *not* have the user's keybindings
-or colourscheme. `nvim.init` points somewhere else — `~/.config/nvim/init.lua`
-for the full personal setup — at the cost of both guarantees above, and of a
-format-on-save then reflowing dictated prose on the write after every
-utterance.
+The cost is a visible one, and it is the reason the bundled config existed:
+the window paints your normal editor for a moment before the chrome comes off,
+because that happens after nvim answers RPC rather than before it draws. The
+trade was made deliberately, in that direction.
 
 ## Startup cost
 

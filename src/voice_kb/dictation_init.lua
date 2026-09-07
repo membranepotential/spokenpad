@@ -5,28 +5,23 @@
 -- autocommand that could reflow dictated prose on the save after every
 -- utterance.
 --
--- Two reasons this is bundled rather than borrowing the user's config:
+-- **This is the fallback, not the default.** `nvim.init` is unset by default,
+-- which means the window runs the user's own nvim configuration -- their
+-- colourscheme, their keybindings, their yank flash. That was tried the other
+-- way round first, with this file as the default, and the verdict from use
+-- was plain: it never looked like their neovim, and every missing habit had
+-- to be reimplemented here one at a time to no real end. A dictation window
+-- is still an editor, and people want their editor.
 --
---  1. **The repo owns its own behaviour.** Everything the dictation window
---     looks and acts like is in this repository, so it is the same on a fresh
---     machine as it is here, and a change to somebody's dotfiles cannot
---     quietly change what voice-kb does.
+-- What this file is for is a machine with no nvim configuration of its own,
+-- and as the written-down statement of what the window actually needs. Point
+-- `nvim.init` at it to get exactly that, at the price of the above.
 --
---  2. **The chrome is off before the first draw.** Stripping it over RPC
---     after attaching worked, but the window had already painted a status
---     line, a tab line and a sign column, so opening it flashed a normal
---     editor for a moment before settling. Setting it here means the first
---     frame is the final one.
---
--- Startup cost is *not* one of the reasons: measured time-to-RPC-ready is
--- 0.26s under a full LazyVim config and 0.28s under this one. The ~1s cold
--- open that used to be visible came from voice-kb's own readiness probe, not
--- from nvim.
---
--- `nvim.init` in the config points somewhere else if you want your own setup
--- in this window instead. Nothing here is required for correctness -- the
--- indicator applies what it needs itself (see `nvim_indicator.lua`) -- so a
--- different config loses the guarantees above but still works.
+-- Nothing here is required for correctness either way. `nvim_indicator.lua`
+-- applies the chrome and prose settings itself over RPC and re-applies them
+-- on BufWinEnter/WinNew/FileType, so they hold under any configuration; and
+-- committed text is written with `noautocmd`, so a format-on-save cannot
+-- reflow dictated prose whatever the user's config does on write.
 
 -- No chrome. The winbar is the whole UI: voice-kb draws the recording
 -- indicator and level meter there, and the preview hangs below the text as
@@ -108,37 +103,28 @@ local function inherit_terminal_background()
   end
 end
 
+local group = vim.api.nvim_create_augroup("VoiceKbInit", { clear = true })
+
 inherit_terminal_background()
--- Re-applied after any `:colorscheme`, so `nvim.colorscheme` can set a theme
--- for the syntax colours while the background still comes from the terminal.
 vim.api.nvim_create_autocmd("ColorScheme", {
-  group = vim.api.nvim_create_augroup("VoiceKbInit", { clear = true }),
+  group = group,
   callback = inherit_terminal_background,
 })
 
---- Load a colourscheme by name from wherever a plugin manager put it.
----
---- Only the one directory that actually provides it is added to the
---- runtimepath -- not every installed plugin -- so this cannot drag in plugin
---- scripts, autocommands or a format-on-save along with the colours.
-function _G.VoiceKbColorscheme(name)
-  if vim.fn.exists("g:colors_name") == 1 and vim.g.colors_name == name then
-    return
-  end
-  local data = vim.fn.stdpath("data")
-  for _, pattern in ipairs({
-    data .. "/lazy/*/colors/" .. name .. ".*",
-    data .. "/site/pack/*/start/*/colors/" .. name .. ".*",
-    data .. "/site/pack/*/opt/*/colors/" .. name .. ".*",
-  }) do
-    local found = vim.fn.glob(pattern, false, true)
-    if #found > 0 then
-      vim.opt.runtimepath:append(vim.fn.fnamemodify(found[1], ":h:h"))
-      break
+-- Flash what you just yanked, the way nvim's own default configuration does.
+-- Built in (`vim.hl.on_yank`), no plugin: copying a line out of a transcript
+-- is the main thing anyone does in this window by hand, and without the flash
+-- there is no feedback at all that it worked.
+vim.api.nvim_create_autocmd("TextYankPost", {
+  group = group,
+  callback = function()
+    -- `vim.hl` on 0.11+, `vim.highlight` before it.
+    local hl = vim.hl or vim.highlight
+    if hl and hl.on_yank then
+      hl.on_yank({ higroup = "Visual", timeout = 200 })
     end
-  end
-  pcall(vim.cmd.colorscheme, name)
-end
+  end,
+})
 
 vim.opt.winbar = ""
 

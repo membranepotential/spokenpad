@@ -353,17 +353,21 @@ class NvimConfig:
     dictation file are appended; anything here is passed before them."""
 
     init: Path | None = None
-    """nvim config for the dictation window. ``None`` means the bundled one.
+    """nvim config for the window. ``None`` uses nvim's own, i.e. the user's.
 
-    The bundled ``dictation_init.lua`` keeps the window's behaviour inside
-    this repository rather than depending on whatever is in the user's
-    dotfiles, and turns the chrome off before the first frame is drawn instead
-    of stripping it over RPC afterwards, which used to flash a normal editor
-    for a moment. See that file for the full reasoning.
+    Default because the window *is* the user's editor: their colourscheme,
+    their keybindings, their yank flash. A bundled config was tried and the
+    verdict from use was clear -- it never looked like their neovim, and each
+    missing habit had to be reimplemented one at a time to no real end.
 
-    Point this at ``~/.config/nvim/init.lua`` to use your own setup in the
-    dictation window instead -- keybindings and colourscheme included, along
-    with any format-on-save that would then rewrite dictated prose.
+    voice-kb still applies what the window needs (chrome off, prose wrapping)
+    over RPC once attached, and re-applies it on ``BufWinEnter``/``WinNew``/
+    ``FileType`` so a plugin reacting to those cannot undo it. Committed text
+    is written with ``noautocmd``, so a format-on-save cannot reflow dictated
+    prose behind the user's back either.
+
+    Point this at :attr:`bundled_init` for a self-contained window on a
+    machine with no nvim configuration, or at ``"NONE"`` for a bare one.
     """
 
     window_instance: str = "voice-kb"
@@ -459,15 +463,18 @@ class NvimConfig:
             functools.reduce(lambda a, kv: a.replace(*kv), substitutions.items(), arg)
             for arg in self.terminal
         ]
-        return [
-            *terminal,
-            *self.editor,
-            "-u",
-            str(self.init_path),
-            "--listen",
-            str(socket),
-            str(target),
-        ]
+        init = ["-u", str(self.init)] if self.init is not None else []
+        return [*terminal, *self.editor, *init, "--listen", str(socket), str(target)]
+
+    @property
+    def bundled_init(self) -> Path:
+        """The self-contained nvim config shipped with the package.
+
+        Not used unless :attr:`init` names it. It exists for a machine with no
+        nvim configuration of its own, and as the written-down statement of
+        what this window actually needs.
+        """
+        return Path(str(resources.files("voice_kb").joinpath("dictation_init.lua")))
 
     @property
     def announces_instance(self) -> bool:
@@ -482,17 +489,6 @@ class NvimConfig:
         """
         return any(_INSTANCE_PLACEHOLDER in arg for arg in self.terminal)
 
-    @property
-    def init_path(self) -> Path:
-        """:attr:`init`, or the config bundled with the package.
-
-        Resolved here rather than at spawn time so the path is a value the
-        caller can log, test against, and check for existence, instead of
-        something only the subprocess ever sees.
-        """
-        if self.init is not None:
-            return self.init
-        return Path(str(resources.files("voice_kb").joinpath("dictation_init.lua")))
 
 
 
