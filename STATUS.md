@@ -9,9 +9,8 @@ For recording long passages while reading something else.
 - **Pivoted 2026-09-07: the sink is neovim, not the clipboard.** Appended over
   msgpack-RPC to a floating nvim that never takes focus, one file per window.
 - **Used live, German and English, hold and latch.** ruff + mypy --strict +
-  **175 tests** green, incl. 18 driving a real nvim.
-- **Self-contained:** `scripts/install.py` symlinks the i3 rules and systemd
-  unit out of `packaging/`.
+  **190 tests** green. `scripts/install.py` symlinks the i3 rules and systemd
+  unit out of `packaging/`, so nothing of voice-kb's lives only in dotfiles.
 
 ## Done
 - nvim sink: pointer-anchored one-third window, winbar indicator, preview as
