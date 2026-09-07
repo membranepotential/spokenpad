@@ -116,6 +116,12 @@ editor = ["nvim"]
 # string, and a config value must not be able to become i3 syntax.
 window_instance = "voice-kb"
 
+# Size of the dictation window, as a fraction of each screen axis: 0.33 is a
+# third of the width and a third of the height. It opens with its top-left
+# corner at the mouse pointer, clamped fully on screen, so it lands beside
+# whatever you are reading rather than in a fixed corner.
+window_fraction = 0.33
+
 # Where nvim listens for RPC. voice-kb reattaches to a live socket rather
 # than opening a second window, so restarting the daemon does not litter the
 # desktop with terminals.

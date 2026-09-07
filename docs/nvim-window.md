@@ -54,14 +54,14 @@ and i3 reported the new window as `focused: false`.
 Size and position are voice-kb's, not i3's, so the rule file stays to the two
 things only a window manager can do.
 
-The window is **a quarter of the screen** (`nvim.window_fraction`, 0.5 of each
-axis) with its **top-left corner at the mouse pointer**, on whichever monitor
+The window is **a third of the screen on each axis** (`nvim.window_fraction`,
+0.33) with its **top-left corner at the mouse pointer**, on whichever monitor
 the pointer is on — it opens beside what you are reading rather than in a
 fixed corner you have to look away to find. The rect is clamped fully
 on-screen by `geometry.dictation_rect`, the same clamp the overlay uses, so a
-pointer near an edge lands the window flush against it; a pointer in the
-bottom-right corner (or a pointer that cannot be read at all) gives the
-bottom-right quarter.
+pointer near an edge tucks the window flush against it; a pointer in the
+bottom-right corner (or a pointer that cannot be read at all) puts it in the
+bottom-right corner.
 
 Placement happens **once, on spawn**. On later dictations the window is only
 moved to the current workspace — a window that jumped back under the pointer

@@ -256,14 +256,17 @@ class NvimConfig:
     by a streaming decoder.
     """
 
-    window_fraction: float = 0.5
+    window_fraction: float = 0.33
     """Size of the dictation window, as a fraction of each screen axis.
 
-    0.5 covers a quarter of the screen's area. The window is placed with its
-    top-left corner at the mouse pointer, so it opens beside whatever the user
-    is reading, and is clamped on-screen -- which puts it flush in the
-    bottom-right quarter when the pointer is already down there, or when the
-    pointer cannot be read at all.
+    A third of the width and a third of the height. Big enough to read a
+    paragraph of wrapped prose, small enough to sit beside the document being
+    read rather than over it.
+
+    The window is placed with its top-left corner at the mouse pointer, so it
+    opens next to whatever the user is looking at, and is clamped on-screen --
+    which tucks it flush into the corner when the pointer is already near an
+    edge, or when the pointer cannot be read at all.
     """
 
     startup_timeout_s: float = 20.0
