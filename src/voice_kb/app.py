@@ -1,4 +1,4 @@
-"""The imperative shell: wires the hotkey, audio, model, and overlay together.
+"""The imperative shell: wires the hotkey, audio, model and dictation window together.
 
 All policy lives in :func:`voice_kb.state.step`, which is pure. This module's
 only job is to interpret the commands that function returns, and to get work
@@ -9,9 +9,11 @@ Threading
 Four threads, deliberately:
 
 * the **evdev watcher**, which must never block or the hotkey lags;
-* the **Qt main thread**, which owns the overlay and the state machine;
+* the **Qt main thread**, which owns the state machine and the timers;
 * one **worker**, which owns the recogniser -- seconds of CPU per decode,
-  which must not stall the UI or delay the next keypress;
+  which must not stall the UI or delay the next keypress -- and with it the
+  *committed offset*, the one fact about a capture that has to be decided
+  on the thread that serialises decodes;
 * one **nvim bridge**, which owns the RPC connection to the dictation window.
   It is separate from the worker because the two block on different things
   and must not queue behind each other: opening the window takes ~1s
@@ -31,32 +33,35 @@ exists to eliminate.
 
 The sink
 --------
-The committed transcript is appended to a floating neovim over its RPC socket
+The transcript is appended to a floating neovim over its RPC socket
 (:mod:`voice_kb.nvim`). Nothing is pasted anywhere and no window but that one
 is ever written to, so dictating never depends on -- or disturbs -- whatever
 happens to have focus.
 
-Live preview
-------------
-While the key is held, the indicators show a rolling preview of the
-transcript. It is cosmetic and strictly subordinate to the committed decode
-(``docs/constraints.md``, "One-shot committed decode"):
+Progressive commit
+------------------
+Text lands *while the user is still speaking* (``docs/progressive-commit.md``).
+Every ``preview.interval_ms`` while recording, the worker splits the audio
+since its committed offset at silence, decodes each chunk that has settled
+exactly once and appends it, and decodes the open tail for the preview. At
+key release only the remainder past the committed offset is decoded, so the
+wait is bounded by one chunk however long the passage was.
 
-1. the text that reaches the buffer is still produced by *exactly one*
-   decode of the complete captured buffer at key release -- preview output is
-   never committed, never merged into it, and never influences it. In nvim it
-   is not even buffer content: it is an extmark's virtual text, which cannot
-   be saved, yanked or undone into the file;
-2. a preview's cost is bounded -- by an adaptive cadence that keeps the
-   worker idle at least half the time, and by a hard stop at
-   ``PreviewConfig.max_seconds``, so it is bounded and
-   independent of how long the user has been speaking;
-3. a preview can never make the user wait: previews are *abandoned* the
-   instant a committed decode (or a cancellation) is due, so a preview
-   already queued on the worker is dropped rather than run ahead of it.
+Three things keep that on the right side of ``docs/constraints.md``:
 
-Preview decodes run on the same single worker as the committed decode, which
-is what keeps the non-thread-safe recogniser serialized.
+1. every committed sample is decoded exactly once -- when its chunk settles
+   or at release, never both. The offset only grows within an utterance and
+   is owned by the worker;
+2. the preview is the open tail only: virtual text in nvim, bounded by one
+   chunk, replaced every tick, never merged into anything;
+3. a tick can never make the user wait: one still queued when the key comes
+   up is skipped, one already running stops after its current chunk (which,
+   if settled, it has just committed rather than wasted). Ticks are allowed
+   per utterance id, so re-arming for the next utterance cannot revive one.
+
+Every message between the two threads carries the **utterance id**, bumped on
+every capture. It is what lets a stale tick, a cancelled decode and a slow
+decode from the previous utterance each be told apart from the current one.
 """
 
 from __future__ import annotations
@@ -67,7 +72,6 @@ import logging.handlers
 import os
 import signal
 import sys
-import threading
 import time
 import wave
 from pathlib import Path
@@ -77,14 +81,20 @@ import numpy as np
 from PySide6.QtCore import QObject, QThread, QTimer, Signal
 from PySide6.QtWidgets import QApplication
 
-from voice_kb import x11
 from voice_kb.asr import ModelMissingError, Transcriber, ensure_model_files
-from voice_kb.audio import AudioCapture, MonoAudio
+from voice_kb.audio import MAX_UTTERANCE_SECONDS, AudioCapture, MonoAudio
 from voice_kb.config import Config, xdg_state_home
-from voice_kb.geometry import Output, Rect, overlay_rect, pick_output
+from voice_kb.decode import decode_capture
 from voice_kb.hotkey import HotkeyPermissionError, HotkeyWatcher
 from voice_kb.nvim import Appended, AppendFailed, NvimSession
-from voice_kb.overlay import Overlay, screen_rect
+from voice_kb.recorder import (
+    CaptureRecorder,
+    NotRecorded,
+    Recorded,
+    RecordingError,
+    Truncated,
+    read_capture,
+)
 from voice_kb.state import (
     AbortDecode,
     Cancelled,
@@ -105,66 +115,71 @@ from voice_kb.state import (
     step,
 )
 from voice_kb.text import postprocess
-from voice_kb.vad import Segment, SpeechSegmenter, load_segmenter
+from voice_kb.vad import SpeechSegmenter, load_segmenter
 
 log = logging.getLogger("voice-kb")
 
-_LEVEL_POLL_MS = 33  # matches the overlay's own frame interval
+_LEVEL_POLL_MS = 33
 _NVIM_LEVEL_EVERY = 3  # so nvim's meter updates at ~10Hz, not 30
 _THREAD_SHUTDOWN_MS = 5000
-_OUTPUTS_TTL_S = 5.0
+
+#: No utterance. The worker starts here and returns here after each release
+#: decode, so the first message of any real utterance always resets it.
+_NO_UTTERANCE = -1
 
 
 class _Worker(QObject):
-    """Owns the recogniser. Lives on its own QThread; never touched from Qt."""
+    """Owns the recogniser and the committed offset. Lives on its own QThread.
+
+    The offset -- how much of the current capture has been committed -- lives
+    here and nowhere else, because this is the one thread on which decodes
+    are serialised. A tick that commits a chunk and a release decode that
+    starts after it cannot race each other, so no sample is ever decoded
+    twice and none is skipped. The daemon keeps a lagging copy for sizing
+    snapshots (:attr:`Daemon._committed_hint`) and never acts on it.
+    """
 
     ready = Signal()
     prepare_failed = Signal(str)
-    decoded = Signal(str, float, int)  # full text, elapsed, generation
-    segment_decoded = Signal(str, int)  # one segment's text, generation
-    decode_failed = Signal(str, int)
-    previewed = Signal(str, int)  # text, generation
+    committed = Signal(str, int, int)  # text, utterance, frames committed through
+    previewed = Signal(str, int, int)  # open-tail text, utterance, frames committed through
+    tick_failed = Signal(str, int)  # reason, utterance
+    decoded = Signal(str, float, float, int)  # utterance text, elapsed, tail seconds, utterance
+    decode_failed = Signal(str, int)  # reason, utterance
 
     def __init__(self, config: Config) -> None:
         super().__init__()
         self._config = config
         self._transcriber: Transcriber | None = None
         self._segmenter: SpeechSegmenter | None = None
-        #: Set from the Qt thread, read on this worker thread. The *only*
-        #: mutable state shared between the two -- everything else crosses by
-        #: queued signal. It exists so a preview that is already queued when a
-        #: committed decode becomes due is dropped instead of run, which is
-        #: what keeps a cosmetic decode off the user's latency path.
-        self._abandon_previews = threading.Event()
-        #: Set from the Qt thread when an in-flight decode is cancelled. Read
-        #: between segments so a cancelled long decode stops appending rather
-        #: than running to the end of a passage the user has abandoned.
-        self._abandon_decode = threading.Event()
-        #: Preview text for chunks of this utterance that are already closed,
-        #: and how much audio it accounts for. Worker-thread-only, and reset
-        #: per utterance. This is what makes a preview cost the same at ten
-        #: seconds as at ten minutes: only the open tail is ever re-decoded.
-        #:
-        #: It cannot reach the committed transcript. `run_decode` never reads
-        #: it, and decodes the capture from zero -- the invariant in
-        #: docs/constraints.md that preview output is never merged into the
-        #: final text holds exactly as before.
-        self._preview_prefix = ""
-        self._preview_from = 0
+        #: The one utterance ticks are allowed for, or none. Written from the
+        #: Qt thread (an int store is atomic under the GIL), read here between
+        #: chunks. It is an id rather than a flag so that a tick still queued
+        #: when the key comes up is dropped instead of run -- which keeps the
+        #: cosmetic half of a tick off the user's latency path -- *and* so
+        #: that re-arming for the next utterance cannot revive one for the
+        #: last, which a shared ``Event`` did.
+        self._ticking = _NO_UTTERANCE
+        #: Utterances whose decode was cancelled: ``add`` from the Qt thread,
+        #: ``in`` from here, both atomic under the GIL. A set rather than the
+        #: latest id so a second cancel cannot un-cancel the first.
+        self._abandoned: set[int] = set()
+        #: Worker-thread-only, reset whenever the utterance id changes.
+        self._utterance = _NO_UTTERANCE
+        self._committed_from = 0
+        self._committed_text: list[str] = []
 
-    @property
-    def abandon_previews(self) -> threading.Event:
-        """The abandon flag: ``set()`` to drop pending previews, ``clear()`` to re-arm.
+    def tick_for(self, utterance: int) -> None:
+        """Allow ticks for ``utterance`` and no other. Qt-thread caller."""
+        self._ticking = utterance
 
-        Exposed as the whole ``Event`` rather than as a pair of methods so it
-        is obvious at the call site that this is the one shared object.
-        """
-        return self._abandon_previews
+    def stop_ticks(self) -> None:
+        """Drop any queued tick and stop a running one after its current chunk."""
+        self._ticking = _NO_UTTERANCE
 
-    @property
-    def abandon_decode(self) -> threading.Event:
-        """Set to stop a running decode after its current segment."""
-        return self._abandon_decode
+    def abandon(self, utterance: int) -> None:
+        """Stop decoding ``utterance`` after its current chunk. Qt-thread caller."""
+        self._abandoned.add(utterance)
 
     def prepare(self) -> None:
         """Load the model, then decode a moment of silence.
@@ -187,145 +202,134 @@ class _Worker(QObject):
         self._segmenter = load_segmenter(self._config.vad, self._config.audio.sample_rate)
         self.ready.emit()
 
-    def run_decode(self, samples: MonoAudio, generation: int) -> None:
-        """Decode the capture segment by segment, emitting each as it lands.
+    # ------------------------------------------------------------ the tick
 
-        Every sample is decoded exactly once, in one pass, after the key came
-        up -- no region is re-decoded as more audio arrives, which is the
-        property ``docs/constraints.md`` protects. Splitting first is a
-        correctness fix (see ``voice_kb.vad``) that happens to also let text
-        start appearing in a few hundred milliseconds instead of at the end.
+    def run_preview(self, samples: MonoAudio, start: int, utterance: int) -> None:
+        """One tick: commit what has settled since the offset, preview the rest.
+
+        ``samples`` begins at frame ``start`` of the capture, which is the
+        daemon's lagging copy of the offset and so never *past* the real one;
+        the remainder is sliced from the real one here. Deliberately
+        toothless about failure: anything it raises is swallowed at DEBUG. A
+        chunk it committed before failing is committed -- the offset moved
+        with it -- and the release decode carries on from there.
         """
-        if self._transcriber is None:
-            self.decode_failed.emit("model not loaded", generation)
+        if self._ticking != utterance or utterance in self._abandoned or self._transcriber is None:
             return
-        rate = self._config.audio.sample_rate
-        start = time.perf_counter()
+        self._begin(utterance)
+        remainder = samples[max(0, self._committed_from - start) :]
+        if remainder.size == 0:
+            return
         try:
-            segments = (
-                self._segmenter.split(samples)
-                if self._segmenter is not None
-                else [Segment(samples=samples, start_seconds=0.0)]
-            )
-            texts: list[str] = []
-            cancelled = False
-            for index, segment in enumerate(segments):
-                if self._abandon_decode.is_set():
-                    log.info("decode cancelled after %d of %d chunks", index, len(segments))
-                    cancelled = True
-                    break
-                text = self._transcriber.transcribe(segment.samples, rate).text
-                # Every chunk, with where it came from, at DEBUG. Words going
-                # missing from the front of a dictation is the one report that
-                # cannot be diagnosed after the fact without this: it says
-                # whether the first chunk covered the start of the capture and
-                # what it decoded to, which separates "the audio was not
-                # there" from "the recogniser returned nothing for it".
-                log.debug(
-                    "chunk %d/%d at %.1fs, %.1fs long -> %d chars: %r",
-                    index + 1,
-                    len(segments),
-                    segment.start_seconds,
-                    segment.samples.size / rate,
-                    len(text),
-                    text[:60],
-                )
-                if not text.strip():
-                    continue
-                texts.append(text)
-                self.segment_decoded.emit(text, generation)
-
-            # Chunking must never lose a whole utterance. It has: a 2.8s
-            # capture at peak 0.28 -- unmistakably speech -- came back empty
-            # from every chunk, and the words were simply gone. Whatever the
-            # detector did there, the audio is still in hand, so decode it the
-            # old way rather than report nothing.
-            #
-            # Costs one extra decode, and only in a case that was already a
-            # total failure. The floor this buys is worth stating plainly:
-            # segmentation can now never do worse than not segmenting.
-            if not texts and not cancelled and len(segments) != 1:
-                log.warning(
-                    "all %d chunks decoded to nothing; retrying the whole %.1fs buffer",
-                    len(segments),
-                    samples.size / rate,
-                )
-                text = self._transcriber.transcribe(samples, rate).text
-                if text.strip():
-                    log.info("the whole-buffer retry recovered the utterance")
-                    texts.append(text)
-                    self.segment_decoded.emit(text, generation)
+            tail = self._tick(remainder, utterance)
         except Exception as e:
-            log.exception("decode raised")
-            self.decode_failed.emit(str(e), generation)
+            # Reported rather than swallowed: the daemon re-arms the timer off
+            # this, and without it one bad decode would end ticking -- and
+            # with it progressive commit -- for the rest of the utterance.
+            self.tick_failed.emit(str(e), utterance)
             return
-        self._reset_preview()
-        self.decoded.emit(" ".join(texts), time.perf_counter() - start, generation)
-
-    def run_preview(self, samples: MonoAudio, generation: int) -> None:
-        """Decode the in-flight capture, for the indicators only.
-
-        Deliberately toothless: it returns without decoding at all if previews
-        have been abandoned, and it emits nothing if they were abandoned while
-        it was decoding. Anything it raises is swallowed at DEBUG -- a failed
-        preview is cosmetic, and must never surface as an error, abort the
-        session, or touch the committed decode.
-        """
-        if self._abandon_previews.is_set() or self._transcriber is None or samples.size == 0:
+        if tail is None or self._ticking != utterance:
             return
-        # The capture restarting is how this thread learns a new utterance
-        # began: it is the one signal that arrives without a round trip to the
-        # Qt thread, and a preview carrying the last utterance's words would
-        # be worse than no preview at all.
-        if samples.size < self._preview_from:
-            self._reset_preview()
-        try:
-            text = self._preview_text(samples)
-        except Exception as e:
-            log.debug("preview decode failed, ignoring: %s", e)
-            return
-        if self._abandon_previews.is_set():
-            return
-        self.previewed.emit(text, generation)
+        self.previewed.emit(tail, utterance, self._committed_from)
 
-    def _reset_preview(self) -> None:
-        self._preview_prefix = ""
-        self._preview_from = 0
+    def _tick(self, remainder: MonoAudio, utterance: int) -> str | None:
+        """Commit the settled chunks of ``remainder``; return the open tail's text.
 
-    def _preview_text(self, samples: MonoAudio) -> str:
-        """The utterance so far: settled chunks remembered, open tail decoded.
-
-        Previews used to decode the whole utterance every time, which made
-        each one cost more than the last -- ~4s by the one-minute mark -- and
-        is why they had to stop being issued at all past a time limit. Neither
-        is acceptable in the window someone is watching while they speak.
-
-        Once the detector closes a chunk, that audio is final: no later speech
-        changes it, so its text is kept and its samples are never looked at
-        again. Only the open tail is re-decoded, which bounds a preview by the
-        chunk rather than by the utterance -- the same cost at ten minutes as
-        at ten seconds.
+        ``None`` means the tick was stopped part-way and nothing should be
+        shown for it. Without a segmenter nothing ever settles, so the whole
+        remainder is the tail -- the pre-2026-09-08 preview, and the reason
+        ``PreviewConfig.max_seconds`` still exists.
         """
         assert self._transcriber is not None
         rate = self._config.audio.sample_rate
         if self._segmenter is None:
-            return self._transcriber.transcribe(samples, rate).text
+            return self._transcriber.transcribe(remainder, rate).text
 
-        chunks = self._segmenter.split(samples[self._preview_from :])
-        # The last chunk is still open -- the user may be mid-sentence in it --
-        # so only the ones before it are settled.
-        for chunk in chunks[:-1]:
-            settled = self._transcriber.transcribe(chunk.samples, rate).text
-            if settled.strip():
-                self._preview_prefix = f"{self._preview_prefix} {settled}".strip()
-            self._preview_from += chunk.samples.size
-            if self._abandon_previews.is_set():
-                # Mid-fold, but the prefix and the offset moved together, so
-                # what is kept is consistent and the next preview resumes here.
-                return self._preview_prefix
+        base = self._committed_from
+        for chunk in self._segmenter.split(remainder):
+            if self._ticking != utterance:
+                # Whatever was committed above stands; the release decode
+                # resumes from the offset it left.
+                return None
+            text = self._transcriber.transcribe(chunk.samples, rate).text
+            if not chunk.settled:
+                # Only the last chunk can be unsettled (voice_kb.vad), so
+                # this is the tail and there is nothing after it.
+                return text
+            self._commit(text, utterance, base + chunk.end_frame)
+        # Everything settled, and the buffer ends in silence: nothing to show.
+        return ""
 
-        tail = self._transcriber.transcribe(chunks[-1].samples, rate).text
-        return f"{self._preview_prefix} {tail}".strip()
+    def _commit(self, text: str, utterance: int, through: int) -> None:
+        """One chunk decoded, once: advance the offset and hand the text over.
+
+        Emitted even when empty, because the *offset* is news the daemon
+        needs for its next snapshot whether or not there were words in it.
+        """
+        self._committed_from = through
+        if text.strip():
+            self._committed_text.append(text)
+        self.committed.emit(text, utterance, through)
+
+    # --------------------------------------------------------- the release
+
+    def run_decode(self, samples: MonoAudio, utterance: int) -> None:
+        """Decode the remainder past the committed offset, emitting each chunk.
+
+        The pipeline itself is :func:`~voice_kb.decode.decode_capture`, shared
+        with ``voice-kb transcribe``, so a transcript recovered from a
+        recording is produced exactly the way the live one would have been.
+        All this adds is the thread boundary and the offset: turn each chunk
+        into a signal, turn a failure into one too, and start where the ticks
+        left off.
+        """
+        if self._transcriber is None:
+            self.decode_failed.emit("model not loaded", utterance)
+            return
+        self._begin(utterance)
+        remainder = samples[self._committed_from :]
+        tail_seconds = remainder.size / self._config.audio.sample_rate
+        start = time.perf_counter()
+        try:
+            decode_capture(
+                remainder,
+                transcriber=self._transcriber,
+                segmenter=self._segmenter,
+                sample_rate=self._config.audio.sample_rate,
+                # `through` is the whole capture for every release chunk:
+                # the offset only matters while snapshots are still taken,
+                # and none are after release.
+                on_segment=lambda text: self._commit(text, utterance, samples.size),
+                abandoned=lambda: utterance in self._abandoned,
+            )
+        except Exception as e:
+            log.exception("decode raised")
+            self._reset()
+            self.decode_failed.emit(str(e), utterance)
+            return
+        text = " ".join(self._committed_text)
+        self._reset()
+        self.decoded.emit(text, time.perf_counter() - start, tail_seconds, utterance)
+
+    # ------------------------------------------------------------ bookkeeping
+
+    def _begin(self, utterance: int) -> None:
+        """Start from nothing if this is a new utterance.
+
+        Explicit, by id, rather than by noticing that the capture got shorter:
+        a stale tick from the previous utterance can only ever reset state
+        for *that* utterance, and the next message for this one resets it
+        again. The one thing it can never do is carry an offset across.
+        """
+        if utterance != self._utterance:
+            self._reset()
+            self._utterance = utterance
+
+    def _reset(self) -> None:
+        self._utterance = _NO_UTTERANCE
+        self._committed_from = 0
+        self._committed_text = []
+
 
 class _NvimBridge(QObject):
     """Owns the connection to the dictation window. Lives on its own QThread.
@@ -408,7 +412,6 @@ class _NvimBridge(QObject):
         self._session.close()
 
 
-
 class Daemon(QObject):
     """Holds the session state and interprets the state machine's commands."""
 
@@ -417,8 +420,8 @@ class Daemon(QObject):
     key_up = Signal(float)
     cancelled = Signal(float)
 
-    _decode_requested = Signal(object, int)
-    _preview_requested = Signal(object, int)
+    _decode_requested = Signal(object, int)  # samples, utterance
+    _preview_requested = Signal(object, int, int)  # samples, start frame, utterance
 
     _nvim_open_requested = Signal()
     _nvim_append_requested = Signal(str, bool)
@@ -436,27 +439,47 @@ class Daemon(QObject):
         self._started = False
         self._dump_dir: Path | None = None
         self._last_phase = Phase.IDLE
-        self._outputs_cache: list[Output] | None = None
-        self._outputs_read_at = 0.0
 
-        #: Bumped whenever an in-flight decode is invalidated. A result whose
-        #: generation no longer matches is discarded instead of injected.
-        #: Previews never touch it: a preview is a shell concern, not a
-        #: session transition.
-        self._generation = 0
+        #: The current capture's id, bumped on every StartCapture and carried
+        #: on every message to and from the worker. Qt-thread-only.
+        self._utterance = 0
+        #: Utterances whose decode was cancelled. A chunk arriving for one of
+        #: them is dropped; the audio stays on disk regardless. Grows by one
+        #: int per cancel, which is nothing.
+        self._aborted: set[int] = set()
+        #: Lagging copy of the worker's committed offset, fed by `committed`,
+        #: used only to ask the capture for the audio past it. Never acted
+        #: on: the worker's own offset decides what is decoded.
+        self._committed_hint = 0
+        #: Which utterance the last paragraph in the buffer belongs to, so a
+        #: chunk extends it only if it is from the same one. A slow decode
+        #: from the previous utterance therefore opens its own paragraph
+        #: rather than gluing itself onto the one being dictated now.
+        self._paragraph_of: int | None = None
 
-        #: When the current utterance's most recent preview was requested, and
-        #: whether its cost has already been logged. Qt-thread-only.
         self._level_tick = 0
-        #: Whether the utterance being decoded has already appended a
-        #: paragraph. The *second* and later segments extend it rather than
-        #: starting a new one, so an utterance stays one paragraph however
-        #: many pieces it arrives in. Qt-thread-only, reset per decode.
-        self._utterance_started = False
+        #: The open-tail preview currently shown, and the committed offset it
+        #: belongs to. The "previews only grow" guard compares within one
+        #: offset: when a chunk commits, the tail legitimately starts over.
+        self._preview_text = ""
+        self._preview_epoch = 0
         self._preview_requested_at = 0.0
         self._preview_seconds = 0.0
         self._preview_timed = False
-        self._preview_text = ""
+        self._tick_failures = 0
+        #: Whether this capture has hit the in-memory ceiling. Latched for the
+        #: rest of the capture and cleared only by the next one.
+        #:
+        #: **Once capped, no preview may write over the notice.** It is a
+        #: state, not a message, because the first two attempts smuggled the
+        #: warning through the *preview* field and lost it: a longer late
+        #: preview beat it on the "previews only grow" rule. Nothing cosmetic
+        #: may outrank a warning that the transcript is about to stop short.
+        #:
+        #: A *warning* still may, and only one does: a dead microphone
+        #: (:meth:`_warn_no_audio`) invalidates what the notice promises, so
+        #: it replaces it rather than queueing behind it.
+        self._capped = False
 
         # Fail fast, on this thread, while the error can still reach main().
         # Constructing the Transcriber on the worker would bury ModelMissingError
@@ -464,11 +487,11 @@ class Daemon(QObject):
         # silently produces nothing.
         ensure_model_files(config.asr)
 
-        self._audio = AudioCapture(config.audio)
-        self._overlay = (
-            Overlay(config.overlay, preview_band=config.preview.enabled)
-            if config.overlay.enabled
-            else None
+        # The recorder is built here, in the shell, and handed to the capture:
+        # `audio.py` writes to it from the realtime callback but has no business
+        # knowing where recordings live or how many of them are kept.
+        self._audio = AudioCapture(
+            config.audio, CaptureRecorder(config.recording, config.audio.sample_rate)
         )
 
         self._worker = _Worker(config)
@@ -479,10 +502,11 @@ class Daemon(QObject):
         self._preview_requested.connect(self._worker.run_preview)
         self._worker.ready.connect(lambda: log.info("model ready"))
         self._worker.prepare_failed.connect(self._on_prepare_failed)
-        self._worker.decoded.connect(self._on_decoded)
-        self._worker.segment_decoded.connect(self._on_segment_decoded)
-        self._worker.decode_failed.connect(self._on_decode_failed)
+        self._worker.committed.connect(self._on_committed)
         self._worker.previewed.connect(self._on_previewed)
+        self._worker.tick_failed.connect(self._on_tick_failed)
+        self._worker.decoded.connect(self._on_decoded)
+        self._worker.decode_failed.connect(self._on_decode_failed)
 
         # The bridge gets its own thread, not the worker's: opening a terminal
         # blocks for a few hundred milliseconds and must not sit in front of a
@@ -519,16 +543,13 @@ class Daemon(QObject):
         self._level_timer.setInterval(_LEVEL_POLL_MS)
         self._level_timer.timeout.connect(self._poll_level)
 
-        # Previews turned off means there is nothing to schedule, so the timer
-        # is not created at all rather than created and left stopped. It is no
-        # longer conditional on the overlay: the nvim indicator shows previews
-        # too, and it is the one that is on by default.
+        # Ticks turned off means there is nothing to schedule, so the timer is
+        # not created at all rather than created and left stopped.
         self._preview_timer: QTimer | None = None
         if config.preview.enabled:
             self._preview_timer = QTimer(self)
             # Single-shot and re-armed after each result: the gap between
-            # previews depends on how long the last one took. See
-            # _rearm_previews.
+            # ticks depends on how long the last one took. See _rearm_previews.
             self._preview_timer.setSingleShot(True)
             self._preview_timer.timeout.connect(self._request_preview)
 
@@ -590,6 +611,8 @@ class Daemon(QObject):
             case Nothing():
                 pass
             case StartCapture():
+                self._utterance += 1
+                self._committed_hint = 0
                 self._audio.start_capture()
                 self._level_timer.start()
                 # Asked for on every key-down, and answered on the bridge
@@ -600,45 +623,44 @@ class Daemon(QObject):
                 self._arm_previews()
             case Decode(spoken_seconds=spoken):
                 self._level_timer.stop()
-                self._utterance_started = False
-                self._worker.abandon_decode.clear()
-                # Before the decode is even requested: a preview already queued
+                # Before the decode is even requested: a tick already queued
                 # on the worker must be dropped, not run ahead of it.
                 self._abandon_previews()
                 samples = self._audio.stop_capture()
                 self._log_capture(spoken, samples)
-                self._decode_requested.emit(samples, self._generation)
+                self._decode_requested.emit(samples, self._utterance)
             case DiscardCapture():
                 self._level_timer.stop()
-                self._abandon_previews()
+                self._abandon_capture()
                 self._audio.stop_capture()
                 log.info("discarded capture (too short, or cancelled)")
             case AbortDecode():
-                self._abandon_previews()
-                # Stop the decode between segments as well as discarding its
-                # result. With text landing progressively, a cancellation can
-                # arrive after some of it is already in the buffer -- so it
-                # now means "stop adding", not "none of this happened". What
-                # is already written stays; it is the user's file.
-                self._worker.abandon_decode.set()
-                self._generation += 1
-                log.info("cancelled; in-flight decode will not be injected")
+                self._abandon_capture()
+                log.info("cancelled; the rest of this decode will not be appended")
             case _:
                 assert_never(command)
 
-    # ------------------------------------------------------------------- overlay
+    def _abandon_capture(self) -> None:
+        """Cancel the current utterance: nothing further lands, nothing lands twice.
+
+        With text committed progressively a cancel can arrive after some of it
+        is already in the buffer -- during recording as well as during the
+        tail decode -- so it means "stop adding", not "none of this happened".
+        What is already written stays; it is the user's file, and the wav on
+        disk is untouched either way.
+        """
+        self._abandon_previews()
+        self._aborted.add(self._utterance)
+        self._worker.abandon(self._utterance)
+
+    # ---------------------------------------------------------------- indicators
 
     def _sync_indicators(self) -> None:
-        """Push a real phase change to the nvim winbar and the overlay.
+        """Push a real phase change to the nvim winbar.
 
-        This runs from every dispatched event, and overlay positioning shells
-        out to xrandr and xdotool. Doing that per event is what previously
-        stalled the Qt thread; the indicators only change when the phase does,
-        so anything that leaves the phase unchanged must cost nothing.
-
-        The phase-change test deliberately sits *above* the overlay check --
-        the overlay is off by default now, and gating the whole thing on it
-        would leave the nvim indicator frozen.
+        This runs from every dispatched event; the indicator only changes when
+        the phase does, so anything that leaves the phase unchanged must cost
+        nothing. (Evdev auto-repeat used to reach here ~30 times a second.)
         """
         phase = phase_of(self._state)
         if phase == self._last_phase:
@@ -646,57 +668,6 @@ class Daemon(QObject):
         self._last_phase = phase
         self._nvim_phase_changed.emit(phase)
         self._nvim_latched.emit(isinstance(self._state, Recording) and self._state.latched)
-        if self._overlay is None:
-            return
-        if phase is not Phase.IDLE:
-            pos = self._overlay_position()
-            if pos is not None:
-                self._overlay.show_at(pos.x, pos.y)
-        self._overlay.set_phase(phase)
-
-    def _overlay_position(self) -> Rect | None:
-        """Where to put the overlay, in the coordinate space Qt's ``move()`` uses.
-
-        Two coordinate systems meet here and must not be confused. Choosing the
-        *output* is a question about the physical desktop, so it is answered
-        with device pixels from ``xrandr`` and ``xdotool``. Placing the overlay
-        *on* that output is a question for Qt, which works in logical units
-        whenever the device pixel ratio is not 1 -- so the placement maths runs
-        against the matching ``QScreen``'s own rect, never the xrandr one.
-
-        Mixing them is silently wrong: it put the overlay 1776px below the
-        bottom of the screen, mapped and painted and invisible.
-        """
-        screens = self._cached_outputs()
-        if not screens:
-            return None
-        window = x11.focused_window_rect() if self._config.overlay.follow_focus else None
-        target = pick_output(screens, window) if window else _primary(screens)
-        # Fall back to the xrandr rect only if Qt does not know this screen by
-        # name; on a device pixel ratio of 1 the two are identical anyway.
-        qt_rect = screen_rect(target.name)
-        if qt_rect is None:
-            log.warning(
-                "Qt does not know a screen named %r; placing the overlay from "
-                "xrandr geometry, which is wrong under HiDPI scaling",
-                target.name,
-            )
-            qt_rect = target.rect
-        return overlay_rect(
-            qt_rect, self._config.overlay, preview_band=self._config.preview.enabled
-        )
-
-    def _cached_outputs(self) -> list[Output]:
-        """Monitor layout, re-read at most every few seconds.
-
-        xrandr is a subprocess and the layout almost never changes; re-reading
-        it on the hot path is pure latency.
-        """
-        now = time.monotonic()
-        if self._outputs_cache is None or now - self._outputs_read_at > _OUTPUTS_TTL_S:
-            self._outputs_cache = x11.outputs()
-            self._outputs_read_at = now
-        return self._outputs_cache
 
     def _log_capture(self, held_seconds: float, samples: MonoAudio) -> None:
         """Report what was actually captured, not just how long the key was held.
@@ -712,6 +683,27 @@ class Daemon(QObject):
             "captured %.1fs held -> %.1fs audio (%d samples), rms=%.4f peak=%.4f",
             held_seconds, audio_seconds, len(samples), rms, peak,
         )
+        # Next to the capture line, and honest about which of the two it is:
+        # "recorded to X" next to a file that stops in the middle is the same
+        # false reassurance the old cap gave.
+        match self._audio.recording_status():
+            case Recorded(path=path):
+                log.info("recorded to %s", path)
+            case Truncated(path=path):
+                log.error(
+                    "the recording %s was given up on part-way, so it does NOT "
+                    "hold this whole capture -- see the error above for why",
+                    path,
+                )
+            case NotRecorded():
+                pass
+
+        # The 30Hz poll cannot see a ceiling crossed in the last tick before
+        # the key came up, and "the transcript stops short and nothing said
+        # so" is the failure being fixed, not a variant of it to leave in.
+        if self._audio.take_cap_notice():
+            self._warn_capture_capped()
+
         status = self._audio.take_stream_status()
         if status:
             log.warning("PortAudio reported: %s", status)
@@ -756,86 +748,176 @@ class Daemon(QObject):
 
         This timer already ticks every 33ms for the whole of a recording, so it
         is the one place that can catch a stream dying *during* an utterance
-        rather than on the next keypress. Silence in the overlay is ambiguous
-        -- a quiet room looks the same as a dead device -- so say which it is,
-        in the log and on the overlay, while the user is still holding the key
+        rather than on the next keypress. Silence in the meter is ambiguous --
+        a quiet room looks the same as a dead device -- so say which it is, in
+        the log and on the indicator, while the user is still holding the key
         and can do something about it.
         """
         level = self._audio.current_level()
-        if self._overlay is not None:
-            self._overlay.push_level(level)
-        # The overlay redraws locally at 30fps; nvim is across a socket, so it
-        # gets every third sample. A 24-cell text meter has nothing to gain
-        # from the other twenty, and the winbar redraw is nvim's main loop.
+        # nvim is across a socket, so it gets every third sample. A 24-cell
+        # text meter has nothing to gain from the other twenty, and the winbar
+        # redraw is nvim's main loop.
         self._level_tick += 1
         if self._level_tick % _NVIM_LEVEL_EVERY == 0:
             self._nvim_level.emit(level)
+        if self._audio.take_cap_notice():
+            self._warn_capture_capped()
         if self._audio.recover_if_dead():
             self._warn_no_audio()
 
     def _warn_no_audio(self) -> None:
         """Tell the user, where they are looking, that the microphone went away.
 
-        Both indicators, not just the overlay: with the overlay off by default
-        this warning would otherwise exist only in the log, which is precisely
-        where a user mid-utterance is not looking.
+        This *does* overwrite the capped notice, and it is the one thing that
+        may. The two messages are not competing for the same slot: a dead
+        microphone is news that **invalidates** what the capped notice says.
+        Past the ceiling that notice promises the rest of the audio is on disk
+        and recoverable with ``voice-kb transcribe`` -- but the recorder is
+        still writing, so if the input stream then dies (a live bug here,
+        three occurrences in STATUS.md) what lands in the wav is silence, and
+        the promise is false. Saying so, in the capped wording below, is worth
+        more than keeping a message that has just stopped being true.
         """
         message = "no audio from the microphone -- reconnected, keep talking"
-        if self._overlay is not None:
-            self._overlay.set_preview_text(message)
+        if self._capped:
+            # Past the ceiling the wav is the only copy, so what to say about
+            # the gap depends on whether there is a wav at all. Branching on
+            # `_capped` alone asserted a recording exists: with `[recording]`
+            # off it replaced the correct "audio from here is being discarded"
+            # with a promise of a silent gap in a file that was never opened,
+            # which is the same lie in the other direction.
+            match self._audio.recording_status():
+                case Recorded():
+                    message = (
+                        "no audio from the microphone -- reconnected, but the "
+                        "recording past the limit has a silent gap in it"
+                    )
+                case Truncated():
+                    message = (
+                        "no audio from the microphone -- reconnected, and the "
+                        "recording had already been given up on"
+                    )
+                case NotRecorded():
+                    message = (
+                        "no audio from the microphone -- reconnected, but past "
+                        "the limit and not recording: this is being discarded"
+                    )
         self._nvim_preview.emit(message)
 
-    # -------------------------------------------------------------------- preview
+    def _warn_capture_capped(self) -> None:
+        """Say, once, that the in-memory ceiling has been reached, and stop ticking.
+
+        The old cap was silent in every channel at once -- no log line, no
+        indicator -- which is how 3m41s went missing on 2026-09-08 without
+        anyone able to say afterwards what had happened. It is now said in the
+        log *and* where the user is looking while they are still speaking, and
+        it says what to do about it, because the audio is no longer lost: it
+        is on disk, and the whole thing can be decoded again.
+
+        Ticking ends here for the rest of the capture, and ``_capped`` latches
+        so that no preview -- not even one already in flight -- can write over
+        the notice afterwards. That is a state rather than a stronger message
+        because the two attempts before it were messages, and both were erased
+        within seconds: a capped notice that survives one tick is barely
+        better than the silent cap that lost 3m41s.
+
+        Stopping the tick is not only about the screen. Past the ceiling the
+        buffer is frozen, so every further tick would split byte-identical
+        audio -- pure cost, no news. What was committed before the ceiling
+        stands, and the release decode picks up from there.
+        """
+        self._capped = True
+        self._abandon_previews()
+        self._nvim_previewing.emit(False)
+        minutes = MAX_UTTERANCE_SECONDS / 60
+        match self._audio.recording_status():
+            case Recorded(path=path):
+                log.warning(
+                    "this capture has passed the %.0f-minute in-memory ceiling, so the "
+                    "transcript will stop there -- but the audio is still being recorded "
+                    "in full. Recover the rest with `voice-kb transcribe %s`.",
+                    minutes, path,
+                )
+                message = (
+                    f"past the {minutes:.0f}min limit -- the rest is on disk, "
+                    "recover it with voice-kb transcribe"
+                )
+            case Truncated(path=path):
+                # The one case where neither half is working: the transcript
+                # stops at the ceiling and the file stops wherever the disk
+                # gave up. Promising `voice-kb transcribe` here would be worse
+                # than saying nothing.
+                log.warning(
+                    "this capture has passed the %.0f-minute in-memory ceiling AND its "
+                    "recording %s was given up on part-way, so what was said past the "
+                    "ceiling is not anywhere. Stop and start a new recording.",
+                    minutes, path,
+                )
+                message = (
+                    f"past the {minutes:.0f}min limit and the recording failed -- "
+                    "stop and start a new one"
+                )
+            case NotRecorded():
+                log.warning(
+                    "this capture has passed the %.0f-minute in-memory ceiling and is NOT "
+                    "being recorded, so everything spoken from here is being discarded. "
+                    "Stop and start a new recording, and turn [recording] back on.",
+                    minutes,
+                )
+                message = (
+                    f"past the {minutes:.0f}min limit and not recording -- "
+                    "audio from here is being discarded"
+                )
+        self._nvim_preview.emit(message)
+
+    # ------------------------------------------------------------------- the tick
 
     def _arm_previews(self) -> None:
-        """Start previewing a new utterance, from a blank slate."""
-        self._worker.abandon_previews.clear()
+        """Start ticking for a new utterance, from a blank slate."""
+        self._worker.tick_for(self._utterance)
+        self._capped = False
         self._preview_requested_at = 0.0
         self._preview_seconds = 0.0
         self._preview_timed = False
+        self._tick_failures = 0
         self._preview_text = ""
-        if self._overlay is not None:
-            self._overlay.set_preview_text("")
+        self._preview_epoch = 0
         self._nvim_preview.emit("")
         self._nvim_previewing.emit(self._config.preview.enabled)
         if self._preview_timer is not None:
             self._preview_timer.start(self._config.preview.interval_ms)
 
     def _abandon_previews(self) -> None:
-        """Stop previewing, and drop whatever is already queued on the worker.
+        """Stop ticking, and drop whatever tick is already queued on the worker.
 
-        This is invariant 3 of the live preview (see the module docstring): a
-        preview must never make the user wait. Setting the flag *before* the
-        committed decode is requested is what guarantees a queued preview is
-        skipped entirely rather than decoded ahead of the real thing.
+        Telling the worker *before* the release decode is requested is what
+        guarantees a queued tick is skipped entirely rather than run ahead of
+        the text the user is waiting for. One already running stops after its
+        current chunk, which -- if it was settled -- it has just committed.
         """
-        self._worker.abandon_previews.set()
+        self._worker.stop_ticks()
         if self._preview_timer is not None:
             self._preview_timer.stop()
 
     def _request_preview(self) -> None:
-        """Ask the worker to preview the whole utterance so far.
+        """Ask the worker for a tick over the audio past the committed offset.
 
-        From the beginning, not a trailing window. A trailing window was tried
-        first and it was wrong for the one job a preview has: it physically
-        discarded the start of the sentence, so words the user had already
-        watched appear would vanish in chunks while they were still speaking.
-        Decoding from the start means what is on screen only ever grows.
-
-        Snapshotted non-destructively, so the capture keeps accumulating and
-        the committed decode at key release still sees everything.
+        From the *hint*, which lags the worker's real offset by at most the
+        chunks a tick in flight has committed: the worker slices the rest off
+        itself. Snapshotted non-destructively, so the capture keeps
+        accumulating and the release decode still sees everything.
         """
         if phase_of(self._state) is not Phase.RECORDING:
             return
-        samples = self._audio.snapshot_capture()
+        samples = self._audio.snapshot_capture(since_frame=self._committed_hint)
         seconds = samples.size / self._config.audio.sample_rate
         if seconds > self._config.preview.max_seconds:
-            # Cost grows with the utterance, so it has to stop somewhere. The
-            # text stays exactly as it is -- this stops updating it, it does
-            # not clear it -- and by now there is far more of it than the
-            # overlay can show anyway.
+            # Only reachable without a VAD model, where nothing ever settles
+            # and the tail is the whole capture. The text stays exactly as it
+            # is -- this stops updating it, it does not clear it.
             log.debug(
-                "utterance past %.0fs; no more previews for it (the last one stays on screen)",
+                "uncommitted audio past %.0fs; no more previews for this utterance "
+                "(the last one stays on screen)",
                 self._config.preview.max_seconds,
             )
             self._nvim_previewing.emit(False)
@@ -845,18 +927,17 @@ class Daemon(QObject):
             return
         self._preview_requested_at = time.monotonic()
         self._preview_seconds = seconds
-        self._preview_requested.emit(samples, self._generation)
+        self._preview_requested.emit(samples, self._committed_hint, self._utterance)
 
     def _rearm_previews(self, last_decode_seconds: float) -> None:
-        """Schedule the next preview, keeping the worker idle at least half the time.
+        """Schedule the next tick, keeping the worker idle at least half the time.
 
         The gap is ``max(interval - decode, decode)``, so the *period* is
-        ``max(interval, 2 * decode)``. Short utterances keep the configured
-        cadence exactly; long ones slow down on their own rather than pinning
-        the worker. The duty cycle is what matters: a preview already inside
-        ``decode_stream`` when the key comes up cannot be cancelled, so the
-        fraction of time one is running is the fraction of releases that pay
-        for it.
+        ``max(interval, 2 * decode)``. Short tails keep the configured cadence
+        exactly; a long one slows down on its own rather than pinning the
+        worker. The duty cycle is what matters: a tick already inside a decode
+        when the key comes up cannot be cancelled, so the fraction of time one
+        is running is the fraction of releases that pay for it.
 
         A repeating timer cannot express this, hence single-shot plus re-arm.
         """
@@ -866,87 +947,120 @@ class Daemon(QObject):
         gap = max(interval - last_decode_seconds, last_decode_seconds)
         self._preview_timer.start(int(gap * 1000))
 
-    def _on_previewed(self, text: str, generation: int) -> None:
-        """Show a preview, unless it has been overtaken by events.
+    # -------------------------------------------------------------------- results
+
+    def _on_committed(self, text: str, utterance: int, through: int) -> None:
+        """One chunk, decoded once, into the buffer -- during recording or after.
+
+        The first chunk of an utterance opens a paragraph and the rest extend
+        it, so what the user sees is a paragraph growing rather than several
+        appearing. Nothing here can run ahead of itself: appends cross to the
+        bridge thread on a queued signal, so they land in the order this
+        method emitted them.
+        """
+        if utterance in self._aborted:
+            log.debug("dropping a chunk from a cancelled utterance")
+            return
+        if utterance == self._utterance:
+            self._committed_hint = max(self._committed_hint, through)
+        cleaned = postprocess(text, self._config.text)
+        if not cleaned.strip():
+            return
+        self._nvim_append_requested.emit(cleaned, self._paragraph_of == utterance)
+        self._paragraph_of = utterance
+
+    def _on_previewed(self, text: str, utterance: int, through: int) -> None:
+        """Show the open tail, unless it has been overtaken by events.
 
         Everything here is DEBUG: a preview is cosmetic, and previews arrive
         about once a second, so anything louder would drown the log that
         matters.
         """
-        if generation != self._generation or phase_of(self._state) is not Phase.RECORDING:
-            log.debug("dropping a preview that no longer applies (gen %d)", generation)
+        if self._capped:
+            # Before the re-arm, not just before the write: re-arming would
+            # resurrect the timer `_warn_capture_capped` just stopped, and the
+            # preview after that would take the notice off the screen. There
+            # is no legitimate preview past the ceiling -- the buffer is
+            # frozen, so it would say nothing new even if it were free.
+            log.debug("dropping a preview: this capture is capped")
+            return
+        if utterance != self._utterance or phase_of(self._state) is not Phase.RECORDING:
+            log.debug("dropping a preview that no longer applies (utterance %d)", utterance)
             return
         round_trip = (
             time.monotonic() - self._preview_requested_at if self._preview_requested_at else 0.0
         )
         self._rearm_previews(round_trip)
         if not self._preview_timed and self._preview_requested_at:
-            # Once per utterance, so preview cost stays visible in the log file
+            # Once per utterance, so tick cost stays visible in the log file
             # without flooding it. Round trip, so it includes the queue hop the
-            # user would actually feel if a preview ever delayed a decode.
+            # user would actually feel if a tick ever delayed a decode.
             self._preview_timed = True
             log.debug(
-                "preview round trip %.0fms for %.1fs of audio",
+                "tick round trip %.0fms for %.1fs of audio",
                 round_trip * 1000,
                 self._preview_seconds,
             )
+        if through != self._preview_epoch:
+            # A chunk landed above: the tail starts over, and a shorter one
+            # is the truth rather than instability.
+            self._preview_epoch = through
+            self._preview_text = ""
         cleaned = postprocess(text, self._config.text)
-        # Each preview sees strictly more audio than the last, so the
-        # transcript should only ever grow -- but the recogniser does not
-        # guarantee that. Decoding 4.4s of a real sample returned "Okay."
+        # Within one offset each preview sees strictly more audio than the
+        # last, so the tail should only ever grow -- but the recogniser does
+        # not guarantee that. Decoding 4.4s of a real sample returned "Okay."
         # where 3.3s of the same sample had returned "Okay, we are now at the
-        # new model.". Showing that verbatim is the exact thing being fixed
-        # here: words the user watched appear, disappearing again.
-        #
-        # So a preview that came back shorter is treated as instability rather
-        # than as news, and the previous text stands. Worst case is a slightly
-        # stale preview for one cycle; the committed decode is unaffected
-        # either way, since nothing here can reach the clipboard.
+        # new model.". Showing that verbatim is words the user watched appear,
+        # disappearing again; so a preview that came back shorter is treated
+        # as instability and the previous text stands.
         if len(cleaned) < len(self._preview_text):
             log.debug("ignoring a preview that shrank: %r", cleaned[:40])
             return
         self._preview_text = cleaned
-        if self._overlay is not None:
-            self._overlay.set_preview_text(cleaned)
         self._nvim_preview.emit(cleaned)
 
-    # -------------------------------------------------------------------- results
+    def _on_tick_failed(self, reason: str, utterance: int) -> None:
+        """A tick raised. Say so, and keep ticking: the next one may well succeed,
+        and stopping here would quietly turn the rest of a long passage back
+        into one big decode at release."""
+        if utterance != self._utterance or phase_of(self._state) is not Phase.RECORDING:
+            return
+        self._tick_failures += 1
+        # Once at WARNING per utterance; a persistent failure at 1Hz belongs
+        # in the DEBUG file, not on the console.
+        level = logging.WARNING if self._tick_failures == 1 else logging.DEBUG
+        log.log(level, "a tick failed (%s); still recording, will keep trying", reason)
+        round_trip = (
+            time.monotonic() - self._preview_requested_at if self._preview_requested_at else 0.0
+        )
+        self._rearm_previews(round_trip)
 
-    def _on_decoded(self, text: str, elapsed: float, generation: int) -> None:
-        if generation != self._generation:
-            log.info("dropping decode from a cancelled session (%.2fs)", elapsed)
+    def _on_decoded(self, text: str, elapsed: float, tail_seconds: float, utterance: int) -> None:
+        if utterance in self._aborted:
+            log.info("dropping the rest of a cancelled decode (%.2fs)", elapsed)
             return
         cleaned = postprocess(text, self._config.text)
-        log.info("decoded in %.2fs (%d chars): %r", elapsed, len(cleaned), cleaned[:80])
+        log.info(
+            "decoded the last %.1fs in %.2fs; utterance %d chars: %r",
+            tail_seconds, elapsed, len(cleaned), cleaned[:80],
+        )
         if cleaned != text:
             log.debug("raw model output: %r", text)
         log.debug("full transcript: %r", cleaned)
         if not cleaned.strip():
             log.warning("decode produced no text")
-        self._dispatch(DecodeFinished(at=time.monotonic()))
+        if utterance == self._utterance:
+            # A decode from the utterance *before* this one finishing late is
+            # not this one finishing; it must not settle a Transcribing state
+            # that belongs to a newer capture.
+            self._dispatch(DecodeFinished(at=time.monotonic()))
 
-    def _on_segment_decoded(self, text: str, generation: int) -> None:
-        """Put one segment's text in the buffer, without waiting for the rest.
-
-        The first segment of an utterance opens a paragraph and the rest
-        extend it, so what the user sees is a paragraph growing rather than
-        several appearing. Nothing here can run ahead of itself: appends cross
-        to the bridge thread on a queued signal, so they land in the order
-        this method emitted them.
-        """
-        if generation != self._generation:
-            log.debug("dropping a segment from a cancelled session")
-            return
-        cleaned = postprocess(text, self._config.text)
-        if not cleaned.strip():
-            return
-        self._nvim_append_requested.emit(cleaned, self._utterance_started)
-        self._utterance_started = True
-
-    def _on_decode_failed(self, reason: str, generation: int) -> None:
-        if generation == self._generation:
+    def _on_decode_failed(self, reason: str, utterance: int) -> None:
+        if utterance not in self._aborted:
             log.error("decode failed: %s", reason)
-        self._dispatch(DecodeFinished(at=time.monotonic()))
+        if utterance == self._utterance:
+            self._dispatch(DecodeFinished(at=time.monotonic()))
 
     def _on_appended(self, line: int, elapsed_ms: float) -> None:
         """The text is in the buffer *and* on disk -- nvim confirmed the line
@@ -1017,12 +1131,105 @@ def _configure_logging(*, verbose: bool, log_file: Path | None) -> None:
     root.info("logging to %s", target)
 
 
-def _primary(screens: list[Output]) -> Output:
-    """The primary output, else the first. xrandr order is not primary order."""
-    return next((s for s in screens if s.primary), screens[0])
+EXIT_MODEL_MISSING = 2
+EXIT_HOTKEY_PERMISSION = 3
+EXIT_UNREADABLE_RECORDING = 4
+
+
+def transcribe_recording(wav: Path, out: Path | None, config: Config) -> int:
+    """Decode a recorded capture and write the transcript out. The recovery path.
+
+    This is what makes a recording worth having. It runs the *same* pipeline
+    as live dictation -- :func:`~voice_kb.decode.decode_capture`, the same VAD
+    segmentation, the same model, the same post-processing -- so what comes
+    back is what the daemon would have produced at the time, not an
+    approximation of it produced by a second implementation.
+
+    No Qt, no hotkey, no microphone: this runs in a terminal, over a file,
+    long after the fact.
+    """
+    try:
+        samples, rate = read_capture(wav)
+    except RecordingError as e:
+        log.error("%s", e)
+        return EXIT_UNREADABLE_RECORDING
+    if rate != config.audio.sample_rate:
+        log.error(
+            "%s is %d Hz but the model expects %d Hz. Decoding it anyway would "
+            "produce plausible nonsense rather than an error, so it is refused.",
+            wav, rate, config.audio.sample_rate,
+        )
+        return EXIT_UNREADABLE_RECORDING
+
+    try:
+        transcriber = Transcriber(config.asr)
+    except ModelMissingError as e:
+        log.error("%s", e)
+        return EXIT_MODEL_MISSING
+    log.info("decoding %.1fs of audio from %s", samples.size / rate, wav)
+    text = postprocess(
+        decode_capture(
+            samples,
+            transcriber=transcriber,
+            segmenter=load_segmenter(config.vad, rate),
+            sample_rate=rate,
+        ),
+        config.text,
+    )
+    if not text.strip():
+        log.warning("%s decoded to nothing", wav)
+    if out is None:
+        # The log goes to stderr, so stdout carries the transcript alone and
+        # this composes with a pipe.
+        print(text)
+    else:
+        out.write_text(text + "\n", encoding="utf-8")
+        log.info("wrote %d chars to %s", len(text), out)
+    return 0
+
+
+def run_daemon(config: Config, dump_audio: Path | None) -> int:
+    """The daemon: hotkey, microphone, model, dictation window. Blocks."""
+    app = QApplication(sys.argv)
+    app.setQuitOnLastWindowClosed(False)  # there are no Qt windows; closing none must not exit
+
+    try:
+        daemon = Daemon(config)
+        if dump_audio is not None:
+            dump_audio.mkdir(parents=True, exist_ok=True)
+            daemon.set_dump_dir(dump_audio)
+        daemon.start()
+    except ModelMissingError as e:
+        log.error("%s", e)
+        return EXIT_MODEL_MISSING
+    except HotkeyPermissionError as e:
+        log.error("%s", e)
+        return EXIT_HOTKEY_PERMISSION
+
+    # Only worth connecting once we are actually going to reach the event loop;
+    # both failure paths above have already torn themselves down.
+    app.aboutToQuit.connect(daemon.stop)
+
+    # Qt's event loop blocks in C, so Python never runs its SIGINT handler and
+    # Ctrl-C is swallowed. Ask Qt to surface briefly so the handler can fire.
+    signal.signal(signal.SIGINT, lambda *_: app.quit())
+    signal.signal(signal.SIGTERM, lambda *_: app.quit())
+    wakeup = QTimer()
+    wakeup.timeout.connect(lambda: None)
+    wakeup.start(200)
+
+    return app.exec()
 
 
 def main() -> int:
+    """``voice-kb`` runs the daemon; ``voice-kb transcribe`` recovers a wav.
+
+    The subcommand is optional, so the bare invocation the systemd unit and
+    every existing habit use is untouched. The options common to both stay on
+    the top-level parser rather than being repeated per subcommand -- argparse
+    lets a subparser's defaults overwrite what the top level already parsed,
+    so ``-v`` in both places would silently mean *less* verbose, not more.
+    """
     parser = argparse.ArgumentParser(prog="voice-kb", description="Push-to-talk dictation.")
     parser.add_argument("-c", "--config", type=Path, default=None)
     parser.add_argument("--model-dir", type=Path, default=None)
@@ -1040,6 +1247,19 @@ def main() -> int:
         default=None,
         help=f"defaults to {DEFAULT_LOG_FILE}; pass 'none' to disable",
     )
+    sub = parser.add_subparsers(dest="command")
+    recover = sub.add_parser(
+        "transcribe",
+        help="decode a recorded capture (see [recording]) and print the transcript",
+        description=(
+            "Decode a wav through the same VAD and model the daemon uses. "
+            "Global options go before the subcommand: voice-kb -v transcribe FILE."
+        ),
+    )
+    recover.add_argument("wav", type=Path, help="a capture from the recording directory")
+    recover.add_argument(
+        "--out", type=Path, default=None, metavar="PATH", help="write here instead of stdout"
+    )
     args = parser.parse_args()
 
     _configure_logging(verbose=args.verbose, log_file=args.log_file)
@@ -1048,35 +1268,9 @@ def main() -> int:
     if args.model_dir is not None:
         config = config.with_model_dir(args.model_dir)
 
-    app = QApplication(sys.argv)
-    app.setQuitOnLastWindowClosed(False)  # the overlay hides; that must not exit
-
-    try:
-        daemon = Daemon(config)
-        if args.dump_audio is not None:
-            args.dump_audio.mkdir(parents=True, exist_ok=True)
-            daemon.set_dump_dir(args.dump_audio)
-        daemon.start()
-    except ModelMissingError as e:
-        log.error("%s", e)
-        return 2
-    except HotkeyPermissionError as e:
-        log.error("%s", e)
-        return 3
-
-    # Only worth connecting once we are actually going to reach the event loop;
-    # both failure paths above have already torn themselves down.
-    app.aboutToQuit.connect(daemon.stop)
-
-    # Qt's event loop blocks in C, so Python never runs its SIGINT handler and
-    # Ctrl-C is swallowed. Ask Qt to surface briefly so the handler can fire.
-    signal.signal(signal.SIGINT, lambda *_: app.quit())
-    signal.signal(signal.SIGTERM, lambda *_: app.quit())
-    wakeup = QTimer()
-    wakeup.timeout.connect(lambda: None)
-    wakeup.start(200)
-
-    return app.exec()
+    if args.command == "transcribe":
+        return transcribe_recording(args.wav, args.out, config)
+    return run_daemon(config, args.dump_audio)
 
 
 if __name__ == "__main__":

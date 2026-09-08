@@ -2,8 +2,8 @@
 stays pure and testable.
 
 Everything here shells out and can fail; failures degrade to ``None`` or an
-empty list rather than raising, because a missing overlay is a papercut and a
-crashed daemon is not.
+empty list rather than raising, because a misplaced dictation window is a
+papercut and a crashed daemon is not.
 """
 
 from __future__ import annotations
@@ -73,29 +73,6 @@ def pointer_position() -> tuple[int, int] | None:
     if "X" not in values or "Y" not in values:
         return None
     return values["X"], values["Y"]
-
-
-def focused_window_rect() -> Rect | None:
-    """Geometry of the focused window in root coordinates.
-
-    ``xdotool getwindowgeometry`` reports position relative to the window's
-    parent under some reparenting WMs, so ``--shell`` output plus the root
-    offsets it already resolves is used rather than parsing the human form.
-    """
-    out = _run(["xdotool", "getactivewindow", "getwindowgeometry", "--shell"])
-    if out is None:
-        return None
-    values: dict[str, int] = {}
-    for line in out.splitlines():
-        key, _, raw = line.partition("=")
-        if raw.lstrip("-").isdigit():
-            values[key.strip()] = int(raw)
-    try:
-        return Rect(
-            x=values["X"], y=values["Y"], width=values["WIDTH"], height=values["HEIGHT"]
-        )
-    except (KeyError, ValueError):
-        return None
 
 
 def i3_window_exists(instance: str) -> bool:

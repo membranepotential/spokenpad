@@ -3,9 +3,9 @@
 ← [docs index](README.md) | The keycode chain below is why `hotkey.py`
 (see [architecture.md](architecture.md)) must read evdev directly instead of
 using a keysym-based hotkey library — reinforced by
-[constraints.md](constraints.md#read-evdev-read-only). The overlay's
-per-output placement is defined by `OverlayConfig` in
-[`config.py`](../src/voice_kb/config.py).
+[constraints.md](constraints.md#read-evdev-read-only). The dictation
+window's per-output placement is `dictation_rect` in
+[`geometry.py`](../src/voice_kb/geometry.py).
 
 This is not a general compatibility target. voice-kb is built and tuned
 against one specific machine and input device; other hardware may need
@@ -56,12 +56,11 @@ eDP-1 (primary)  3840,0      3840x2160
 
 Two 4K outputs side by side, laptop panel (`eDP-1`) primary and positioned to
 the right of the external `HDMI-1-0` output in the X11 coordinate space.
-`OverlayConfig.follow_focus`
-([`config.py`](../src/voice_kb/config.py)) places the overlay on whichever
-output currently holds the focused window, which on this layout means
-computing which of the two `3840x2160` regions the focused window's
-coordinates fall into — [`geometry.py`](../src/voice_kb/geometry.py) owns that
-calculation as a pure function over window and output rectangles (see
+The dictation window opens on whichever output holds the mouse pointer
+([nvim-window.md](nvim-window.md)), which on this layout means computing
+which of the two `3840x2160` regions the pointer's coordinates fall into —
+[`geometry.py`](../src/voice_kb/geometry.py) owns that calculation as a pure
+function over output rectangles (see
 [architecture.md](architecture.md)).
 
 ## CPU / GPU
@@ -80,7 +79,6 @@ default source; no device is hardcoded.
 
 ## Window manager
 
-i3 on X11 (not Wayland). The overlay's positioning approach
-(`OverlayConfig`, non-focusable, borderless) and the toolkit chosen to
-implement it are shaped by this — see
-[decisions.md](decisions.md#pyside6-over-gtk4).
+i3 on X11 (not Wayland). The dictation window is placed and refused focus
+through i3 (`for_window` rules, see [nvim-window.md](nvim-window.md)), and
+the hotkey is read from evdev because keysym-based libraries cannot see M4.

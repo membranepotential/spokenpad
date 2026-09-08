@@ -45,6 +45,39 @@ preroll_ms = 250
 # input device.
 # device = "alsa_input.usb-..."
 
+[recording]
+# Every capture is written to a wav while you are speaking, independently of
+# decoding. This is the safety net, and it is ON by default: an opt-in one is
+# switched off exactly when it turns out to have been needed.
+#
+# On 2026-09-08 a 13m41s hold hit the in-memory ceiling, the audio past it was
+# dropped inside the realtime callback -- the only copy that existed -- and
+# 3m41s of dictation was gone, with nothing in the log to say so. With a
+# recording, a decode that fails, is cancelled, or stops short is no longer a
+# loss: `voice-kb transcribe <wav>` decodes the file through the same VAD and
+# model the daemon uses and prints the transcript.
+#
+# The cost is ~32 KB per second of speech (16 kHz 16-bit mono), pruned below.
+enabled = true
+
+# Where the recordings go. Created mode 0700, each file mode 0600 -- a capture
+# holds whatever you dictated, which is why the log file is 0600 too.
+# Defaults to $XDG_STATE_HOME/voice-kb/audio (~/.local/state/voice-kb/audio).
+# ~ and $VAR are expanded; an unset $VAR is an error rather than a literal
+# directory named after it.
+#
+# GIVE THIS A DIRECTORY OF ITS OWN: voice-kb prunes it (see max_total_bytes
+# below). Only the `capture-*.wav` files it writes are ever deleted -- nothing
+# else in the directory is touched -- but a folder that is only ever voice-kb's
+# leaves no room for that promise to be wrong.
+# dir = "~/.local/state/voice-kb/audio"
+
+# Size budget for that directory, enforced oldest-first at startup and once
+# per capture. 5 GiB is ~46 hours of speech. Age is deliberately not a
+# criterion: a recording is pruned because something newer needs the space,
+# never because it got old. The capture being written is never pruned.
+max_total_bytes = 5368709120
+
 [asr]
 # Path to the model directory. Relative paths resolve against the config
 # file's own directory, not the current working directory, so this file
@@ -249,65 +282,27 @@ file_template = "dictation-%Y-%m-%d-%H%M%S.md"
 startup_timeout_s = 5.0
 
 [preview]
-# The rolling preview of the transcript, shown while the key is held.
+# The tick of progressive commit (docs/progressive-commit.md): every
+# interval_ms while the key is held, the audio since the committed offset is
+# split at silence, each chunk that has settled is decoded ONCE and appended
+# to the dictation buffer, and the open tail -- the sentence being spoken now
+# -- is decoded for the live preview below it.
 #
-# Cosmetic only. The text that actually gets committed is still produced by
-# exactly ONE decode of the complete captured buffer at key release -- a
-# preview is never appended, never merged into the final text, and never
-# influences it (see docs/constraints.md). In nvim it is not even buffer
-# content: it is an extmark's virtual text, so it cannot be saved, yanked, or
-# undone into the file.
+# The preview is cosmetic only: virtual text in nvim, replaced every tick,
+# never written to the file. What reaches the buffer is each chunk decoded
+# exactly once, when it settles or at key release. Turning this off means
+# nothing commits until the key is released, and the whole capture is decoded
+# then.
 enabled = true
 
-# How often a preview decode is requested while recording. Must be >= 200.
+# Minimum time between ticks. Must be >= 200. The real gap is
+# max(interval - last_decode, last_decode), so the worker stays idle at least
+# half the time however long the passage gets.
 interval_ms = 1100
 
-# Stop previewing once the utterance is longer than this many seconds.
-#
-# Each preview decodes the WHOLE utterance so far, from its start. That is what
-# keeps words on screen once they appear. A trailing window was tried first and
-# it was wrong: it physically discarded the beginning of the sentence, so text
-# vanished in chunks while you were still speaking.
-#
-# Decoding from the start means cost grows with the utterance, and two things
-# bound it. The gap between previews is max(interval - last_decode,
-# last_decode), so the worker stays idle at least half the time; and past this
-# many seconds previews simply stop. Nothing disappears when they do -- the
-# last one stays on screen.
-#
-# This is a latency budget. A preview still QUEUED when you release the key is
-# dropped, but one already decoding cannot be interrupted, so the real decode
-# waits behind it. At ~14.6x real-time, 30s of audio costs ~2.0s -- that is the
-# worst a release can pay, ~1.0s expected. Raising this raises both in
-# proportion. When previews do stop, the nvim winbar says so.
-max_seconds = 30.0
-
-[overlay]
-# Show the Qt status overlay at all.
-#
-# Off by default since the sink became nvim: the dictation window carries the
-# same indicator (phase, level meter, live preview) in its winbar, rendered
-# where the text is about to land instead of in a second widget elsewhere on
-# screen. Turn it back on if you want feedback before the dictation window
-# has finished opening. It still never takes focus.
-enabled = false
-
-# Width of the pill, and the height of its status row (dot, label, level
-# meter). With previews enabled the widget is height + preview_height tall.
-# Sizes are in Qt's LOGICAL pixels, not device pixels. On a HiDPI display
-# (Xft.dpi 192 gives a device pixel ratio of 2.0) the overlay is drawn twice
-# this size in real pixels, so it stays the same apparent size as it would on
-# a 96dpi screen rather than shrinking to a sliver on a 4K panel.
-width = 720
-height = 96
-
-# Gap between the overlay and the bottom edge of the output it's shown on.
-margin_px = 32
-
-# Place the overlay on the output holding the currently focused window,
-# rather than always on the primary output.
-follow_focus = true
-
-# Extra pixels below the status row for the preview text (two lines, with
-# the oldest words elided away first). Ignored when preview.enabled = false.
-preview_height = 64
+# Backstop for a daemon running WITHOUT a VAD model, where nothing settles and
+# every preview decodes the whole capture from its beginning. Past this many
+# seconds of audio previews stop, the last one stays on screen, and the winbar
+# says so. With the VAD model the tick only ever decodes the open tail -- at
+# most one chunk -- so this is never reached.
+max_seconds = 600.0

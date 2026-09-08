@@ -10,14 +10,18 @@ the live dashboard in [STATUS.md](../STATUS.md).
    split, the module map, and the keypress-to-text-in-the-buffer event flow.
 2. **[constraints.md](constraints.md)** — the hard rules this project will not
    break, each traced to a specific Handy 0.9.6 failure.
-3. **[nvim-window.md](nvim-window.md)** — the dictation window: how it is
+3. **[progressive-commit.md](progressive-commit.md)** — the decode design:
+   settled chunks land while the user is still speaking, and releasing the
+   key only decodes the open tail.
+4. **[nvim-window.md](nvim-window.md)** — the dictation window: how it is
    opened, placed, refused focus, and what runs inside it.
-4. **[asr.md](asr.md)** — the ASR model, the measured decode speed, and the
-- [evaluation.md](evaluation.md) — the regression harness: WER, per-error checks, and how to tune `hotwords_score` without guessing.
+5. **[asr.md](asr.md)** — the ASR model, the measured decode speed, and the
    `bpe.vocab` reconstruction that makes hotword biasing possible.
-5. **[hardware.md](hardware.md)** — the exact keyboard, keycode, and display
+6. **[evaluation.md](evaluation.md)** — the regression harness: WER, per-error
+   checks, and how to tune `hotwords_score` without guessing.
+7. **[hardware.md](hardware.md)** — the exact keyboard, keycode, and display
    setup this is built and tuned against.
-6. **[decisions.md](decisions.md)** — an ADR-style log of what was chosen,
+8. **[decisions.md](decisions.md)** — an ADR-style log of what was chosen,
    what was rejected, and why.
 
 ## Scope

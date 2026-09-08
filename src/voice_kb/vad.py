@@ -62,9 +62,24 @@ if you do.
 ``docs/constraints.md`` forbids re-decoding a growing buffer, because that is
 what made Handy slow and made it silently drop long utterances. This is a
 different shape and keeps both properties that rule exists to protect: every
-sample is decoded **exactly once**, in one pass, after the key comes up. No
-region is ever re-decoded as more audio arrives, so cost stays linear in the
-audio and nothing is dropped at any length.
+committed sample is decoded **exactly once** -- when its chunk settles, or at
+key release for the open tail. No committed region is ever re-decoded as
+more audio arrives, so cost stays linear in the audio and nothing is dropped
+at any length.
+
+## Settled chunks
+
+Since 2026-09-08 the daemon commits chunks *while the user is still
+speaking* (``docs/progressive-commit.md``), which needs one more fact per
+chunk: whether later audio can still change it. :attr:`Segment.settled`
+answers that, and the answer rests on Silero being causal. :meth:`split` is
+run from the same offset on every tick, and a causal detector fed the same
+prefix emits the same spans, so a span that ended by silence on one tick ends
+at the same frame on every later one. The only span that can move is the one
+``flush()`` cut at the buffer's end because the user was mid-word -- and that
+one is always the last. Hence: every chunk before the last is settled; the
+last is settled only if it reached the merge target *and* the buffer runs
+:data:`SETTLE_SILENCE_SECONDS` past its end, which a flushed span never does.
 
 Failure is a value, never an exception: if the VAD model is missing or will
 not load, :func:`load_segmenter` returns ``None`` and the caller decodes the
@@ -76,7 +91,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Final
+from typing import Final, NamedTuple
 
 from voice_kb.audio import MonoAudio
 from voice_kb.config import VadConfig
@@ -102,6 +117,34 @@ _BUFFER_HEADROOM: Final = 2.0
 #: wider margin that protects a first or last word.
 _EDGE_MARGIN_MIN_SPEECH_S: Final = 3.0
 
+SETTLE_SILENCE_SECONDS: Final = 1.0
+"""Audio that must follow the *last* closed chunk before it counts as settled.
+
+A chunk before the last is settled by construction (see the module
+docstring). The last one may have been closed by the span ``flush()`` cut at
+the buffer's end, which moves on the next tick; a chunk followed by this much
+audio with no new speech was closed by real silence. A flushed span ends
+within one frame of the buffer's end, so it can never pass this test; a
+span sherpa ended on its own is reported about 0.9 s after the speech stops
+(measured on the eval samples: ``min_silence_seconds`` plus the detector's
+own latency), so with this margin a sentence the user paused after settles
+about two seconds into the pause. That is the cost of never committing a
+chunk that could still move.
+"""
+
+
+class _Chunk(NamedTuple):
+    """A merged run of spans, in input frames, before padding."""
+
+    start: int
+    end: int
+    speech: int
+    """How many of the frames the detector called speech, as opposed to the
+    pauses between them the chunk also spans. Decides whether the chunk is
+    substantial enough to earn the wider edge margin."""
+    closed: bool
+    """Whether the merge target closed it, as opposed to the input running out."""
+
 
 @dataclass(frozen=True, slots=True)
 class Segment:
@@ -114,6 +157,18 @@ class Segment:
 
     samples: MonoAudio
     start_seconds: float
+    end_frame: int
+    """Where the speech ends in the input, exclusive, *before* the trailing pad.
+
+    The next remainder starts here, not at the end of ``samples``: the pad
+    after the speech belongs to the silence the following chunk pads into
+    from its own side, so starting past it would rob that chunk of its lead
+    pad, and starting by the padded *length* -- as the preview prefix once
+    did -- lands inside this chunk whenever a pause was longer than the lead
+    pad, and finds the tail of its speech a second time.
+    """
+    settled: bool
+    """No later audio can change this chunk. See the module docstring."""
 
 
 class SpeechSegmenter:
@@ -171,44 +226,46 @@ class SpeechSegmenter:
                 "VAD found no speech in %.1fs; decoding the whole buffer",
                 samples.size / self._sample_rate,
             )
-            return [Segment(samples=samples, start_seconds=0.0)]
+            return [
+                Segment(samples=samples, start_seconds=0.0, end_frame=samples.size, settled=False)
+            ]
 
         pad = int(self._pad_seconds * self._sample_rate)
         edge = int(self._edge_pad_seconds * self._sample_rate)
+        settle_after = int(SETTLE_SILENCE_SECONDS * self._sample_rate)
         merged = self._merged(spans)
+        last = len(merged) - 1
         chunks = []
-        for index, (start, end, speech) in enumerate(merged):
+        for index, chunk in enumerate(merged):
             # A wider margin at the very start and end of the capture, where
             # a clipped word is the first or last word of what was said.
-            wide = speech >= _EDGE_MARGIN_MIN_SPEECH_S * self._sample_rate
+            wide = chunk.speech >= _EDGE_MARGIN_MIN_SPEECH_S * self._sample_rate
             lead = edge if wide and index == 0 else pad
-            trail = edge if wide and index == len(merged) - 1 else pad
+            trail = edge if wide and index == last else pad
             # `start_seconds` describes the samples actually returned, padding
             # included, so it always locates them in the capture rather than
             # pointing a little after where they begin.
-            padded_start = max(0, start - lead)
+            padded_start = max(0, chunk.start - lead)
             chunks.append(
                 Segment(
-                    samples=samples[padded_start : min(samples.size, end + trail)],
+                    samples=samples[padded_start : min(samples.size, chunk.end + trail)],
                     start_seconds=padded_start / self._sample_rate,
+                    end_frame=chunk.end,
+                    settled=chunk.closed
+                    and (index < last or samples.size - chunk.end >= settle_after),
                 )
             )
         return chunks
 
-    def _merged(self, spans: list[tuple[int, int]]) -> list[tuple[int, int, int]]:
-        """Group spans into ``(start, end, speech)`` chunks of enough speech.
-
-        ``speech`` is how many samples of the chunk the detector actually
-        called speech, as opposed to the pauses between them that the chunk
-        also spans. It decides whether the chunk is substantial enough to earn
-        the wider edge margin.
+    def _merged(self, spans: list[tuple[int, int]]) -> list[_Chunk]:
+        """Group spans into chunks holding enough speech.
 
         Merging is by *speech* accumulated, not elapsed time, so a passage
         with long thinking pauses in it still produces chunks the recogniser
         has enough context to work with rather than one chunk per phrase.
         """
         target = self._chunk_seconds * self._sample_rate
-        chunks: list[tuple[int, int, int]] = []
+        chunks: list[_Chunk] = []
         start: int | None = None
         speech = 0
         for span_start, span_end in spans:
@@ -216,10 +273,10 @@ class SpeechSegmenter:
                 start = span_start
             speech += span_end - span_start
             if speech >= target:
-                chunks.append((start, span_end, speech))
+                chunks.append(_Chunk(start, span_end, speech, closed=True))
                 start, speech = None, 0
         if start is not None:
-            chunks.append((start, spans[-1][1], speech))
+            chunks.append(_Chunk(start, spans[-1][1], speech, closed=False))
         return chunks
 
     def _speech_spans(self, samples: MonoAudio) -> list[tuple[int, int]]:

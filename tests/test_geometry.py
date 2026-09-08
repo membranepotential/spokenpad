@@ -8,84 +8,11 @@ import json
 import pytest
 
 from voice_kb import x11
-from voice_kb.config import OverlayConfig
-from voice_kb.geometry import Output, Rect, dictation_rect, overlay_rect, pick_output
+from voice_kb.geometry import Output, Rect, dictation_rect, pick_output
 
 HDMI = Output(name="HDMI-1-0", rect=Rect(x=0, y=0, width=3840, height=2160))
 EDP = Output(name="eDP-1", rect=Rect(x=3840, y=0, width=3840, height=2160), primary=True)
 OUTPUTS = (HDMI, EDP)
-
-
-# -- overlay placement --------------------------------------------------------
-
-
-def test_overlay_centred_and_bottom_aligned_on_hdmi() -> None:
-    cfg = OverlayConfig(width=420, height=96, margin_px=32)
-    rect = overlay_rect(HDMI.rect, cfg, preview_band=False)
-    assert rect == Rect(x=(3840 - 420) // 2, y=2160 - 32 - 96, width=420, height=96)
-
-
-def test_overlay_centred_and_bottom_aligned_on_edp() -> None:
-    cfg = OverlayConfig(width=420, height=96, margin_px=32)
-    rect = overlay_rect(EDP.rect, cfg, preview_band=False)
-    # eDP-1 starts at x=3840, so its centring is offset by that origin.
-    assert rect == Rect(x=3840 + (3840 - 420) // 2, y=2160 - 32 - 96, width=420, height=96)
-
-
-def test_overlay_uses_total_height_when_the_preview_band_is_enabled() -> None:
-    """With ``preview_band`` on the widget is ``height + preview_height`` tall,
-    and placement must be computed against *that* -- otherwise the pill is
-    positioned as if it were only its status row and the preview band hangs
-    below where the margin says the overlay ends."""
-    cfg = OverlayConfig(width=720, height=96, preview_height=64, margin_px=32)
-    assert cfg.total_height(preview_band=True) == 160
-
-    rect = overlay_rect(HDMI.rect, cfg, preview_band=True)
-    assert rect == Rect(x=(3840 - 720) // 2, y=2160 - 32 - 160, width=720, height=160)
-
-
-def test_overlay_is_always_fully_within_its_output() -> None:
-    cfg = OverlayConfig(width=420, height=96, margin_px=32)
-    for output in OUTPUTS:
-        rect = overlay_rect(output.rect, cfg, preview_band=False)
-        assert rect.x >= output.rect.x
-        assert rect.y >= output.rect.y
-        assert rect.right <= output.rect.right
-        assert rect.bottom <= output.rect.bottom
-
-
-def test_regression_overlay_never_hangs_off_the_bottom_edge() -> None:
-    """The previous tool placed a 400x200 overlay at y=1995 on a 2160-tall
-    screen -- 35px hung off the bottom edge. A margin_px that would
-    reproduce that naive (unclamped) y must instead be clamped fully
-    on-screen."""
-    output = Rect(x=0, y=0, width=3840, height=2160)
-    cfg = OverlayConfig(width=400, height=200, margin_px=-35)
-
-    naive_y = output.bottom - cfg.margin_px - cfg.total_height(preview_band=False)
-    assert naive_y == 1995  # reproduces the exact regression numbers
-    assert naive_y + cfg.total_height(preview_band=False) > output.bottom  # ... off-screen
-
-    rect = overlay_rect(output, cfg, preview_band=False)
-    assert rect.bottom <= output.bottom
-    assert rect.y == output.bottom - cfg.total_height(preview_band=False)
-
-
-def test_preview_overlay_taller_than_the_margin_still_lands_fully_inside() -> None:
-    """The same clamp, but for the failure the preview band introduces: a
-    widget whose *total* height exceeds what the margin leaves room for must
-    still be entirely on-screen. Clamping ``height`` instead of
-    ``total_height`` would put the whole preview band off the bottom edge."""
-    output = Rect(x=0, y=0, width=1280, height=200)
-    cfg = OverlayConfig(width=720, height=96, preview_height=64, margin_px=80)
-    assert cfg.total_height(preview_band=True) == 160
-    # Naive placement would start above the output entirely.
-    assert output.bottom - cfg.margin_px - cfg.total_height(preview_band=True) < output.y
-
-    rect = overlay_rect(output, cfg, preview_band=True)
-    assert rect.height == cfg.total_height(preview_band=True)
-    assert rect.y >= output.y
-    assert rect.bottom <= output.bottom
 
 
 # -- dictation window placement ------------------------------------------------
@@ -114,8 +41,7 @@ def test_dictation_rect_falls_back_to_the_bottom_right_quarter_without_a_pointer
 
 def test_dictation_rect_clamps_a_pointer_near_the_right_or_bottom_edge() -> None:
     """A pointer close to an edge would otherwise anchor a window that hangs
-    off the screen -- the same clamp ``overlay_rect`` applies, and for the
-    same reason."""
+    off the screen."""
     output = Rect(x=0, y=0, width=3840, height=2160)
     rect = dictation_rect(output, (3800, 2140), 0.5)
     assert rect.right <= output.right

@@ -35,11 +35,12 @@ this project's hard constraints:
 - Never synthesise characters (`xdotool type` / enigo). It rewrites the *core*
   X keymap. The transcript goes over neovim's msgpack-RPC socket instead — no
   keystrokes, no clipboard, and the text crosses no shell or argv boundary.
-- One-shot *committed* decode at key release. Streaming models re-decode a
-  growing buffer and silently drop long utterances. The live preview is a
-  bounded, throwaway decode that is never committed and never delays the real
-  one -- in nvim it is virtual text, so it *cannot* reach the file. See
-  `docs/constraints.md`.
+- Every committed sample is decoded exactly once, never from a growing
+  buffer. Streaming models re-decode as audio arrives and silently drop long
+  utterances. Here a chunk is decoded and appended the moment no later audio
+  can change it, and releasing the key only decodes the open tail -- about a
+  second, however long the passage. The preview of that tail is virtual text
+  in nvim, so it *cannot* reach the file. See `docs/progressive-commit.md`.
 - Bias vocabulary at decode time, never by fuzzy string replacement
   (`set`→`sed`, `reset`→`rust`).
 
@@ -99,6 +100,22 @@ The unit assumes the checkout is at `~/Documents/voice-kb`; edit
 target is not `i3-session.target`. Watch it with
 `journalctl --user -u voice-kb -f`; the full DEBUG log is in
 `$XDG_STATE_HOME/voice-kb/voice-kb.log` either way.
+
+## Recovering a dictation
+
+Every capture is also written to a wav in
+`$XDG_STATE_HOME/voice-kb/audio/`, as it is spoken and independently of
+decoding, and the capture's log line names the file. So a decode that failed,
+was cancelled, or stopped short is not a lost dictation:
+
+```console
+$ voice-kb transcribe ~/.local/state/voice-kb/audio/capture-2026-09-08-141530.wav
+```
+
+It decodes through the same VAD and model the daemon uses and prints the
+transcript (`--out PATH` writes it to a file instead). The directory is pruned
+oldest-first at 5 GiB, ~46 hours of speech; `[recording]` in
+`config.example.toml` turns it off or moves it.
 
 ## Note on `bpe.vocab`
 

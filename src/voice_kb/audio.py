@@ -16,7 +16,10 @@ minimum required to stay off the audio thread's bad side: no logging, no
 exceptions raised, no unbounded allocation. It copies at most one
 callback's worth of samples per call (unavoidable -- PortAudio reuses its
 input buffer immediately after the callback returns) and otherwise only
-writes into a buffer sized up front.
+writes into a buffer sized up front. The one thing it hands outside this
+module is that copy, pushed onto :class:`~voice_kb.recorder.CaptureRecorder`'s
+queue for a writer thread to put on disk -- a queue push, never the write
+itself, because a blocking write here is an xrun.
 """
 
 from __future__ import annotations
@@ -24,6 +27,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from typing import TYPE_CHECKING
 
 import numpy as np
 import numpy.typing as npt
@@ -31,16 +35,34 @@ import sounddevice as sd
 
 from voice_kb.config import AudioConfig
 
+if TYPE_CHECKING:
+    from voice_kb.recorder import CaptureRecorder, RecordingStatus
+
 type MonoAudio = npt.NDArray[np.float32]
 
 log = logging.getLogger("voice-kb.audio")
 
-MAX_UTTERANCE_SECONDS = 600.0
-"""Hard ceiling on a single capture. Guards against unbounded memory growth
-if the hotkey's key-up is ever lost (stuck key, dropped event, wedged
-device) -- without this, `_chunks` would grow for as long as the key stays
-down. At 16 kHz float32 mono this is ~38 MB, negligible to hold and easy to
-notice in the overlay if it is ever actually hit."""
+MAX_UTTERANCE_SECONDS = 3600.0
+"""Hard ceiling on how much of a capture is held **in memory**.
+
+Its only job is to bound `_chunks` if the hotkey's key-up is ever lost (stuck
+key, dropped event, wedged device), where the buffer would otherwise grow for
+as long as the key stays down. At 16 kHz float32 mono an hour is ~230 MB.
+
+It used to be 600s and it used to be a data-loss bug. On 2026-09-08 a hold of
+821.3s hit it and the samples past the ceiling were dropped inside the
+callback below -- the only copy in existence, because everything else sits
+downstream of it. The docstring at the time claimed the cap was "easy to
+notice in the overlay", which was false: it fired with no log line and no
+indicator at all, and 3m41s of dictation was simply gone.
+
+Both halves of that are fixed. Every callback now reaches
+:class:`~voice_kb.recorder.CaptureRecorder` *before* this ceiling is
+consulted, so what is on disk is never bounded by it, and hitting it is
+reported at WARNING and on the indicators (see :meth:`AudioCapture.take_cap_notice`).
+The number is generous because it no longer protects anything the user cares
+about -- only the daemon's resident memory.
+"""
 
 FIRST_CALLBACK_TIMEOUT = 0.5
 """How long a newly opened stream gets to deliver its first callback.
@@ -118,10 +140,17 @@ class AudioCapture:
     :meth:`snapshot_capture` is safe *against the realtime callback* -- it
     reads under the same lock -- and is non-destructive, so it can be called
     mid-capture without disturbing what :meth:`stop_capture` will return.
+
+    A :class:`~voice_kb.recorder.CaptureRecorder` is required rather than
+    optional: "not recording" is a state the recorder itself expresses
+    (``RecordingConfig.enabled``), and making it a ``None`` here would put a
+    branch on the realtime path and leave every caller to invent what "no
+    recorder" means.
     """
 
-    def __init__(self, config: AudioConfig) -> None:
+    def __init__(self, config: AudioConfig, recorder: CaptureRecorder) -> None:
         self._config = config
+        self._recorder = recorder
         self._max_frames = int(MAX_UTTERANCE_SECONDS * config.sample_rate)
 
         self._ring: _RingBuffer | None = None
@@ -136,6 +165,11 @@ class AudioCapture:
         self._last_callback_at = 0.0
         self._last_status: str | None = None
         self._callback_count = 0
+        #: Whether the ceiling was reached, and whether that has been reported
+        #: yet. Two facts, not one: the capture can end in the same 33ms tick
+        #: that crosses the ceiling, and the news must survive that.
+        self._capped = False
+        self._cap_reported = False
 
         self._stream: sd.InputStream | None = None
         if self._ring is not None:
@@ -201,11 +235,19 @@ class AudioCapture:
 
         with self._lock:
             if self._capturing:
+                # One copy, shared by both sinks: PortAudio reuses `indata`
+                # the moment this returns, and neither sink mutates it.
+                captured = mono.copy()
+                # Disk first, and deliberately *above* the ceiling below.
+                # Everything that discarded audio on 2026-09-08 sat downstream
+                # of that `return`; nothing that decides how much to keep in
+                # memory may ever again decide what reaches the file.
+                self._recorder.write(captured)
                 remaining = self._max_frames - self._frames_captured
                 if remaining <= 0:
                     return
-                chunk = mono[:remaining] if frames > remaining else mono
-                self._chunks.append(chunk.copy())
+                chunk = captured[:remaining] if frames > remaining else captured
+                self._chunks.append(chunk)
                 self._frames_captured += len(chunk)
             elif self._ring is not None:
                 self._ring.write(mono)
@@ -216,6 +258,10 @@ class AudioCapture:
             self._stream = self._open_stream()
         else:
             self._ensure_stream_alive()
+
+        self._capped = False
+        self._cap_reported = False
+        self._recorder.start()
 
         with self._lock:
             # Snapshotting the ring buffer must happen under the same lock
@@ -229,15 +275,32 @@ class AudioCapture:
             preroll = self._ring.snapshot() if self._ring is not None else None
             self._chunks = [preroll] if preroll is not None and preroll.size else []
             self._frames_captured = preroll.size if preroll is not None else 0
+            # The pre-roll is the run-up to the first word, so it belongs in
+            # the recording too -- and it has to go in here, under the lock and
+            # before the flag flips, or the first callback of the capture could
+            # reach the file ahead of the audio that precedes it.
+            if preroll is not None and preroll.size:
+                self._recorder.write(preroll)
             self._capturing = True
 
     def stop_capture(self) -> MonoAudio:
         """Stop accumulating and return everything captured, oldest first."""
         with self._lock:
             chunks = self._chunks
+            # Latched here, from the final frame count, because the ceiling can
+            # be crossed inside the last 33ms of a hold -- after the last poll
+            # and before this. Deriving it only while capturing meant a release
+            # that quick reported nothing at all: a silent cap in miniature,
+            # which is the exact failure this whole change is about.
+            self._capped = self._capped or self._frames_captured >= self._max_frames
             self._chunks = []
             self._frames_captured = 0
             self._capturing = False
+
+        # After the flag is down, so no further callback can queue a buffer,
+        # and before returning, so the wav is closed and complete by the time
+        # the caller starts decoding what it just got back.
+        self._recorder.stop()
 
         if self._config.preroll_frames == 0 and self._stream is not None:
             self._stream.stop()
@@ -248,52 +311,50 @@ class AudioCapture:
             return np.zeros(0, dtype=np.float32)
         return chunks[0] if len(chunks) == 1 else np.concatenate(chunks)
 
-    def snapshot_capture(self, max_frames: int | None = None) -> MonoAudio:
-        """The audio captured so far, without ending the capture.
+    def snapshot_capture(self, since_frame: int = 0) -> MonoAudio:
+        """The audio captured from ``since_frame`` on, without ending the capture.
 
-        Returns at most the trailing ``max_frames`` samples. Copies out under
-        the same lock the realtime callback uses, so it never observes a
-        partially appended chunk.
+        ``since_frame`` counts from the start of the capture, pre-roll
+        included, so a caller that has committed everything before it asks
+        only for the rest. The result begins exactly there, or is empty if the
+        capture is not that long yet (or is over).
 
-        Only the trailing chunks needed to satisfy ``max_frames`` are walked
-        and concatenated -- never the whole buffer -- so the cost of a
-        snapshot is bounded by ``max_frames`` and does *not* grow with the
-        length of the utterance. That bound is what makes the overlay's live
-        preview safe: a five-minute dictation costs the same per preview as a
-        ten-second one (``docs/constraints.md``).
+        Copies out under the same lock the realtime callback uses, so it never
+        observes a partially appended chunk, and walks only the trailing chunks
+        it needs -- never the whole buffer -- so the cost is bounded by what is
+        still *uncommitted*, not by the length of the utterance. That bound is
+        what keeps the progressive-commit tick flat over an hour-long latched
+        passage (``docs/progressive-commit.md``).
 
         This is deliberately non-destructive. It never touches ``_chunks``,
-        ``_frames_captured`` or ``_capturing``, so the committed decode at key
-        release still sees the complete buffer, exactly once, via
-        :meth:`stop_capture`.
+        ``_frames_captured`` or ``_capturing``, so the release decode still
+        sees the complete buffer via :meth:`stop_capture`.
         """
-        if max_frames is not None and max_frames <= 0:
-            return np.zeros(0, dtype=np.float32)
+        if since_frame < 0:
+            raise ValueError(f"since_frame must not be negative: {since_frame}")
 
         with self._lock:
             if not self._capturing:
                 return np.zeros(0, dtype=np.float32)
-            if max_frames is None:
-                tail = list(self._chunks)
-            else:
-                tail = []
-                frames = 0
-                for chunk in reversed(self._chunks):
-                    tail.append(chunk)
-                    frames += len(chunk)
-                    if frames >= max_frames:
-                        break
-                tail.reverse()
+            needed = self._frames_captured - since_frame
+            if needed <= 0:
+                return np.zeros(0, dtype=np.float32)
+            tail = []
+            frames = 0
+            for chunk in reversed(self._chunks):
+                tail.append(chunk)
+                frames += len(chunk)
+                if frames >= needed:
+                    break
+            tail.reverse()
 
         # Concatenation happens outside the lock on purpose: every chunk in
         # `tail` is already an immutable-by-convention copy made by the
         # callback, so nothing can mutate them, and the realtime thread must
         # not be made to wait on an allocation it does not need to.
-        if not tail:
-            return np.zeros(0, dtype=np.float32)
         audio = np.concatenate(tail) if len(tail) > 1 else tail[0].copy()
-        if max_frames is not None and audio.size > max_frames:
-            audio = audio[-max_frames:]
+        if audio.size > needed:
+            audio = audio[-needed:]
         return audio
 
     def _ensure_stream_alive(self) -> None:
@@ -370,17 +431,49 @@ class AudioCapture:
         self._stream = self._open_stream()
         return True
 
+    def take_cap_notice(self) -> bool:
+        """Whether :data:`MAX_UTTERANCE_SECONDS` has bitten, once per capture.
+
+        Derived from the frame count rather than latched in the callback, so
+        the realtime thread gains no work at all from being watched, and
+        cleared by :meth:`start_capture` rather than by reading -- the caller
+        polls this at 30Hz for the whole of a recording and must be told once,
+        not thirty times a second. :meth:`stop_capture` latches the same test
+        over the final count, so a key released in the tick that crossed the
+        ceiling is still reported rather than falling between two polls.
+
+        The cap is no longer a data-loss bug (the audio is on disk regardless,
+        see :data:`MAX_UTTERANCE_SECONDS`), but it does mean the transcript
+        will stop short of what was said, and that is worth saying out loud
+        while the user can still act on it.
+        """
+        if self._cap_reported:
+            return False
+        with self._lock:
+            capped = self._capped or self._frames_captured >= self._max_frames
+        self._cap_reported = capped
+        return capped
+
+    def recording_status(self) -> RecordingStatus:
+        """Where the current or most recent capture went, and whether it is whole."""
+        return self._recorder.status()
+
     def take_stream_status(self) -> str | None:
         """Any PortAudio status flags seen since the last call (overflows etc.)."""
         status, self._last_status = self._last_status, None
         return status
 
     def current_level(self) -> float:
-        """Cheap peak level of the most recent callback, 0.0-1.0, for the overlay meter."""
+        """Cheap peak level of the most recent callback, 0.0-1.0, for the level meter."""
         return self._level
 
     def close(self) -> None:
-        """Release the stream. Only meaningful when ``preroll_ms > 0`` kept it open."""
+        """Release the stream, and any recording still open.
+
+        Shutting down mid-capture is exactly when a recording matters most, so
+        the wav is flushed and closed here as well as in :meth:`stop_capture`.
+        """
+        self._recorder.stop()
         if self._stream is not None:
             self._stream.stop()
             self._stream.close()

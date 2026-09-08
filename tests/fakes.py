@@ -18,6 +18,7 @@ from voice_kb.audio import MonoAudio
 from voice_kb.config import AsrConfig, AudioConfig, NvimConfig
 from voice_kb.geometry import Output, Rect
 from voice_kb.nvim import Appended, AppendResult
+from voice_kb.recorder import NotRecorded, RecordingStatus
 from voice_kb.state import Phase
 
 
@@ -30,16 +31,21 @@ class FakeAudioCapture:
     key-up that triggers ``Decode``.
 
     ``snapshot_capture`` is likewise decoupled from ``next_samples``: a
-    preview reads its own :attr:`preview_samples`, so a test can prove the
-    injected text came from the *committed* decode and not from anything a
-    preview saw.
+    tick reads its own :attr:`preview_samples`, so a test can tell what a
+    tick committed from what the release decode did.
     """
 
-    def __init__(self, config: AudioConfig) -> None:
+    def __init__(self, config: AudioConfig, recorder: object) -> None:
         self.config = config
+        #: The real ``AudioCapture`` hands every callback to this before its
+        #: own in-memory ceiling; nothing here calls back, so the fake only
+        #: has to accept it. ``recording`` below is what a test reads.
+        self.recorder = recorder
+        self.capped = False
+        self.recording: RecordingStatus = NotRecorded()
         self.start_calls = 0
         self.stop_calls = 0
-        self.snapshot_calls: list[int | None] = []
+        self.snapshot_calls: list[int] = []
         self.closed = False
         self.next_samples: MonoAudio = np.zeros(1600, dtype=np.float32)
         self.preview_samples: MonoAudio = np.zeros(800, dtype=np.float32)
@@ -54,13 +60,26 @@ class FakeAudioCapture:
         self.stop_calls += 1
         return self.next_samples
 
-    def snapshot_capture(self, max_frames: int | None = None) -> MonoAudio:
-        """Mirrors ``AudioCapture.snapshot_capture``: non-destructive, and
-        never disturbs what ``stop_capture`` will hand back."""
-        self.snapshot_calls.append(max_frames)
-        if max_frames is None:
-            return self.preview_samples
-        return self.preview_samples[-max_frames:]
+    def snapshot_capture(self, since_frame: int = 0) -> MonoAudio:
+        """Mirrors ``AudioCapture.snapshot_capture``: the audio from
+        ``since_frame`` on, non-destructive, never disturbing what
+        ``stop_capture`` will hand back."""
+        self.snapshot_calls.append(since_frame)
+        return self.preview_samples[since_frame:]
+
+    def take_cap_notice(self) -> bool:
+        """Mirrors AudioCapture.take_cap_notice. Set ``capped`` to make the
+        next poll report the ceiling; it self-clears, as the real one does
+        once it has been reported for this capture."""
+        if not self.capped:
+            return False
+        self.capped = False
+        return True
+
+    def recording_status(self) -> RecordingStatus:
+        """Mirrors AudioCapture.recording_status: where this capture is on disk,
+        and whether the file is whole."""
+        return self.recording
 
     def take_stream_status(self) -> str | None:
         """Mirrors AudioCapture.take_stream_status; the fake never sees flags."""
@@ -209,22 +228,15 @@ class FakeNvimSession:
 class FakeX11:
     """Stands in for the module-level functions in :mod:`voice_kb.x11`.
 
-    Never shells out to ``xrandr``/``xdotool``; call counts are what the
-    subprocess-storm regression test asserts a bound on.
+    Never shells out to ``xrandr``.
     """
 
     def __init__(self) -> None:
         self.outputs_calls = 0
-        self.focused_calls = 0
         self.outputs_result: list[Output] = [
             Output(name="fake-1", rect=Rect(x=0, y=0, width=1920, height=1080), primary=True)
         ]
-        self.focused_result: Rect | None = None
 
     def outputs(self) -> list[Output]:
         self.outputs_calls += 1
         return self.outputs_result
-
-    def focused_window_rect(self) -> Rect | None:
-        self.focused_calls += 1
-        return self.focused_result

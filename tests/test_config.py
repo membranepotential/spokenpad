@@ -13,8 +13,8 @@ from voice_kb.config import (
     ConfigError,
     HotkeyConfig,
     NvimConfig,
-    OverlayConfig,
     PreviewConfig,
+    RecordingConfig,
     TextConfig,
 )
 
@@ -59,16 +59,15 @@ def test_toml_round_trip(tmp_path: Path) -> None:
         replacements = { teh = "the" }
         trailing_space = true
 
-        [overlay]
-        width = 300
-        height = 120
-        margin_px = 10
-        preview_height = 40
-
         [preview]
         enabled = false
         interval_ms = 500
         max_seconds = 6.5
+
+        [recording]
+        enabled = false
+        dir = "~/captures"
+        max_total_bytes = 1024
         """,
         encoding="utf-8",
     )
@@ -83,8 +82,10 @@ def test_toml_round_trip(tmp_path: Path) -> None:
     assert cfg.text.fillers == ("uh", "erm")
     assert cfg.text.replacements == {"teh": "the"}
     assert cfg.text.trailing_space is True
-    assert cfg.overlay == OverlayConfig(width=300, height=120, margin_px=10, preview_height=40)
     assert cfg.preview == PreviewConfig(enabled=False, interval_ms=500, max_seconds=6.5)
+    assert cfg.recording == RecordingConfig(
+        enabled=False, dir=Path.home() / "captures", max_total_bytes=1024
+    )
 
 
 # -- unknown section / key ---------------------------------------------------
@@ -140,20 +141,6 @@ def test_too_frequent_preview_interval_is_rejected() -> None:
 def test_non_positive_preview_window_is_rejected() -> None:
     with pytest.raises(ConfigError, match="max_seconds"):
         Config.from_mapping({"preview": {"max_seconds": 0}})
-
-
-def test_negative_preview_height_is_rejected() -> None:
-    with pytest.raises(ConfigError, match="preview_height"):
-        Config.from_mapping({"overlay": {"preview_height": -1}})
-
-
-def test_total_height_includes_the_preview_band_only_when_it_is_enabled() -> None:
-    """The overlay widget and its placement both size off ``total_height``, so
-    this is the single place the preview band's existence is expressed."""
-    cfg = OverlayConfig(height=96, preview_height=64)
-
-    assert cfg.total_height(preview_band=True) == 160
-    assert cfg.total_height(preview_band=False) == 96
 
 
 # -- relative model_dir resolution -------------------------------------------
@@ -419,3 +406,43 @@ def test_opting_out_of_transparency_is_passed_through() -> None:
 def _colorscheme_argument(cfg: NvimConfig) -> str:
     argv = cfg.spawn_argv(socket=Path("/tmp/x.sock"), target=Path("/tmp/x.md"), at=None)
     return argv[argv.index("-c") + 1]
+
+
+# -- recording ---------------------------------------------------------------
+
+
+def test_recording_is_on_by_default_and_lives_in_the_state_directory() -> None:
+    """A safety net that has to be switched on is switched off exactly when it
+    turns out to have been needed -- which is what happened on 2026-09-08."""
+    cfg = RecordingConfig()
+    assert cfg.enabled is True
+    assert cfg.dir.parts[-2:] == ("voice-kb", "audio")
+    assert cfg.max_total_bytes == 5 * 1024**3
+
+
+def test_non_positive_recording_budget_is_rejected() -> None:
+    """Zero would mean pruning every capture the moment it is written, which
+    is indistinguishable from recording being off but looks like it is on."""
+    with pytest.raises(ConfigError, match="max_total_bytes"):
+        Config.from_mapping({"recording": {"max_total_bytes": 0}})
+
+
+def test_recording_dir_expands_a_variable_and_a_tilde(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VOICE_KB_TEST_STATE", "/var/tmp/state")
+    cfg = Config.from_mapping({"recording": {"dir": "$VOICE_KB_TEST_STATE/audio"}})
+    assert cfg.recording.dir == Path("/var/tmp/state/audio")
+
+
+def test_recording_dir_referencing_an_unset_variable_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Left as-is, ``expandvars`` would create a directory literally named
+    ``$VOICE_KB_UNSET`` in the user's home."""
+    monkeypatch.delenv("VOICE_KB_UNSET", raising=False)
+    with pytest.raises(ConfigError, match=re.escape("recording.dir")):
+        Config.from_mapping({"recording": {"dir": "$VOICE_KB_UNSET/audio"}})
+
+
+def test_unknown_recording_key_is_rejected() -> None:
+    with pytest.raises(ConfigError, match=r"\[recording\]"):
+        Config.from_mapping({"recording": {"max_bytes": 1}})

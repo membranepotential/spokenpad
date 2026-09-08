@@ -5,7 +5,7 @@ injected, a missing model silently produced nothing, and holding the hotkey
 spawned ~60 subprocesses/second and stalled the whole event loop. Unit tests
 on ``state.py``/``text.py``/etc. in isolation cannot see any of that -- these
 tests drive the real :class:`~voice_kb.app.Daemon` (state machine, ``_apply``,
-``_sync_indicators``, ``_on_decoded``, the generation counter) against fakes
+``_sync_indicators``, ``_on_decoded``, the utterance id) against fakes
 for every hardware/subprocess boundary, so a regression in how those pieces
 are wired together shows up here even when every module still passes in
 isolation.
@@ -31,7 +31,7 @@ would cross to one of those threads via a queued signal
 *receiving* end of the result signals (``_Worker.decoded``/``decode_failed``,
 ``_NvimBridge.appended``/``append_failed``) lives on the main thread and the
 call happens from the main thread, Qt resolves that connection to a direct
-(synchronous) call -- so the real generation check in ``_on_decoded`` (and the
+(synchronous) call -- so the real utterance check in ``_on_decoded`` (and the
 real success/failure handling in ``_on_appended``/``_on_append_failed``)
 still run for real; only the thread hop itself is skipped.
 """
@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import cast
@@ -49,14 +50,15 @@ import pytest
 from fakes import FakeAudioCapture, FakeNvimSession, FakeTranscriber, FakeX11
 from PySide6.QtWidgets import QApplication
 
+from voice_kb import app as app_module
 from voice_kb import x11
 from voice_kb.app import Daemon
 from voice_kb.asr import ModelMissingError, Transcriber, TranscriptionResult
 from voice_kb.audio import AudioCapture, MonoAudio
-from voice_kb.config import AsrConfig, Config, HotkeyConfig, OverlayConfig
-from voice_kb.geometry import Rect
+from voice_kb.config import AsrConfig, Config, HotkeyConfig, RecordingConfig
 from voice_kb.hotkey import HotkeyWatcher
 from voice_kb.nvim import AppendFailed, NvimSession
+from voice_kb.recorder import CaptureRecorder, NotRecorded, Recorded, Truncated
 from voice_kb.state import (
     MIN_HOLD_SECONDS,
     Cancelled,
@@ -113,22 +115,22 @@ def _nvim_preview_spy(daemon: Daemon) -> list[str]:
 
 
 def _decode_spy(daemon: Daemon) -> list[int]:
-    """Records every generation a decode was requested for."""
+    """Records every utterance a decode was requested for."""
     calls: list[int] = []
-    daemon._decode_requested.connect(lambda samples, generation: calls.append(generation))
+    daemon._decode_requested.connect(lambda samples, utterance: calls.append(utterance))
     return calls
 
 
-def _preview_spy(daemon: Daemon) -> list[tuple[MonoAudio, int]]:
-    """Records every ``(samples, generation)`` a preview was requested for.
+def _preview_spy(daemon: Daemon) -> list[tuple[MonoAudio, int, int]]:
+    """Records every ``(samples, start, utterance)`` a tick was requested for.
 
     As :func:`_decode_spy`: the worker thread is never started, so tests take
     what the daemon asked for here and hand it to ``_Worker.run_preview``
     themselves, exactly where Qt would have made the thread hop.
     """
-    calls: list[tuple[MonoAudio, int]] = []
+    calls: list[tuple[MonoAudio, int, int]] = []
     daemon._preview_requested.connect(
-        lambda samples, generation: calls.append((samples, generation))
+        lambda samples, start, utterance: calls.append((samples, start, utterance))
     )
     return calls
 
@@ -183,19 +185,19 @@ def test_cancelled_decode_is_never_appended(make_daemon: DaemonFactory) -> None:
     daemon._dispatch(KeyDown(at=0.0))
     daemon._dispatch(KeyUp(at=0.5))
     assert isinstance(_state(daemon), Transcribing)
-    in_flight_generation = daemon._generation
+    in_flight_utterance = daemon._utterance
 
     daemon._dispatch(Cancelled(at=0.6))
     assert isinstance(_state(daemon), Idle)
-    assert daemon._generation == in_flight_generation + 1
+    assert in_flight_utterance in daemon._aborted
 
     _transcriber(daemon).next_result = TranscriptionResult(
         text="late result", elapsed_seconds=0.1
     )
 
     # The decode that was already running when Cancelled arrived completes
-    # now, off-band, with the generation it was started under.
-    daemon._worker.run_decode(_audio(daemon).next_samples, in_flight_generation)
+    # now, off-band, with the utterance it was started under.
+    daemon._worker.run_decode(_audio(daemon).next_samples, in_flight_utterance)
 
     assert append_calls == []
     assert isinstance(_state(daemon), Idle)
@@ -209,12 +211,12 @@ def test_uncancelled_decode_is_appended(make_daemon: DaemonFactory) -> None:
 
     daemon._dispatch(KeyDown(at=0.0))
     daemon._dispatch(KeyUp(at=0.5))
-    generation = daemon._generation
+    utterance = daemon._utterance
 
     _transcriber(daemon).next_result = TranscriptionResult(
         text="on time result", elapsed_seconds=0.1
     )
-    daemon._worker.run_decode(_audio(daemon).next_samples, generation)
+    daemon._worker.run_decode(_audio(daemon).next_samples, utterance)
 
     assert append_calls == ["on time result"]
     assert isinstance(_state(daemon), Idle)
@@ -223,28 +225,26 @@ def test_uncancelled_decode_is_appended(make_daemon: DaemonFactory) -> None:
 # -- 2. holding the key does not cause an X11 subprocess storm ---------------
 
 
-def test_holding_key_does_not_cause_x11_subprocess_storm(
-    make_daemon: DaemonFactory, fake_x11: FakeX11
-) -> None:
-    """Regression: holding the hotkey used to reposition the overlay (and so
-    shell out to xrandr/xdotool) on every single dispatched event -- ~2 calls
-    per event, ~122 calls for a 2s hold. Repositioning must only happen on an
-    actual phase change. The overlay is off by default now, so it is turned
-    on explicitly here -- otherwise this would pass trivially by never
-    reaching the placement code at all.
+def test_holding_key_does_not_flood_the_indicator(make_daemon: DaemonFactory) -> None:
+    """Regression: holding the hotkey used to reposition the (since deleted)
+    Qt overlay, shelling out to xrandr/xdotool on every dispatched event --
+    ~60 subprocesses a second, enough to delay the key-up by 22s. What is
+    left on the per-event path is the indicator push, and it must happen on
+    an actual phase change only.
     """
-    daemon = make_daemon(Config(overlay=OverlayConfig(enabled=True)))
+    daemon = make_daemon(None)
+    phases: list[Phase] = []
+    daemon._nvim_phase_changed.connect(phases.append)
 
     daemon._dispatch(KeyDown(at=0.0))
-    # Simulate a 2-second hold's worth of events reaching the daemon without
-    # ever leaving the Recording phase -- what a held key looked like before
+    # A 2-second hold's worth of events reaching the daemon without ever
+    # leaving the Recording phase -- what a held key looked like before
     # auto-repeat was dropped at the hotkey layer.
     for i in range(60):
         daemon._dispatch(KeyDown(at=0.01 * (i + 1)))
     daemon._dispatch(Cancelled(at=2.0))
 
-    assert fake_x11.outputs_calls <= 5
-    assert fake_x11.focused_calls <= 5
+    assert phases == [Phase.RECORDING, Phase.IDLE]
 
 
 # -- 3. auto-repeat does not reach the daemon at all --------------------------
@@ -306,12 +306,12 @@ def test_happy_path_key_down_to_appended_postprocessed_text(
     daemon._dispatch(KeyDown(at=0.0))
     assert _audio(daemon).start_calls == 1
     daemon._dispatch(KeyUp(at=0.5))
-    generation = daemon._generation
+    utterance = daemon._utterance
 
     _transcriber(daemon).next_result = TranscriptionResult(
         text="um hello world", elapsed_seconds=0.05
     )
-    daemon._worker.run_decode(_audio(daemon).next_samples, generation)
+    daemon._worker.run_decode(_audio(daemon).next_samples, utterance)
 
     assert append_calls == ["hello world"]
     assert isinstance(_state(daemon), Idle)
@@ -337,7 +337,7 @@ def test_press_during_inflight_decode_starts_new_capture_and_both_results_land(
     daemon._dispatch(KeyDown(at=0.0))
     daemon._dispatch(KeyUp(at=0.5))
     assert isinstance(_state(daemon), Transcribing)
-    first_generation = daemon._generation
+    first_utterance = daemon._utterance
     first_samples = _audio(daemon).next_samples.copy()
 
     # A press arrives while the first decode is still "in flight" (we have
@@ -348,16 +348,16 @@ def test_press_during_inflight_decode_starts_new_capture_and_both_results_land(
 
     # The earlier decode now completes; its result must still be appended.
     transcriber.next_result = TranscriptionResult(text="first result", elapsed_seconds=0.1)
-    daemon._worker.run_decode(first_samples, first_generation)
+    daemon._worker.run_decode(first_samples, first_utterance)
     assert append_calls[-1] == "first result"
     # The daemon is still mid-recording the second utterance.
     assert isinstance(_state(daemon), Recording)
 
     daemon._dispatch(KeyUp(at=1.0))
-    second_generation = daemon._generation
-    assert second_generation == first_generation  # nothing cancelled, so unchanged
+    second_utterance = daemon._utterance
+    assert second_utterance == first_utterance + 1
     transcriber.next_result = TranscriptionResult(text="second result", elapsed_seconds=0.1)
-    daemon._worker.run_decode(_audio(daemon).next_samples, second_generation)
+    daemon._worker.run_decode(_audio(daemon).next_samples, second_utterance)
 
     assert append_calls == ["first result", "second result"]
     assert isinstance(_state(daemon), Idle)
@@ -388,10 +388,10 @@ def test_decode_that_raises_does_not_kill_daemon_and_returns_to_idle(
 
     daemon._dispatch(KeyDown(at=0.0))
     daemon._dispatch(KeyUp(at=0.5))
-    generation = daemon._generation
+    utterance = daemon._utterance
 
     _transcriber(daemon).next_result = RuntimeError("decode blew up")
-    daemon._worker.run_decode(_audio(daemon).next_samples, generation)
+    daemon._worker.run_decode(_audio(daemon).next_samples, utterance)
 
     assert append_calls == []
     assert isinstance(_state(daemon), Idle)
@@ -401,13 +401,12 @@ def test_decode_that_raises_does_not_kill_daemon_and_returns_to_idle(
     assert isinstance(_state(daemon), Recording)
 
 
-# -- 9. the live preview never touches the committed decode -------------------
+# -- 9. the open-tail preview is cosmetic ------------------------------------
 #
-# The preview relaxes constraint 3 ("one-shot decode") in exactly one
-# direction: extra *cosmetic* decodes are allowed, the *committed* decode is
-# still one shot over the whole buffer. These tests pin the three invariants
-# that keep the relaxation from turning back into the failure it came from --
-# a streaming decode that made the user wait and silently dropped audio.
+# A tick decodes the open tail once and shows it; that is an extra decode of
+# audio that is still growing, so these pin the invariants that keep it on the
+# right side of docs/constraints.md: it never reaches the buffer, it is
+# bounded, and it can never make the user wait.
 
 
 def test_preview_mid_recording_reaches_the_nvim_indicator(make_daemon: DaemonFactory) -> None:
@@ -419,46 +418,45 @@ def test_preview_mid_recording_reaches_the_nvim_indicator(make_daemon: DaemonFac
     daemon._request_preview()  # what the preview QTimer does, once a second
 
     assert len(requests) == 1
-    # The WHOLE utterance so far, not a trailing window: a window physically
-    # discards the start of the sentence, so text the user has already watched
-    # appear vanishes in chunks while they are still speaking.
-    assert _audio(daemon).snapshot_calls == [None]
+    # From the committed offset -- nothing committed yet, so from the start.
+    assert _audio(daemon).snapshot_calls == [0]
 
-    samples, generation = requests[0]
+    samples, start, utterance = requests[0]
     _transcriber(daemon).next_result = TranscriptionResult(
         text="um hello world", elapsed_seconds=0.02
     )
-    daemon._worker.run_preview(samples, generation)
+    daemon._worker.run_preview(samples, start, utterance)
 
     # Post-processed on the way to the indicator, like the committed transcript.
     assert previews[-1] == "hello world"
 
 
-def test_preview_from_a_previous_generation_is_dropped(make_daemon: DaemonFactory) -> None:
-    """A preview requested before a cancellation must not land in the
+def test_preview_from_a_previous_utterance_is_dropped(make_daemon: DaemonFactory) -> None:
+    """A tick requested before a cancellation must not land in the
     indicator of the *next* utterance -- the same staleness rule the
-    committed decode already obeys."""
+    committed chunks obey."""
     daemon = make_daemon(None)
     requests = _preview_spy(daemon)
     previews = _nvim_preview_spy(daemon)
 
     daemon._dispatch(KeyDown(at=0.0))
     daemon._request_preview()
-    stale_samples, stale_generation = requests[0]
+    stale = requests[0]
 
-    # Key up, then cancel the decode: this is what bumps the generation.
+    # Key up, then cancel the decode.
     daemon._dispatch(KeyUp(at=0.5))
     daemon._dispatch(Cancelled(at=0.6))
-    assert daemon._generation != stale_generation
+    assert stale[2] in daemon._aborted
 
-    # A new utterance starts, which re-arms previews.
+    # A new utterance starts, which re-arms ticks and bumps the id.
     daemon._dispatch(KeyDown(at=1.0))
     assert isinstance(_state(daemon), Recording)
+    assert daemon._utterance != stale[2]
 
     _transcriber(daemon).next_result = TranscriptionResult(
         text="stale preview", elapsed_seconds=0.02
     )
-    daemon._worker.run_preview(stale_samples, stale_generation)
+    daemon._worker.run_preview(*stale)
 
     assert "stale preview" not in previews
     assert previews[-1] == ""
@@ -471,13 +469,13 @@ def test_preview_arriving_after_key_up_is_dropped(make_daemon: DaemonFactory) ->
     previews = _nvim_preview_spy(daemon)
 
     daemon._dispatch(KeyDown(at=0.0))
-    generation = daemon._generation
+    utterance = daemon._utterance
     daemon._dispatch(KeyUp(at=0.5))
     assert isinstance(_state(daemon), Transcribing)
 
     # Straight from the worker's signal, bypassing the worker-side abandon
     # check, so this pins the *receiving* guard on its own.
-    daemon._worker.previewed.emit("late preview", generation)
+    daemon._worker.previewed.emit("late preview", utterance, 0)
 
     assert "late preview" not in previews
     assert previews[-1] == ""
@@ -496,17 +494,16 @@ def test_abandon_flag_skips_a_queued_preview_entirely(make_daemon: DaemonFactory
 
     daemon._dispatch(KeyDown(at=0.0))
     daemon._request_preview()
-    queued_samples, queued_generation = requests[0]
+    queued = requests[0]
 
     daemon._dispatch(KeyUp(at=0.5))
-    assert daemon._worker.abandon_previews.is_set()
 
     transcriber = _transcriber(daemon)
     decodes_before = len(transcriber.calls)
     transcriber.next_result = TranscriptionResult(text="never decoded", elapsed_seconds=0.02)
 
-    # The queued preview finally reaches the worker, after the key-up.
-    daemon._worker.run_preview(queued_samples, queued_generation)
+    # The queued tick finally reaches the worker, after the key-up.
+    daemon._worker.run_preview(*queued)
 
     assert len(transcriber.calls) == decodes_before, "the preview was decoded anyway"
     assert "never decoded" not in previews
@@ -516,9 +513,10 @@ def test_abandon_flag_skips_a_queued_preview_entirely(make_daemon: DaemonFactory
 def test_appended_text_comes_only_from_the_committed_decode(
     make_daemon: DaemonFactory,
 ) -> None:
-    """Invariant 1: previews are cosmetic. Even with a preview that decoded to
-    something completely different, the appended text is produced by exactly
-    one decode of the complete captured buffer at key release.
+    """Previews are cosmetic. Without a segmenter nothing ever settles, so
+    even with a preview that decoded to something completely different, the
+    appended text is produced by exactly one decode of the complete captured
+    buffer at key release.
     """
     daemon = make_daemon(None)
     append_calls = _append_spy(daemon)
@@ -537,7 +535,7 @@ def test_appended_text_comes_only_from_the_committed_decode(
 
     daemon._dispatch(KeyUp(at=0.5))
     transcriber.next_result = TranscriptionResult(text="committed text", elapsed_seconds=0.1)
-    daemon._worker.run_decode(audio.next_samples, daemon._generation)
+    daemon._worker.run_decode(audio.next_samples, daemon._utterance)
 
     assert append_calls == ["committed text"]
     # Exactly one decode saw the full buffer, and the preview's window never
@@ -638,64 +636,11 @@ def test_capture_far_shorter_than_the_hold_is_reported_as_an_error(
     assert caplog.text == ""
 
 
-def test_overlay_is_placed_from_qt_geometry_not_xrandr_geometry(
-    make_daemon: DaemonFactory,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The overlay was invisible for the whole of the project's life.
-
-    Placement was computed from xrandr, which reports device pixels, and handed
-    to Qt's ``move()``, which takes logical units whenever the device pixel
-    ratio is not 1. With ``Xft.dpi: 192`` (ratio 2.0) the overlay landed at
-    y=3936 on a 2160px-tall screen -- mapped, viewable, painted, and 1776px
-    below the bottom edge. Every offscreen render test passed throughout,
-    because a render test never involves a screen.
-
-    So: pick the output with xrandr, place on it with Qt's own rect. This pins
-    that the *Qt* rect is what reaches the placement maths. (The placement
-    computation itself does not care whether the overlay widget is enabled.)
-    """
-    daemon = make_daemon(None)
-
-    # A screen Qt describes very differently from xrandr: same panel, half the
-    # logical size, exactly what a 2.0 device pixel ratio produces.
-    monkeypatch.setattr(
-        "voice_kb.app.screen_rect",
-        lambda name: Rect(x=0, y=0, width=960, height=540),
-    )
-    position = daemon._overlay_position()
-
-    assert position is not None
-    # Centred and bottom-aligned within the QT rect (960x540), not the 1920x1080
-    # one the fake xrandr reports.
-    cfg = daemon._config.overlay
-    height = cfg.total_height(preview_band=daemon._config.preview.enabled)
-    assert position.x == (960 - cfg.width) // 2
-    assert position.y == 540 - cfg.margin_px - height
-
-
-def test_overlay_falls_back_to_xrandr_when_qt_does_not_know_the_screen(
-    make_daemon: DaemonFactory,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An unrecognised screen name must still put the overlay somewhere. At a
-    device pixel ratio of 1 the two rects are identical anyway, so the fallback
-    is only wrong on the setup where Qt would have known the name."""
-    daemon = make_daemon(None)
-    monkeypatch.setattr("voice_kb.app.screen_rect", lambda name: None)
-
-    position = daemon._overlay_position()
-
-    assert position is not None
-    cfg = daemon._config.overlay
-    height = cfg.total_height(preview_band=daemon._config.preview.enabled)
-    assert position.y == 1080 - cfg.margin_px - height
-
-
 def test_previews_stop_past_the_cap_without_clearing_what_is_on_screen(
     make_daemon: DaemonFactory,
 ) -> None:
-    """Preview cost grows with the utterance now, so it has to stop somewhere.
+    """Without a segmenter nothing settles, every preview decodes the whole
+    capture, and cost grows with the utterance -- so it has to stop somewhere.
 
     Stopping must not look like the failure it was introduced to fix: the text
     already shown stays exactly where it is. Silence from the previewer is not
@@ -713,11 +658,11 @@ def test_previews_stop_past_the_cap_without_clearing_what_is_on_screen(
     daemon._request_preview()
     assert len(requests) == 1
 
-    samples, generation = requests[0]
+    samples, start, utterance = requests[0]
     _transcriber(daemon).next_result = TranscriptionResult(
         text="everything said so far", elapsed_seconds=0.5
     )
-    daemon._worker.run_preview(samples, generation)
+    daemon._worker.run_preview(samples, start, utterance)
     assert previews[-1] == "everything said so far"
 
     # Past the cap: no new request, and critically the old text is untouched.
@@ -767,26 +712,26 @@ def test_a_preview_that_shrank_never_replaces_a_longer_one(
     daemon._dispatch(KeyDown(at=0.0))
 
     daemon._request_preview()
-    samples, generation = requests[-1]
+    samples, start, utterance = requests[-1]
     _transcriber(daemon).next_result = TranscriptionResult(
         text="Okay, we are now at the new model.", elapsed_seconds=0.3
     )
-    daemon._worker.run_preview(samples, generation)
+    daemon._worker.run_preview(samples, start, utterance)
     assert previews[-1] == "Okay, we are now at the new model."
 
     daemon._request_preview()
-    samples, generation = requests[-1]
+    samples, start, utterance = requests[-1]
     _transcriber(daemon).next_result = TranscriptionResult(text="Okay.", elapsed_seconds=0.4)
-    daemon._worker.run_preview(samples, generation)
+    daemon._worker.run_preview(samples, start, utterance)
     assert previews[-1] == "Okay, we are now at the new model."
 
     # Growth still lands, so this is not a freeze.
     daemon._request_preview()
-    samples, generation = requests[-1]
+    samples, start, utterance = requests[-1]
     _transcriber(daemon).next_result = TranscriptionResult(
         text="Okay, we are now at the new model. The overlay is there.", elapsed_seconds=0.5
     )
-    daemon._worker.run_preview(samples, generation)
+    daemon._worker.run_preview(samples, start, utterance)
     assert previews[-1].endswith("The overlay is there.")
 
 
@@ -801,18 +746,18 @@ def test_each_utterance_starts_its_preview_from_nothing(
 
     daemon._dispatch(KeyDown(at=0.0))
     daemon._request_preview()
-    samples, generation = requests[-1]
+    samples, start, utterance = requests[-1]
     _transcriber(daemon).next_result = TranscriptionResult(
         text="a considerably longer first dictation than the second", elapsed_seconds=0.3
     )
-    daemon._worker.run_preview(samples, generation)
+    daemon._worker.run_preview(samples, start, utterance)
     daemon._dispatch(KeyUp(at=5.0))
 
     daemon._dispatch(KeyDown(at=6.0))
     daemon._request_preview()
-    samples, generation = requests[-1]
+    samples, start, utterance = requests[-1]
     _transcriber(daemon).next_result = TranscriptionResult(text="short", elapsed_seconds=0.2)
-    daemon._worker.run_preview(samples, generation)
+    daemon._worker.run_preview(samples, start, utterance)
     assert previews[-1] == "short"
 
 
@@ -825,8 +770,7 @@ def test_every_fake_still_matches_the_interface_it_stands_in_for() -> None:
     _assert_stands_in_for(FakeAudioCapture, AudioCapture)
     _assert_stands_in_for(FakeTranscriber, Transcriber)
     _assert_stands_in_for(FakeNvimSession, NvimSession)
-    for name in ("outputs", "focused_window_rect"):
-        assert _params(getattr(FakeX11, name)) == _params(getattr(x11, name))
+    assert _params(FakeX11.outputs) == _params(x11.outputs)
 
 
 # -- 11. the nvim seam: opening, appending, and phase changes -----------------
@@ -869,15 +813,8 @@ def test_failed_append_is_reported_and_does_not_take_the_daemon_down(
     assert isinstance(_state(daemon), Recording)
 
 
-def test_phase_changes_reach_the_nvim_bridge_even_when_the_overlay_is_disabled(
-    make_daemon: DaemonFactory,
-) -> None:
-    """Regression risk called out explicitly: the phase-change detection used
-    to sit behind an ``if self._overlay is None: return``, which would freeze
-    the nvim winbar the moment the overlay -- off by default now -- was
-    disabled."""
+def test_phase_changes_reach_the_nvim_bridge(make_daemon: DaemonFactory) -> None:
     daemon = make_daemon(None)
-    assert daemon._overlay is None
     phases: list[Phase] = []
     daemon._nvim_phase_changed.connect(phases.append)
 
@@ -894,15 +831,25 @@ class _FakeSegmenter:
     ``count`` runs of speech. Stands in for ``voice_kb.vad.SpeechSegmenter``
     so these tests need no model and no real audio.
 
-    ``counts`` scripts a different number per call, which is what previews
-    need: the real segmenter sees a shorter tail each time as settled chunks
-    are consumed, and so returns fewer chunks, while a fixed ``count`` would
-    keep splitting whatever remains into the same number of pieces forever.
+    Every piece but the last is ``settled`` -- the rule the real segmenter
+    applies to chunks before the last -- and the last is settled only with
+    ``settle_last``, standing in for a closed chunk followed by a second of
+    silence. ``end_frame`` is where each piece ends in the input, so the
+    worker's committed offset advances exactly as it would on real audio.
+
+    ``counts`` scripts a different number per call, which is what ticks
+    need: the real segmenter sees a shorter remainder each time as settled
+    chunks are committed, and so returns fewer chunks, while a fixed
+    ``count`` would keep splitting whatever remains into the same number of
+    pieces forever.
     """
 
-    def __init__(self, count: int, counts: list[int] | None = None) -> None:
+    def __init__(
+        self, count: int, counts: list[int] | None = None, *, settle_last: bool = False
+    ) -> None:
         self.count = count
         self.counts = counts or []
+        self.settle_last = settle_last
         self.calls: list[MonoAudio] = []
 
     def split(self, samples: MonoAudio) -> list[Segment]:
@@ -910,7 +857,12 @@ class _FakeSegmenter:
         n = self.counts.pop(0) if self.counts else self.count
         step = max(1, samples.size // n)
         return [
-            Segment(samples=samples[i * step : (i + 1) * step], start_seconds=float(i))
+            Segment(
+                samples=samples[i * step : (i + 1) * step],
+                start_seconds=float(i),
+                end_frame=(i + 1) * step,
+                settled=i < n - 1 or self.settle_last,
+            )
             for i in range(n)
         ]
 
@@ -935,7 +887,7 @@ def test_each_segment_lands_as_it_decodes_and_the_utterance_stays_one_paragraph(
         for text in ("first piece", "second piece", "third piece")
     ]
 
-    daemon._worker.run_decode(_audio(daemon).next_samples, daemon._generation)
+    daemon._worker.run_decode(_audio(daemon).next_samples, daemon._utterance)
 
     assert paragraphs == [
         ("first piece", False),
@@ -964,17 +916,17 @@ def test_a_segment_that_decodes_to_nothing_does_not_open_a_paragraph(
         for text in ("   ", "real text", "more text")
     ]
 
-    daemon._worker.run_decode(_audio(daemon).next_samples, daemon._generation)
+    daemon._worker.run_decode(_audio(daemon).next_samples, daemon._utterance)
 
     assert paragraphs == [("real text", False), ("more text", True)]
 
 
 def test_a_new_utterance_starts_a_new_paragraph(make_daemon: DaemonFactory) -> None:
-    """``continued`` resets per utterance, not per daemon.
+    """``continued`` is per utterance, not per daemon.
 
-    Without the reset in ``Decode``, every dictation after the first would be
-    glued onto the previous one -- exactly the "appending to the old dictation"
-    behaviour the one-file-per-window work removed.
+    Without it, every dictation after the first would be glued onto the
+    previous one -- exactly the "appending to the old dictation" behaviour the
+    one-file-per-window work removed.
     """
     daemon = make_daemon(None)
     paragraphs = _paragraph_spy(daemon)
@@ -987,7 +939,7 @@ def test_a_new_utterance_starts_a_new_paragraph(make_daemon: DaemonFactory) -> N
             TranscriptionResult(text=text, elapsed_seconds=0.1),
             TranscriptionResult(text="tail", elapsed_seconds=0.1),
         ]
-        daemon._worker.run_decode(_audio(daemon).next_samples, daemon._generation)
+        daemon._worker.run_decode(_audio(daemon).next_samples, daemon._utterance)
 
     assert [continued for _, continued in paragraphs] == [False, True, False, True]
 
@@ -1005,10 +957,10 @@ def test_cancelling_stops_the_decode_between_segments(make_daemon: DaemonFactory
 
     daemon._dispatch(KeyDown(at=0.0))
     daemon._dispatch(KeyUp(at=0.5))
-    generation = daemon._generation
-    daemon._worker.abandon_decode.set()
+    utterance = daemon._utterance
+    daemon._worker.abandon(utterance)
 
-    daemon._worker.run_decode(_audio(daemon).next_samples, generation)
+    daemon._worker.run_decode(_audio(daemon).next_samples, utterance)
 
     assert paragraphs == []
 
@@ -1027,7 +979,7 @@ def test_without_a_segmenter_the_whole_buffer_is_decoded_exactly_as_before(
         text="um the whole thing", elapsed_seconds=0.1
     )
 
-    daemon._worker.run_decode(_audio(daemon).next_samples, daemon._generation)
+    daemon._worker.run_decode(_audio(daemon).next_samples, daemon._utterance)
 
     assert paragraphs == [("the whole thing", False)]
     assert len(_transcriber(daemon).calls) == 1
@@ -1057,7 +1009,7 @@ def test_an_utterance_is_never_lost_to_chunking(make_daemon: DaemonFactory) -> N
         TranscriptionResult(text="the whole thing after all", elapsed_seconds=0.3),
     ]
 
-    daemon._worker.run_decode(_audio(daemon).next_samples, daemon._generation)
+    daemon._worker.run_decode(_audio(daemon).next_samples, daemon._utterance)
 
     assert appended == ["the whole thing after all"]
     assert len(_transcriber(daemon).calls) == 4, "three chunks, then the retry"
@@ -1079,7 +1031,7 @@ def test_the_retry_does_not_fire_when_a_chunk_produced_text(
         TranscriptionResult(text="", elapsed_seconds=0.1),
     ]
 
-    daemon._worker.run_decode(_audio(daemon).next_samples, daemon._generation)
+    daemon._worker.run_decode(_audio(daemon).next_samples, daemon._utterance)
 
     assert len(_transcriber(daemon).calls) == 3, "no retry"
 
@@ -1090,91 +1042,718 @@ def test_a_cancelled_decode_is_not_retried(make_daemon: DaemonFactory) -> None:
     daemon._worker._segmenter = cast(SpeechSegmenter, _FakeSegmenter(3))
     daemon._dispatch(KeyDown(at=0.0))
     daemon._dispatch(KeyUp(at=0.5))
-    daemon._worker.abandon_decode.set()
+    daemon._worker.abandon(daemon._utterance)
 
-    daemon._worker.run_decode(_audio(daemon).next_samples, daemon._generation)
+    daemon._worker.run_decode(_audio(daemon).next_samples, daemon._utterance)
 
     assert _transcriber(daemon).calls == []
 
 
-# --------------------------------------------------------- incremental preview
+# --------------------------------------------------------- progressive commit
+#
+# docs/progressive-commit.md. A tick commits the chunks that have settled and
+# previews the open tail; the release decodes only what is past the committed
+# offset. The offset lives on the worker; the daemon holds a lagging hint.
 
 
-def test_a_preview_only_decodes_the_open_tail(make_daemon: DaemonFactory) -> None:
-    """Settled chunks are remembered, not decoded again.
+def _result(text: str) -> TranscriptionResult:
+    return TranscriptionResult(text=text, elapsed_seconds=0.1)
 
-    This is what makes a preview cost the same at ten minutes as at ten
-    seconds. Decoding from the beginning every time is why previews used to
-    have to stop being issued past a time limit at all.
+
+def test_a_settled_chunk_lands_while_still_recording(make_daemon: DaemonFactory) -> None:
+    """The point of the change: text is in the buffer before the key comes up.
+
+    Three chunks on the tick. The first two are settled and are appended as
+    one growing paragraph; the third is the open tail and is only previewed.
+    """
+    daemon = make_daemon(None)
+    paragraphs = _paragraph_spy(daemon)
+    previews = _nvim_preview_spy(daemon)
+    requests = _preview_spy(daemon)
+    daemon._worker._segmenter = cast(SpeechSegmenter, _FakeSegmenter(3))
+
+    daemon._dispatch(KeyDown(at=0.0))
+    daemon._request_preview()
+    _transcriber(daemon).results = [
+        _result(t) for t in ("first settled", "second settled", "open tail")
+    ]
+    daemon._worker.run_preview(*requests[-1])
+
+    assert isinstance(_state(daemon), Recording)
+    assert paragraphs == [("first settled", False), ("second settled", True)]
+    assert previews[-1] == "open tail"
+
+
+def test_the_release_decodes_only_the_audio_past_the_committed_offset(
+    make_daemon: DaemonFactory,
+) -> None:
+    """Every committed sample is decoded exactly once: what a tick committed is
+    never handed to the recogniser again, at release or ever."""
+    daemon = make_daemon(None)
+    appended = _append_spy(daemon)
+    requests = _preview_spy(daemon)
+    audio = _audio(daemon)
+    audio.preview_samples = np.arange(900, dtype=np.float32)
+    audio.next_samples = np.arange(1500, dtype=np.float32)
+    daemon._worker._segmenter = cast(SpeechSegmenter, _FakeSegmenter(3))
+    transcriber = _transcriber(daemon)
+
+    daemon._dispatch(KeyDown(at=0.0))
+    daemon._request_preview()
+    transcriber.results = [_result(t) for t in ("a", "b", "tail")]
+    daemon._worker.run_preview(*requests[-1])
+    assert daemon._worker._committed_from == 600
+    assert daemon._committed_hint == 600
+
+    daemon._dispatch(KeyUp(at=5.0))
+    release_from = len(transcriber.calls)
+    transcriber.results = [_result(t) for t in ("c", "d", "e")]
+    daemon._worker.run_decode(audio.next_samples, daemon._utterance)
+
+    assert appended == ["a", "b", "c", "d", "e"]
+    # The release split frames 600..1500 and never looked at 0..600.
+    assert all(call.min() >= 600 for call in transcriber.calls[release_from:])
+    assert sum(call.size for call in transcriber.calls[release_from:]) == 900
+    assert daemon._worker._committed_from == 0, "reset for the next utterance"
+    assert isinstance(_state(daemon), Idle)
+
+
+def test_the_next_tick_is_asked_for_the_audio_past_the_hint(make_daemon: DaemonFactory) -> None:
+    """The snapshot starts at the daemon's copy of the offset, so a tick's cost
+    is bounded by what is uncommitted rather than by the utterance -- and the
+    worker slices from its own offset, so a hint that lags is harmless."""
+    daemon = make_daemon(None)
+    requests = _preview_spy(daemon)
+    audio = _audio(daemon)
+    audio.preview_samples = np.arange(900, dtype=np.float32)
+    daemon._worker._segmenter = cast(SpeechSegmenter, _FakeSegmenter(3, counts=[3, 1]))
+    transcriber = _transcriber(daemon)
+
+    daemon._dispatch(KeyDown(at=0.0))
+    daemon._request_preview()
+    assert audio.snapshot_calls == [0]
+    transcriber.results = [_result(t) for t in ("a", "b", "tail")]
+    daemon._worker.run_preview(*requests[-1])
+
+    daemon._request_preview()
+    assert audio.snapshot_calls == [0, 600]
+    samples, start, utterance = requests[-1]
+    assert (start, samples.size) == (600, 300)
+
+    # A lagging hint: the worker is at 600, the daemon asked from 300.
+    stale = audio.preview_samples[300:]
+    calls_before = len(transcriber.calls)
+    transcriber.results = [_result("longer tail")]
+    daemon._worker.run_preview(stale, 300, utterance)
+
+    assert len(transcriber.calls) == calls_before + 1
+    assert transcriber.calls[-1].min() >= 600, "nothing below the real offset was decoded"
+
+
+def test_a_chunk_landing_resets_the_shrink_guard(make_daemon: DaemonFactory) -> None:
+    """Within one offset a shorter preview is instability and is ignored; once
+    a chunk commits, the tail starts over and a shorter one is the truth."""
+    daemon = make_daemon(None)
+    paragraphs = _paragraph_spy(daemon)
+    previews = _nvim_preview_spy(daemon)
+    requests = _preview_spy(daemon)
+    daemon._worker._segmenter = cast(SpeechSegmenter, _FakeSegmenter(1, counts=[1, 1, 2]))
+    transcriber = _transcriber(daemon)
+    daemon._dispatch(KeyDown(at=0.0))
+
+    daemon._request_preview()
+    transcriber.results = [_result("a long open tail so far")]
+    daemon._worker.run_preview(*requests[-1])
+    assert previews[-1] == "a long open tail so far"
+
+    daemon._request_preview()
+    transcriber.results = [_result("a long")]
+    daemon._worker.run_preview(*requests[-1])
+    assert previews[-1] == "a long open tail so far", "a shorter tail at the same offset is noise"
+
+    daemon._request_preview()
+    transcriber.results = [_result("a long open tail so far."), _result("so")]
+    daemon._worker.run_preview(*requests[-1])
+    assert paragraphs == [("a long open tail so far.", False)]
+    assert previews[-1] == "so", "the tail restarted below the chunk that landed"
+
+
+def test_a_cancel_during_recording_stops_further_commits(make_daemon: DaemonFactory) -> None:
+    """Cancel means stop adding. A chunk from a tick that was already mid-decode
+    when the cancel landed is dropped; what landed before it stays."""
+    daemon = make_daemon(None)
+    paragraphs = _paragraph_spy(daemon)
+    requests = _preview_spy(daemon)
+    daemon._worker._segmenter = cast(SpeechSegmenter, _FakeSegmenter(2))
+    transcriber = _transcriber(daemon)
+
+    daemon._dispatch(KeyDown(at=0.0))
+    daemon._request_preview()
+    transcriber.results = [_result("landed"), _result("tail")]
+    daemon._worker.run_preview(*requests[-1])
+    assert paragraphs == [("landed", False)]
+
+    cancelled = daemon._utterance
+    daemon._dispatch(Cancelled(at=1.0))
+    assert isinstance(_state(daemon), Idle)
+    # Straight from the worker's signal: a chunk a tick had already decoded.
+    daemon._worker.committed.emit("late chunk", cancelled, 800)
+    assert paragraphs == [("landed", False)]
+
+    # The next utterance re-arms ticks, but only for itself: a tick for the
+    # cancelled utterance is refused by id, not by a flag the re-arm cleared.
+    daemon._dispatch(KeyDown(at=2.0))
+    calls_before = len(transcriber.calls)
+    daemon._worker.run_preview(_audio(daemon).preview_samples, 0, cancelled)
+    assert len(transcriber.calls) == calls_before
+
+
+def test_a_slow_decode_from_the_previous_utterance_opens_its_own_paragraph(
+    make_daemon: DaemonFactory,
+) -> None:
+    """A chunk extends the last paragraph only if it is from the same utterance.
+
+    The old per-decode boolean was reset by the *next* utterance's decode, so
+    a late chunk of the previous one could open a fresh paragraph mid-passage
+    or glue itself onto the new one. It also must not settle the newer
+    capture's state when it finishes.
+    """
+    daemon = make_daemon(None)
+    paragraphs = _paragraph_spy(daemon)
+    daemon._worker._segmenter = cast(SpeechSegmenter, _FakeSegmenter(2))
+    transcriber = _transcriber(daemon)
+
+    daemon._dispatch(KeyDown(at=0.0))
+    daemon._dispatch(KeyUp(at=0.5))
+    first = daemon._utterance
+    # The next utterance starts, and its first chunk lands, before the first
+    # utterance's decode has finished.
+    daemon._dispatch(KeyDown(at=1.0))
+    daemon._worker.committed.emit("second utterance", daemon._utterance, 400)
+    transcriber.results = [_result("first a"), _result("first b")]
+    daemon._worker.run_decode(_audio(daemon).next_samples, first)
+
+    assert paragraphs == [
+        ("second utterance", False),
+        ("first a", False),
+        ("first b", True),
+    ]
+    assert isinstance(_state(daemon), Recording), "the old decode must not settle the new capture"
+
+
+def test_the_offset_never_carries_into_the_next_utterance(make_daemon: DaemonFactory) -> None:
+    """Explicitly, by utterance id -- not by noticing the capture got shorter."""
+    daemon = make_daemon(None)
+    paragraphs = _paragraph_spy(daemon)
+    previews = _nvim_preview_spy(daemon)
+    requests = _preview_spy(daemon)
+    daemon._worker._segmenter = cast(SpeechSegmenter, _FakeSegmenter(2))
+    transcriber = _transcriber(daemon)
+
+    daemon._dispatch(KeyDown(at=0.0))
+    daemon._request_preview()
+    transcriber.results = [_result("old settled"), _result("old tail")]
+    daemon._worker.run_preview(*requests[-1])
+    daemon._dispatch(KeyUp(at=0.5))
+    transcriber.results = [_result("old c"), _result("old d")]
+    daemon._worker.run_decode(_audio(daemon).next_samples, daemon._utterance)
+
+    daemon._dispatch(KeyDown(at=1.0))
+    daemon._request_preview()
+    assert requests[-1][1] == 0, "the hint is reset with the capture"
+    transcriber.results = [_result("new settled"), _result("new tail")]
+    daemon._worker.run_preview(*requests[-1])
+
+    assert paragraphs == [
+        ("old settled", False),
+        ("old c", True),
+        ("old d", True),
+        ("new settled", False),
+    ]
+    assert previews[-1] == "new tail"
+
+
+def test_without_a_segmenter_nothing_settles_before_release(make_daemon: DaemonFactory) -> None:
+    """A missing VAD model is a lost improvement, not a broken daemon: the
+    tick previews the whole capture and the release decodes all of it."""
+    daemon = make_daemon(None)
+    assert daemon._worker._segmenter is None
+    paragraphs = _paragraph_spy(daemon)
+    previews = _nvim_preview_spy(daemon)
+    requests = _preview_spy(daemon)
+    transcriber = _transcriber(daemon)
+
+    daemon._dispatch(KeyDown(at=0.0))
+    daemon._request_preview()
+    transcriber.next_result = _result("everything so far")
+    daemon._worker.run_preview(*requests[-1])
+    assert paragraphs == []
+    assert previews[-1] == "everything so far"
+
+    daemon._dispatch(KeyUp(at=0.5))
+    transcriber.next_result = _result("the whole thing")
+    daemon._worker.run_decode(_audio(daemon).next_samples, daemon._utterance)
+
+    assert paragraphs == [("the whole thing", False)]
+    assert transcriber.calls[-1].size == _audio(daemon).next_samples.size
+
+
+def test_the_whole_buffer_retry_covers_only_the_remainder(make_daemon: DaemonFactory) -> None:
+    """The chunking safety net still fires at release, over the audio the
+    release is responsible for -- not over chunks a tick already committed."""
+    daemon = make_daemon(None)
+    appended = _append_spy(daemon)
+    requests = _preview_spy(daemon)
+    audio = _audio(daemon)
+    audio.preview_samples = np.arange(900, dtype=np.float32)
+    audio.next_samples = np.arange(1500, dtype=np.float32)
+    daemon._worker._segmenter = cast(SpeechSegmenter, _FakeSegmenter(3))
+    transcriber = _transcriber(daemon)
+
+    daemon._dispatch(KeyDown(at=0.0))
+    daemon._request_preview()
+    transcriber.results = [_result(t) for t in ("a", "b", "tail")]
+    daemon._worker.run_preview(*requests[-1])
+
+    daemon._dispatch(KeyUp(at=5.0))
+    transcriber.results = [_result(""), _result(""), _result(""), _result("recovered")]
+    daemon._worker.run_decode(audio.next_samples, daemon._utterance)
+
+    assert appended == ["a", "b", "recovered"]
+    retry = transcriber.calls[-1]
+    assert retry.size == 900 and retry.min() >= 600, "the retry decoded the remainder, once"
+
+
+def test_a_tick_that_raises_keeps_the_utterance_ticking(
+    make_daemon: DaemonFactory, caplog: pytest.LogCaptureFixture
+) -> None:
+    """One bad decode must not end progressive commit for the rest of a
+    passage: the timer is re-armed off the failure, and it is said once."""
+    daemon = make_daemon(None)
+    requests = _preview_spy(daemon)
+    paragraphs = _paragraph_spy(daemon)
+    daemon._worker._segmenter = cast(SpeechSegmenter, _FakeSegmenter(2))
+    transcriber = _transcriber(daemon)
+    timer = daemon._preview_timer
+    assert timer is not None
+
+    daemon._dispatch(KeyDown(at=0.0))
+    daemon._request_preview()
+    timer.stop()  # as it is while a tick is in flight
+    transcriber.next_result = RuntimeError("onnx hiccup")
+    with caplog.at_level(logging.WARNING, logger="voice-kb"):
+        daemon._worker.run_preview(*requests[-1])
+
+    assert "a tick failed" in caplog.text
+    assert timer.isActive(), "the next tick is scheduled despite the failure"
+
+    daemon._request_preview()
+    transcriber.next_result = _result("recovered")
+    daemon._worker.run_preview(*requests[-1])
+    assert paragraphs == [("recovered", False)]
+
+
+def test_rearming_for_the_next_utterance_does_not_revive_a_queued_tick(
+    make_daemon: DaemonFactory,
+) -> None:
+    """A tick queued for utterance N when its key came up, reaching the worker
+    after utterance N+1 has re-armed ticking, must still be skipped: it would
+    otherwise run ahead of N's release decode."""
+    daemon = make_daemon(None)
+    requests = _preview_spy(daemon)
+    transcriber = _transcriber(daemon)
+
+    daemon._dispatch(KeyDown(at=0.0))
+    daemon._request_preview()
+    queued = requests[0]
+    daemon._dispatch(KeyUp(at=0.5))
+    daemon._dispatch(KeyDown(at=0.6))  # re-arms, for the new utterance only
+
+    calls_before = len(transcriber.calls)
+    daemon._worker.run_preview(*queued)
+
+    assert len(transcriber.calls) == calls_before
+
+
+def test_a_settled_last_chunk_is_committed_too(make_daemon: DaemonFactory) -> None:
+    """When the buffer ends in a second of silence after a closed chunk, the
+    segmenter marks the last chunk settled and there is no tail to show."""
+    daemon = make_daemon(None)
+    paragraphs = _paragraph_spy(daemon)
+    previews = _nvim_preview_spy(daemon)
+    requests = _preview_spy(daemon)
+    daemon._worker._segmenter = cast(SpeechSegmenter, _FakeSegmenter(1, settle_last=True))
+
+    daemon._dispatch(KeyDown(at=0.0))
+    daemon._request_preview()
+    _transcriber(daemon).results = [_result("all of it, settled")]
+    daemon._worker.run_preview(*requests[-1])
+
+    assert paragraphs == [("all of it, settled", False)]
+    assert previews[-1] == ""
+    assert daemon._committed_hint == _audio(daemon).preview_samples.size
+
+
+# -- 12. the recording, and recovering a transcript from it -------------------
+
+
+def test_the_capture_log_names_the_recording_it_landed_in(
+    make_daemon: DaemonFactory, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The two lines are only useful together: one says how much audio there
+    was, the other says which file holds it. That pairing is what makes a lost
+    transcript recoverable after the fact rather than merely regrettable."""
+    daemon = make_daemon(None)
+    _audio(daemon).recording = Recorded(
+        path=Path("/state/voice-kb/audio/capture-2026-09-08-141530.wav")
+    )
+
+    daemon._dispatch(KeyDown(at=0.0))
+    with caplog.at_level(logging.INFO, logger="voice-kb"):
+        daemon._dispatch(KeyUp(at=2.0))
+
+    assert "captured 2.0s held" in caplog.text
+    assert "recorded to /state/voice-kb/audio/capture-2026-09-08-141530.wav" in caplog.text
+
+
+def test_hitting_the_ceiling_is_loud_in_the_log_and_on_the_indicator(
+    make_daemon: DaemonFactory, caplog: pytest.LogCaptureFixture
+) -> None:
+    """What the 2026-09-08 loss did not do.
+
+    The cap fired with no log line and no indicator, and the docstring at the
+    time claimed it was "easy to notice in the overlay". It now says so at
+    WARNING *and* where the user is looking mid-utterance, and it says what to
+    do about it -- the audio is on disk, so this is recoverable news rather
+    than a loss.
     """
     daemon = make_daemon(None)
     previews = _nvim_preview_spy(daemon)
-    # Three chunks on the first preview, then only the still-open tail.
-    daemon._worker._segmenter = cast(SpeechSegmenter, _FakeSegmenter(1, counts=[3, 1]))
+    audio = _audio(daemon)
+    audio.recording = Recorded(
+        path=Path("/state/voice-kb/audio/capture-2026-09-08-141530.wav")
+    )
+    audio.capped = True
+
     daemon._dispatch(KeyDown(at=0.0))
+    with caplog.at_level(logging.WARNING, logger="voice-kb"):
+        daemon._poll_level()
 
-    _transcriber(daemon).results = [
-        TranscriptionResult(text="first settled", elapsed_seconds=0.1),
-        TranscriptionResult(text="second settled", elapsed_seconds=0.1),
-        TranscriptionResult(text="open tail", elapsed_seconds=0.1),
-    ]
-    daemon._worker.run_preview(_audio(daemon).preview_samples, daemon._generation)
-    assert previews[-1] == "first settled second settled open tail"
-
-    # The next preview re-decodes only the tail: the two settled chunks are
-    # already in the prefix and their audio is never looked at again.
-    calls_before = len(_transcriber(daemon).calls)
-    _transcriber(daemon).results = [TranscriptionResult(text="longer tail", elapsed_seconds=0.1)]
-    daemon._worker.run_preview(_audio(daemon).preview_samples, daemon._generation)
-
-    assert len(_transcriber(daemon).calls) - calls_before == 1
-    assert previews[-1] == "first settled second settled longer tail"
+    assert "in-memory ceiling" in caplog.text
+    assert "voice-kb transcribe /state/voice-kb/audio/capture-2026-09-08-141530.wav" in caplog.text
+    assert "voice-kb transcribe" in previews[-1]
 
 
-def test_preview_state_does_not_leak_into_the_next_utterance(
+def test_the_cap_warning_survives_the_preview_that_would_have_erased_it(
     make_daemon: DaemonFactory,
 ) -> None:
-    """A preview carrying the previous utterance's words would be worse than
-    no preview at all."""
+    """The warning has to still be there a minute later, not for one cycle.
+
+    Previews share the indicator's preview field, so the next one due ~1.1s
+    after the cap bit would have overwritten the notice and left the user
+    looking at a stale transcript for the rest of a 70-minute hold -- a cap
+    that is visible for one second is barely better than the silent one that
+    lost 3m41s. Past the ceiling the buffer is frozen anyway, so every further
+    preview is byte-identical work.
+    """
     daemon = make_daemon(None)
     previews = _nvim_preview_spy(daemon)
-    daemon._worker._segmenter = cast(SpeechSegmenter, _FakeSegmenter(2))
+    audio = _audio(daemon)
+    audio.recording = Recorded(
+        path=Path("/state/voice-kb/audio/capture-2026-09-08-141530.wav")
+    )
+    audio.capped = True
+
     daemon._dispatch(KeyDown(at=0.0))
-    _transcriber(daemon).next_result = TranscriptionResult(text="old words", elapsed_seconds=0.1)
-    daemon._worker.run_preview(_audio(daemon).preview_samples, daemon._generation)
-    assert "old words" in previews[-1]
+    daemon._poll_level()
+    warning = previews[-1]
 
-    daemon._dispatch(KeyUp(at=0.5))
-    daemon._worker.run_decode(_audio(daemon).next_samples, daemon._generation)
+    # The preview timer is stopped for the rest of the capture...
+    assert daemon._preview_timer is not None
+    assert not daemon._preview_timer.isActive()
+    # ...and a preview that was already in flight cannot land afterwards.
+    # Deliberately *longer* than the notice: the "previews only grow" rule
+    # that protects a preview from a shorter one would happily let this one
+    # through, so this only passes because being capped is a state the preview
+    # path cannot write through, not because of the length comparison.
+    late = "the words of a preview that was already decoding when the cap bit " * 6
+    assert len(late) > len(warning)
+    daemon._on_previewed(late, daemon._utterance, 0)
 
-    daemon._dispatch(KeyDown(at=1.0))
-    _transcriber(daemon).next_result = TranscriptionResult(text="new words", elapsed_seconds=0.1)
-    daemon._worker.run_preview(_audio(daemon).preview_samples, daemon._generation)
-
-    assert previews[-1] == "new words new words", "only this utterance's chunks"
+    assert previews[-1] == warning
+    assert not daemon._preview_timer.isActive(), "and it did not re-arm the timer"
+    assert "voice-kb transcribe" in warning
 
 
-def test_the_committed_decode_never_reads_preview_state(
+def test_a_dead_microphone_replaces_the_cap_notice_it_has_invalidated(
     make_daemon: DaemonFactory,
 ) -> None:
-    """The invariant in docs/constraints.md: preview output is never merged
-    into the committed text. Previews now carry state across calls, so this is
-    worth asserting directly rather than by inspection."""
+    """The one message allowed to overwrite the capped notice.
+
+    The notice promises the rest of the audio is on disk and recoverable with
+    ``voice-kb transcribe``. The recorder keeps writing past the ceiling, so
+    when the input stream dies -- a live bug here, three occurrences in
+    STATUS.md -- what lands in the wav from then on is silence and the promise
+    is false. This is not a staler message losing a ranking contest; it is
+    news that invalidates what is on screen, so it replaces it and says what
+    is actually true about the recording.
+    """
     daemon = make_daemon(None)
-    appended = _append_spy(daemon)
-    daemon._worker._segmenter = cast(SpeechSegmenter, _FakeSegmenter(2))
-    daemon._dispatch(KeyDown(at=0.0))
-    _transcriber(daemon).next_result = TranscriptionResult(
-        text="preview only", elapsed_seconds=0.1
+    previews = _nvim_preview_spy(daemon)
+    audio = _audio(daemon)
+    audio.recording = Recorded(
+        path=Path("/state/voice-kb/audio/capture-2026-09-08-141530.wav")
     )
-    daemon._worker.run_preview(_audio(daemon).preview_samples, daemon._generation)
+    audio.capped = True
 
-    daemon._dispatch(KeyUp(at=0.5))
-    _transcriber(daemon).results = [
-        TranscriptionResult(text="committed a", elapsed_seconds=0.1),
-        TranscriptionResult(text="committed b", elapsed_seconds=0.1),
-    ]
-    daemon._worker.run_decode(_audio(daemon).next_samples, daemon._generation)
+    daemon._dispatch(KeyDown(at=0.0))
+    daemon._poll_level()
+    assert "voice-kb transcribe" in previews[-1]
 
-    assert appended == ["committed a", "committed b"]
-    assert not any("preview only" in text for text in appended)
+    audio.dead = True  # the microphone drops out after the cap
+    daemon._poll_level()
+
+    assert "no audio from the microphone" in previews[-1]
+    assert "silent gap" in previews[-1], "and it does not repeat the false promise"
+    assert "voice-kb transcribe" not in previews[-1]
+
+
+def test_the_dead_microphone_notice_does_not_invent_a_recording(
+    make_daemon: DaemonFactory,
+) -> None:
+    """With ``[recording]`` off there is no wav to have a gap in.
+
+    Branching on ``_capped`` alone made this message assert a recording
+    exists: it replaced the correct "audio from here is being discarded" with
+    a promise of a silent gap in a file that was never opened. That is the
+    same lie as offering `voice-kb transcribe` for a truncated file, pointing
+    the other way -- so it branches on the recording, not on the cap.
+    """
+    daemon = make_daemon(None)
+    previews = _nvim_preview_spy(daemon)
+    audio = _audio(daemon)
+    audio.recording = NotRecorded()
+    audio.capped = True
+
+    daemon._dispatch(KeyDown(at=0.0))
+    daemon._poll_level()
+    audio.dead = True
+    daemon._poll_level()
+
+    assert "no audio from the microphone" in previews[-1]
+    assert "discarded" in previews[-1]
+    assert "silent gap" not in previews[-1], "there is no file to have a gap in"
+
+
+def test_a_cap_crossed_in_the_last_tick_is_still_reported(
+    make_daemon: DaemonFactory, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The 30Hz poll cannot see a ceiling crossed between the last tick and the
+    key coming up. Left there, the transcript would stop short with nothing
+    anywhere saying why -- the original failure in miniature."""
+    daemon = make_daemon(None)
+    audio = _audio(daemon)
+    audio.recording = Recorded(
+        path=Path("/state/voice-kb/audio/capture-2026-09-08-141530.wav")
+    )
+
+    daemon._dispatch(KeyDown(at=0.0))
+    audio.capped = True  # crossed after the last _poll_level of the hold
+    with caplog.at_level(logging.WARNING, logger="voice-kb"):
+        daemon._dispatch(KeyUp(at=2.0))
+
+    assert "in-memory ceiling" in caplog.text
+
+
+def test_the_ceiling_warning_says_when_nothing_is_being_recorded(
+    make_daemon: DaemonFactory, caplog: pytest.LogCaptureFixture
+) -> None:
+    """With recording off there is no file to recover from, so the advice has
+    to be the opposite one: stop now, because audio is being discarded."""
+    daemon = make_daemon(None)
+    _audio(daemon).capped = True
+
+    daemon._dispatch(KeyDown(at=0.0))
+    with caplog.at_level(logging.WARNING, logger="voice-kb"):
+        daemon._poll_level()
+
+    assert "being discarded" in caplog.text
+
+
+def _recorded(tmp_path: Path, samples: MonoAudio, rate: int = 16000) -> Path:
+    """A real recording, written by the real recorder -- so these tests decode
+    the same bytes the daemon would have left behind."""
+    recorder = CaptureRecorder(RecordingConfig(dir=tmp_path / "audio"), rate)
+    recorder.start()
+    recorder.write(samples)
+    recorder.stop()
+    status = recorder.status()
+    assert isinstance(status, Recorded)
+    return status.path
+
+
+def _faked_pipeline(
+    monkeypatch: pytest.MonkeyPatch, text: str
+) -> FakeTranscriber:
+    fake = FakeTranscriber()
+    fake.next_result = TranscriptionResult(text=text, elapsed_seconds=0.1)
+    monkeypatch.setattr(app_module, "Transcriber", lambda config: fake)
+    monkeypatch.setattr(app_module, "load_segmenter", lambda config, rate: None)
+    return fake
+
+
+def test_transcribe_recovers_the_transcript_from_a_recording(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The recovery path end to end: a wav on disk in, the transcript out.
+
+    It goes through the same ``decode_capture`` the daemon's worker runs, so
+    what comes back is what the live decode would have produced -- that shared
+    pipeline is the whole reason a recording is worth keeping.
+    """
+    samples = np.linspace(-0.5, 0.5, 8000, dtype=np.float32)
+    wav = _recorded(tmp_path, samples)
+    fake = _faked_pipeline(monkeypatch, "the words that were nearly lost")
+    out = tmp_path / "recovered.txt"
+
+    assert app_module.transcribe_recording(wav, out, Config()) == 0
+
+    assert out.read_text(encoding="utf-8") == "the words that were nearly lost\n"
+    assert len(fake.calls) == 1
+    assert np.allclose(fake.calls[0], samples, atol=2e-5), "it decoded the recorded audio"
+
+
+def test_transcribe_writes_to_stdout_when_no_out_is_given(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Logging goes to stderr, so stdout carries the transcript alone and this
+    composes with a pipe."""
+    wav = _recorded(tmp_path, np.linspace(-0.5, 0.5, 1600, dtype=np.float32))
+    _faked_pipeline(monkeypatch, "um, straight to stdout")
+
+    assert app_module.transcribe_recording(wav, None, Config()) == 0
+
+    # Post-processed exactly as the live path would have: fillers stripped.
+    assert capsys.readouterr().out == "straight to stdout\n"
+
+
+def test_transcribe_refuses_a_recording_at_the_wrong_sample_rate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Decoding 8 kHz audio as if it were 16 kHz returns plausible nonsense
+    rather than an error, which is worse than refusing."""
+    wav = _recorded(tmp_path, np.zeros(800, dtype=np.float32), rate=8000)
+    _faked_pipeline(monkeypatch, "never reached")
+
+    assert app_module.transcribe_recording(wav, None, Config()) == 4
+
+
+def test_a_bare_invocation_still_starts_the_daemon(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The subcommand is optional. ``voice-kb`` with no arguments is what the
+    systemd unit runs and what every existing habit types."""
+    started: list[Path | None] = []
+
+    def fake_daemon(config: Config, dump_audio: Path | None) -> int:
+        started.append(dump_audio)
+        return 0
+
+    monkeypatch.setattr(sys, "argv", ["voice-kb", "-c", str(tmp_path / "absent.toml")])
+    monkeypatch.setattr(app_module, "_configure_logging", lambda **kwargs: None)
+    monkeypatch.setattr(app_module, "run_daemon", fake_daemon)
+
+    assert app_module.main() == 0
+    assert started == [None]
+
+
+def test_the_transcribe_subcommand_never_reaches_the_daemon(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No Qt, no hotkey, no microphone: recovery runs in a terminal over a
+    file, possibly while the daemon is running in another one."""
+    recovered: list[tuple[Path, Path | None]] = []
+
+    def fake_recovery(wav: Path, out: Path | None, config: Config) -> int:
+        recovered.append((wav, out))
+        return 0
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "voice-kb",
+            "-c",
+            str(tmp_path / "absent.toml"),
+            "transcribe",
+            "capture.wav",
+            "--out",
+            "t.txt",
+        ],
+    )
+    monkeypatch.setattr(app_module, "_configure_logging", lambda **kwargs: None)
+    monkeypatch.setattr(app_module, "run_daemon", lambda config, dump_audio: pytest.fail("daemon"))
+    monkeypatch.setattr(app_module, "transcribe_recording", fake_recovery)
+
+    assert app_module.main() == 0
+    assert recovered == [(Path("capture.wav"), Path("t.txt"))]
+
+
+def test_a_capped_capture_does_not_silence_the_one_after_it(
+    make_daemon: DaemonFactory,
+) -> None:
+    """``_capped`` latches for a capture, not for the process.
+
+    Left set, the daemon would go quiet for good after one long dictation:
+    every later preview dropped before it reached either indicator, with the
+    stale notice still on screen. That is the regression this latch is one
+    mistake away from, so it is pinned here.
+    """
+    daemon = make_daemon(None)
+    previews = _nvim_preview_spy(daemon)
+    audio = _audio(daemon)
+    audio.recording = Recorded(
+        path=Path("/state/voice-kb/audio/capture-2026-09-08-141530.wav")
+    )
+    audio.capped = True
+
+    daemon._dispatch(KeyDown(at=0.0))
+    daemon._poll_level()
+    notice = previews[-1]
+    daemon._on_previewed("refused while capped", daemon._utterance, 0)
+    assert previews[-1] == notice
+    daemon._dispatch(KeyUp(at=2.0))
+
+    daemon._dispatch(KeyDown(at=3.0))  # a new capture, a clean slate
+
+    daemon._on_previewed("the next dictation", daemon._utterance, 0)
+    assert previews[-1] == "the next dictation"
+
+
+def test_a_truncated_recording_is_never_offered_as_a_recovery(
+    make_daemon: DaemonFactory, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Both callers of the recording status have to tell the truth.
+
+    A recording given up on at 200s does not support "recover the rest with
+    `voice-kb transcribe`" -- that is the same false reassurance the silent
+    cap gave, dressed up as a fix. When the file is short, the cap notice says
+    so and the capture line says so.
+    """
+    daemon = make_daemon(None)
+    previews = _nvim_preview_spy(daemon)
+    audio = _audio(daemon)
+    audio.recording = Truncated(
+        path=Path("/state/voice-kb/audio/capture-2026-09-08-141530.wav")
+    )
+    audio.capped = True
+
+    daemon._dispatch(KeyDown(at=0.0))
+    with caplog.at_level(logging.WARNING, logger="voice-kb"):
+        daemon._poll_level()
+        daemon._dispatch(KeyUp(at=2.0))
+
+    assert "voice-kb transcribe" not in caplog.text
+    assert "voice-kb transcribe" not in previews[-1]
+    assert "recording failed" in previews[-1]
+    assert "was given up on part-way" in caplog.text

@@ -78,10 +78,11 @@ local function winbar()
     local label = M.state.latched and "\u{25cf} REC \u{1f512} press to stop " or "\u{25cf} REC "
     local bar = "%#VoiceKbRec#" .. label .. "%*" .. meter()
     if not M.state.previewing then
-      -- Previews stop once an utterance is long enough that re-decoding it
-      -- would start costing the user real latency at key release. Saying so
-      -- is the difference between "it is still recording, it just stopped
-      -- showing me" and "it has silently dropped what I am saying".
+      -- Previews stop past the in-memory ceiling, or -- without a VAD model,
+      -- where nothing settles and every preview decodes the whole capture --
+      -- past preview.max_seconds. Saying so is the difference between "it is
+      -- still recording, it just stopped showing me" and "it has silently
+      -- dropped what I am saying".
       bar = bar .. "%#VoiceKbIdle# preview paused, still recording%*"
     end
     return bar
@@ -134,7 +135,9 @@ end
 ---
 --- The *tail* is kept when there is too much, for the same reason the meter
 --- shows recent levels: the newest words are the ones being checked against
---- what was just said.
+--- what was just said. Since progressive commit (docs/progressive-commit.md)
+--- the preview is only the open tail -- at most one chunk -- so this rarely
+--- has anything to cut; everything before it is already in the buffer above.
 local function wrap(text, width, max_lines)
   if width < 8 then
     return { text }

@@ -1,8 +1,8 @@
 """Shared fixtures for the end-to-end tests.
 
 ``QT_QPA_PLATFORM`` must be set before anything imports PySide6 (transitively,
-that means before ``voice_kb.app``/``voice_kb.overlay`` are imported anywhere
-in the process), so it happens at module import time, first thing.
+that means before ``voice_kb.app`` is imported anywhere in the process), so it
+happens at module import time, first thing.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from collections.abc import Callable, Iterator
+from pathlib import Path
 
 import pytest
 from fakes import FakeAudioCapture, FakeNvimSession, FakeTranscriber, FakeX11
@@ -23,10 +24,29 @@ from voice_kb.app import Daemon
 from voice_kb.config import Config
 
 
+@pytest.fixture(autouse=True)
+def _never_the_real_state_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point ``XDG_STATE_HOME`` at a scratch dir for *every* test.
+
+    Not hygiene -- a guard against the suite destroying the user's data.
+    ``Daemon`` builds a real ``CaptureRecorder``, whose constructor prunes
+    the recordings directory to ``max_total_bytes``. With the real
+    ``XDG_STATE_HOME`` that is the directory holding the user's dictation
+    audio, so once it passed 5 GiB any ``pytest`` run would delete their
+    oldest recordings. Verified before this fixture existed: a single
+    ``pytest -k dead_microphone`` deleted a seeded 3 GiB capture.
+
+    Autouse and unconditional, because the next test to reach the real
+    directory will not be one anybody thought to audit -- the same reasoning
+    that put the recording below the ceiling rather than above it.
+    """
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+
+
 @pytest.fixture(scope="session")
 def qapp() -> QApplication:
     """One ``QApplication`` for the whole run -- PySide6 allows only one per
-    process, and the overlay/daemon machinery needs it to exist even under
+    process, and the daemon's threads and timers need it to exist even under
     the offscreen platform plugin."""
     existing = QApplication.instance()
     if isinstance(existing, QApplication):
@@ -36,11 +56,10 @@ def qapp() -> QApplication:
 
 @pytest.fixture
 def fake_x11(monkeypatch: pytest.MonkeyPatch) -> FakeX11:
-    """Replaces ``voice_kb.x11.outputs``/``focused_window_rect`` so overlay
-    placement never shells out to ``xrandr``/``xdotool``."""
+    """Replaces ``voice_kb.x11.outputs`` so nothing here shells out to
+    ``xrandr``."""
     fake = FakeX11()
     monkeypatch.setattr(x11, "outputs", fake.outputs)
-    monkeypatch.setattr(x11, "focused_window_rect", fake.focused_window_rect)
     return fake
 
 

@@ -320,6 +320,49 @@ def _xdg_runtime_dir() -> Path:
 
 
 @dataclass(frozen=True, slots=True)
+class RecordingConfig:
+    """Every capture is written to disk while it is being spoken.
+
+    On by default, and that default is the whole point. On 2026-09-08 a
+    821s hold hit the in-memory utterance ceiling, the samples past it were
+    dropped inside the realtime callback, and 3m41s of dictation existed
+    nowhere else -- not in a file, not in the log, not on screen. A safety
+    net that has to be switched on is switched off exactly when it is
+    needed, so this one is on unless the user turns it off.
+
+    The recording is independent of decoding: it is written by
+    :mod:`voice_kb.recorder` as the audio arrives, so a decode that fails,
+    is cancelled, or never happens still leaves a wav that
+    ``voice-kb transcribe`` can turn back into text.
+    """
+
+    enabled: bool = True
+
+    dir: Path = field(default_factory=lambda: xdg_state_home() / "voice-kb" / "audio")
+    """Where the wavs go, alongside the log in the state directory.
+
+    Created mode 0700, and each recording mode 0600: a capture holds
+    whatever was dictated, which is the same reason the log file is 0600.
+    """
+
+    max_total_bytes: int = 5 * 1024**3
+    """Prune oldest-first once the directory holds more than this.
+
+    5 GiB is ~46 hours of 16 kHz 16-bit mono -- long enough that anything
+    still worth recovering is still there, bounded enough that a forgotten
+    safety net cannot fill a disk. Age is deliberately not a criterion: a
+    recording is pruned because something newer needs the space, never
+    because it got old.
+    """
+
+    def __post_init__(self) -> None:
+        if self.max_total_bytes <= 0:
+            raise ConfigError(
+                f"recording.max_total_bytes must be positive: {self.max_total_bytes}"
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class NvimConfig:
     """Where the transcript goes: a floating neovim, never the clipboard."""
 
@@ -551,59 +594,47 @@ class NvimConfig:
 
 @dataclass(frozen=True, slots=True)
 class PreviewConfig:
-    """The live transcript preview, shown while the key is held.
+    """The live preview of the open tail, shown while the key is held.
 
-    Its own section rather than a corner of ``[overlay]``: the preview now
-    feeds the nvim indicator, which is the primary UI, and the overlay is off
-    by default. Tying "do I see what I am saying" to "is the Qt pill enabled"
-    would be a lie about what these settings control.
+    This is the *tick* of progressive commit (``docs/progressive-commit.md``):
+    every ``interval_ms`` the worker splits the audio since the committed
+    offset, commits each chunk that has settled, and decodes the open tail
+    once for the indicator. The name is historical -- the section also paces
+    how often settled text lands -- but what the user tunes here is still how
+    live the preview feels, so it stays ``[preview]``.
 
-    A preview is *cosmetic only*. The text that actually gets committed is
-    still produced by exactly one decode of the complete captured buffer at
-    key release (``docs/constraints.md``, "One-shot committed decode"):
-    preview output is never appended, never merged into the final text, and
-    never influences it.
+    The preview itself is *cosmetic only*: the open tail is virtual text in
+    nvim, replaced every tick, and it never reaches the buffer. What reaches
+    the buffer is each chunk decoded exactly once, when it settles or at key
+    release (``docs/constraints.md``).
     """
 
     enabled: bool = True
+    """Off means no tick at all: nothing commits until the key is released,
+    and the whole capture is decoded then, as before 2026-09-08."""
 
     interval_ms: int = 1100
-    """Minimum time between preview decodes while recording.
+    """Minimum time between ticks while recording.
 
     A floor, not a fixed period: the real gap is
     ``max(interval_ms - last_decode, last_decode)``, which keeps the worker
-    idle at least half the time however long the utterance gets. See
-    :attr:`max_seconds` for why that idle fraction is the thing being
-    protected.
+    idle at least half the time however long the utterance gets. A tick
+    already inside a decode when the key comes up cannot be interrupted, so
+    the fraction of time one is running is the fraction of releases that wait
+    for it -- and with chunking that wait is one chunk either way.
     """
 
     max_seconds: float = 600.0
-    """Stop previewing once the utterance is longer than this. A backstop.
+    """Stop previewing once the audio a tick would decode is longer than this.
 
-    Previews used to decode the whole utterance from its beginning every time,
-    so each cost more than the last -- ~4s by the one-minute mark -- and this
-    limit was load-bearing: past it they stopped being issued at all, and the
-    winbar had to explain that a frozen preview was not lost audio. In use
-    that was reported straight back as the wrong behaviour, which it was. The
-    limit was 30s and ordinary passages ran longer.
-
-    A preview now costs the same at ten minutes as at ten seconds. Chunks the
-    detector has closed are settled -- no later speech changes them -- so
-    their text is kept and only the open tail is re-decoded (see
-    ``_Worker._preview_text``). Cost is bounded by ``vad.chunk_seconds``, not
-    by the utterance, so there is nothing left for a time limit to protect
-    against.
-
-    It stays as a backstop for the case that reasoning does not cover: no VAD
-    model, where previews fall back to decoding the whole buffer and the old
-    growth returns. Ten minutes is far past any dictation and still short of
-    a runaway.
-
-    The number is a latency budget either way. A *queued* preview is dropped
-    the instant the key is released, but one already inside ``decode_stream``
-    cannot be interrupted, so the committed decode waits for it. With chunking
-    that wait is one chunk (~0.8s worst case, ~0.4s expected from the duty
-    cycle) regardless of what this is set to.
+    A backstop, not a budget. With a VAD model the tick decodes only the open
+    tail, which is at most one unclosed chunk, so this is never reached.
+    Without one (``[vad]`` off, or the model missing) nothing ever settles,
+    every preview decodes the whole capture from its beginning, and each
+    costs more than the last -- ~4s by the one-minute mark. Past this many
+    seconds previews simply stop, the last one stays on screen, and the winbar
+    says so. Ten minutes is far past any dictation and still short of a
+    runaway.
     """
 
     def __post_init__(self) -> None:
@@ -614,62 +645,15 @@ class PreviewConfig:
 
 
 @dataclass(frozen=True, slots=True)
-class OverlayConfig:
-    enabled: bool = False
-    """Off by default since the transcript sink became nvim.
-
-    The nvim window carries the indicator now (``nvim_indicator.lua``): the
-    same phase, level meter and live preview, rendered where the text is
-    about to land instead of in a second widget elsewhere on screen. This
-    overlay still works and still never takes focus -- turn it back on if you
-    want feedback before the dictation window has opened.
-    """
-
-    # Sizes below are in Qt's *logical* pixels, which is what Qt's resize()
-    # takes. On a display with a device pixel ratio above 1 -- Xft.dpi 192
-    # gives 2.0 -- the overlay is drawn at twice these numbers in device
-    # pixels, so it keeps the same apparent size as on a 96dpi screen. That is
-    # deliberate: it follows the DPI the user configured rather than shrinking
-    # to a sliver on a 4K panel. See voice_kb.overlay.screen_rect.
-    width: int = 720
-    """Wide enough to read a line of transcript, not just the status label."""
-
-    height: int = 96
-    """Height of the status row (dot, label, level meter) on its own."""
-
-    margin_px: int = 32
-    """Gap between the overlay and the bottom edge of the output."""
-
-    follow_focus: bool = True
-    """Place the overlay on the output holding the focused window."""
-
-    preview_height: int = 64
-    """Extra pixels below the status row for the preview band.
-
-    Only consulted when previews are on (:attr:`PreviewConfig.enabled`); the
-    policy for previews themselves lives in ``[preview]``, because they now
-    feed the nvim indicator as well as this overlay.
-    """
-
-    def __post_init__(self) -> None:
-        if self.preview_height < 0:
-            raise ConfigError(f"overlay.preview_height must not be negative: {self.preview_height}")
-
-    def total_height(self, *, preview_band: bool) -> int:
-        """Full widget height: the status row, plus the preview band if shown."""
-        return self.height + self.preview_height if preview_band else self.height
-
-
-@dataclass(frozen=True, slots=True)
 class Config:
     hotkey: HotkeyConfig = field(default_factory=HotkeyConfig)
     audio: AudioConfig = field(default_factory=AudioConfig)
+    recording: RecordingConfig = field(default_factory=RecordingConfig)
     asr: AsrConfig = field(default_factory=AsrConfig)
     vad: VadConfig = field(default_factory=VadConfig)
     text: TextConfig = field(default_factory=TextConfig)
     nvim: NvimConfig = field(default_factory=NvimConfig)
     preview: PreviewConfig = field(default_factory=PreviewConfig)
-    overlay: OverlayConfig = field(default_factory=OverlayConfig)
 
     @classmethod
     def load(cls, path: Path | None = None) -> Self:
@@ -685,13 +669,18 @@ class Config:
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any], base_dir: Path | None = None) -> Self:
-        known = {"hotkey", "audio", "asr", "vad", "text", "nvim", "preview", "overlay"}
+        known = {"hotkey", "audio", "recording", "asr", "vad", "text", "nvim", "preview"}
         if unknown := set(raw) - known:
             raise ConfigError(f"unknown config section(s): {', '.join(sorted(unknown))}")
 
         return cls(
             hotkey=_build(HotkeyConfig, raw.get("hotkey", {}), "hotkey"),
             audio=_build(AudioConfig, raw.get("audio", {}), "audio"),
+            recording=_build(
+                RecordingConfig,
+                _resolve_paths(raw.get("recording", {}), _RECORDING_PATH_KEYS, "recording"),
+                "recording",
+            ),
             asr=_build(
                 AsrConfig,
                 _resolve_model_dir(raw.get("asr", {}), base_dir),
@@ -702,12 +691,11 @@ class Config:
             text=_build(TextConfig, raw.get("text", {}), "text", tuple_fields=("fillers",)),
             nvim=_build(
                 NvimConfig,
-                _resolve_nvim_paths(raw.get("nvim", {})),
+                _resolve_paths(raw.get("nvim", {}), _NVIM_PATH_KEYS, "nvim"),
                 "nvim",
                 tuple_fields=("terminal", "editor"),
             ),
             preview=_build(PreviewConfig, raw.get("preview", {}), "preview"),
-            overlay=_build(OverlayConfig, raw.get("overlay", {}), "overlay"),
         )
 
     def with_model_dir(self, model_dir: Path) -> Self:
@@ -758,9 +746,12 @@ def _resolve_vad_model(section: Mapping[str, Any], base_dir: Path | None) -> Map
 
 
 _NVIM_PATH_KEYS = ("socket_path", "dictation_dir", "init")
+_RECORDING_PATH_KEYS = ("dir",)
 
 
-def _resolve_nvim_paths(section: Mapping[str, Any]) -> Mapping[str, Any]:
+def _resolve_paths(
+    section: Mapping[str, Any], keys: tuple[str, ...], name: str
+) -> Mapping[str, Any]:
     """TOML has no path type, so the path-valued keys arrive as strings.
 
     Both ``~`` and ``$VAR`` are expanded here, at the boundary, so nothing
@@ -771,13 +762,13 @@ def _resolve_nvim_paths(section: Mapping[str, Any]) -> Mapping[str, Any]:
     do exactly that, so it is rejected instead.
     """
     resolved = dict(section)
-    for key in _NVIM_PATH_KEYS:
+    for key in keys:
         if key not in resolved:
             continue
         expanded = os.path.expandvars(str(resolved[key]))
         if "$" in expanded:
             raise ConfigError(
-                f"nvim.{key} references an unset environment variable: {resolved[key]!r}"
+                f"{name}.{key} references an unset environment variable: {resolved[key]!r}"
             )
         resolved[key] = Path(expanded).expanduser()
     return resolved

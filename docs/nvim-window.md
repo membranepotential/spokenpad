@@ -60,7 +60,7 @@ The window is **a third of the screen on each axis** (`nvim.window_fraction`,
 0.33) with its **top-left corner at the mouse pointer**, on whichever monitor
 the pointer is on — it opens beside what you are reading rather than in a
 fixed corner you have to look away to find. The rect is clamped fully
-on-screen by `geometry.dictation_rect`, the same clamp the overlay uses, so a
+on-screen by `geometry.dictation_rect`, so a
 pointer near an edge tucks the window flush against it; a pointer in the
 bottom-right corner (or a pointer that cannot be read at all) puts it in the
 bottom-right corner.
@@ -122,8 +122,7 @@ re-applies it), and defines `_G.VoiceKb`. The daemon calls exactly three
 things: `setup`, `append`, and `set_state`.
 
 **The winbar** carries the indicator: a phase dot, and while recording a
-24-cell level meter driven by the same perceptual curve (`level ^ 0.6`) the Qt
-overlay used. It is set window-locally on every window showing the dictation
+24-cell level meter on a perceptual curve (`level ^ 0.6`). It is set window-locally on every window showing the dictation
 buffer, so a global winbar from the user's own config is overridden for this
 buffer only and left alone everywhere else. Levels are sent at ~10 Hz as
 notifications, not requests — a round trip per sample would put nvim's event
@@ -133,8 +132,14 @@ loop on the dictation latency path for something purely cosmetic.
 buffer, exactly where the committed text will land. Virtual text, not buffer
 content: it cannot be written to the file, yanked, or undone into the buffer
 even deliberately. That makes "a preview is never committed"
-([constraints.md](constraints.md#the-one-relaxation-cosmetic-previews)) a
-property of the data model rather than a discipline.
+([constraints.md](constraints.md#the-one-relaxation-a-cosmetic-preview-of-the-open-tail))
+a property of the data model rather than a discipline.
+
+Since 2026-09-08 the preview is only the **open tail** — the sentence being
+spoken now, at most one chunk. Everything before it has already been
+committed to the buffer above, so the preview restarts from nothing each time
+a chunk lands and the transcript itself is never cropped
+([progressive-commit.md](progressive-commit.md)).
 
 Virtual text does **not** wrap — nvim truncates a chunk at the window edge —
 so the preview is word-wrapped here by hand, measured in display columns with
@@ -143,9 +148,10 @@ byte counting would break `längeren` several columns early. It keeps the last
 eight lines; the newest words are the ones being checked against what was
 just said.
 
-When previews stop (past `preview.max_seconds`) the winbar says
-`preview paused, still recording`. Without that, a frozen preview during a
-long passage reads as lost audio rather than as a cost control — which is
+When previews stop — past `preview.max_seconds`, which only a daemon running
+without a VAD model can reach, or past the in-memory ceiling — the winbar
+says `preview paused, still recording`. Without that, a frozen preview during
+a long passage reads as lost audio rather than as a cost control — which is
 exactly how it was first reported.
 
 **Which nvim runs it is a choice, and the trade is measured.** `nvim.init`

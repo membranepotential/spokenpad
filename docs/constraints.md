@@ -16,7 +16,7 @@ running system.
 | Read `/dev/input/event*` **read-only** | uinput clone inherited the default XKB layout | yes |
 | **Never** synthesise characters (`xdotool type` / enigo) | rewrote the core X keymap | yes |
 | **Never write to a window the user did not open for this** | text pasted into whatever had focus | no |
-| **One-shot *committed* decode** at key release, over the whole buffer | growing-buffer re-decode dropped long utterances | no (functional, silent) |
+| **Every committed sample decoded exactly once**, never from a growing buffer | growing-buffer re-decode dropped long utterances | no (functional, silent) |
 | **CPU only** | auto-selection bound the model to the 4 GB GTX 1650 | no |
 | **Bias vocabulary at decode time**, never fuzzy replacement | edit-distance rewrite turned real words into wrong ones | no |
 | **No window voice-kb opens may take focus** | focus steal aborted transcription mid-utterance | no |
@@ -60,7 +60,7 @@ boundary — it is a msgpack string argument, so a dictated `$(rm -rf ~)` is
 just text. The clipboard round trip (`inject.py`) is deleted; see
 [decisions.md](decisions.md#the-sink-is-neovim-not-the-clipboard).
 
-## One-shot committed decode, never streaming
+## Every committed sample is decoded exactly once, never streamed
 
 Handy streamed audio into the model continuously, re-decoding a growing
 buffer as more audio arrived. Measured real-time factor on this project's
@@ -68,44 +68,42 @@ hardware: **1.37x real-time** — barely faster than the utterance itself —
 and it silently dropped audio past a 30 s cap, with no error surfaced to the
 user (STATUS.md). A 37 s dictation was discarded outright.
 
-**Rule:** every captured sample is decoded **exactly once**, in a single
-pass that starts after `KeyUp`. This is the `Decode` command in the
-[state machine](architecture.md#statestep-a-total-function) — it only ever
-fires on the `Recording → Transcribing` transition, never mid-recording.
-Because the committed decode happens once per utterance, at a known correct
-decode speed (9.7x real-time, see [asr.md](asr.md)), there is no
-growing-buffer cost and no silent length cap.
+**Rule:** every captured sample that reaches the buffer is decoded **exactly
+once**, and no committed text ever comes from re-decoding audio that is still
+growing. Cost is therefore linear in the audio, and nothing is capped or
+discarded at any length.
+
+Until 2026-09-08 that rule was implemented as a single decode of the whole
+buffer after `KeyUp`. It is now implemented *progressively*: the capture is
+split at silence by [`voice_kb.vad`](../src/voice_kb/vad.py) into chunks of
+about ten seconds of speech, a chunk is decoded and appended the moment no
+later audio can change it, and releasing the key decodes only the open tail.
+The full design, the rule for deciding that a chunk has settled, and the
+latency budget are in [progressive-commit.md](progressive-commit.md). The
+`Decode` command in the [state machine](architecture.md#statestep-a-total-function)
+still fires only on `Recording → Transcribing`; what it now decodes is the
+remainder, not the whole.
 
 ### Segmented is not streamed
 
-That pass is split at silence by [`voice_kb.vad`](../src/voice_kb/vad.py)
-before decoding, and each speech segment is appended as it lands rather than
-all of them at the end. This is not the thing the rule forbids, and the
-difference is worth being exact about, because "the transcript arrives in
-pieces" sounds like the failure mode by description.
+"The transcript arrives in pieces" sounds like the failure mode by
+description, so the difference is worth being exact about. What broke Handy
+was re-decoding a *growing* buffer: the same audio decoded again and again as
+more arrived, so cost grew with the utterance and a cap had to be bolted on,
+which then dropped a 37 s dictation silently. Committing a settled chunk keeps
+both properties that rule protects. No committed region is ever decoded
+twice, so cost stays linear in the audio; and nothing is capped or discarded
+at any length, because a chunk boundary is a pause, not a limit.
 
-What broke Handy was re-decoding a *growing* buffer: the same audio decoded
-again and again as more arrived, so cost grew with the utterance and a cap had
-to be bolted on, which then dropped a 37 s dictation silently. Segmentation
-keeps both properties that rule protects. No region is ever decoded twice, so
-cost stays linear in the audio; and nothing is capped or discarded at any
-length, because a segment boundary is a pause, not a limit.
-
-The reason it exists is **correctness**, not speed. Parakeet TDT returns an
+Segmentation exists for **correctness** before speed. Parakeet TDT returns an
 empty string when speech is a small fraction of its window — measured, same
 0.53 s of speech, varying only the padding: no padding gives `'D home.'`, 2 s
 each side gives `'Did the home?'`, 5 s each side gives `''`. In use that was
-pressing the key, saying two words, and getting nothing back. It is also the
-other end of the preview instability described below: a preview of 4.4 s
-returning `"Okay."` where 3.3 s returned a full sentence is the same collapse,
-seen one preview at a time.
+pressing the key, saying two words, and getting nothing back.
 
 Throughput is unchanged — 12.3-12.6x real-time whole-buffer against 11.0-11.7x
 segmented, slightly *worse*, because per-chunk overhead costs about what the
-skipped silence saves. Nobody should reach for this to make decoding faster;
-it does not. What changes is *when* text appears: the first chunk lands after
-~1 s rather than after the whole recording, so a five-minute latched passage
-starts arriving immediately instead of all at once at the end.
+skipped silence saves. What changes is *when* text appears.
 
 **Accuracy is preserved by merging, and that is not optional.** Decoding every
 detected run of speech separately costs about four WER points, because the
@@ -114,75 +112,43 @@ chunk holds `vad.chunk_seconds` (10 s) of speech, and each chunk is padded by
 `vad.pad_seconds` (0.5 s) of the real surrounding audio, since Silero's
 boundaries clip word onsets and endings. Measured on the eval samples, per-run
 33.7% → 37.7% WER, merged-and-padded 33.4%; and through `scripts/eval.py
---vad`, which scores the way the harness always has, **13.4% either way**,
-with one *more* exercise check passing. Anyone lowering `chunk_seconds` for
-faster first text is spending accuracy, and should re-run that harness.
+--vad`, which scores the way the harness always has, **13.4% either way**.
+Anyone lowering `chunk_seconds` for faster text is spending accuracy, and
+should re-run that harness.
 
-One property genuinely weakens. A cancellation during `Transcribing` used to
-mean the text never existed; now some of it may already be in the buffer, so
-it means "stop adding" and what landed stays. That is the honest trade for
-watching a long passage arrive instead of waiting out its decode, and the file
-is the user's to edit either way.
+One property is weaker than a single decode at release, and it is stated
+rather than hidden: a cancel no longer means the text never existed. During
+recording, at release, or during the tail decode, it means "stop adding" —
+what is already in the buffer stays, because it is the user's file.
 
-### The one relaxation: cosmetic previews
+### The one relaxation: a cosmetic preview of the open tail
 
-The overlay shows a live transcript preview while the key is held
-(`PreviewConfig.enabled`). That is an extra decode, so it is worth being
-precise about what this constraint does and does not forbid. What broke Handy
-was not "more than one decode" — it was that the *result the user got* came
-from a streaming pipeline whose cost grew with the utterance and which
-silently truncated it. Three invariants keep previews on the safe side of
-that line, and they are asserted in `tests/test_e2e.py`:
+The audio after the last settled chunk is decoded once per tick and shown as
+virtual text below the committed transcript, then thrown away. That is an
+extra decode of audio that is still growing, so the invariants that keep it
+on the safe side of this rule are worth stating, and they are asserted in
+`tests/test_e2e.py`:
 
-1. **The committed text is still one shot over the whole buffer.** Preview
-   output is never appended, never merged into the final text, and never
-   influences it. In the nvim window this is enforced *physically* rather
-   than by discipline: the preview is an extmark's virtual text, not buffer
-   content, so it cannot be written to the file, yanked, or undone into the
-   buffer even deliberately. `AudioCapture.snapshot_capture` is non-destructive: the
-   capture keeps accumulating and `stop_capture` still returns everything.
-2. **Preview cost is bounded** -- now by the chunk rather than by the
-   utterance. Previews originally decoded a fixed-length trailing window,
-   which made cost constant but physically discarded the start of the
-   sentence: text the user had already watched appear vanished in chunks
-   while they were still speaking. So they moved to decoding the whole
-   utterance every time, which kept the words but made each preview cost more
-   than the last -- ~4 s by the one-minute mark, ~13 s by two -- and needed a
-   time limit past which previews stopped being issued at all. That limit was
-   reported in use as the wrong behaviour, and it was: ordinary passages ran
-   past it, and a frozen preview reads as lost audio however the winbar
-   explains it.
+1. **Preview output never reaches the buffer.** In nvim it is an extmark's
+   virtual text, not buffer content, so it cannot be written to the file,
+   yanked, or undone into the buffer even deliberately. `_Worker.run_decode`
+   never reads preview state.
+2. **Preview cost is bounded by the chunk, not the utterance.** Only the open
+   tail is decoded, and it is at most one unclosed chunk. A preview costs the
+   same at ten minutes as at ten seconds. `PreviewConfig.max_seconds`
+   survives only as a backstop for a daemon running without a VAD model,
+   where the tail is the whole buffer.
+3. **A preview can never make the user wait.** Previews are abandoned the
+   instant a release or a cancel is due: a preview still queued on the single
+   worker is skipped, and one already running stops after its current chunk
+   — which, if that chunk was settled, it has just committed rather than
+   wasted.
 
-   Chunking resolves the dilemma the two earlier designs were stuck between.
-   Once the detector closes a chunk, that audio is *settled* -- no later
-   speech changes it -- so its text is kept and its samples are never decoded
-   again, and only the open tail is re-decoded. Nothing is discarded and
-   nothing grows: a preview costs the same at ten minutes as at ten seconds.
-   `PreviewConfig.max_seconds` survives only as a backstop for a daemon
-   running without a VAD model, where the old growth returns.
-
-   The guard against a preview that comes back *shorter* stays. Each preview
-   still sees strictly more audio than the last, so the transcript should only
-   grow, but the recogniser does not guarantee it -- decoding 4.4 s of a real
-   sample returned `"Okay."` where 3.3 s of the same sample had returned a
-   full sentence. (That is the same collapse `voice_kb.vad` exists for, seen
-   one preview at a time.) A preview that shrank is treated as instability
-   rather than news, and the previous text stands.
-
-3. **A preview can never make the user wait.** Previews are *abandoned* the
-   instant a committed decode (or a cancellation) is due: `Daemon` sets the
-   worker's abandon flag before it requests the decode, so a preview already
-   queued on the single worker thread is dropped rather than run ahead of the
-   text the user is waiting for.
-
-   One thing the abandon flag now also covers: a preview folding several
-   settled chunks into its prefix checks the flag between them, and the
-   prefix and the audio offset move together, so an abandoned preview leaves
-   consistent state that the next one resumes from.
-
-Nothing the user sees mid-recording can reach the buffer -- `run_decode`
-never reads preview state and decodes the capture from zero. See
-[decisions.md](decisions.md#live-transcript-preview-as-a-cosmetic-second-decode).
+The guard against a preview that came back *shorter* than the last one is
+kept: decoding 4.4 s of a real sample returned `"Okay."` where 3.3 s of the
+same sample had returned a full sentence. It is keyed on the committed
+offset, since a tail legitimately restarts from nothing when the chunk above
+it lands.
 
 ## CPU only
 
@@ -232,17 +198,14 @@ recording, it could take focus away from the application the user was
 dictating into, aborting the transcription in progress.
 
 **Rule:** no window this project opens may receive keyboard focus at any
-point in its lifecycle. That covers both windows it can open:
-
-* the **overlay** is borderless and non-focusable by construction
-  (`WA_ShowWithoutActivating`, `WindowDoesNotAcceptFocus`, the `Tool` window
-  type). The requirement directly shaped the UI toolkit choice; see
-  [decisions.md](decisions.md#pyside6-over-gtk4);
-* the **dictation window** is refused focus by the window manager, via a
-  `no_focus` rule keyed on its X11 instance name. There is deliberately no
-  focus call anywhere in [`nvim.py`](../src/voice_kb/nvim.py) — not even a
-  "restore the previous focus" one, which would be a focus change of its own.
-  See [nvim-window.md](nvim-window.md).
+point in its lifecycle. Since 2026-09-08 it opens exactly one: the
+**dictation window**, which is refused focus by the window manager via a
+`no_focus` rule keyed on its X11 instance name. There is deliberately no
+focus call anywhere in [`nvim.py`](../src/voice_kb/nvim.py) — not even a
+"restore the previous focus" one, which would be a focus change of its own.
+See [nvim-window.md](nvim-window.md). (The Qt status overlay that preceded
+it was non-focusable by construction; it is deleted, see
+[decisions.md](decisions.md#pyside6-over-gtk4).)
 
 Verified live on 2026-09-07: opening the dictation window left the focused
 window unchanged, and i3 reported the new window as `focused: false`.

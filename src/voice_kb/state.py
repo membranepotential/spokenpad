@@ -16,7 +16,7 @@ from typing import Final, assert_never
 
 
 class Phase(Enum):
-    """Coarse phase, for the overlay. Derived from the state, never stored."""
+    """Coarse phase, for the indicator. Derived from the state, never stored."""
 
     IDLE = auto()
     RECORDING = auto()

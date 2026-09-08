@@ -27,9 +27,16 @@ one-shot-per-utterance requirement.
 
 ## PySide6 over GTK4
 
+**Superseded 2026-09-08.** The overlay is deleted: off by default since the
+nvim sink landed, with no user, it was the second-sink trap below in UI form.
+PySide6 stays only as the event loop and thread plumbing (`QThread`, queued
+signals, `QTimer`); replacing those changes no behaviour and is the natural
+first step of a rewrite rather than a change on its own. The original
+reasoning is kept for the record.
+
 The overlay must be positioned on a specific output and must never take
 keyboard focus (see
-[constraints.md](constraints.md#overlay-must-not-steal-focus)). This ruled
+[constraints.md](constraints.md#no-window-voice-kb-opens-may-take-focus)). This ruled
 out GTK4: it has no `Window.move()` or `set_type_hint()` on X11 — verified —
 so it cannot position or hint a non-focusable overlay window on this
 platform (STATUS.md: "GTK4 has no `move()`/`set_type_hint()` on X11
@@ -37,13 +44,13 @@ platform (STATUS.md: "GTK4 has no `move()`/`set_type_hint()` on X11
 implemented) will be built on it; `pyside6>=6.11.2` is already a project
 dependency (`pyproject.toml`).
 
-## Overlay-only UI with TOML config over a settings GUI
+## TOML config over a settings GUI
 
 There is no settings application. Configuration is a TOML file parsed once
 at startup into frozen dataclasses (`Config.load` in
 [`config.py`](../src/voice_kb/config.py)), and the only runtime UI is the
-status overlay (`OverlayConfig`). This keeps the UI surface to exactly the
-one window that must exist for user feedback during recording, rather than
+dictation window's winbar. This keeps the UI surface to exactly the one
+window that must exist for user feedback during recording, rather than
 building a second, larger UI surface purely for configuration.
 
 ## Hotwords-only cleanup for v1
@@ -62,12 +69,47 @@ harness once references exist." That harness needs
 currently holds Handy's raw (error-including) output, not references
 (STATUS.md).
 
+## Progressive commit: settled chunks land while speaking
+
+**2026-09-08.** The committed decode no longer waits for the key. Each chunk
+the VAD has closed is decoded once and appended the moment no later audio can
+change it; releasing the key decodes only the open tail. Design, settle rule
+and latency budget: [progressive-commit.md](progressive-commit.md).
+
+Why now: a 379 s passage took 31.5 s to land and an 821 s one 54.5 s, and the
+preview meanwhile had to hold the whole transcript as virtual text, cropping
+its beginning at eight lines. The preview was *already* decoding settled
+chunks exactly once — to show them, then throwing the work away — so this
+promotes that work to the commit rather than adding a decode.
+
+The constraint is reworded from "one-shot decode at key release" to "every
+committed sample decoded exactly once, never from a growing buffer", which is
+the property the original wording was protecting
+([constraints.md](constraints.md#every-committed-sample-is-decoded-exactly-once-never-streamed)).
+
+Rejected:
+
+- **Committing on every VAD span** rather than on merged chunks: four WER
+  points, measured; the merge target stays.
+- **Committing the last chunk as soon as it closes**, without waiting for 1 s
+  of silence: the span that closed it may be the one `flush()` cut mid-word,
+  which moves on the next tick. One second is the cheapest proof it did not.
+- **Letting the daemon own the committed offset**: a preview mid-flight can
+  commit a chunk after the daemon has snapshotted for the release decode, and
+  that chunk would be decoded twice. The offset lives on the worker, the one
+  thread that serialises decodes; the daemon holds a lagging hint used only to
+  keep snapshots small.
+
 ## Live transcript preview as a cosmetic second decode
+
+**Superseded 2026-09-08** by progressive commit above: the preview is now
+only the open tail, and the settled chunks it used to carry are committed
+instead. Kept for the record.
 
 The overlay now shows a rolling preview of what is being said while the key
 is held. This touches the project's third hard constraint, so the change was
 a deliberate *rewording* of that constraint rather than a quiet exception to
-it (see [constraints.md](constraints.md#one-shot-committed-decode-never-streaming)).
+it (see [constraints.md](constraints.md#every-committed-sample-is-decoded-exactly-once-never-streamed)).
 
 The constraint used to read "one-shot decode at key release; no streaming, no
 incremental re-decode, no time cap." It exists because Handy's streaming

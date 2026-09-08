@@ -20,10 +20,11 @@ defensively.
 | [`geometry.py`](../src/voice_kb/geometry.py) | core | no | implemented |
 | [`hotkey.py`](../src/voice_kb/hotkey.py) | shell | evdev (read-only) | implemented |
 | [`audio.py`](../src/voice_kb/audio.py) | shell | PipeWire capture | implemented |
+| [`recorder.py`](../src/voice_kb/recorder.py) | shell | writes each capture to a wav | implemented |
 | [`asr.py`](../src/voice_kb/asr.py) | shell | sherpa-onnx / CPU inference | implemented |
+| [`decode.py`](../src/voice_kb/decode.py) | shell | drives the VAD + model pipeline | implemented |
 | [`nvim.py`](../src/voice_kb/nvim.py) | shell | nvim RPC socket, i3 | implemented |
 | [`nvim_indicator.lua`](../src/voice_kb/nvim_indicator.lua) | — | runs *inside* nvim | implemented |
-| [`overlay.py`](../src/voice_kb/overlay.py) | shell | X11 window (PySide6) | off by default |
 | [`x11.py`](../src/voice_kb/x11.py) | shell | xrandr / xdotool queries | implemented |
 | [`app.py`](../src/voice_kb/app.py) | shell | wires everything together | implemented |
 
@@ -70,7 +71,7 @@ boundary made concrete: the *decision* of what should happen next is pure and
 unit-testable; *making it happen* is not, and lives elsewhere.
 
 `Phase` (`IDLE` / `RECORDING` / `TRANSCRIBING`) is derived from `SessionState`
-via `phase_of`, never stored — the overlay reads a phase, it does not own
+via `phase_of`, never stored — the indicator reads a phase, it does not own
 one, so the two can't drift apart.
 
 ## Event flow
@@ -87,10 +88,17 @@ state.step()          -- pure: (SessionState, Event) -> (SessionState, Command)
     ▼
 app.py                -- interprets the command
     │
-    ├─ StartCapture   → audio.py starts accumulating from the pre-roll buffer
-    ├─ Decode         → asr.py runs the one committed decode over the whole
-    │                     captured buffer (hotword-biased via bpe.vocab, asr.md)
-    ├─ DiscardCapture → audio thrown away, nothing decoded
+    ├─ StartCapture   → audio.py starts accumulating from the pre-roll buffer,
+    │                     and recorder.py opens a wav that every callback
+    │                     reaches before any in-memory limit applies.
+    │                     Every ~1s from here: the worker splits the audio
+    │                     since the committed offset (vad.py), commits each
+    │                     settled chunk, previews the open tail
+    │                     (progressive-commit.md)
+    ├─ Decode         → decode.py decodes the remainder past the committed
+    │                     offset -- the open tail -- through the same
+    │                     pipeline voice-kb transcribe uses on a wav
+    ├─ DiscardCapture → nothing further is decoded; what already landed stays
     │
     ▼
 text.py               -- post-process: strip fillers, apply exact replacements
@@ -102,6 +110,17 @@ nvim.py               -- appended over msgpack-RPC to the dictation buffer,
 text lands in the floating nvim window; nothing is pasted anywhere
 ```
 
+Nothing in that pipeline is the only copy of the audio any more.
+`recorder.py` writes every capture to
+`$XDG_STATE_HOME/voice-kb/audio/capture-<timestamp>.wav` while it is being
+spoken — from a writer thread, because the realtime callback may not touch a
+filesystem — and `voice-kb transcribe <wav>` replays a recording through the
+*same* `decode.py` pipeline. That exists because on 2026-09-08 a 821.3s hold
+hit a 600s in-memory ceiling enforced inside the callback, above every other
+consumer, and 3m41s of dictation existed nowhere else. The ceiling is now
+3600s, it bounds only resident memory, and hitting it is a warning rather
+than a loss.
+
 The sink is a neovim the daemon opens itself, floating and never focused
 (see [nvim-window.md](nvim-window.md)). Nothing is written to the window the
 user is working in, so dictating neither depends on nor disturbs whatever has
@@ -109,49 +128,15 @@ focus — which retires a whole class of failure the clipboard-and-paste sink
 had (a paste that raced the clipboard restore, a target that swallowed
 `ctrl+v`, a window-class-specific paste combo).
 
-`overlay.py` sits to the side of this pipeline, reading `Phase` off the
-current `SessionState`. It is off by default now: the same phase, level meter
-and preview are rendered in the nvim window's winbar by
+Phase, level meter and the preview of the open tail are rendered in the
+nvim window's winbar and as virtual text by
 [`nvim_indicator.lua`](../src/voice_kb/nvim_indicator.lua), where the text is
-about to land rather than in a second widget elsewhere on screen.
-
-The live transcript preview is the one place the overlay reads audio rather
-than just phase: while recording, a timer on the Qt thread snapshots a
-fixed-length trailing window (non-destructively — `snapshot_capture` never
-consumes the buffer) and asks the *same* worker for a throwaway decode. It is
-still off the critical path by construction: previews are abandoned before the
-committed decode is requested, and nothing a preview produces can reach the
-buffer. See
-[constraints.md](constraints.md#the-one-relaxation-cosmetic-previews). No
-event, command or state was added for it — a preview is a shell concern, so
-`state.py` is untouched.
-
-## Two coordinate systems, and the rule for keeping them apart
-
-`xrandr` and `xdotool` report the desktop in **device pixels**. Qt's
-`move()` and `resize()` take **logical pixels**, which differ whenever the
-device pixel ratio is not 1 -- `Xft.dpi: 192` gives a ratio of 2.0.
-
-There is no single factor to convert between them, because Qt reports screen
-*origins* in device pixels but screen *sizes* in logical ones. On this machine
-a 3840x2160 panel at x=3840 comes back from Qt as `(3840, 0, 1920, 1080)`.
-
-The rule is therefore not "divide by the ratio" but:
-
-> Choosing **which** output is a question about the physical desktop — answer
-> it with xrandr. Placing something **on** that output is a question for Qt —
-> answer it with `QScreen`'s own rect, via `overlay.screen_rect`.
-
-Mixing them is silently wrong rather than loudly wrong. Placement computed
-from xrandr and passed to `move()` put the overlay at y=3936 on a 2160px-tall
-screen: mapped, `IsViewable`, painted correctly, and 1776px below the bottom
-edge. The overlay was invisible for the entire life of the project and every
-test passed the whole time, because offscreen render tests never involve a
-screen and unit tests never involve Qt. It took `xwininfo` on the live window
-to see it.
-
-`geometry.py` stays pure and unit-testable throughout; it does the same
-centre-and-clamp arithmetic either way. Only the rect handed to it changes.
+about to land. The tick that commits settled chunks and previews the tail is
+a timer on the Qt thread asking the *same* worker, so the recogniser stays
+serialised; `snapshot_capture` is non-destructive, so `stop_capture` still
+returns the whole capture. No event, command or state was added for it: the
+tick is a shell concern, and `state.py` is untouched. The design is in
+[progressive-commit.md](progressive-commit.md).
 
 ## The input stream is not trusted
 
@@ -182,9 +167,9 @@ the next `start_capture` and reopening there would discard a warm pre-roll ring
 for nothing.
 
 Silence in the level meter is ambiguous -- a quiet room and a dead microphone
-look identical -- so a recovery also writes a message into the overlay's
-preview band. That is the only case where the overlay shows text that did not
-come from the recogniser.
+look identical -- so a recovery also writes a message into the indicator's
+preview field. That is the only case where it shows text that did not come
+from the recogniser.
 
 ## Why this split matters here specifically
 
@@ -204,7 +189,7 @@ Four threads, and the boundaries matter:
 | Thread | Owns | Must never |
 |---|---|---|
 | evdev watcher | `/dev/input/event*` reads | block; it is the hotkey's latency budget |
-| Qt main | the state machine, the overlay | do slow work -- see below |
+| Qt main | the state machine, the timers | do slow work -- see below |
 | worker | the `Transcriber` | be touched from the Qt thread |
 | nvim bridge | the `NvimSession` | share the worker's queue -- see below |
 
@@ -225,6 +210,5 @@ xrandr and xdotool on *every* dispatched event; evdev auto-repeat fires around
 subprocesses per second. That stalled the event loop badly enough to delay the
 key-up (capture kept running ~22s past the physical release) and to batch three
 decode results into the same millisecond. Auto-repeat is now dropped in
-`hotkey.py`, the overlay repositions only on a real phase change, and the
-monitor layout is cached. Anything added to the Qt thread's hot path deserves
-the same scrutiny.
+`hotkey.py`, and the indicators are only pushed on a real phase change.
+Anything added to the Qt thread's hot path deserves the same scrutiny.

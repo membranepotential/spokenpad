@@ -13,7 +13,7 @@ window manager can be told once to float it and never focus it -- see
 ``docs/nvim-window.md``. This module does not manage focus itself beyond
 asking i3 to bring an existing window to the current workspace; that is the
 WM's job, and reaching for ``xdotool windowfocus`` here would recreate the
-focus-steal this project already forbids for the overlay.
+focus-steal this project forbids for any window it opens.
 
 The file
 --------
@@ -532,8 +532,8 @@ class NvimSession:
         if pointer is None:
             target = next((s for s in screens if s.primary), screens[0])
         else:
-            # A 1x1 rect at the pointer reuses the same "largest intersection,
-            # else primary" rule the overlay uses to pick an output.
+            # A 1x1 rect at the pointer: "largest intersection, else primary"
+            # picks the output under it.
             target = pick_output(screens, Rect(x=pointer[0], y=pointer[1], width=1, height=1))
         return dictation_rect(target.rect, pointer, self._config.window_fraction)
 

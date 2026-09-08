@@ -19,7 +19,7 @@ import pytest
 
 from voice_kb.audio import MonoAudio
 from voice_kb.config import Config, VadConfig
-from voice_kb.vad import SpeechSegmenter, load_segmenter
+from voice_kb.vad import SETTLE_SILENCE_SECONDS, SpeechSegmenter, load_segmenter
 
 RATE = 16000
 SAMPLE = Path("eval-samples/handy-1787827474.wav")
@@ -300,3 +300,87 @@ def test_a_brief_utterance_in_a_quiet_capture_keeps_its_tight_trim() -> None:
     chunk = built.split(audio)[0]
 
     assert chunk.samples.size < audio.size / 2, "a brief utterance must stay tightly trimmed"
+
+
+# ------------------------------------------------------------- settled chunks
+#
+# docs/progressive-commit.md: a chunk is settled when no later audio can
+# change it, and that is decided on a growing buffer.
+
+
+@pytest.mark.skipif(not LONG_SAMPLE.exists(), reason="eval sample not present")
+def test_every_chunk_but_the_last_is_settled(segmenter: SpeechSegmenter) -> None:
+    core = _speech_core(_load(LONG_SAMPLE))
+    gap = np.zeros(int(0.6 * RATE), dtype=np.float32)
+    many = np.concatenate([x for _ in range(4) for x in (core, gap)])
+
+    chunks = segmenter.split(many)
+
+    assert len(chunks) > 1, "the sample must be long enough to close a chunk"
+    assert all(c.settled for c in chunks[:-1])
+
+
+@pytest.mark.skipif(not LONG_SAMPLE.exists(), reason="eval sample not present")
+def test_the_last_chunk_settles_only_after_a_second_of_silence(
+    segmenter: SpeechSegmenter,
+) -> None:
+    """The span that closes the last chunk may be the one ``flush()`` cut at
+    the buffer's end, which moves on the next tick. A second of trailing
+    silence is the proof it did not."""
+    core = _speech_core(_load(LONG_SAMPLE))
+    config = Config().vad
+    assert core.size / RATE > config.chunk_seconds, "needs a full chunk of speech"
+
+    ending_mid_word = segmenter.split(core)[-1]
+    assert not ending_mid_word.settled
+
+    # sherpa reports a span's end ~0.9s after the speech stops (measured), so
+    # a second of silence is not yet a *reported* second past the end.
+    too_soon = np.zeros(int((SETTLE_SILENCE_SECONDS + 0.2) * RATE), dtype=np.float32)
+    assert not segmenter.split(np.concatenate([core, too_soon]))[-1].settled
+
+    quiet = np.zeros(int((SETTLE_SILENCE_SECONDS + 1.5) * RATE), dtype=np.float32)
+    after_a_pause = segmenter.split(np.concatenate([core, quiet]))
+    assert after_a_pause[-1].settled, "a closed chunk followed by real silence must settle"
+    assert after_a_pause[-1].end_frame < core.size + RATE, "and its end is where the speech ended"
+
+
+@pytest.mark.skipif(not LONG_SAMPLE.exists(), reason="eval sample not present")
+def test_end_frame_lies_inside_the_chunk_and_after_its_speech(
+    segmenter: SpeechSegmenter,
+) -> None:
+    core = _speech_core(_load(LONG_SAMPLE))
+    gap = np.zeros(int(0.6 * RATE), dtype=np.float32)
+    audio = np.concatenate([core, gap, core, gap])
+
+    for chunk in segmenter.split(audio):
+        start = int(chunk.start_seconds * RATE)
+        assert start < chunk.end_frame <= start + chunk.samples.size
+        assert chunk.end_frame <= audio.size
+
+
+@pytest.mark.skipif(not LONG_SAMPLE.exists(), reason="eval sample not present")
+def test_splitting_from_a_settled_end_frame_finds_the_same_next_chunk(
+    segmenter: SpeechSegmenter,
+) -> None:
+    """What the tick does: re-split the audio past the last settled chunk. The
+    next chunk must be the one the whole-buffer split would have produced, to
+    within the pad -- or the live transcript and ``voice-kb transcribe`` would
+    disagree about where sentences begin."""
+    core = _speech_core(_load(LONG_SAMPLE))
+    gap = np.zeros(int(0.6 * RATE), dtype=np.float32)
+    audio = np.concatenate([core, gap, core, gap])
+    pad = int(Config().vad.pad_seconds * RATE)
+
+    whole = segmenter.split(audio)
+    settled = [c for c in whole if c.settled]
+    assert settled, "the sample must close at least one chunk"
+    first = settled[0]
+    remainder = segmenter.split(audio[first.end_frame :])
+
+    # Same speech, located in the same place, allowing the lead pad to be
+    # clipped at the remainder's start.
+    expected = whole[whole.index(first) + 1]
+    expected_start = int(expected.start_seconds * RATE)
+    remainder_start = first.end_frame + int(remainder[0].start_seconds * RATE)
+    assert abs(remainder_start - expected_start) <= pad

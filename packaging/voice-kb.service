@@ -1,8 +1,8 @@
 [Unit]
 Description=voice-kb push-to-talk dictation
 Documentation=https://github.com/felixpeppert/voice-kb
-# Dies with the graphical session: the hotkey watcher, the overlay and the
-# dictation window all need X, and a daemon outliving the session it was
+# Dies with the graphical session: the hotkey watcher and the dictation
+# window both need X, and a daemon outliving the session it was
 # started for would hold /dev/input readers open for nothing.
 PartOf=graphical-session.target
 After=graphical-session.target

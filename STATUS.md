@@ -6,55 +6,55 @@ that never takes focus. Fully local, CPU-only (the 4 GB GTX 1650 stays free).
 For recording long passages while reading something else.
 
 ## Now
-- **Pivoted 2026-09-07: the sink is neovim, not the clipboard.** Appended over
-  msgpack-RPC to a floating nvim that never takes focus, one file per window.
-- **Used live, German and English, hold and latch.** ruff + mypy --strict +
-  **190 tests** green. `scripts/install.py` symlinks the i3 rules and systemd
-  unit out of `packaging/`, so nothing of voice-kb's lives only in dotfiles.
+- **progressive-commit (2026-09-08)** — settled chunks are decoded once and
+  appended *while speaking*; release decodes only the open tail (bound ~1-2.5s
+  instead of the 31-55s measured on 379s/821s passages); preview = open tail,
+  never cropped. PySide6 overlay deleted (Qt stays as the event loop). **Built,
+  reviewed (2 findings fixed), 252 tests green, simulated live: WER 13.5% vs
+  14.6% before, release 1.9s vs 9.3s on a 101s passage. Daemon restarted on
+  it; not yet dictated into.** Spec + as-built: `docs/progressive-commit.md`.
+  Uncommitted, together with:
+- **audio-safety-net (2026-09-08)** — every capture written to a wav as spoken;
+  `voice-kb transcribe <wav>` replays it. Cap 3600s and loud. **Done.**
 
 ## Done
-- nvim sink: pointer-anchored one-third window, winbar indicator, preview as
-  virtual text, one file per window. `docs/nvim-window.md` + ADR.
+- nvim sink (2026-09-07): pointer-anchored window, winbar indicator, one file per window.
 - Latched recording: shift+M4 records until M4 is pressed again.
-- **VAD chunking** (`vad.py`): fixes short utterances decoding to nothing;
-  transcript lands progressively; previews decode only the open tail.
-- **Window open:** placed by the terminal, msgpack readiness probe, X warm-up
-  at start. Never moves once open. `nvim.init = "bundled"` + `colorscheme`
-  opens in 0.23s against 0.73s for full LazyVim, same theme.
-- **systemd `--user` unit**, enabled, `WantedBy=i3-session.target`.
+- VAD chunking (`vad.py`): short utterances no longer decode to nothing.
+- Window open: placed by the terminal, msgpack readiness probe, never moves.
+- systemd `--user` unit, enabled; `scripts/install.py` symlinks `packaging/`.
 
 ## Measured (i7-9850H, 6 threads, CPU, 0 VRAM)
-- Warm, idle: 20 s -> 1.19 s (**16.8x**); Handy managed 1.37x, dropped a 37 s
-  clip at its cap, and scored 48.7% WER against ours.
-- Live: 11.2s held -> 0.78s decode + ~40ms append = **~0.8s to text**.
-- VAD-chunked decode: first text after ~1s at any recording length, rest
-  streams in. **WER 12.8%** vs 13.4% whole-buffer (`eval.py --vad`).
-- Preview cost now flat: median 1.10s over a 142s passage (was growing to 13s).
-- Window: cold open **244ms**, reattach 92ms, append 14-62ms — off the path.
+- Warm, idle: 20 s -> 1.19 s (**16.8x**); Handy managed 1.37x and 48.7% WER
+  against ours. Live: 11.2s held = **~0.8s to text**.
+- VAD-chunked **WER 12.8%** vs 13.4% whole-buffer (`eval.py --vad`).
+- sherpa reports a span's end ~0.9s after speech stops; a closed last chunk
+  therefore settles ~2s into a pause (`SETTLE_SILENCE_SECONDS` = 1s past it).
+- Window: cold open **244ms**, append 14-62ms — off the path.
 
 ## Hard constraints — full rationale in `docs/constraints.md`
 Read evdev **read-only** (no `EVIOCGRAB`, no uinput clones); **never synthesise
 characters** (no `xdotool type`/enigo) — both destroy per-device `setxkbmap`.
-One decode per sample, split at silence, never on a growing buffer. CPU only.
-Bias vocabulary at decode time, never fuzzy replacement. **No window voice-kb
-opens may take focus**, and nothing is written to a window it did not open.
-M4 = evdev `186` (`KEY_F16`) → X keycode `194`, keysym `XF86Launch7`,
-unbindable by keysym-based hotkey libraries.
+Every committed sample decoded exactly once, never from a growing buffer. CPU
+only. Bias vocabulary at decode time, never fuzzy replacement. **No window
+voice-kb opens may take focus**, and nothing is written to a window it did not
+open. M4 = evdev `186` (`KEY_F16`) → X keycode `194`, keysym `XF86Launch7`.
 
 ## Next
-- **A latched recording has no upper bound in memory** (~64 KB/s: an hour is
-  ~230 MB). Decode is no longer the worry — segments land progressively.
-- **First words lost on some long dictations** (2026-09-07, book titles). Not
-  reproduced; wider edge margin + per-chunk DEBUG logging added to catch it.
+- **Dictate a long passage** through the restarted daemon; check the log line
+  `decoded the last N.Ns in M.MMs` against the ~1-2.5s bound, then commit.
+- A latched recording costs ~230 MB RAM/hour, cut at 3600s; `transcribe` recovers the rest.
+- First words lost on some long dictations (2026-09-07). Not reproduced; logged.
 - Dying input stream: root cause unknown (3rd). Watchdogs recover it.
 - `cd home` -> `C D home.` — short commands spell out.
+- Recorder, accepted: a capped notice can go stale if the writer fails after it.
 
 ## Open questions
 - LLM cleanup pass? Technical vocabulary (mkdir, udev) is open. Gladia: #1.
 - Should a latched recording auto-commit at some length, or keep growing?
+- Rust rewrite (floated 2026-09-08): later, if at all; the design is neutral.
 
 ## Decided
-- Python + `uv`; TOML config. **PySide6** overlay (GTK4 has no X11 `move()`).
+- Python + `uv`; TOML config. PySide6 only as the event loop (overlay gone).
   **No hotwords** — biasing is risky on set/sed, gap ~2.6 pts.
-- **Deleted the paste path** rather than keep a second sink: one with no
-  caller rots untested while looking maintained.
+- Deleted the paste path and the overlay: a second sink/UI with no caller rots.

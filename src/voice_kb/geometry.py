@@ -1,9 +1,9 @@
-"""Pure placement math for the overlay window.
+"""Pure placement math for the dictation window.
 
-No ``xrandr``, no subprocess, no Qt: the caller (the imperative shell) is
-responsible for discovering real output geometry and the focused window's
-rect, and hands them in as plain :class:`Rect` values. That's what makes
-this testable without an X server.
+No ``xrandr``, no subprocess: the caller (the imperative shell) is
+responsible for discovering real output geometry and the pointer position,
+and hands them in as plain :class:`Rect` values. That's what makes this
+testable without an X server.
 """
 
 from __future__ import annotations
@@ -11,18 +11,16 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from voice_kb.config import OverlayConfig
-
 
 @dataclass(frozen=True, slots=True)
 class Rect:
     """An axis-aligned pixel rectangle: X11 output geometry, a window, or
-    the overlay itself.
+    the pointer as a 1x1 anchor.
 
     ``width``/``height`` rather than a second corner point, matching how
-    ``xrandr`` and Qt both report geometry -- a rect with zero or negative
-    area cannot represent a real monitor or window, so it's rejected here
-    rather than producing nonsense areas downstream.
+    ``xrandr`` reports geometry -- a rect with zero or negative area cannot
+    represent a real monitor or window, so it's rejected here rather than
+    producing nonsense areas downstream.
     """
 
     x: int
@@ -58,7 +56,8 @@ class Output:
 
 
 def pick_output(outputs: Sequence[Output], window: Rect) -> Output:
-    """Choose the output that should show the overlay for a focused ``window``.
+    """Choose the output that holds ``window`` -- for the dictation window,
+    a 1x1 rect at the mouse pointer.
 
     The output with the largest intersection with ``window`` wins. If the
     window doesn't overlap any output at all (off-screen, or the caller
@@ -82,12 +81,11 @@ def dictation_rect(output: Rect, anchor: tuple[int, int] | None, fraction: float
     the user is reading rather than in a fixed corner they have to look away
     to find.
 
-    Clamped into ``output`` exactly like :func:`overlay_rect`, and for the
-    same reason -- a pointer near the right or bottom edge would otherwise
-    anchor a window that hangs off the screen. Clamping means a pointer in the
-    bottom-right corner lands the window flush in the bottom-right quarter,
-    which is also the placement used when ``anchor`` is ``None`` because the
-    pointer could not be read.
+    Clamped into ``output``: a pointer near the right or bottom edge would
+    otherwise anchor a window that hangs off the screen. Clamping means a
+    pointer in the bottom-right corner lands the window flush in the
+    bottom-right quarter, which is also the placement used when ``anchor`` is
+    ``None`` because the pointer could not be read.
     """
     width = max(1, int(output.width * fraction))
     height = max(1, int(output.height * fraction))
@@ -99,26 +97,3 @@ def dictation_rect(output: Rect, anchor: tuple[int, int] | None, fraction: float
     y = max(output.y, min(y, output.bottom - height))
     return Rect(x=x, y=y, width=width, height=height)
 
-
-def overlay_rect(output: Rect, cfg: OverlayConfig, *, preview_band: bool) -> Rect:
-    """Where the overlay goes on ``output``: horizontally centred, bottom-aligned
-    with ``cfg.margin_px`` above the edge, and always fully inside ``output``.
-
-    The naive centred/bottom-aligned position is clamped into ``output``'s
-    bounds rather than trusted outright -- an overlay taller or wider than
-    the margin leaves room for must still land on-screen, not hang off the
-    bottom edge the way the previous tool's overlay did.
-
-    Height comes from :meth:`OverlayConfig.total_height`, not ``height``: with
-    the preview band shown the widget is taller than its status row, and
-    clamping the shorter number would put the band off-screen -- the exact
-    failure this clamp exists to prevent. ``preview_band`` is passed in rather
-    than read off ``cfg`` because previews are policy from ``[preview]`` now,
-    not an overlay setting.
-    """
-    height = cfg.total_height(preview_band=preview_band)
-    x = output.x + (output.width - cfg.width) // 2
-    y = output.bottom - cfg.margin_px - height
-    x = max(output.x, min(x, output.right - cfg.width))
-    y = max(output.y, min(y, output.bottom - height))
-    return Rect(x=x, y=y, width=cfg.width, height=height)
