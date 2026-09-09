@@ -18,9 +18,8 @@ For recording long passages while reading something else.
   `spokenpad transcribe <wav>` replays it. Cap 3600s and loud. **Done.**
 
 ## Done
-- Project rename to **spokenpad** (2026-09-09): runtime and installation
-  identifiers are coherent; migration instructions stop `voice-kb` before
-  enabling the renamed service.
+- Project rename to **spokenpad** (2026-09-09): checkout, GitHub repository,
+  runtime identifiers, i3 rule and user service migrated; live daemon healthy.
 - nvim sink (2026-09-07): pointer-anchored window, winbar indicator, one file per window.
 - Latched recording: shift+M4 records until M4 is pressed again.
 - VAD chunking (`vad.py`): short utterances no longer decode to nothing.
