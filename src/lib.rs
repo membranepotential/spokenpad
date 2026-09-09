@@ -1,0 +1,14 @@
+pub mod audio;
+pub mod config;
+pub mod daemon;
+pub mod decode;
+pub mod geometry;
+pub mod hotkey;
+pub mod inference;
+pub mod logging;
+pub mod nvim;
+pub mod recorder;
+pub mod session;
+pub mod state;
+pub mod text;
+pub mod x11;

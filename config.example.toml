@@ -3,7 +3,7 @@
 # Every key below is shown at its default value. Copy this file to
 # ~/.config/spokenpad/config.toml and uncomment/edit only what you need to
 # change -- an absent section or key falls back to its default, but an
-# *unknown* section or key is a hard error (config.py rejects typos loudly
+# *unknown* section or key is a hard error (config.rs rejects typos loudly
 # rather than silently ignoring them).
 
 [hotkey]
@@ -13,9 +13,8 @@ key_code = 186
 
 # evdev key code that cancels an in-progress recording/transcription.
 # 1 is KEY_ESC. Set to a bare integer to change it, or comment out /
-# omit for the default -- there is no way to disable it from TOML since
-# `null` isn't a code, only Python's None is (leave this line out and pass
-# cancel_key_code=None in code if you need it disabled).
+# omit for the default. TOML has no null value, so this option cannot be
+# disabled from the configuration file.
 cancel_key_code = 1
 
 # Modifier that turns a press into a LATCHED recording: hold it together with
@@ -27,8 +26,8 @@ cancel_key_code = 1
 # never have to remember which hand you started with. The nvim winbar shows a
 # lock while latched, since the way to stop it differs from push-to-talk.
 #
-# One of "shift", "ctrl", "alt". Omit the line entirely to disable latching and
-# leave pure push-to-talk (there is no way to write None in TOML).
+# One of "shift", "ctrl", "alt", "super", or "none". Use "none" to disable
+# latching; omitting the line retains the default "shift".
 latch_modifier = "shift"
 
 [audio]
@@ -41,9 +40,9 @@ sample_rate = 16000
 # opened lazily on keypress instead, at the cost of clipping quick starts.
 preroll_ms = 250
 
-# PipeWire/PulseAudio source name. Omit (or leave unset) to use the default
-# input device.
-# device = "alsa_input.usb-..."
+# PortAudio device-name query: case-insensitive, ordered words matched against
+# the device name and host API. Omit to use the default input device.
+# device = "USB ALSA"
 
 [recording]
 # Every capture is written to a wav while you are speaking, independently of
@@ -227,9 +226,10 @@ trailing_space = false
 # The literal token {instance} is replaced with `window_instance` below.
 #
 # The default asks alacritty for X11 class "Floating" and instance
-# "spokenpad", which is what the window manager rules key on. Set to [] to run
-# `editor` directly, for a GUI editor that needs no terminal.
-terminal = ["alacritty", "--class", "Floating,{instance}", "-e"]
+# "spokenpad", which is what the window manager rules key on. Rust refuses
+# graphical commands whose instance setting it cannot verify. Set to [] only
+# with an explicitly headless editor (for example ["nvim", "--headless"]).
+terminal = ["alacritty", "--class", "Floating,{instance}", "-o", "window.position.x={x}", "-o", "window.position.y={y}", "-e"]
 
 # The editor. `--listen <socket>` and the dictation file are appended to
 # this, so anything here comes first: ["nvim", "-u", "NONE"] gets an editor

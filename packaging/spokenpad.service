@@ -15,7 +15,7 @@ Type=exec
 # path absolute in a config file: moving the checkout then needs one edit
 # here, not two in different places.
 WorkingDirectory=%h/Documents/spokenpad
-ExecStart=%h/Documents/spokenpad/.venv/bin/spokenpad
+ExecStart=%h/Documents/spokenpad/target/release/spokenpad
 
 # Not -v: DEBUG still goes to the rotating file at
 # $XDG_STATE_HOME/spokenpad/spokenpad.log regardless, and duplicating it into

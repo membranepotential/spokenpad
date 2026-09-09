@@ -5,6 +5,8 @@ __pycache__/
 .mypy_cache/
 .pytest_cache/
 .ruff_cache/
+target/
+nvim.log
 
 # ASR model weights (~630 MB) - fetched by scripts/fetch_model.py
 models/
