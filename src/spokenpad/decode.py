@@ -1,29 +1,38 @@
 """The decode pipeline: split at silence, decode each chunk exactly once.
 
-This is the functional core the daemon's worker thread runs and that
-``spokenpad transcribe`` runs over a recovered wav. It lives on its own rather
-than inside :mod:`spokenpad.app` so that recovering a lost transcript from disk
-goes through *the same* pipeline as live dictation -- same segmentation, same
-model, same whole-buffer fallback. A second, parallel implementation of this
-would drift, and the day it is needed is the day nobody is in a position to
-notice that it has.
+This is the offline Python reference for the Rust daemon and recovery command.
+Both implementations use the same segmentation rules, model, and whole-buffer
+fallback; ``scripts/verify_rust.py`` checks that they do not drift.
 
 Everything policy-shaped stays with the caller: this function decodes and
-reports, it does not decide what to do with the text. The daemon appends each
-chunk to nvim as it lands; the CLI collects them. Both get the same string
-back at the end.
+reports, it does not decide what to do with the text. The Rust implementation
+has the same boundary; this Python reference lets offline callers collect each
+chunk and the final joined string for differential checks.
 """
 
 from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from typing import Protocol
 
-from spokenpad.asr import Transcriber
+from spokenpad.asr import TranscriptionResult
 from spokenpad.audio import MonoAudio
-from spokenpad.vad import Segment, SpeechSegmenter
+from spokenpad.vad import Segment
 
 log = logging.getLogger("spokenpad.decode")
+
+
+class Transcriber(Protocol):
+    """The one operation the pure decode pipeline needs from an ASR model."""
+
+    def transcribe(self, samples: MonoAudio, sample_rate: int) -> TranscriptionResult: ...
+
+
+class Segmenter(Protocol):
+    """The segmentation operation used by the pure decode pipeline."""
+
+    def split(self, samples: MonoAudio) -> list[Segment]: ...
 
 
 def _keep_going() -> bool:
@@ -38,7 +47,7 @@ def decode_capture(
     samples: MonoAudio,
     *,
     transcriber: Transcriber,
-    segmenter: SpeechSegmenter | None,
+    segmenter: Segmenter | None,
     sample_rate: int,
     on_segment: Callable[[str], None] = _ignore,
     abandoned: Callable[[], bool] = _keep_going,

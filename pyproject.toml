@@ -1,29 +1,17 @@
 [project]
 name = "spokenpad"
-version = "0.1.0"
-description = "Local push-to-talk dictation for Linux/X11"
+version = "0.2.0"
+description = "Offline Python evaluation helpers for spokenpad"
 readme = "README.md"
 authors = [
     { name = "Felix Peppert", email = "felix@peppert.de" }
 ]
 requires-python = ">=3.13"
 dependencies = [
-    "evdev>=2.0.0",
-    # Direct: the nvim readiness probe speaks msgpack-RPC on the raw socket,
-    # because pynvim's own requests cannot be given a timeout. Pulled in by
-    # pynvim anyway, but declared because this project imports it itself.
-    "msgpack>=1.1.0",
     "numpy>=2.5.2",
-    "pynvim>=0.6.0",
-    "pyside6>=6.11.2",
-    "pyudev>=0.24.4",
     "sherpa-onnx>=1.13.6",
     "sherpa-onnx-core==1.13.6",
-    "sounddevice>=0.5.6",
 ]
-
-[project.scripts]
-spokenpad = "spokenpad.app:main"
 
 [build-system]
 requires = ["uv_build>=0.12.5,<0.13.0"]
@@ -44,7 +32,7 @@ warn_unreachable = true
 disallow_any_explicit = false
 
 [[tool.mypy.overrides]]
-module = ["sherpa_onnx.*", "sounddevice.*", "pyudev.*", "evdev.*", "pynvim.*", "msgpack.*"]
+module = ["sherpa_onnx.*"]
 ignore_missing_imports = true
 
 [tool.ruff]
@@ -61,3 +49,4 @@ ignore = ["ANN401"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]

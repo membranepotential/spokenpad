@@ -144,6 +144,9 @@ class _Chunk(NamedTuple):
     substantial enough to earn the wider edge margin."""
     closed: bool
     """Whether the merge target closed it, as opposed to the input running out."""
+    edge_lead: bool
+    """A long internal silence makes this boundary act like a capture edge."""
+    edge_trail: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,6 +199,10 @@ class SpeechSegmenter:
         self._chunk_seconds = config.chunk_seconds
         self._pad_seconds = config.pad_seconds
         self._edge_pad_seconds = config.edge_pad_seconds
+        self._split_silence_seconds = max(
+            SETTLE_SILENCE_SECONDS,
+            2 * max(config.edge_pad_seconds, config.pad_seconds),
+        )
         self._detector = sherpa_onnx.VoiceActivityDetector(
             model, buffer_size_in_seconds=config.max_speech_seconds * _BUFFER_HEADROOM
         )
@@ -240,8 +247,8 @@ class SpeechSegmenter:
             # A wider margin at the very start and end of the capture, where
             # a clipped word is the first or last word of what was said.
             wide = chunk.speech >= _EDGE_MARGIN_MIN_SPEECH_S * self._sample_rate
-            lead = edge if wide and index == 0 else pad
-            trail = edge if wide and index == last else pad
+            lead = edge if wide and (index == 0 or chunk.edge_lead) else pad
+            trail = edge if wide and (index == last or chunk.edge_trail) else pad
             # `start_seconds` describes the samples actually returned, padding
             # included, so it always locates them in the capture rather than
             # pointing a little after where they begin.
@@ -265,18 +272,30 @@ class SpeechSegmenter:
         has enough context to work with rather than one chunk per phrase.
         """
         target = self._chunk_seconds * self._sample_rate
+        split_after = self._split_silence_seconds * self._sample_rate
         chunks: list[_Chunk] = []
         start: int | None = None
+        end: int | None = None
         speech = 0
+        edge_lead = False
         for span_start, span_end in spans:
+            previous_end = end if end is not None else chunks[-1].end if chunks else None
+            if previous_end is not None and span_start - previous_end >= split_after:
+                if start is not None and end is not None:
+                    chunks.append(_Chunk(start, end, speech, True, edge_lead, False))
+                chunks[-1] = chunks[-1]._replace(edge_trail=True)
+                start, end, speech = None, None, 0
+                edge_lead = True
             if start is None:
                 start = span_start
             speech += span_end - span_start
+            end = span_end
             if speech >= target:
-                chunks.append(_Chunk(start, span_end, speech, closed=True))
-                start, speech = None, 0
-        if start is not None:
-            chunks.append(_Chunk(start, spans[-1][1], speech, closed=False))
+                chunks.append(_Chunk(start, span_end, speech, True, edge_lead, False))
+                start, end, speech = None, None, 0
+                edge_lead = False
+        if start is not None and end is not None:
+            chunks.append(_Chunk(start, end, speech, False, edge_lead, False))
         return chunks
 
     def _speech_spans(self, samples: MonoAudio) -> list[tuple[int, int]]:

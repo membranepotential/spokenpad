@@ -192,14 +192,97 @@ def test_its_log_lines_reach_the_daemons_log() -> None:
     VAD model" among them, went nowhere at all. Caught in use: the daemon
     started with segmentation silently unavailable and said nothing.
     """
-    from spokenpad import hotkey, vad
+    from spokenpad import vad
 
-    for module in (vad, hotkey):
+    for module in (vad,):
         name = getattr(module, "log", None) or module.logger
         assert name.name.startswith("spokenpad."), f"{module.__name__} logs outside the tree"
 
 
 # --------------------------------------------------- merging and padding
+
+
+def _synthetic_segmenter(config: VadConfig, rate: int = 100) -> SpeechSegmenter:
+    segmenter = object.__new__(SpeechSegmenter)
+    segmenter._sample_rate = rate
+    segmenter._chunk_seconds = config.chunk_seconds
+    segmenter._pad_seconds = config.pad_seconds
+    segmenter._edge_pad_seconds = config.edge_pad_seconds
+    segmenter._split_silence_seconds = max(
+        SETTLE_SILENCE_SECONDS,
+        2 * max(config.edge_pad_seconds, config.pad_seconds),
+    )
+    return segmenter
+
+
+def test_a_long_pause_closes_the_pending_chunk(monkeypatch: pytest.MonkeyPatch) -> None:
+    segmenter = _synthetic_segmenter(VadConfig())
+    monkeypatch.setattr(segmenter, "_speech_spans", lambda _samples: [(100, 300), (700, 800)])
+    audio = np.arange(900, dtype=np.float32)
+
+    chunks = segmenter.split(audio)
+
+    assert [(chunk.end_frame, chunk.settled) for chunk in chunks] == [(300, True), (800, False)]
+    assert np.array_equal(chunks[0].samples, audio[50:350])
+    assert np.array_equal(chunks[1].samples, audio[650:850])
+
+
+def test_a_long_pause_gives_both_wide_chunks_an_internal_context_edge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    segmenter = _synthetic_segmenter(VadConfig())
+    monkeypatch.setattr(segmenter, "_speech_spans", lambda _samples: [(100, 500), (900, 1300)])
+    audio = np.arange(1400, dtype=np.float32)
+
+    chunks = segmenter.split(audio)
+
+    assert np.array_equal(chunks[0].samples, audio[0:700])
+    assert np.array_equal(chunks[1].samples, audio[700:1400])
+
+
+@pytest.mark.parametrize(
+    ("second_start", "expected_windows"),
+    [
+        (1500, [(0, 1300), (1450, 1650)]),
+        (1499, [(0, 1150), (1449, 1650)]),
+    ],
+)
+def test_a_long_pause_after_a_target_closed_chunk_still_marks_its_context_edge(
+    monkeypatch: pytest.MonkeyPatch,
+    second_start: int,
+    expected_windows: list[tuple[int, int]],
+) -> None:
+    segmenter = _synthetic_segmenter(VadConfig())
+    monkeypatch.setattr(
+        segmenter,
+        "_speech_spans",
+        lambda _samples: [(100, 1100), (second_start, 1600)],
+    )
+    audio = np.arange(1650, dtype=np.float32)
+
+    chunks = segmenter.split(audio)
+
+    actual_windows = [
+        (round(chunk.start_seconds * 100), round(chunk.start_seconds * 100) + len(chunk.samples))
+        for chunk in chunks
+    ]
+    assert actual_windows == expected_windows
+
+
+def test_a_pause_below_the_padding_aware_boundary_still_merges(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    segmenter = _synthetic_segmenter(VadConfig())
+    monkeypatch.setattr(segmenter, "_speech_spans", lambda _samples: [(100, 300), (699, 800)])
+    chunks = segmenter.split(np.arange(900, dtype=np.float32))
+    assert len(chunks) == 1
+    assert chunks[0].end_frame == 800
+
+
+def test_larger_padding_raises_the_long_pause_boundary(monkeypatch: pytest.MonkeyPatch) -> None:
+    segmenter = _synthetic_segmenter(VadConfig(pad_seconds=3))
+    monkeypatch.setattr(segmenter, "_speech_spans", lambda _samples: [(100, 300), (700, 800)])
+    assert len(segmenter.split(np.arange(900, dtype=np.float32))) == 1
 
 
 @pytest.mark.skipif(not SAMPLE.exists(), reason="eval sample not present")

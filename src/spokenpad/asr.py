@@ -27,6 +27,7 @@ from pathlib import Path
 import numpy as np
 import sherpa_onnx
 
+from spokenpad.audio import MonoAudio
 from spokenpad.config import AsrConfig
 
 
@@ -100,6 +101,7 @@ class Transcriber:
 
     def __init__(self, config: AsrConfig) -> None:
         ensure_model_files(config)
+        self._trailing_silence: dict[int, MonoAudio] = {}
 
         hotwords_path: Path | None = None
         try:
@@ -140,11 +142,16 @@ class Transcriber:
             if hotwords_path is not None:
                 hotwords_path.unlink(missing_ok=True)
 
-    def transcribe(self, samples: np.ndarray, sample_rate: int) -> TranscriptionResult:
+    def transcribe(self, samples: MonoAudio, sample_rate: int) -> TranscriptionResult:
         """Decode ``samples`` (mono float32 PCM in ``[-1, 1]``) in one shot."""
         t0 = time.perf_counter()
         stream = self._recognizer.create_stream()
-        stream.accept_waveform(sample_rate, samples)
+        silence = self._trailing_silence.get(sample_rate)
+        if silence is None:
+            silence = np.zeros(sample_rate, dtype=np.float32)
+            self._trailing_silence[sample_rate] = silence
+        padded_samples = np.concatenate((samples, silence))
+        stream.accept_waveform(sample_rate, padded_samples)
         self._recognizer.decode_stream(stream)
         elapsed = time.perf_counter() - t0
         text: str = stream.result.text
