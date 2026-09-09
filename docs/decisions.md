@@ -16,11 +16,11 @@ Every hard constraint in [constraints.md](constraints.md) traces back to one
 of these seven. Handy was run end-to-end, every change it made was reverted,
 and it was uninstalled (STATUS.md).
 
-## Python + `uv` over Rust
+## Python + `uv` over Rust (superseded)
 
-Chosen for the implementation language and toolchain. `pyproject.toml`
-targets Python 3.13, `mypy --strict`, and `uv` for dependency management
-(STATUS.md: "Decided — Python + `uv`"). No performance case demanded Rust:
+Originally chosen for the implementation language and toolchain. Python 3.13,
+strict mypy, and `uv` remain for offline setup/evaluation helpers only; the
+production runtime is Rust. At the time, no performance case demanded Rust:
 the ASR bottleneck is the ONNX Runtime, not Python, and int8 CPU decode
 already runs at 9.7x real-time (see [asr.md](asr.md)) — well past the
 one-shot-per-utterance requirement.
@@ -29,10 +29,8 @@ one-shot-per-utterance requirement.
 
 **Superseded 2026-09-08.** The overlay is deleted: off by default since the
 nvim sink landed, with no user, it was the second-sink trap below in UI form.
-PySide6 stays only as the event loop and thread plumbing (`QThread`, queued
-signals, `QTimer`); replacing those changes no behaviour and is the natural
-first step of a rewrite rather than a change on its own. The original
-reasoning is kept for the record.
+The later Rust runtime removed the remaining Qt event-loop/thread plumbing and
+the PySide6 dependency. The original UI reasoning is kept below for the record.
 
 The overlay must be positioned on a specific output and must never take
 keyboard focus (see
@@ -40,9 +38,8 @@ keyboard focus (see
 out GTK4: it has no `Window.move()` or `set_type_hint()` on X11 — verified —
 so it cannot position or hint a non-focusable overlay window on this
 platform (STATUS.md: "GTK4 has no `move()`/`set_type_hint()` on X11
-(verified)"). PySide6 (Qt) supports both, so `overlay.py` (not yet
-implemented) will be built on it; `pyside6>=6.11.2` is already a project
-dependency (`pyproject.toml`).
+(verified)"). PySide6 supported both and was used by the now-deleted Python
+runtime; it is no longer a project dependency.
 
 ## TOML config over a settings GUI
 
@@ -126,8 +123,8 @@ decode of the complete buffer. Previews are permitted only under three
 invariants that make the old failure mode unreachable:
 
 - previews are never injected, merged, or otherwise allowed to influence the
-  committed text (`_Worker.run_preview` emits to the overlay and nowhere
-  else);
+  committed text (the Rust session exposes them only to nvim's virtual-text
+  renderer);
 - a preview decodes a fixed-length trailing window, never a growing buffer,
   so its cost cannot scale with utterance length;
 - previews are abandoned before a committed decode is requested, so a
@@ -179,12 +176,13 @@ have cost nothing to leave in, and that is the trap — a second sink with no
 caller is a code path that rots untested while looking maintained. It is one
 `git revert` away if the need returns.
 
-**Consequences.** The Qt overlay is off by default; the same indicator (phase,
+**Historical consequences.** The Qt overlay was disabled; the same indicator (phase,
 level meter, live preview) is rendered in the nvim window's winbar by
-`nvim_indicator.lua`, where the text is about to land. Preview settings moved
+`src/lua/nvim_indicator.lua`, where the text is about to land. Preview settings moved
 out of `[overlay]` into their own `[preview]` section, because they are no
 longer an overlay concern. A fourth thread was added for the RPC connection
-(see [architecture.md](architecture.md)). `pynvim` is a new dependency.
+(see [architecture.md](architecture.md)). The Rust runtime later replaced this
+adapter and removed `pynvim`.
 
 **Measured on this machine, 2026-09-07:** cold open of the dictation window
 1.0-1.2 s (the first ever open took 13.5 s while the user's plugin manager

@@ -4,6 +4,11 @@ Local push-to-talk dictation for Linux/X11 (i3). Hold a key, speak, release —
 the text appears in a floating neovim window that never takes focus. Fully
 local, CPU-only.
 
+The daemon and recovery command are implemented in Rust. Python is retained
+only for model setup, offline evaluation, and Rust/Python ASR/VAD differential
+checks; the Rust executable never starts Python. See [the Rust implementation
+notes](docs/rust.md).
+
 Hold **shift** with the hotkey instead and recording *latches*: let go, keep
 talking, and press the hotkey again when you are done. For a long passage,
 holding a key for two minutes is its own kind of friction.
@@ -46,6 +51,9 @@ this project's hard constraints:
 
 ## Measured
 
+These original benchmarks describe the Python reference. Exact Rust parity
+and release-tail measurements are in [docs/rust.md](docs/rust.md#verification).
+
 Parakeet TDT 0.6B v3 int8 on an i7-9850H, 6 threads, CPU only:
 
 Idle machine, warm model, `modified_beam_search`, best of 3:
@@ -69,9 +77,11 @@ this replaces managed 1.37× on the same hardware and silently discarded the
 ## Setup
 
 ```sh
+cargo build --locked --release
+# If the weights are not already present (Python is only needed by this setup tool):
 uv sync
-uv run scripts/fetch_model.py     # ~630 MB ASR + ~2 MB VAD, not committed
-uv run scripts/install.py         # window manager rules + systemd unit
+uv run scripts/fetch_model.py
+python3 scripts/install.py        # window manager rules + systemd unit
 systemctl --user daemon-reload && systemctl --user enable --now spokenpad
 ```
 
@@ -101,15 +111,32 @@ target is not `i3-session.target`. Watch it with
 `journalctl --user -u spokenpad -f`; the full DEBUG log is in
 `$XDG_STATE_HOME/spokenpad/spokenpad.log` either way.
 
+The editor needs Neovim 0.10 or newer for buffer-scoped diagnostic control.
+The build needs Rust, a C toolchain, `pkg-config`, and PortAudio development
+files (`portaudio` on Arch). It downloads the pinned sherpa-onnx native runtime
+unless `SHERPA_ONNX_LIB_DIR` points to an existing **1.13.6** library directory.
+Keep the shared libraries in `target/release/` beside the binary when moving
+it. Model weights are still loaded from `models/` or the configured paths.
+
+Run `target/release/spokenpad check` to validate the config and load both CPU
+models without opening a microphone, hotkey watcher, or editor. Missing config
+files use defaults, matching the original command.
+
+For an existing Python installation, finish the current dictation, build Rust,
+then run `systemctl --user daemon-reload && systemctl --user restart spokenpad`.
+Keep only one daemon running. The service restart closes its child windows;
+their saved transcripts remain on disk. A surviving dedicated editor can be
+reattached without starting a new file.
+
 ### Migrating from voice-kb
 
-Rename the checkout to `~/Documents/spokenpad`, run `uv sync`, then install the
+Rename the checkout to `~/Documents/spokenpad`, build Rust, then install the
 new unit and rules. Before enabling it, stop the old daemon so two processes do
 not read the same hotkey:
 
 ```sh
 systemctl --user disable --now voice-kb
-uv run scripts/install.py
+python3 scripts/install.py
 systemctl --user daemon-reload && systemctl --user enable --now spokenpad
 i3-msg reload
 ```
@@ -122,13 +149,31 @@ decoding, and the capture's log line names the file. So a decode that failed,
 was cancelled, or stopped short is not a lost dictation:
 
 ```console
-$ spokenpad transcribe ~/.local/state/spokenpad/audio/capture-2026-09-08-141530.wav
+$ target/release/spokenpad transcribe ~/.local/state/spokenpad/audio/capture-2026-09-08-141530.wav
 ```
 
 It decodes through the same VAD and model the daemon uses and prints the
 transcript (`--out PATH` writes it to a file instead). The directory is pruned
 oldest-first at 5 GiB, ~46 hours of speech; `[recording]` in
 `config.example.toml` turns it off or moves it.
+
+## Verification
+
+```sh
+cargo test --locked --all-targets
+cargo clippy --locked --all-targets -- -D warnings
+cargo fmt --check
+```
+
+The nvim integration tests use isolated headless editors and temporary files.
+They require permission to bind local Unix sockets. No test reads keyboard
+events or captures microphone audio. With the local evaluation WAVs and the
+small Python reference environment installed, compare exact native results:
+
+```sh
+cargo build --locked --release --example verify_native
+.venv/bin/python scripts/verify_rust.py
+```
 
 ## Note on `bpe.vocab`
 

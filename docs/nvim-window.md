@@ -1,8 +1,8 @@
 # The dictation window
 
 ← [docs index](README.md) | Implemented by
-[`nvim.py`](../src/spokenpad/nvim.py) and
-[`nvim_indicator.lua`](../src/spokenpad/nvim_indicator.lua). The reasoning for
+[`nvim.rs`](../src/nvim.rs) and
+[`nvim_indicator.lua`](../src/lua/nvim_indicator.lua). The reasoning for
 using nvim at all is in
 [decisions.md](decisions.md#the-sink-is-neovim-not-the-clipboard); the rules
 it must not break are in [constraints.md](constraints.md).
@@ -226,8 +226,8 @@ the cost. Three other things were, and all three are fixed:
   <socket> --remote-expr 1` every 100 ms, at ~200 ms a spawn. It is now a raw
   msgpack-RPC round trip on the socket: one connection, one request, and the
   reply arrives when nvim's event loop reaches it. It still has a hard
-  timeout, which is the reason it was out of process to begin with — pynvim
-  requests have none, and attaching to an editor that is still starting would
+  timeout, which is why the Rust client enforces one absolute deadline; an
+  editor that is still starting must not
   block the bridge thread with no way out, hanging the daemon's shutdown.
   `nvim.startup_timeout_s` stays a generous 20 s: a first-ever open took
   13.5 s while a plugin manager did one-time work.

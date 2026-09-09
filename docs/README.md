@@ -6,6 +6,9 @@ the live dashboard in [STATUS.md](../STATUS.md).
 
 ## Reading order
 
+Start with **[rust.md](rust.md)** for the current runtime, thread ownership,
+build, and verification. Historical measurements are labeled where retained.
+
 1. **[architecture.md](architecture.md)** — the functional-core / imperative-shell
    split, the module map, and the keypress-to-text-in-the-buffer event flow.
 2. **[constraints.md](constraints.md)** — the hard rules this project will not

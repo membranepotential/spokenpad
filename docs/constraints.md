@@ -53,7 +53,7 @@ clipboard + `ctrl+v` versus **3.3 s** via character synthesis for the same
 
 Since 2026-09-07 it does not touch the clipboard either. The transcript is
 appended to a neovim buffer over that editor's msgpack-RPC socket
-([`nvim.py`](../src/spokenpad/nvim.py)), which is strictly stronger than the
+([`nvim.rs`](../src/nvim.rs)), which is strictly stronger than the
 clipboard sink it replaced: no keystroke is sent anywhere, no global X state
 is read or written, and the transcript never crosses a shell or an argv
 boundary — it is a msgpack string argument, so a dictated `$(rm -rf ~)` is
@@ -126,16 +126,16 @@ what is already in the buffer stays, because it is the user's file.
 The audio after the last settled chunk is decoded once per tick and shown as
 virtual text below the committed transcript, then thrown away. That is an
 extra decode of audio that is still growing, so the invariants that keep it
-on the safe side of this rule are worth stating, and they are asserted in
-`tests/test_e2e.py`:
+on the safe side of this rule are worth stating, and they are asserted in the
+Rust session/nvim tests and retained Python decode tests:
 
 1. **Preview output never reaches the buffer.** In nvim it is an extmark's
    virtual text, not buffer content, so it cannot be written to the file,
-   yanked, or undone into the buffer even deliberately. `_Worker.run_decode`
-   never reads preview state.
+   yanked, or undone into the buffer even deliberately. Committed decode never
+   reads preview state.
 2. **Preview cost is bounded by the chunk, not the utterance.** Only the open
    tail is decoded, and it is at most one unclosed chunk. A preview costs the
-   same at ten minutes as at ten seconds. `PreviewConfig.max_seconds`
+   same at ten minutes as at ten seconds. `[preview].max_seconds`
    survives only as a backstop for a daemon running without a VAD model,
    where the tail is the whole buffer.
 3. **A preview can never make the user wait.** Previews are abandoned the
@@ -157,7 +157,7 @@ model to the discrete GPU — a GTX 1650 with 4 GB VRAM. That GPU needs to stay
 free for other workloads; the project's stated goal was CPU-only local ASR
 from the start (README.md, STATUS.md: "the 4 GB GTX 1650 stays free").
 
-**Rule:** `AsrConfig.num_threads` is fixed at 6 and the ONNX Runtime provider
+**Rule:** `Asr.num_threads` is fixed at 6 and the ONNX Runtime provider
 is pinned to `cpu` (`scripts/spike_decode.py` builds the recognizer with
 `provider="cpu"` explicitly). No code path in this project selects a GPU
 provider.
@@ -201,7 +201,7 @@ dictating into, aborting the transcription in progress.
 point in its lifecycle. Since 2026-09-08 it opens exactly one: the
 **dictation window**, which is refused focus by the window manager via a
 `no_focus` rule keyed on its X11 instance name. There is deliberately no
-focus call anywhere in [`nvim.py`](../src/spokenpad/nvim.py) — not even a
+focus call anywhere in [`nvim.rs`](../src/nvim.rs) — not even a
 "restore the previous focus" one, which would be a focus change of its own.
 See [nvim-window.md](nvim-window.md). (The Qt status overlay that preceded
 it was non-focusable by construction; it is deleted, see
