@@ -1,7 +1,7 @@
-# voice-kb configuration
+# spokenpad configuration
 #
 # Every key below is shown at its default value. Copy this file to
-# ~/.config/voice-kb/config.toml and uncomment/edit only what you need to
+# ~/.config/spokenpad/config.toml and uncomment/edit only what you need to
 # change -- an absent section or key falls back to its default, but an
 # *unknown* section or key is a hard error (config.py rejects typos loudly
 # rather than silently ignoring them).
@@ -37,7 +37,7 @@ sample_rate = 16000
 
 # Audio retained before the key goes down, so the first word isn't clipped.
 # This costs an always-open input stream -- the mic stays live the whole
-# time voice-kb runs. Set to 0 to disable pre-roll; the stream is then
+# time spokenpad runs. Set to 0 to disable pre-roll; the stream is then
 # opened lazily on keypress instead, at the cost of clipping quick starts.
 preroll_ms = 250
 
@@ -54,7 +54,7 @@ preroll_ms = 250
 # dropped inside the realtime callback -- the only copy that existed -- and
 # 3m41s of dictation was gone, with nothing in the log to say so. With a
 # recording, a decode that fails, is cancelled, or stops short is no longer a
-# loss: `voice-kb transcribe <wav>` decodes the file through the same VAD and
+# loss: `spokenpad transcribe <wav>` decodes the file through the same VAD and
 # model the daemon uses and prints the transcript.
 #
 # The cost is ~32 KB per second of speech (16 kHz 16-bit mono), pruned below.
@@ -62,15 +62,15 @@ enabled = true
 
 # Where the recordings go. Created mode 0700, each file mode 0600 -- a capture
 # holds whatever you dictated, which is why the log file is 0600 too.
-# Defaults to $XDG_STATE_HOME/voice-kb/audio (~/.local/state/voice-kb/audio).
+# Defaults to $XDG_STATE_HOME/spokenpad/audio (~/.local/state/spokenpad/audio).
 # ~ and $VAR are expanded; an unset $VAR is an error rather than a literal
 # directory named after it.
 #
-# GIVE THIS A DIRECTORY OF ITS OWN: voice-kb prunes it (see max_total_bytes
+# GIVE THIS A DIRECTORY OF ITS OWN: spokenpad prunes it (see max_total_bytes
 # below). Only the `capture-*.wav` files it writes are ever deleted -- nothing
-# else in the directory is touched -- but a folder that is only ever voice-kb's
+# else in the directory is touched -- but a folder that is only ever spokenpad's
 # leaves no room for that promise to be wrong.
-# dir = "~/.local/state/voice-kb/audio"
+# dir = "~/.local/state/spokenpad/audio"
 
 # Size budget for that directory, enforced oldest-first at startup and once
 # per capture. 5 GiB is ~46 hours of speech. Age is deliberately not a
@@ -100,7 +100,7 @@ hotwords_score = 1.5
 # Words and phrases to bias the decoder toward, e.g. project names or
 # commands that are otherwise misheard. Only takes effect with
 # decoding = "modified_beam_search"; greedy decoding ignores it.
-# vocabulary = ["kubectl", "voice-kb", "nginx"]
+# vocabulary = ["kubectl", "spokenpad", "nginx"]
 vocabulary = []
 
 [vad]
@@ -122,7 +122,7 @@ vocabulary = []
 enabled = true
 
 # Silero VAD weights, ~2 MB, fetched by scripts/fetch_model.py. Relative paths
-# resolve against this file's directory. If the file is missing, voice-kb logs
+# resolve against this file's directory. If the file is missing, spokenpad logs
 # a warning and decodes whole captures rather than refusing to start.
 model = "models/silero_vad.onnx"
 
@@ -189,7 +189,7 @@ trailing_space = false
 # nvim config for the dictation window.
 #
 #   unset       your own ~/.config/nvim -- everything you have, and its cost
-#   "bundled"   voice-kb's own: no plugins, chrome off before the first frame
+#   "bundled"   spokenpad's own: no plugins, chrome off before the first frame
 #   "NONE"      a bare nvim
 #   <a path>    that file
 #
@@ -200,7 +200,7 @@ trailing_space = false
 # `bundled`: the yank flash is built into nvim, and `colorscheme` below loads
 # a theme without the configuration it normally lives in (0.23s with one).
 #
-# voice-kb strips the chrome and sets prose wrapping over RPC whatever is
+# spokenpad strips the chrome and sets prose wrapping over RPC whatever is
 # loaded, and writes committed text with `noautocmd` so a format-on-save
 # cannot reflow a transcript.
 # init = "bundled"
@@ -227,7 +227,7 @@ trailing_space = false
 # The literal token {instance} is replaced with `window_instance` below.
 #
 # The default asks alacritty for X11 class "Floating" and instance
-# "voice-kb", which is what the window manager rules key on. Set to [] to run
+# "spokenpad", which is what the window manager rules key on. Set to [] to run
 # `editor` directly, for a GUI editor that needs no terminal.
 terminal = ["alacritty", "--class", "Floating,{instance}", "-e"]
 
@@ -237,12 +237,12 @@ terminal = ["alacritty", "--class", "Floating,{instance}", "-e"]
 editor = ["nvim"]
 
 # X11 instance name of the dictation window. It must match whatever your
-# window manager rules match on. voice-kb writes the i3 rules to
-# ~/.config/i3/i3.d/voice-kb.conf; see docs/nvim-window.md.
+# window manager rules match on. spokenpad writes the i3 rules to
+# ~/.config/i3/i3.d/spokenpad.conf; see docs/nvim-window.md.
 #
 # Restricted to [A-Za-z0-9_-] because it is interpolated into an i3 criteria
 # string, and a config value must not be able to become i3 syntax.
-window_instance = "voice-kb"
+window_instance = "spokenpad"
 
 # Size of the dictation window, as a fraction of each screen axis: 0.33 is a
 # third of the width and a third of the height. It opens with its top-left
@@ -250,21 +250,21 @@ window_instance = "voice-kb"
 # whatever you are reading rather than in a fixed corner.
 window_fraction = 0.33
 
-# Where nvim listens for RPC. voice-kb reattaches to a live socket rather
+# Where nvim listens for RPC. spokenpad reattaches to a live socket rather
 # than opening a second window, so restarting the daemon does not litter the
 # desktop with terminals.
 #
-# Defaults to $XDG_RUNTIME_DIR/voice-kb-nvim.sock, falling back to the state
+# Defaults to $XDG_RUNTIME_DIR/spokenpad-nvim.sock, falling back to the state
 # directory below if that variable is unset. Both ~ and $VAR are expanded
 # here -- but a $VAR that is not actually set is a hard error rather than a
 # literal directory named "$XDG_RUNTIME_DIR" in your home.
-socket_path = "/run/user/1000/voice-kb-nvim.sock"
+socket_path = "/run/user/1000/spokenpad-nvim.sock"
 
 # Directory holding the dictation files, and the strftime template for their
 # names -- one file per WINDOW, saved after every single utterance.
 #
 # Closing the dictation window ends the passage: the next time you record,
-# voice-kb opens a new window on a new file rather than appending under
+# spokenpad opens a new window on a new file rather than appending under
 # everything you said an hour ago. While the window stays open every utterance
 # goes into it, across a daemon restart included. Include a time in the
 # template, not just a date, or two sessions in one day share a page.
@@ -273,9 +273,9 @@ socket_path = "/run/user/1000/voice-kb-nvim.sock"
 # disappears because a buffer was closed is the same class of failure as one
 # dropped by a streaming decoder, which is the failure this project exists to
 # eliminate.
-# dictation_dir defaults to $XDG_STATE_HOME/voice-kb/dictation, and to
-# ~/.local/state/voice-kb/dictation when XDG_STATE_HOME is unset.
-dictation_dir = "~/.local/state/voice-kb/dictation"
+# dictation_dir defaults to $XDG_STATE_HOME/spokenpad/dictation, and to
+# ~/.local/state/spokenpad/dictation when XDG_STATE_HOME is unset.
+dictation_dir = "~/.local/state/spokenpad/dictation"
 file_template = "dictation-%Y-%m-%d-%H%M%S.md"
 
 # How long to wait for a freshly spawned nvim to start listening.

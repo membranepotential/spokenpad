@@ -1,4 +1,4 @@
-"""Thin X11 queries, kept out of :mod:`voice_kb.geometry` so the placement math
+"""Thin X11 queries, kept out of :mod:`spokenpad.geometry` so the placement math
 stays pure and testable.
 
 Everything here shells out and can fail; failures degrade to ``None`` or an
@@ -12,7 +12,7 @@ import json
 import re
 import subprocess
 
-from voice_kb.geometry import Output, Rect
+from spokenpad.geometry import Output, Rect
 
 _TIMEOUT = 2.0
 

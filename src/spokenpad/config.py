@@ -18,7 +18,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Any, Literal, Self
 
-DEFAULT_CONFIG_PATH = Path.home() / ".config" / "voice-kb" / "config.toml"
+DEFAULT_CONFIG_PATH = Path.home() / ".config" / "spokenpad" / "config.toml"
 
 type DecodingMethod = Literal["greedy_search", "modified_beam_search"]
 type LatchModifier = Literal["shift", "ctrl", "alt"]
@@ -163,7 +163,7 @@ class VadConfig:
 
     On by default, and the default is load-bearing: without it a short
     utterance inside a long quiet capture decodes to an empty string. See
-    ``voice_kb.vad`` for the measurements. Turning it off restores exactly the
+    ``spokenpad.vad`` for the measurements. Turning it off restores exactly the
     older whole-buffer behaviour, bug included.
     """
 
@@ -225,7 +225,7 @@ class VadConfig:
 
     Bounded rather than "extend to the ends of the buffer", because a chunk
     swamped by silence is exactly what makes the recogniser return nothing --
-    the failure ``voice_kb.vad`` exists to prevent. It applies only to chunks
+    the failure ``spokenpad.vad`` exists to prevent. It applies only to chunks
     with real speech in them (see ``_EDGE_MARGIN_MIN_SPEECH_S``), so a short
     utterance buried in a long quiet capture is still trimmed tightly.
     """
@@ -277,7 +277,7 @@ class TextConfig:
     trailing_space: bool = False
 
 
-#: ``nvim.init`` value selecting voice-kb's own config, resolved from the
+#: ``nvim.init`` value selecting spokenpad's own config, resolved from the
 #: installed package. A named value rather than a path because the file lives
 #: inside the package and a user config should not have to name a checkout
 #: directory that may move. nvim's own ``-u NONE`` is the same idea.
@@ -297,7 +297,7 @@ _INSTANCE_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 """Allowed window instance names.
 
 An allowlist, because this name is interpolated into an i3 criteria string
-(``[instance="..."]``) in :meth:`voice_kb.nvim.NvimSession.place_window`. A
+(``[instance="..."]``) in :meth:`spokenpad.nvim.NvimSession.place_window`. A
 name containing a quote or a bracket would let a config value become i3
 syntax; the same reasoning that keeps transcript text out of argv keeps
 config values out of another program's grammar.
@@ -331,14 +331,14 @@ class RecordingConfig:
     needed, so this one is on unless the user turns it off.
 
     The recording is independent of decoding: it is written by
-    :mod:`voice_kb.recorder` as the audio arrives, so a decode that fails,
+    :mod:`spokenpad.recorder` as the audio arrives, so a decode that fails,
     is cancelled, or never happens still leaves a wav that
-    ``voice-kb transcribe`` can turn back into text.
+    ``spokenpad transcribe`` can turn back into text.
     """
 
     enabled: bool = True
 
-    dir: Path = field(default_factory=lambda: xdg_state_home() / "voice-kb" / "audio")
+    dir: Path = field(default_factory=lambda: xdg_state_home() / "spokenpad" / "audio")
     """Where the wavs go, alongside the log in the state directory.
 
     Created mode 0700, and each recording mode 0600: a capture holds
@@ -374,7 +374,7 @@ class NvimConfig:
         # first frame. i3 honours this for a floating window (verified: the
         # window appeared at exactly the requested point, floating, unfocused),
         # which removes the visible jump from wherever the window manager first
-        # put it to where voice-kb wants it. The size is still corrected over
+        # put it to where spokenpad wants it. The size is still corrected over
         # i3 afterwards -- alacritty measures its window in character cells,
         # and guessing the font's metrics to avoid one small resize would be
         # worse than the resize.
@@ -388,7 +388,7 @@ class NvimConfig:
 
     Empty means run :attr:`editor` directly, for a GUI editor that needs no
     terminal. The default names the window ``Floating`` (class) /
-    ``voice-kb`` (instance) so a window manager rule can float it and refuse
+    ``spokenpad`` (instance) so a window manager rule can float it and refuse
     it focus -- see ``docs/nvim-window.md``.
 
     ``{instance}`` is replaced with :attr:`window_instance`, and ``{x}``/
@@ -409,13 +409,13 @@ class NvimConfig:
     verdict from use was clear -- it never looked like their neovim, and each
     missing habit had to be reimplemented one at a time to no real end.
 
-    voice-kb still applies what the window needs (chrome off, prose wrapping)
+    spokenpad still applies what the window needs (chrome off, prose wrapping)
     over RPC once attached, and re-applies it on ``BufWinEnter``/``WinNew``/
     ``FileType`` so a plugin reacting to those cannot undo it. Committed text
     is written with ``noautocmd``, so a format-on-save cannot reflow dictated
     prose behind the user's back either.
 
-    ``"bundled"`` selects voice-kb's own config instead: no plugins, chrome
+    ``"bundled"`` selects spokenpad's own config instead: no plugins, chrome
     off before the first frame, and **0.30 s to open the window against 0.78 s
     for a full LazyVim setup** -- with :attr:`colorscheme` it still gets the
     user's theme, because only that one plugin is put on the runtimepath.
@@ -448,17 +448,19 @@ class NvimConfig:
     Set ``false`` to take the colourscheme's own background instead.
     """
 
-    window_instance: str = "voice-kb"
+    window_instance: str = "spokenpad"
     """X11 instance name of the dictation window.
 
     Substituted into :attr:`terminal` and used to find the window again. It
     must match whatever the window manager rules key on.
     """
 
-    socket_path: Path = field(default_factory=lambda: _xdg_runtime_dir() / "voice-kb-nvim.sock")
+    socket_path: Path = field(default_factory=lambda: _xdg_runtime_dir() / "spokenpad-nvim.sock")
     """Where nvim listens for RPC. Reconnected to rather than recreated."""
 
-    dictation_dir: Path = field(default_factory=lambda: xdg_state_home() / "voice-kb" / "dictation")
+    dictation_dir: Path = field(
+        default_factory=lambda: xdg_state_home() / "spokenpad" / "dictation"
+    )
     """Directory holding the dated dictation files."""
 
     file_template: str = "dictation-%Y-%m-%d-%H%M%S.md"
@@ -574,7 +576,7 @@ class NvimConfig:
         nvim configuration of its own, and as the written-down statement of
         what this window actually needs.
         """
-        return Path(str(resources.files("voice_kb").joinpath("dictation_init.lua")))
+        return Path(str(resources.files("spokenpad").joinpath("dictation_init.lua")))
 
     @property
     def announces_instance(self) -> bool:
@@ -583,7 +585,7 @@ class NvimConfig:
         ``{instance}`` is substituted into :attr:`terminal`, so only a
         terminal template that contains it produces a window findable by
         :attr:`window_instance`. Without one there is nothing for the window
-        manager rules to match and nothing for voice-kb to wait for -- the
+        manager rules to match and nothing for spokenpad to wait for -- the
         editor is on its own for placement, which is right for a bare
         ``nvim --headless`` and for a GUI editor that places itself.
         """
@@ -716,7 +718,7 @@ def _resolve_model_dir(section: Mapping[str, Any], base_dir: Path | None) -> Map
 def _colorscheme_command(name: str, *, transparent: bool) -> str:
     """A ``-c`` command that applies ``name`` under either kind of config.
 
-    The bundled config defines ``VoiceKbColorscheme``, which finds the scheme
+    The bundled config defines ``SpokenpadColorscheme``, which finds the scheme
     among installed plugins, puts only its directory on the runtimepath, and
     keeps the terminal's background unless told otherwise. A user's own config
     already has its theme loaded and configured, so a plain ``colorscheme`` is
@@ -725,7 +727,7 @@ def _colorscheme_command(name: str, *, transparent: bool) -> str:
     """
     opaque = "true" if not transparent else "false"
     return (
-        f"lua if _G.VoiceKbColorscheme then VoiceKbColorscheme({name!r}, {opaque}) "
+        f"lua if _G.SpokenpadColorscheme then SpokenpadColorscheme({name!r}, {opaque}) "
         f"else pcall(vim.cmd.colorscheme, {name!r}) end"
     )
 

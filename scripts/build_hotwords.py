@@ -16,8 +16,8 @@ import argparse
 import sys
 from pathlib import Path
 
-from voice_kb.asr import ensure_model_files, render_hotwords, write_bpe_vocab
-from voice_kb.config import Config
+from spokenpad.asr import ensure_model_files, render_hotwords, write_bpe_vocab
+from spokenpad.config import Config
 
 
 def build(config_path: Path | None, out_path: Path | None) -> int:

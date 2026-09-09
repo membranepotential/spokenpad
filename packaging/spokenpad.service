@@ -1,6 +1,6 @@
 [Unit]
-Description=voice-kb push-to-talk dictation
-Documentation=https://github.com/felixpeppert/voice-kb
+Description=spokenpad push-to-talk dictation
+Documentation=https://github.com/membranepotential/spokenpad
 # Dies with the graphical session: the hotkey watcher and the dictation
 # window both need X, and a daemon outliving the session it was
 # started for would hold /dev/input readers open for nothing.
@@ -14,12 +14,12 @@ Type=exec
 # so the daemon has to run from the checkout. Set this rather than making the
 # path absolute in a config file: moving the checkout then needs one edit
 # here, not two in different places.
-WorkingDirectory=%h/Documents/voice-kb
-ExecStart=%h/Documents/voice-kb/.venv/bin/voice-kb
+WorkingDirectory=%h/Documents/spokenpad
+ExecStart=%h/Documents/spokenpad/.venv/bin/spokenpad
 
 # Not -v: DEBUG still goes to the rotating file at
-# $XDG_STATE_HOME/voice-kb/voice-kb.log regardless, and duplicating it into
-# the journal buys nothing but noise. `journalctl --user -u voice-kb` shows
+# $XDG_STATE_HOME/spokenpad/spokenpad.log regardless, and duplicating it into
+# the journal buys nothing but noise. `journalctl --user -u spokenpad` shows
 # the INFO line per dictation, which is what you want when watching it live.
 
 Restart=on-failure

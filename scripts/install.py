@@ -1,11 +1,11 @@
-"""Install voice-kb's window manager rules and its systemd user unit.
+"""Install spokenpad's window manager rules and its systemd user unit.
 
-Everything voice-kb needs outside this repository is installed from inside it,
+Everything spokenpad needs outside this repository is installed from inside it,
 by this script, so the checkout is the single source of truth for how the tool
 behaves. Two files leave the repo:
 
-  packaging/i3/voice-kb.conf   -> ~/.config/i3/i3.d/voice-kb.conf
-  packaging/voice-kb.service   -> ~/.config/systemd/user/voice-kb.service
+  packaging/i3/spokenpad.conf   -> ~/.config/i3/i3.d/spokenpad.conf
+  packaging/spokenpad.service   -> ~/.config/systemd/user/spokenpad.service
 
 Both are **symlinked** by default, so editing them here takes effect on the
 next `i3-msg reload` / `systemctl --user daemon-reload` with no second step
@@ -34,8 +34,8 @@ REPO = Path(__file__).resolve().parent.parent
 
 #: The marker that says a file at a destination came from this project. Both
 #: installed files carry it in their first lines, so ``--uninstall`` and the
-#: overwrite check can tell voice-kb's file from one the user wrote.
-MARKER = "voice-kb"
+#: overwrite check can tell spokenpad's file from one the user wrote.
+MARKER = "spokenpad"
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,16 +55,16 @@ def items() -> list[Item]:
     config = _config_home()
     return [
         Item(
-            source=REPO / "packaging" / "i3" / "voice-kb.conf",
-            dest=config / "i3" / "i3.d" / "voice-kb.conf",
+            source=REPO / "packaging" / "i3" / "spokenpad.conf",
+            dest=config / "i3" / "i3.d" / "spokenpad.conf",
             what="i3 window rules",
             after="i3-msg reload",
         ),
         Item(
-            source=REPO / "packaging" / "voice-kb.service",
-            dest=config / "systemd" / "user" / "voice-kb.service",
+            source=REPO / "packaging" / "spokenpad.service",
+            dest=config / "systemd" / "user" / "spokenpad.service",
             what="systemd user unit",
-            after="systemctl --user daemon-reload && systemctl --user enable --now voice-kb",
+            after="systemctl --user daemon-reload && systemctl --user enable --now spokenpad",
         ),
     ]
 
@@ -117,7 +117,7 @@ def install(*, link: bool, dry_run: bool) -> int:
             # collision, and silently replacing an i3 config is not recoverable
             # from a terminal that has just lost its window rules.
             print(
-                f"  {item.what}: {item.dest} exists and was not written by voice-kb."
+                f"  {item.what}: {item.dest} exists and was not written by spokenpad."
                 "\n      Move it aside and re-run, or install by hand.",
                 file=sys.stderr,
             )
@@ -155,7 +155,7 @@ def uninstall(*, dry_run: bool) -> int:
         if not dry_run:
             item.dest.unlink()
     if not dry_run:
-        print("\nThen: systemctl --user disable --now voice-kb && i3-msg reload")
+        print("\nThen: systemctl --user disable --now spokenpad && i3-msg reload")
     return 0
 
 
@@ -194,7 +194,7 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.uninstall:
-        print("Removing voice-kb's installed files:")
+        print("Removing spokenpad's installed files:")
         return uninstall(dry_run=args.dry_run)
 
     print(f"Installing from {REPO}:")

@@ -36,7 +36,7 @@ reasoning is kept for the record.
 
 The overlay must be positioned on a specific output and must never take
 keyboard focus (see
-[constraints.md](constraints.md#no-window-voice-kb-opens-may-take-focus)). This ruled
+[constraints.md](constraints.md#no-window-spokenpad-opens-may-take-focus)). This ruled
 out GTK4: it has no `Window.move()` or `set_type_hint()` on X11 — verified —
 so it cannot position or hint a non-focusable overlay window on this
 platform (STATUS.md: "GTK4 has no `move()`/`set_type_hint()` on X11
@@ -48,7 +48,7 @@ dependency (`pyproject.toml`).
 
 There is no settings application. Configuration is a TOML file parsed once
 at startup into frozen dataclasses (`Config.load` in
-[`config.py`](../src/voice_kb/config.py)), and the only runtime UI is the
+[`config.py`](../src/spokenpad/config.py)), and the only runtime UI is the
 dictation window's winbar. This keeps the UI surface to exactly the one
 window that must exist for user feedback during recording, rather than
 building a second, larger UI surface purely for configuration.
@@ -58,7 +58,7 @@ building a second, larger UI surface purely for configuration.
 Vocabulary correction for v1 is decode-time hotword biasing only (see
 [asr.md](asr.md#hotwords-biasing-the-beam-not-rewriting-the-output)) — no LLM
 cleanup pass. `TextConfig.replacements` in
-[`config.py`](../src/voice_kb/config.py) exists as an escape hatch for exact,
+[`config.py`](../src/spokenpad/config.py) exists as an escape hatch for exact,
 whole-word substitutions, but hotword biasing is the primary mechanism.
 
 An LLM pass is deferred, not ruled out. STATUS.md records this as an open
@@ -194,7 +194,7 @@ own thread, while the utterance is still being spoken.
 
 ## Cloud ASR (Gladia) captured as issue #1, rejected as the default
 
-[Issue #1](https://github.com/membranepotential/voice-kb/issues/1) proposes
+[Issue #1](https://github.com/membranepotential/spokenpad/issues/1) proposes
 [Gladia](https://www.gladia.io/) as an alternative or pluggable second ASR
 backend, citing per-term weighted custom vocabulary (versus this project's
 single global `hotwords_score`), sub-300ms streaming finals, and claimed WER

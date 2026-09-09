@@ -35,14 +35,14 @@ import evdev
 import pyudev
 from evdev import ecodes
 
-from voice_kb.config import HotkeyConfig
+from spokenpad.config import HotkeyConfig
 
-logger = logging.getLogger("voice-kb.hotkey")
+logger = logging.getLogger("spokenpad.hotkey")
 
 type KeyEventCallback = Callable[[float], None]
 """Invoked on the watcher's background thread with ``time.monotonic()`` at
 the moment the event was read, ready to feed straight into
-:func:`voice_kb.state.step` as the ``at`` field of a ``KeyUp``/``Cancelled``
+:func:`spokenpad.state.step` as the ``at`` field of a ``KeyUp``/``Cancelled``
 event."""
 
 type KeyDownCallback = Callable[[float, bool], None]
@@ -124,7 +124,7 @@ class HotkeyWatcher:
             self._teardown()
             raise
 
-        self._thread = threading.Thread(target=self._run, name="voice-kb-hotkey", daemon=True)
+        self._thread = threading.Thread(target=self._run, name="spokenpad-hotkey", daemon=True)
         self._thread.start()
 
     def stop(self) -> None:

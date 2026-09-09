@@ -1,7 +1,7 @@
 """Shared fixtures for the end-to-end tests.
 
 ``QT_QPA_PLATFORM`` must be set before anything imports PySide6 (transitively,
-that means before ``voice_kb.app`` is imported anywhere in the process), so it
+that means before ``spokenpad.app`` is imported anywhere in the process), so it
 happens at module import time, first thing.
 """
 
@@ -18,10 +18,10 @@ import pytest
 from fakes import FakeAudioCapture, FakeNvimSession, FakeTranscriber, FakeX11
 from PySide6.QtWidgets import QApplication
 
-from voice_kb import app as app_module
-from voice_kb import x11
-from voice_kb.app import Daemon
-from voice_kb.config import Config
+from spokenpad import app as app_module
+from spokenpad import x11
+from spokenpad.app import Daemon
+from spokenpad.config import Config
 
 
 @pytest.fixture(autouse=True)
@@ -56,7 +56,7 @@ def qapp() -> QApplication:
 
 @pytest.fixture
 def fake_x11(monkeypatch: pytest.MonkeyPatch) -> FakeX11:
-    """Replaces ``voice_kb.x11.outputs`` so nothing here shells out to
+    """Replaces ``spokenpad.x11.outputs`` so nothing here shells out to
     ``xrandr``."""
     fake = FakeX11()
     monkeypatch.setattr(x11, "outputs", fake.outputs)
@@ -65,7 +65,7 @@ def fake_x11(monkeypatch: pytest.MonkeyPatch) -> FakeX11:
 
 @pytest.fixture
 def fake_nvim(monkeypatch: pytest.MonkeyPatch) -> FakeNvimSession:
-    """Replaces ``voice_kb.nvim.NvimSession`` as seen from ``voice_kb.app``
+    """Replaces ``spokenpad.nvim.NvimSession`` as seen from ``spokenpad.app``
     (where ``_NvimBridge.__init__`` constructs it: ``self._session =
     NvimSession(config.nvim)``), so opening the dictation window, appending
     to it, and pushing indicator state never touch a real socket or spawn a

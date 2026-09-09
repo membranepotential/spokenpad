@@ -17,9 +17,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from voice_kb.audio import MonoAudio
-from voice_kb.config import Config, VadConfig
-from voice_kb.vad import SETTLE_SILENCE_SECONDS, SpeechSegmenter, load_segmenter
+from spokenpad.audio import MonoAudio
+from spokenpad.config import Config, VadConfig
+from spokenpad.vad import SETTLE_SILENCE_SECONDS, SpeechSegmenter, load_segmenter
 
 RATE = 16000
 SAMPLE = Path("eval-samples/handy-1787827474.wav")
@@ -139,10 +139,10 @@ def test_short_utterance_in_silence_decodes_to_nothing_without_vad_and_to_text_w
     Parakeet TDT returns an empty string when speech is a small fraction of
     the window. Same audio, same recogniser -- the only difference is whether
     it was segmented first. If this ever starts passing *without* the VAD, the
-    model changed and ``voice_kb.vad`` deserves a re-measurement.
+    model changed and ``spokenpad.vad`` deserves a re-measurement.
     """
-    from voice_kb.asr import Transcriber, ensure_model_files
-    from voice_kb.config import AsrConfig
+    from spokenpad.asr import Transcriber, ensure_model_files
+    from spokenpad.config import AsrConfig
 
     asr: AsrConfig = Config().asr
     try:
@@ -158,7 +158,7 @@ def test_short_utterance_in_silence_decodes_to_nothing_without_vad_and_to_text_w
         transcriber.transcribe(s.samples, RATE).text for s in segmenter.split(buried)
     )
 
-    assert whole_buffer.strip() == "", "the bug is gone; re-measure voice_kb.vad"
+    assert whole_buffer.strip() == "", "the bug is gone; re-measure spokenpad.vad"
     assert segmented.strip() != "", "segmenting must recover the text"
 
 
@@ -187,16 +187,16 @@ def test_a_corrupt_model_is_reported_and_not_raised(tmp_path: Path) -> None:
 def test_its_log_lines_reach_the_daemons_log() -> None:
     """Loggers here are named explicitly rather than from ``__name__``.
 
-    ``voice_kb.vad`` is not under ``voice-kb`` -- underscore against hyphen --
+    ``spokenpad.vad`` is not under ``spokenpad`` -- underscore against hyphen --
     so a ``getLogger(__name__)`` here produced a module whose warnings, "no
     VAD model" among them, went nowhere at all. Caught in use: the daemon
     started with segmentation silently unavailable and said nothing.
     """
-    from voice_kb import hotkey, vad
+    from spokenpad import hotkey, vad
 
     for module in (vad, hotkey):
         name = getattr(module, "log", None) or module.logger
-        assert name.name.startswith("voice-kb."), f"{module.__name__} logs outside the tree"
+        assert name.name.startswith("spokenpad."), f"{module.__name__} logs outside the tree"
 
 
 # --------------------------------------------------- merging and padding
@@ -365,7 +365,7 @@ def test_splitting_from_a_settled_end_frame_finds_the_same_next_chunk(
 ) -> None:
     """What the tick does: re-split the audio past the last settled chunk. The
     next chunk must be the one the whole-buffer split would have produced, to
-    within the pad -- or the live transcript and ``voice-kb transcribe`` would
+    within the pad -- or the live transcript and ``spokenpad transcribe`` would
     disagree about where sentences begin."""
     core = _speech_core(_load(LONG_SAMPLE))
     gap = np.zeros(int(0.6 * RATE), dtype=np.float32)

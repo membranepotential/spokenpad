@@ -7,8 +7,8 @@ import json
 
 import pytest
 
-from voice_kb import x11
-from voice_kb.geometry import Output, Rect, dictation_rect, pick_output
+from spokenpad import x11
+from spokenpad.geometry import Output, Rect, dictation_rect, pick_output
 
 HDMI = Output(name="HDMI-1-0", rect=Rect(x=0, y=0, width=3840, height=2160))
 EDP = Output(name="eDP-1", rect=Rect(x=3840, y=0, width=3840, height=2160), primary=True)
@@ -111,14 +111,14 @@ def test_i3_window_exists_finds_a_window_nested_in_floating_nodes(
             {
                 "nodes": [],
                 "floating_nodes": [
-                    {"window_properties": {"instance": "voice-kb"}, "nodes": []},
+                    {"window_properties": {"instance": "spokenpad"}, "nodes": []},
                 ],
             }
         ]
     }
     monkeypatch.setattr(x11, "_run", lambda args: json.dumps(tree))
 
-    assert x11.i3_window_exists("voice-kb") is True
+    assert x11.i3_window_exists("spokenpad") is True
     assert x11.i3_window_exists("something-else") is False
 
 
@@ -129,7 +129,7 @@ def test_i3_window_exists_is_false_when_i3_cannot_be_reached(
     which is the right answer when i3 is not the window manager at all."""
     monkeypatch.setattr(x11, "_run", lambda args: None)
 
-    assert x11.i3_window_exists("voice-kb") is False
+    assert x11.i3_window_exists("spokenpad") is False
 
 
 def test_i3_window_exists_survives_unparseable_output(
@@ -137,4 +137,4 @@ def test_i3_window_exists_survives_unparseable_output(
 ) -> None:
     monkeypatch.setattr(x11, "_run", lambda args: "not json")
 
-    assert x11.i3_window_exists("voice-kb") is False
+    assert x11.i3_window_exists("spokenpad") is False

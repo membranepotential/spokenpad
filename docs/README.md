@@ -1,4 +1,4 @@
-# voice-kb docs
+# spokenpad docs
 
 Local push-to-talk dictation for Linux/X11 (i3). This folder is the technical
 reference behind the one-page pitch in the [project README](../README.md) and

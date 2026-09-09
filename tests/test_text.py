@@ -3,8 +3,8 @@ their composition in ``postprocess``."""
 
 from __future__ import annotations
 
-from voice_kb.config import TextConfig
-from voice_kb.text import apply_replacements, postprocess, strip_fillers
+from spokenpad.config import TextConfig
+from spokenpad.text import apply_replacements, postprocess, strip_fillers
 
 DEFAULT_FILLERS = TextConfig().fillers
 

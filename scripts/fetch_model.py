@@ -14,8 +14,8 @@ import sys
 import urllib.request
 from pathlib import Path
 
-from voice_kb.asr import write_bpe_vocab
-from voice_kb.config import Config
+from spokenpad.asr import write_bpe_vocab
+from spokenpad.config import Config
 
 HF_REPO = "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8"
 BASE_URL = f"https://huggingface.co/{HF_REPO}/resolve/main"
@@ -104,7 +104,7 @@ def _fetch_vad(dest: Path) -> None:
     try:
         _download(VAD_URL, dest)
     except OSError as e:
-        print(f"  {dest.name}: FAILED ({e}) -- voice-kb will decode whole captures instead")
+        print(f"  {dest.name}: FAILED ({e}) -- spokenpad will decode whole captures instead")
 
 
 def main() -> int:

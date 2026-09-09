@@ -1,7 +1,7 @@
-"""Hardware-free stand-ins for ``voice_kb``'s I/O boundaries.
+"""Hardware-free stand-ins for ``spokenpad``'s I/O boundaries.
 
 Every fake here implements just enough of the real class's surface for
-``voice_kb.app.Daemon`` to run against it -- no microphone, no model load,
+``spokenpad.app.Daemon`` to run against it -- no microphone, no model load,
 no subprocess, no X server. See ``conftest.py`` for how they get wired in.
 """
 
@@ -13,17 +13,17 @@ from pathlib import Path
 
 import numpy as np
 
-from voice_kb.asr import TranscriptionResult
-from voice_kb.audio import MonoAudio
-from voice_kb.config import AsrConfig, AudioConfig, NvimConfig
-from voice_kb.geometry import Output, Rect
-from voice_kb.nvim import Appended, AppendResult
-from voice_kb.recorder import NotRecorded, RecordingStatus
-from voice_kb.state import Phase
+from spokenpad.asr import TranscriptionResult
+from spokenpad.audio import MonoAudio
+from spokenpad.config import AsrConfig, AudioConfig, NvimConfig
+from spokenpad.geometry import Output, Rect
+from spokenpad.nvim import Appended, AppendResult
+from spokenpad.recorder import NotRecorded, RecordingStatus
+from spokenpad.state import Phase
 
 
 class FakeAudioCapture:
-    """Stands in for :class:`voice_kb.audio.AudioCapture`.
+    """Stands in for :class:`spokenpad.audio.AudioCapture`.
 
     ``stop_capture`` always returns :attr:`next_samples`, regardless of what
     ``start_capture`` calls happened in between -- tests that care about the
@@ -105,7 +105,7 @@ class FakeAudioCapture:
 
 
 class FakeTranscriber:
-    """Stands in for :class:`voice_kb.asr.Transcriber`.
+    """Stands in for :class:`spokenpad.asr.Transcriber`.
 
     ``next_result`` is mutated by the test right before the call it wants to
     control; a :class:`BaseException` instance there makes ``transcribe``
@@ -135,7 +135,7 @@ class FakeTranscriber:
 
 
 class FakeNvimSession:
-    """Stands in for :class:`voice_kb.nvim.NvimSession`.
+    """Stands in for :class:`spokenpad.nvim.NvimSession`.
 
     Duck-typed, like the other fakes here -- ``_NvimBridge`` never learns
     whether it is holding a real session or this one, so none of the
@@ -173,7 +173,7 @@ class FakeNvimSession:
         self.place_calls: list[Rect] = []
         self.ensure_result = True
         self.append_result: AppendResult = Appended(line=1, elapsed_ms=1.0)
-        self._path = Path("/tmp/voice-kb-test/dictation-fake.md")
+        self._path = Path("/tmp/spokenpad-test/dictation-fake.md")
 
     @property
     def path(self) -> Path | None:
@@ -226,7 +226,7 @@ class FakeNvimSession:
 
 
 class FakeX11:
-    """Stands in for the module-level functions in :mod:`voice_kb.x11`.
+    """Stands in for the module-level functions in :mod:`spokenpad.x11`.
 
     Never shells out to ``xrandr``.
     """

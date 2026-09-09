@@ -14,25 +14,25 @@ defensively.
 
 | Module | Kind | Touches the world? | Status |
 |---|---|---|---|
-| [`config.py`](../src/voice_kb/config.py) | core | no | implemented |
-| [`state.py`](../src/voice_kb/state.py) | core | no | implemented |
-| [`text.py`](../src/voice_kb/text.py) | core | no | implemented |
-| [`geometry.py`](../src/voice_kb/geometry.py) | core | no | implemented |
-| [`hotkey.py`](../src/voice_kb/hotkey.py) | shell | evdev (read-only) | implemented |
-| [`audio.py`](../src/voice_kb/audio.py) | shell | PipeWire capture | implemented |
-| [`recorder.py`](../src/voice_kb/recorder.py) | shell | writes each capture to a wav | implemented |
-| [`asr.py`](../src/voice_kb/asr.py) | shell | sherpa-onnx / CPU inference | implemented |
-| [`decode.py`](../src/voice_kb/decode.py) | shell | drives the VAD + model pipeline | implemented |
-| [`nvim.py`](../src/voice_kb/nvim.py) | shell | nvim RPC socket, i3 | implemented |
-| [`nvim_indicator.lua`](../src/voice_kb/nvim_indicator.lua) | — | runs *inside* nvim | implemented |
-| [`x11.py`](../src/voice_kb/x11.py) | shell | xrandr / xdotool queries | implemented |
-| [`app.py`](../src/voice_kb/app.py) | shell | wires everything together | implemented |
+| [`config.py`](../src/spokenpad/config.py) | core | no | implemented |
+| [`state.py`](../src/spokenpad/state.py) | core | no | implemented |
+| [`text.py`](../src/spokenpad/text.py) | core | no | implemented |
+| [`geometry.py`](../src/spokenpad/geometry.py) | core | no | implemented |
+| [`hotkey.py`](../src/spokenpad/hotkey.py) | shell | evdev (read-only) | implemented |
+| [`audio.py`](../src/spokenpad/audio.py) | shell | PipeWire capture | implemented |
+| [`recorder.py`](../src/spokenpad/recorder.py) | shell | writes each capture to a wav | implemented |
+| [`asr.py`](../src/spokenpad/asr.py) | shell | sherpa-onnx / CPU inference | implemented |
+| [`decode.py`](../src/spokenpad/decode.py) | shell | drives the VAD + model pipeline | implemented |
+| [`nvim.py`](../src/spokenpad/nvim.py) | shell | nvim RPC socket, i3 | implemented |
+| [`nvim_indicator.lua`](../src/spokenpad/nvim_indicator.lua) | — | runs *inside* nvim | implemented |
+| [`x11.py`](../src/spokenpad/x11.py) | shell | xrandr / xdotool queries | implemented |
+| [`app.py`](../src/spokenpad/app.py) | shell | wires everything together | implemented |
 
 The core modules are pure functions over immutable data: given the same
 input they always produce the same output, and they never block, spawn a
 thread, or reach for a file handle. `config.py` parses TOML into frozen
 dataclasses once, at startup, so nothing downstream has to defend against a
-missing key or a negative duration ([`config.py`](../src/voice_kb/config.py)
+missing key or a negative duration ([`config.py`](../src/spokenpad/config.py)
 docstring). `state.py` is a closed state machine — see below.
 
 The shell modules do the opposite job: they are thin, mostly untested-by-unit-test
@@ -44,7 +44,7 @@ window hints, ONNX runtime setup), the less logic should live inside it.
 
 ## `state.step`: a total function
 
-[`state.py`](../src/voice_kb/state.py) models the session as a closed union
+[`state.py`](../src/spokenpad/state.py) models the session as a closed union
 of three states — `Idle`, `Recording`, `Transcribing` — and a closed union of
 four events — `KeyDown`, `KeyUp`, `DecodeFinished`, `Cancelled`. The single
 entry point is:
@@ -64,7 +64,7 @@ without the shell needing its own guard logic.
 
 `step` never performs an effect itself. It returns a `Command` — one of
 `Nothing`, `StartCapture`, `Decode`, `DiscardCapture`, `AbortDecode` — and the
-imperative shell ([`app.py`](../src/voice_kb/app.py)) is solely responsible for
+imperative shell ([`app.py`](../src/spokenpad/app.py)) is solely responsible for
 interpreting
 that command into a real action. This is the functional-core/imperative-shell
 boundary made concrete: the *decision* of what should happen next is pure and
@@ -97,7 +97,7 @@ app.py                -- interprets the command
     │                     (progressive-commit.md)
     ├─ Decode         → decode.py decodes the remainder past the committed
     │                     offset -- the open tail -- through the same
-    │                     pipeline voice-kb transcribe uses on a wav
+    │                     pipeline spokenpad transcribe uses on a wav
     ├─ DiscardCapture → nothing further is decoded; what already landed stays
     │
     ▼
@@ -112,9 +112,9 @@ text lands in the floating nvim window; nothing is pasted anywhere
 
 Nothing in that pipeline is the only copy of the audio any more.
 `recorder.py` writes every capture to
-`$XDG_STATE_HOME/voice-kb/audio/capture-<timestamp>.wav` while it is being
+`$XDG_STATE_HOME/spokenpad/audio/capture-<timestamp>.wav` while it is being
 spoken — from a writer thread, because the realtime callback may not touch a
-filesystem — and `voice-kb transcribe <wav>` replays a recording through the
+filesystem — and `spokenpad transcribe <wav>` replays a recording through the
 *same* `decode.py` pipeline. That exists because on 2026-09-08 a 821.3s hold
 hit a 600s in-memory ceiling enforced inside the callback, above every other
 consumer, and 3m41s of dictation existed nowhere else. The ceiling is now
@@ -130,7 +130,7 @@ had (a paste that raced the clipboard restore, a target that swallowed
 
 Phase, level meter and the preview of the open tail are rendered in the
 nvim window's winbar and as virtual text by
-[`nvim_indicator.lua`](../src/voice_kb/nvim_indicator.lua), where the text is
+[`nvim_indicator.lua`](../src/spokenpad/nvim_indicator.lua), where the text is
 about to land. The tick that commits settled chunks and previews the tail is
 a timer on the Qt thread asking the *same* worker, so the recogniser stays
 serialised; `snapshot_capture` is non-destructive, so `stop_capture` still

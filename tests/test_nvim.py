@@ -1,4 +1,4 @@
-"""Integration tests for :mod:`voice_kb.nvim`, against a real headless nvim.
+"""Integration tests for :mod:`spokenpad.nvim`, against a real headless nvim.
 
 Unlike ``test_e2e.py`` (which fakes ``NvimSession`` entirely so the daemon's
 wiring can be tested without a real editor), these tests exercise the real
@@ -20,9 +20,9 @@ from pathlib import Path
 
 import pytest
 
-from voice_kb.config import NvimConfig
-from voice_kb.nvim import Appended, AppendFailed, NvimSession
-from voice_kb.state import Phase
+from spokenpad.config import NvimConfig
+from spokenpad.nvim import Appended, AppendFailed, NvimSession
+from spokenpad.state import Phase
 
 pytestmark = pytest.mark.skipif(shutil.which("nvim") is None, reason="nvim is not installed")
 
@@ -49,7 +49,7 @@ def nvim_config(tmp_path: Path) -> NvimConfig:
     dictation directory scoped to ``tmp_path`` so no test can collide with a
     real dictation session or another test's socket.
 
-    ``window_instance`` is deliberately not the default ``"voice-kb"``: this
+    ``window_instance`` is deliberately not the default ``"spokenpad"``: this
     suite runs against the real X server (``NvimSession.place_window`` and
     shells out to real ``i3-msg``), and a headless nvim opens
     no window for it to find -- but a distinct instance name means that
@@ -59,8 +59,8 @@ def nvim_config(tmp_path: Path) -> NvimConfig:
     return NvimConfig(
         terminal=(),
         editor=("nvim", "--headless", "-u", "NONE"),
-        window_instance="voice-kb-pytest",
-        socket_path=tmp_path / "voice-kb-test.sock",
+        window_instance="spokenpad-pytest",
+        socket_path=tmp_path / "spokenpad-test.sock",
         dictation_dir=tmp_path / "dictation",
         startup_timeout_s=10.0,
     )
@@ -277,7 +277,7 @@ def test_preview_is_virtual_text_never_buffer_content_or_file_content(
     assert "not committed" not in "\n".join(lines)
     assert "not committed" not in _read(session)
 
-    ns = nvim.api.create_namespace("voice_kb")
+    ns = nvim.api.create_namespace("spokenpad")
     extmarks = nvim.api.buf_get_extmarks(buf, ns, 0, -1, {"details": True})
     assert len(extmarks) == 1, "the preview should be exactly one extmark"
     details = extmarks[0][-1]
@@ -401,7 +401,7 @@ def _preview_lines(session: NvimSession) -> list[str]:
     nvim = session._nvim
     buf = session._buffer
     assert nvim is not None and buf is not None
-    ns = nvim.api.create_namespace("voice_kb")
+    ns = nvim.api.create_namespace("spokenpad")
     marks = nvim.api.buf_get_extmarks(buf, ns, 0, -1, {"details": True})
     return [
         chunk[0]
@@ -462,7 +462,7 @@ def test_a_stale_preview_never_greets_the_next_utterance(
 
 
 def _bundled_nvim(script: str) -> str:
-    """Run ``script`` in a headless nvim under voice-kb's bundled config.
+    """Run ``script`` in a headless nvim under spokenpad's bundled config.
 
     A subprocess rather than the session fixture above, which deliberately
     starts nvim with ``-u NONE``: these assertions are *about* the bundled
@@ -533,7 +533,7 @@ def _preview_rows(session: NvimSession) -> list[str]:
     nvim = session._nvim
     buf = session._buffer
     assert nvim is not None and buf is not None
-    ns = nvim.api.create_namespace("voice_kb")
+    ns = nvim.api.create_namespace("spokenpad")
     marks = nvim.api.buf_get_extmarks(buf, ns, 0, -1, {"details": True})
     if not marks:
         return []
@@ -583,7 +583,7 @@ def test_the_preview_anchors_to_the_last_line_with_text_on_it(
 
     session.set_state(phase=Phase.RECORDING, preview="weiter")
 
-    ns = nvim.api.create_namespace("voice_kb")
+    ns = nvim.api.create_namespace("spokenpad")
     marks = nvim.api.buf_get_extmarks(buf, ns, 0, -1, {"details": True})
     assert marks[0][1] == 0, "anchored to the paragraph, not to the blank lines below it"
     assert _preview_rows(session) == ["", "weiter"]

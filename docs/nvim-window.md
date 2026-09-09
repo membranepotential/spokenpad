@@ -1,8 +1,8 @@
 # The dictation window
 
 ← [docs index](README.md) | Implemented by
-[`nvim.py`](../src/voice_kb/nvim.py) and
-[`nvim_indicator.lua`](../src/voice_kb/nvim_indicator.lua). The reasoning for
+[`nvim.py`](../src/spokenpad/nvim.py) and
+[`nvim_indicator.lua`](../src/spokenpad/nvim_indicator.lua). The reasoning for
 using nvim at all is in
 [decisions.md](decisions.md#the-sink-is-neovim-not-the-clipboard); the rules
 it must not break are in [constraints.md](constraints.md).
@@ -14,12 +14,12 @@ written to.
 ## What gets spawned
 
 ```
-alacritty --class 'Floating,voice-kb' \
+alacritty --class 'Floating,spokenpad' \
   -o window.position.x=<x> -o window.position.y=<y> \
   -e nvim -u <bundled dictation_init.lua> --listen <socket> <dated file>
 ```
 
-The X11 **class** is `Floating` and the **instance** is `voice-kb`. Both are
+The X11 **class** is `Floating` and the **instance** is `spokenpad`. Both are
 configurable (`nvim.terminal`, `nvim.window_instance`); the instance is the
 name every window-manager rule keys on, and it is restricted to
 `[A-Za-z0-9_-]` because it is interpolated into an i3 criteria string — a
@@ -36,16 +36,16 @@ to it, and the append that follows simply queues behind it.
 The window must never take focus — it appears while you are reading something
 else, and you keep reading.
 
-That is the window manager's job, and voice-kb contains **no focus call at
+That is the window manager's job, and spokenpad contains **no focus call at
 all**: not `xdotool windowfocus`, and not a "remember the focused window and
 restore it afterwards" dance either, since restoring focus is itself a focus
 change and would race anything the user did in between.
 
-Two lines in `~/.config/i3/i3.d/voice-kb.conf` do it properly:
+Two lines in `~/.config/i3/i3.d/spokenpad.conf` do it properly:
 
 ```
-for_window [instance="voice-kb"] floating enable
-no_focus   [instance="voice-kb"]
+for_window [instance="spokenpad"] floating enable
+no_focus   [instance="spokenpad"]
 ```
 
 Verified live on 2026-09-07: the focused window was unchanged across an open,
@@ -53,7 +53,7 @@ and i3 reported the new window as `focused: false`.
 
 ## Placement
 
-Size and position are voice-kb's, not i3's, so the rule file stays to the two
+Size and position are spokenpad's, not i3's, so the rule file stays to the two
 things only a window manager can do.
 
 The window is **a third of the screen on each axis** (`nvim.window_fraction`,
@@ -118,7 +118,7 @@ re-read or edit an earlier passage keeps their place.
 ## What runs inside nvim
 
 `nvim_indicator.lua` is loaded over RPC on every connection (so a reattach
-re-applies it), and defines `_G.VoiceKb`. The daemon calls exactly three
+re-applies it), and defines `_G.Spokenpad`. The daemon calls exactly three
 things: `setup`, `append`, and `set_state`.
 
 **The winbar** carries the indicator: a phase dot, and while recording a
@@ -195,7 +195,7 @@ paragraph and reading a transcript by keyboard is unusable. It is an
 expression mapping that checks `v:count`, so `5j` still means five buffer
 lines and `gg`/`G` are untouched.
 
-What voice-kb enforces itself, so it holds under any of them:
+What spokenpad enforces itself, so it holds under any of them:
 
 - **The chrome comes off** -- status line, tab line, line numbers, sign
   column, fold column, cursorline -- applied over RPC once attached and

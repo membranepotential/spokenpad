@@ -111,7 +111,7 @@ def edit_in_editor(initial: str) -> str | None:
     the editor failed or the user emptied the buffer."""
     editor = os.environ.get("EDITOR") or os.environ.get("VISUAL") or "nvim"
     with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".txt", prefix="voice-kb-reference-", delete=False, encoding="utf-8"
+        mode="w", suffix=".txt", prefix="spokenpad-reference-", delete=False, encoding="utf-8"
     ) as f:
         f.write(initial)
         tmp = Path(f.name)
@@ -136,10 +136,10 @@ def draft_from_local_decode(path: Path) -> str | None:
     """
     print(_colour("  loading the model (a few seconds)...", _DIM))
     try:
-        from voice_kb.asr import Transcriber
-        from voice_kb.config import Config
+        from spokenpad.asr import Transcriber
+        from spokenpad.config import Config
     except ImportError as e:  # pragma: no cover - developer environment only
-        print(_colour(f"  cannot import voice_kb: {e}", _RED))
+        print(_colour(f"  cannot import spokenpad: {e}", _RED))
         return None
     audio, rate = read_wav(path)
     try:

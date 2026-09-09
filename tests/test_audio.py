@@ -1,6 +1,6 @@
 """Regression coverage for the pre-roll snapshot race in ``AudioCapture``.
 
-Drives the real :class:`~voice_kb.audio.AudioCapture` and its ``_callback``
+Drives the real :class:`~spokenpad.audio.AudioCapture` and its ``_callback``
 directly, with :class:`sounddevice.InputStream` replaced by a fake so no
 real soundcard is needed. The callback is invoked from a background thread
 exactly as PortAudio's realtime thread would, concurrently with
@@ -21,10 +21,10 @@ import numpy.typing as npt
 import pytest
 import sounddevice as sd
 
-from voice_kb import audio as audio_module
-from voice_kb.audio import STALE_STREAM_SECONDS, AudioCapture, _RingBuffer
-from voice_kb.config import AudioConfig, RecordingConfig
-from voice_kb.recorder import CaptureRecorder, NotRecorded, Recorded, read_capture
+from spokenpad import audio as audio_module
+from spokenpad.audio import STALE_STREAM_SECONDS, AudioCapture, _RingBuffer
+from spokenpad.config import AudioConfig, RecordingConfig
+from spokenpad.recorder import CaptureRecorder, NotRecorded, Recorded, read_capture
 
 _NO_STATUS = sd.CallbackFlags()
 """An empty PortAudio status: no overflow, no underflow."""

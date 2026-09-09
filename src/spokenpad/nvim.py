@@ -7,7 +7,7 @@ in ``docs/constraints.md`` rather than a departure from it.
 
 The window
 ----------
-voice-kb spawns its own terminal running ``nvim --listen <socket> <file>``
+spokenpad spawns its own terminal running ``nvim --listen <socket> <file>``
 with a distinct X11 instance name (:attr:`NvimConfig.window_instance`), so the
 window manager can be told once to float it and never focus it -- see
 ``docs/nvim-window.md``. This module does not manage focus itself beyond
@@ -56,12 +56,12 @@ from typing import Any, Final
 import msgpack
 import pynvim
 
-from voice_kb import x11
-from voice_kb.config import NvimConfig
-from voice_kb.geometry import Output, Rect, dictation_rect, pick_output
-from voice_kb.state import Phase
+from spokenpad import x11
+from spokenpad.config import NvimConfig
+from spokenpad.geometry import Output, Rect, dictation_rect, pick_output
+from spokenpad.state import Phase
 
-log = logging.getLogger("voice-kb.nvim")
+log = logging.getLogger("spokenpad.nvim")
 
 _CONNECT_POLL_S: Final = 0.1
 
@@ -157,14 +157,14 @@ type AppendResult = Appended | AppendFailed
 
 def _indicator_source() -> str:
     """The Lua half of this module, shipped alongside it in the package."""
-    return resources.files("voice_kb").joinpath("nvim_indicator.lua").read_text(encoding="utf-8")
+    return resources.files("spokenpad").joinpath("nvim_indicator.lua").read_text(encoding="utf-8")
 
 
 class NvimSession:
     """One dictation nvim: the process, the socket, and the buffer in it.
 
     Not thread-safe, deliberately: it is owned by a single bridge thread in
-    :mod:`voice_kb.app`, the same way the recogniser is owned by the worker.
+    :mod:`spokenpad.app`, the same way the recogniser is owned by the worker.
     """
 
     def __init__(self, config: NvimConfig, *, clock: Callable[[], datetime] | None = None) -> None:
@@ -249,7 +249,7 @@ class NvimSession:
             return AppendFailed(reason="not connected to nvim")
         start = time.monotonic()
         try:
-            line = int(self._nvim.exec_lua("return VoiceKb.append(...)", text, continued))
+            line = int(self._nvim.exec_lua("return Spokenpad.append(...)", text, continued))
         except Exception as e:
             self._drop("append failed")
             return AppendFailed(reason=str(e))
@@ -287,7 +287,7 @@ class NvimSession:
         if not update:
             return
         try:
-            self._nvim.exec_lua("VoiceKb.set_state(...)", update, async_=True)
+            self._nvim.exec_lua("Spokenpad.set_state(...)", update, async_=True)
         except Exception as e:
             log.debug("indicator update dropped: %s", e)
             self._drop("indicator update failed")
@@ -602,7 +602,7 @@ class NvimSession:
         """
         nvim.exec_lua(_indicator_source())
         buffer = int(nvim.exec_lua(_OPEN_BUFFER_LUA, str(path)))
-        nvim.exec_lua("VoiceKb.setup(...)", buffer)
+        nvim.exec_lua("Spokenpad.setup(...)", buffer)
         self._nvim = nvim
         self._buffer = buffer
         self._path = path
@@ -620,7 +620,7 @@ class NvimSession:
         if not found:
             return False
         buffer, name = int(found[0]), str(found[1])
-        nvim.exec_lua("VoiceKb.setup(...)", buffer)
+        nvim.exec_lua("Spokenpad.setup(...)", buffer)
         self._nvim = nvim
         self._buffer = buffer
         self._path = Path(name)

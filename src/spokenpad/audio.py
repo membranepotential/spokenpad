@@ -17,7 +17,7 @@ exceptions raised, no unbounded allocation. It copies at most one
 callback's worth of samples per call (unavoidable -- PortAudio reuses its
 input buffer immediately after the callback returns) and otherwise only
 writes into a buffer sized up front. The one thing it hands outside this
-module is that copy, pushed onto :class:`~voice_kb.recorder.CaptureRecorder`'s
+module is that copy, pushed onto :class:`~spokenpad.recorder.CaptureRecorder`'s
 queue for a writer thread to put on disk -- a queue push, never the write
 itself, because a blocking write here is an xrun.
 """
@@ -33,14 +33,14 @@ import numpy as np
 import numpy.typing as npt
 import sounddevice as sd
 
-from voice_kb.config import AudioConfig
+from spokenpad.config import AudioConfig
 
 if TYPE_CHECKING:
-    from voice_kb.recorder import CaptureRecorder, RecordingStatus
+    from spokenpad.recorder import CaptureRecorder, RecordingStatus
 
 type MonoAudio = npt.NDArray[np.float32]
 
-log = logging.getLogger("voice-kb.audio")
+log = logging.getLogger("spokenpad.audio")
 
 MAX_UTTERANCE_SECONDS = 3600.0
 """Hard ceiling on how much of a capture is held **in memory**.
@@ -57,7 +57,7 @@ notice in the overlay", which was false: it fired with no log line and no
 indicator at all, and 3m41s of dictation was simply gone.
 
 Both halves of that are fixed. Every callback now reaches
-:class:`~voice_kb.recorder.CaptureRecorder` *before* this ceiling is
+:class:`~spokenpad.recorder.CaptureRecorder` *before* this ceiling is
 consulted, so what is on disk is never bounded by it, and hitting it is
 reported at WARNING and on the indicators (see :meth:`AudioCapture.take_cap_notice`).
 The number is generous because it no longer protects anything the user cares
@@ -141,7 +141,7 @@ class AudioCapture:
     reads under the same lock -- and is non-destructive, so it can be called
     mid-capture without disturbing what :meth:`stop_capture` will return.
 
-    A :class:`~voice_kb.recorder.CaptureRecorder` is required rather than
+    A :class:`~spokenpad.recorder.CaptureRecorder` is required rather than
     optional: "not recording" is a state the recorder itself expresses
     (``RecordingConfig.enabled``), and making it a ``None`` here would put a
     branch on the realtime path and leave every caller to invent what "no

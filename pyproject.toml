@@ -1,5 +1,5 @@
 [project]
-name = "voice-kb"
+name = "spokenpad"
 version = "0.1.0"
 description = "Local push-to-talk dictation for Linux/X11"
 readme = "README.md"
@@ -23,7 +23,7 @@ dependencies = [
 ]
 
 [project.scripts]
-voice-kb = "voice_kb.app:main"
+spokenpad = "spokenpad.app:main"
 
 [build-system]
 requires = ["uv_build>=0.12.5,<0.13.0"]
@@ -39,7 +39,7 @@ dev = [
 [tool.mypy]
 strict = true
 python_version = "3.13"
-files = ["src/voice_kb", "scripts", "tests"]
+files = ["src/spokenpad", "scripts", "tests"]
 warn_unreachable = true
 disallow_any_explicit = false
 

@@ -20,10 +20,10 @@ from typing import Any
 import numpy as np
 import pytest
 
-from voice_kb import recorder as recorder_module
-from voice_kb.audio import MonoAudio
-from voice_kb.config import RecordingConfig
-from voice_kb.recorder import (
+from spokenpad import recorder as recorder_module
+from spokenpad.audio import MonoAudio
+from spokenpad.config import RecordingConfig
+from spokenpad.recorder import (
     CaptureRecorder,
     NotRecorded,
     Recorded,
@@ -222,7 +222,7 @@ def test_a_write_that_fails_mid_capture_is_reported_and_swallowed(
     recording = recorder._current
     assert recording is not None
     monkeypatch.setattr(recorder_module, "to_pcm16", explode)
-    with caplog.at_level("ERROR", logger="voice-kb.recorder"):
+    with caplog.at_level("ERROR", logger="spokenpad.recorder"):
         _write(recorder, _ramp(4096))
         recorder.stop()
 
@@ -407,7 +407,7 @@ def test_stop_gives_up_on_a_writer_that_has_stopped_answering(
     _write(recorder, _ramp(2048))
 
     started = time.monotonic()
-    with caplog.at_level("ERROR", logger="voice-kb.recorder"):
+    with caplog.at_level("ERROR", logger="spokenpad.recorder"):
         recorder.stop()
     elapsed = time.monotonic() - started
     release.set()
@@ -439,7 +439,7 @@ def test_audio_the_writer_cannot_keep_up_with_is_dropped_not_hoarded(
     recording = recorder._current
     assert recording is not None
     assert recording.queued <= recording.max_queued, "the bound is the bound"
-    with caplog.at_level("ERROR", logger="voice-kb.recorder"):
+    with caplog.at_level("ERROR", logger="spokenpad.recorder"):
         recorder.stop()
     release.set()
 
@@ -455,7 +455,7 @@ def test_a_capture_with_dropped_audio_reports_itself_truncated(
     timeout path never runs -- the only thing that can mark this recording
     short is the drop itself. Without that, ``status()`` answered ``Recorded``
     for a file missing 9.9 of its 10 seconds, and ``_warn_capture_capped``
-    offered `voice-kb transcribe` for audio that is not in the file. A hole is
+    offered `spokenpad transcribe` for audio that is not in the file. A hole is
     exactly as unrecoverable as a cut-off end.
     """
     release = _stalling_writer(monkeypatch, after=1)
@@ -497,7 +497,7 @@ def test_starting_again_without_stopping_leaves_one_writer_and_one_good_file(
     recorder.start()
     _write(recorder, _ramp(2000))
     second = _path(recorder)
-    writers = [t for t in threading.enumerate() if t.name == "voice-kb-recorder"]
+    writers = [t for t in threading.enumerate() if t.name == "spokenpad-recorder"]
     recorder.stop()
 
     assert len(writers) == 1, "the first writer was joined, not abandoned"
@@ -573,7 +573,7 @@ def test_a_zombie_writer_cannot_reach_the_capture_that_follows_it(
     second = _path(recorder)
     _write(recorder, _ramp(16000))
 
-    with caplog.at_level("ERROR", logger="voice-kb.recorder"):
+    with caplog.at_level("ERROR", logger="spokenpad.recorder"):
         release.set()  # the zombie's write raises now, mid-capture-2
         zombie.join(5.0)
         _write(recorder, _ramp(16000))
@@ -645,7 +645,7 @@ def test_a_recording_given_up_on_reports_itself_as_truncated(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A bare path let every caller assume the happy case, so the cap notice
-    kept promising ``voice-kb transcribe`` for a file that stops in the
+    kept promising ``spokenpad transcribe`` for a file that stops in the
     middle. The status has to carry the difference."""
     recorder = CaptureRecorder(_config(tmp_path), _RATE)
     recorder.start()

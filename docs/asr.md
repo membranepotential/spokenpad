@@ -2,21 +2,21 @@
 
 ← [docs index](README.md) | The decode-time-biasing rule this implements is
 justified in [constraints.md](constraints.md#bias-vocabulary-at-decode-time-never-fuzzy-replacement);
-[`asr.py`](../src/voice_kb/asr.py) is the shell module positioned in
+[`asr.py`](../src/spokenpad/asr.py) is the shell module positioned in
 [architecture.md](architecture.md#event-flow); config fields referenced below
-are defined in [`config.py`](../src/voice_kb/config.py).
+are defined in [`config.py`](../src/spokenpad/config.py).
 
 ## Model
 
 **Parakeet TDT 0.6B v3, int8**, run through
 [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) `>=1.13.6` as a NeMo
 transducer (`model_type="nemo_transducer"` in
-[`src/voice_kb/asr.py`](../src/voice_kb/asr.py)), CPU only, 6 threads
+[`src/spokenpad/asr.py`](../src/spokenpad/asr.py)), CPU only, 6 threads
 (see [constraints.md](constraints.md#cpu-only)). The model files
 (`encoder.int8.onnx`, `decoder.int8.onnx`, `joiner.int8.onnx`, `tokens.txt`)
 are fetched by `scripts/fetch_model.py` — not committed, ~630 MB — into
 `models/parakeet-tdt-0.6b-v3-int8/` by default
-(`AsrConfig.model_dir` in [`config.py`](../src/voice_kb/config.py)).
+(`AsrConfig.model_dir` in [`config.py`](../src/spokenpad/config.py)).
 
 ## Why int8 CPU, not a GPU model
 
@@ -46,7 +46,7 @@ mistake for a scaling problem in the model.
 checkpoint but is required for hotword biasing (next section), and the margin
 is irrelevant for a one-shot decode fired once per utterance — so it's the
 default
-(`AsrConfig.decoding` in [`config.py`](../src/voice_kb/config.py)).
+(`AsrConfig.decoding` in [`config.py`](../src/spokenpad/config.py)).
 
 ## Hotwords: biasing the beam, not rewriting the output
 
@@ -82,7 +82,7 @@ score = -index
 
 [`scripts/build_hotwords.py`](../scripts/build_hotwords.py) performs this
 reconstruction (the generator itself lives in
-[`src/voice_kb/asr.py`](../src/voice_kb/asr.py) so the daemon and the script
+[`src/spokenpad/asr.py`](../src/spokenpad/asr.py) so the daemon and the script
 cannot drift apart). The recogniser is built with
 `bpe_vocab=<model_dir>/bpe.vocab` and `modeling_unit="bpe"` alongside a
 `hotwords_file`. Verified working -- and now guarded by
@@ -94,7 +94,7 @@ cannot drift apart). The recogniser is built with
 configured hotword (`AsrConfig.vocabulary`). It only takes effect with
 `decoding_method="modified_beam_search"` — `AsrConfig.__post_init__` raises a
 `ConfigError` if `vocabulary` is set under `greedy_search`
-([`config.py`](../src/voice_kb/config.py)).
+([`config.py`](../src/spokenpad/config.py)).
 
 Measured against the same eval clip, biasing `mkdir` after the model
 mis-decoded it as `mkir`:
@@ -107,7 +107,7 @@ mis-decoded it as `mkir`:
 | 6.0 | rewrites ordinary, unrelated words |
 
 (Reproducible via `uv run scripts/eval.py --sweep 0 1.5 3.0 --vocabulary mkdir`.) `1.5` is the default in
-[`config.py`](../src/voice_kb/config.py), with a warning in the docstring to
+[`config.py`](../src/spokenpad/config.py), with a warning in the docstring to
 re-run `scripts/eval.py` before raising it.
 
 ## What's not yet answered

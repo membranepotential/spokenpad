@@ -11,7 +11,7 @@ callback cannot log.
 This module removes the category. The wav is written *as the audio arrives*
 and independently of decoding, so the ceiling now bounds only what is held in
 RAM, and a decode that fails, is cancelled, or never happens leaves a file
-that ``voice-kb transcribe`` turns back into text.
+that ``spokenpad transcribe`` turns back into text.
 
 Threading
 ---------
@@ -63,10 +63,10 @@ from typing import BinaryIO
 
 import numpy as np
 
-from voice_kb.audio import MonoAudio
-from voice_kb.config import RecordingConfig
+from spokenpad.audio import MonoAudio
+from spokenpad.config import RecordingConfig
 
-log = logging.getLogger("voice-kb.recorder")
+log = logging.getLogger("spokenpad.recorder")
 
 _DIR_MODE = 0o700
 _FILE_MODE = 0o600
@@ -141,7 +141,7 @@ class Truncated:
     """A recording was started at ``path`` but given up on part-way.
 
     A separate answer from :class:`Recorded` because the difference is the
-    whole promise: "recover the rest with ``voice-kb transcribe``" is a lie
+    whole promise: "recover the rest with ``spokenpad transcribe``" is a lie
     about a file that stops in the middle, and a lie of exactly the kind this
     module exists to stop telling.
     """
@@ -314,7 +314,7 @@ class _Recording:
 class CaptureRecorder:
     """Writes the in-flight capture to a wav, one file per capture.
 
-    Lifecycle mirrors :class:`~voice_kb.audio.AudioCapture`: :meth:`start` on
+    Lifecycle mirrors :class:`~spokenpad.audio.AudioCapture`: :meth:`start` on
     ``start_capture``, :meth:`write` from the realtime callback, :meth:`stop`
     on ``stop_capture``. The directory's size budget is enforced twice: once
     when the daemon starts (here), so a disk under pressure is relieved even
@@ -356,7 +356,7 @@ class CaptureRecorder:
         says which recording holds the audio it is missing.
 
         The whole/short distinction is not decoration. Callers use this to
-        tell the user "recover the rest with ``voice-kb transcribe``", and a
+        tell the user "recover the rest with ``spokenpad transcribe``", and a
         recording that was given up on at 200s does not support that promise.
         Returning a bare path made every caller assume the happy case; three
         variants make the unhappy one impossible to miss.
@@ -416,7 +416,7 @@ class CaptureRecorder:
         self._last = recording
         self._current = recording
         self._writer = threading.Thread(
-            target=self._drain, args=(recording,), name="voice-kb-recorder", daemon=True
+            target=self._drain, args=(recording,), name="spokenpad-recorder", daemon=True
         )
         self._writer.start()
         log.debug("recording this capture to %s", path)
@@ -490,7 +490,7 @@ class CaptureRecorder:
             # A hole in the middle is exactly as unrecoverable as a file cut
             # short, so it has to reach `status()` the same way. Logging
             # "INCOMPLETE" while `status()` still answered `Recorded` let
-            # `_warn_capture_capped` offer `voice-kb transcribe` for a file
+            # `_warn_capture_capped` offer `spokenpad transcribe` for a file
             # that cannot support the promise -- the false reassurance the
             # `Truncated` variant exists to make unrepresentable.
             recording.broken.set()

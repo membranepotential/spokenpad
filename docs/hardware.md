@@ -5,9 +5,9 @@
 using a keysym-based hotkey library — reinforced by
 [constraints.md](constraints.md#read-evdev-read-only). The dictation
 window's per-output placement is `dictation_rect` in
-[`geometry.py`](../src/voice_kb/geometry.py).
+[`geometry.py`](../src/spokenpad/geometry.py).
 
-This is not a general compatibility target. voice-kb is built and tuned
+This is not a general compatibility target. spokenpad is built and tuned
 against one specific machine and input device; other hardware may need
 different keycodes and output geometry.
 
@@ -20,7 +20,7 @@ evdev 186 (KEY_F16)  →  X11 keycode 194  →  keysym XF86Launch7
 ```
 
 `186` is `KEY_F16` in the Linux input-event-codes namespace, which is why
-`HotkeyConfig.key_code` in [`config.py`](../src/voice_kb/config.py) defaults
+`HotkeyConfig.key_code` in [`config.py`](../src/spokenpad/config.py) defaults
 to `186` and is documented there as "the evdev code, not the X11 keycode
 (which is this + 8)". The evdev-to-X11 offset of `+8` is the standard
 XKB convention (X11 keycodes start at 8), not something specific to this
@@ -37,7 +37,7 @@ fragile in the way that motivated reading evdev in the first place.
 layout translation.
 
 `HotkeyConfig.cancel_key_code` defaults to evdev `1` (`KEY_ESC`); `None`
-disables cancelling ([`config.py`](../src/voice_kb/config.py)).
+disables cancelling ([`config.py`](../src/spokenpad/config.py)).
 
 ### Per-device layout
 
@@ -59,14 +59,14 @@ the right of the external `HDMI-1-0` output in the X11 coordinate space.
 The dictation window opens on whichever output holds the mouse pointer
 ([nvim-window.md](nvim-window.md)), which on this layout means computing
 which of the two `3840x2160` regions the pointer's coordinates fall into —
-[`geometry.py`](../src/voice_kb/geometry.py) owns that calculation as a pure
+[`geometry.py`](../src/spokenpad/geometry.py) owns that calculation as a pure
 function over output rectangles (see
 [architecture.md](architecture.md)).
 
 ## CPU / GPU
 
 - CPU: Intel i7-9850H, 6 cores — `AsrConfig.num_threads = 6` in
-  [`config.py`](../src/voice_kb/config.py) matches this exactly, one thread
+  [`config.py`](../src/spokenpad/config.py) matches this exactly, one thread
   per physical core.
 - GPU: GTX 1650, 4 GB VRAM, deliberately unused — see
   [constraints.md](constraints.md#cpu-only).
@@ -74,7 +74,7 @@ function over output rectangles (see
 ## Audio
 
 PipeWire. `AudioConfig.device = None`
-([`config.py`](../src/voice_kb/config.py)) means the PipeWire/PulseAudio
+([`config.py`](../src/spokenpad/config.py)) means the PipeWire/PulseAudio
 default source; no device is hardcoded.
 
 ## Window manager

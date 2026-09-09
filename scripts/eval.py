@@ -9,8 +9,8 @@ Loads ``eval-samples/references.json`` (ground truth, reconstructed from the
 recording session and since confirmed against the audio by the speaker) and
 ``eval-samples/transcripts.json`` (the Handy 0.9.6 baseline this project
 replaces), decodes each sample through the
-real :class:`~voice_kb.asr.Transcriber`, applies
-:func:`~voice_kb.text.postprocess`, and reports WER/CER plus decode timing.
+real :class:`~spokenpad.asr.Transcriber`, applies
+:func:`~spokenpad.text.postprocess`, and reports WER/CER plus decode timing.
 
 Usage:
     uv run scripts/eval.py [--config PATH] [--samples-dir PATH]
@@ -33,11 +33,11 @@ from pathlib import Path
 
 import numpy as np
 
-from voice_kb.asr import ModelMissingError, Transcriber, TranscriptionResult
-from voice_kb.audio import MonoAudio
-from voice_kb.config import Config, ConfigError, DecodingMethod
-from voice_kb.text import postprocess
-from voice_kb.vad import SpeechSegmenter, load_segmenter
+from spokenpad.asr import ModelMissingError, Transcriber, TranscriptionResult
+from spokenpad.audio import MonoAudio
+from spokenpad.config import Config, ConfigError, DecodingMethod
+from spokenpad.text import postprocess
+from spokenpad.vad import SpeechSegmenter, load_segmenter
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_SAMPLES_DIR = SCRIPT_DIR.parent / "eval-samples"

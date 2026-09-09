@@ -1,10 +1,10 @@
--- The nvim half of voice-kb: the dictation buffer and its indicator.
+-- The nvim half of spokenpad: the dictation buffer and its indicator.
 --
--- Loaded once per connection by `voice_kb.nvim.NvimSession` via
+-- Loaded once per connection by `spokenpad.nvim.NvimSession` via
 -- `nvim_exec_lua`, so it is re-applied automatically whenever the daemon
--- reattaches to a new nvim. Everything it defines hangs off `_G.VoiceKb`;
--- the Python side calls nothing but `VoiceKb.setup`, `VoiceKb.append` and
--- `VoiceKb.set_state`.
+-- reattaches to a new nvim. Everything it defines hangs off `_G.Spokenpad`;
+-- the Python side calls nothing but `Spokenpad.setup`, `Spokenpad.append` and
+-- `Spokenpad.set_state`.
 --
 -- Two things live here rather than in Python, for the same reason: they are
 -- per-frame work that would otherwise be a round trip.
@@ -32,7 +32,7 @@ local AUDIBLE = 0.02
 M.state = { phase = "idle", level = 0.0, preview = "", latched = false, previewing = true }
 M.levels = {}
 M.buf = nil
-M.ns = vim.api.nvim_create_namespace("voice_kb")
+M.ns = vim.api.nvim_create_namespace("spokenpad")
 
 for _ = 1, METER_CELLS do
   M.levels[#M.levels + 1] = 0.0
@@ -42,12 +42,12 @@ end
 --- indicator follows whatever theme the user's own config loaded.
 local function define_highlights()
   local links = {
-    VoiceKbRec = "DiagnosticError",
-    VoiceKbWork = "DiagnosticInfo",
-    VoiceKbIdle = "Comment",
-    VoiceKbMuted = "NonText",
-    VoiceKbPreview = "Comment",
-    VoiceKbFile = "Directory",
+    SpokenpadRec = "DiagnosticError",
+    SpokenpadWork = "DiagnosticInfo",
+    SpokenpadIdle = "Comment",
+    SpokenpadMuted = "NonText",
+    SpokenpadPreview = "Comment",
+    SpokenpadFile = "Directory",
   }
   for name, target in pairs(links) do
     vim.api.nvim_set_hl(0, name, { link = target, default = true })
@@ -59,7 +59,7 @@ local function meter()
   for _, level in ipairs(M.levels) do
     local amp = level ^ METER_GAMMA
     local index = math.max(1, math.min(#BARS, math.floor(amp * #BARS + 0.5)))
-    local group = amp > AUDIBLE and "VoiceKbRec" or "VoiceKbMuted"
+    local group = amp > AUDIBLE and "SpokenpadRec" or "SpokenpadMuted"
     out[#out + 1] = "%#" .. group .. "#" .. BARS[index]
   end
   return table.concat(out)
@@ -76,28 +76,28 @@ local function winbar()
     -- the key has already been released, and pressing it again is what ends
     -- it. Someone who cannot tell which mode they are in is stuck.
     local label = M.state.latched and "\u{25cf} REC \u{1f512} press to stop " or "\u{25cf} REC "
-    local bar = "%#VoiceKbRec#" .. label .. "%*" .. meter()
+    local bar = "%#SpokenpadRec#" .. label .. "%*" .. meter()
     if not M.state.previewing then
       -- Previews stop past the in-memory ceiling, or -- without a VAD model,
       -- where nothing settles and every preview decodes the whole capture --
       -- past preview.max_seconds. Saying so is the difference between "it is
       -- still recording, it just stopped showing me" and "it has silently
       -- dropped what I am saying".
-      bar = bar .. "%#VoiceKbIdle# preview paused, still recording%*"
+      bar = bar .. "%#SpokenpadIdle# preview paused, still recording%*"
     end
     return bar
   elseif phase == "transcribing" then
     -- Say the text below is the preview, not the result. Otherwise a preview
     -- left standing through the decode reads as finished text that then
     -- changes under the reader.
-    local bar = "%#VoiceKbWork#\u{25cf} transcribing\u{2026}%*"
+    local bar = "%#SpokenpadWork#\u{25cf} transcribing\u{2026}%*"
     if M.state.preview ~= "" then
-      bar = bar .. " %#VoiceKbIdle#showing the live preview until it lands%*"
+      bar = bar .. " %#SpokenpadIdle#showing the live preview until it lands%*"
     end
     return bar
   end
   local name = M.buf and vim.api.nvim_buf_get_name(M.buf) or ""
-  return "%#VoiceKbIdle#\u{25cb} voice-kb%* %#VoiceKbFile#" .. vim.fn.fnamemodify(name, ":t") .. "%*"
+  return "%#SpokenpadIdle#\u{25cb} spokenpad%* %#SpokenpadFile#" .. vim.fn.fnamemodify(name, ":t") .. "%*"
 end
 
 --- Windows currently displaying the dictation buffer. Usually exactly one;
@@ -212,10 +212,10 @@ local function render_preview()
   -- Without it the preview sat one line higher than the committed text, and
   -- every utterance visibly shifted down as it landed.
   if last_text > 0 then
-    virt_lines[1] = { { "", "VoiceKbPreview" } }
+    virt_lines[1] = { { "", "SpokenpadPreview" } }
   end
   for _, line in ipairs(wrap(text, width - PREVIEW_GUTTER, PREVIEW_MAX_LINES)) do
-    virt_lines[#virt_lines + 1] = { { line, "VoiceKbPreview" } }
+    virt_lines[#virt_lines + 1] = { { line, "SpokenpadPreview" } }
   end
 
   -- Anchored to the last line with text on it, not the last line of the
@@ -270,7 +270,7 @@ function M.setup(buf)
   -- rather than leaving a blank winbar until the next dictation. The chrome
   -- is re-applied on the same events because a plugin that reacts to
   -- BufWinEnter (a statusline, a gutter) would otherwise put itself back.
-  local group = vim.api.nvim_create_augroup("VoiceKb", { clear = true })
+  local group = vim.api.nvim_create_augroup("Spokenpad", { clear = true })
   vim.api.nvim_create_autocmd({ "BufWinEnter", "WinNew", "FileType" }, {
     group = group,
     buffer = buf,
@@ -302,7 +302,7 @@ end
 --- instead of silent. That is the whole point of this project.
 function M.append(text, continued)
   if not M.buf or not vim.api.nvim_buf_is_valid(M.buf) then
-    error("voice-kb: dictation buffer is gone")
+    error("spokenpad: dictation buffer is gone")
   end
   local lines = vim.api.nvim_buf_get_lines(M.buf, 0, -1, false)
 
@@ -400,5 +400,5 @@ function M.set_state(update)
   end
 end
 
-_G.VoiceKb = M
+_G.Spokenpad = M
 return true

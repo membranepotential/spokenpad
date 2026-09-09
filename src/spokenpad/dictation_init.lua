@@ -1,4 +1,4 @@
--- voice-kb's own neovim configuration for the dictation window.
+-- spokenpad's own neovim configuration for the dictation window.
 --
 -- Loaded with `nvim -u <this file>`, which means no user config, no plugin
 -- manager, no colorscheme, no LSP -- and, importantly, no `BufWritePre`
@@ -28,7 +28,7 @@
 -- $XDG_CACHE_HOME/nvim/luacache_chunks afterwards.
 vim.loader.enable()
 
--- No chrome. The winbar is the whole UI: voice-kb draws the recording
+-- No chrome. The winbar is the whole UI: spokenpad draws the recording
 -- indicator and level meter there, and the preview hangs below the text as
 -- virtual lines. Everything else is noise in a window you are not editing in.
 vim.opt.laststatus = 0
@@ -53,7 +53,7 @@ vim.opt.breakindent = true
 vim.opt.textwidth = 0
 vim.opt.spell = false
 
--- The file is saved after every utterance by voice-kb itself. Swap files,
+-- The file is saved after every utterance by spokenpad itself. Swap files,
 -- backups and undo files would all be written next to a transcript directory
 -- that is meant to hold transcripts and nothing else -- and a swap file left
 -- behind by a killed daemon turns the next dictation into a recovery prompt,
@@ -75,7 +75,7 @@ vim.opt.termguicolors = true
 -- This window is where you read a transcript and copy a piece of it out, so a
 -- `y` that does not reach the clipboard makes it useless for its actual job.
 --
--- Not in tension with voice-kb never touching the clipboard itself: that rule
+-- Not in tension with spokenpad never touching the clipboard itself: that rule
 -- is about the *daemon* not writing anywhere the user did not ask it to. A
 -- person pressing `y` in their own editor has asked.
 vim.opt.clipboard = "unnamedplus"
@@ -112,7 +112,7 @@ local function inherit_terminal_background()
   end
 end
 
-local group = vim.api.nvim_create_augroup("VoiceKbInit", { clear = true })
+local group = vim.api.nvim_create_augroup("SpokenpadInit", { clear = true })
 
 inherit_terminal_background()
 vim.api.nvim_create_autocmd("ColorScheme", {
@@ -135,7 +135,7 @@ vim.api.nvim_create_autocmd("ColorScheme", {
 --- block inside alacritty's black border and looked nothing like their
 --- editor. Inheriting reproduces `transparent = true` exactly, and is the
 --- right default for a window floating over a terminal regardless.
-function _G.VoiceKbColorscheme(name, opaque)
+function _G.SpokenpadColorscheme(name, opaque)
   local data = vim.fn.stdpath("data")
   for _, pattern in ipairs({
     data .. "/lazy/*/colors/" .. name .. ".*",
@@ -154,7 +154,7 @@ function _G.VoiceKbColorscheme(name, opaque)
   if not pcall(vim.cmd.colorscheme, name) then
     -- Never a visible error: this window cannot take focus, so a message
     -- waiting for a keypress in it would sit there unanswerable.
-    vim.notify("voice-kb: colourscheme " .. name .. " not found", vim.log.levels.WARN)
+    vim.notify("spokenpad: colourscheme " .. name .. " not found", vim.log.levels.WARN)
     inherit_terminal_background()
   end
 end

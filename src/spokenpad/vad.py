@@ -93,10 +93,10 @@ import logging
 from dataclasses import dataclass
 from typing import Final, NamedTuple
 
-from voice_kb.audio import MonoAudio
-from voice_kb.config import VadConfig
+from spokenpad.audio import MonoAudio
+from spokenpad.config import VadConfig
 
-log = logging.getLogger("voice-kb.vad")
+log = logging.getLogger("spokenpad.vad")
 
 #: Silero consumes fixed-size frames. sherpa-onnx exposes this as
 #: ``window_size`` and rejects a mismatch, so feed it exactly this many

@@ -139,7 +139,7 @@ sequenceDiagram
     Q->>W: decode(all samples, utterance)
     Note over W: a preview mid-flight stops<br/>after its current chunk;<br/>what it committed stands
     W->>W: remainder = samples[committed:]
-    W->>W: decode_capture(remainder) -- same pipeline as voice-kb transcribe
+    W->>W: decode_capture(remainder) -- same pipeline as spokenpad transcribe
     loop every chunk of the remainder
         W-->>Q: committed(text, utterance, …)
         Q->>B: append(text, continued)
@@ -148,7 +148,7 @@ sequenceDiagram
     Q->>Q: DecodeFinished → Idle
 ```
 
-`decode_capture` is unchanged and still shared with `voice-kb transcribe`:
+`decode_capture` is unchanged and still shared with `spokenpad transcribe`:
 the recovery path decodes a wav from frame zero, the live path decodes the
 remainder, and both go through the same segmentation, model, retry and
 post-processing. The whole-buffer retry ("every chunk decoded to nothing")
@@ -227,7 +227,7 @@ from re-decoding a growing buffer, and no audio is discarded at any length.**
    tail: nothing further lands, nothing already landed is removed. The wav on
    disk is untouched either way.
 6. **Nothing is lost past any limit.** The in-memory ceiling still only bounds
-   RAM; the recorder still sees every callback first; `voice-kb transcribe`
+   RAM; the recorder still sees every callback first; `spokenpad transcribe`
    still recovers a whole capture from the wav.
 
 What is *weaker* than before, stated plainly: a cancel during recording used

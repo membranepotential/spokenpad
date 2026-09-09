@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from voice_kb.config import (
+from spokenpad.config import (
     AsrConfig,
     Config,
     ConfigError,
@@ -221,7 +221,7 @@ def test_nvim_spawn_argv_substitutes_instance_and_appends_listen_and_target() ->
     cfg = NvimConfig(
         terminal=("alacritty", "--class", "Floating,{instance}", "-e"),
         editor=("nvim",),
-        window_instance="voice-kb-test",
+        window_instance="spokenpad-test",
         init=Path("/tmp/x-init.lua"),
     )
 
@@ -230,7 +230,7 @@ def test_nvim_spawn_argv_substitutes_instance_and_appends_listen_and_target() ->
     assert argv == [
         "alacritty",
         "--class",
-        "Floating,voice-kb-test",
+        "Floating,spokenpad-test",
         "-e",
         "nvim",
         "-u",
@@ -265,7 +265,7 @@ def test_latch_modifier_reads_from_toml() -> None:
 
 def test_vad_defaults_to_on_because_the_default_is_load_bearing() -> None:
     """Off means short utterances buried in silence decode to nothing -- see
-    ``voice_kb.vad``. Anyone changing this default should read that first."""
+    ``spokenpad.vad``. Anyone changing this default should read that first."""
     assert Config().vad.enabled is True
 
 
@@ -339,13 +339,13 @@ def test_spawn_argv_without_a_known_position_still_produces_one_command_line() -
     assert "{x}" not in " ".join(argv)
 
 
-def test_a_terminal_that_names_the_window_is_one_voice_kb_can_wait_for() -> None:
+def test_a_terminal_that_names_the_window_is_one_spokenpad_can_wait_for() -> None:
     assert NvimConfig().announces_instance is True
 
 
 def test_spawning_the_editor_directly_announces_no_instance() -> None:
     """Nothing communicates the instance name, so there is no window for the
-    manager rules to match and none for voice-kb to wait for."""
+    manager rules to match and none for spokenpad to wait for."""
     assert NvimConfig(terminal=()).announces_instance is False
 
 
@@ -376,7 +376,7 @@ def test_a_colorscheme_is_applied_in_a_way_that_works_under_either_config() -> N
     )
 
     command = argv[argv.index("-c") + 1]
-    assert "VoiceKbColorscheme" in command
+    assert "SpokenpadColorscheme" in command
     assert "pcall" in command
     assert "tokyonight-moon" in command
 
@@ -400,7 +400,7 @@ def test_the_window_is_transparent_by_default() -> None:
 def test_opting_out_of_transparency_is_passed_through() -> None:
     command = _colorscheme_argument(NvimConfig(colorscheme="tokyonight-moon", transparent=False))
 
-    assert "VoiceKbColorscheme('tokyonight-moon', true)" in command
+    assert "SpokenpadColorscheme('tokyonight-moon', true)" in command
 
 
 def _colorscheme_argument(cfg: NvimConfig) -> str:
@@ -416,7 +416,7 @@ def test_recording_is_on_by_default_and_lives_in_the_state_directory() -> None:
     turns out to have been needed -- which is what happened on 2026-09-08."""
     cfg = RecordingConfig()
     assert cfg.enabled is True
-    assert cfg.dir.parts[-2:] == ("voice-kb", "audio")
+    assert cfg.dir.parts[-2:] == ("spokenpad", "audio")
     assert cfg.max_total_bytes == 5 * 1024**3
 
 
@@ -428,8 +428,8 @@ def test_non_positive_recording_budget_is_rejected() -> None:
 
 
 def test_recording_dir_expands_a_variable_and_a_tilde(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("VOICE_KB_TEST_STATE", "/var/tmp/state")
-    cfg = Config.from_mapping({"recording": {"dir": "$VOICE_KB_TEST_STATE/audio"}})
+    monkeypatch.setenv("SPOKENPAD_TEST_STATE", "/var/tmp/state")
+    cfg = Config.from_mapping({"recording": {"dir": "$SPOKENPAD_TEST_STATE/audio"}})
     assert cfg.recording.dir == Path("/var/tmp/state/audio")
 
 
@@ -437,10 +437,10 @@ def test_recording_dir_referencing_an_unset_variable_is_rejected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Left as-is, ``expandvars`` would create a directory literally named
-    ``$VOICE_KB_UNSET`` in the user's home."""
-    monkeypatch.delenv("VOICE_KB_UNSET", raising=False)
+    ``$SPOKENPAD_UNSET`` in the user's home."""
+    monkeypatch.delenv("SPOKENPAD_UNSET", raising=False)
     with pytest.raises(ConfigError, match=re.escape("recording.dir")):
-        Config.from_mapping({"recording": {"dir": "$VOICE_KB_UNSET/audio"}})
+        Config.from_mapping({"recording": {"dir": "$SPOKENPAD_UNSET/audio"}})
 
 
 def test_unknown_recording_key_is_rejected() -> None:

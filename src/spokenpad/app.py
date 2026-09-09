@@ -1,6 +1,6 @@
 """The imperative shell: wires the hotkey, audio, model and dictation window together.
 
-All policy lives in :func:`voice_kb.state.step`, which is pure. This module's
+All policy lives in :func:`spokenpad.state.step`, which is pure. This module's
 only job is to interpret the commands that function returns, and to get work
 onto the right thread.
 
@@ -23,8 +23,8 @@ Four threads, deliberately:
 Hotkey callbacks arrive on the watcher thread and are marshalled onto the Qt
 thread by Signal emission -- Qt queues cross-thread signals automatically. The
 state machine is therefore only ever touched from the Qt thread, so it needs no
-lock. :class:`~voice_kb.asr.Transcriber` is not thread-safe and is used only
-from the worker; :class:`~voice_kb.nvim.NvimSession` likewise belongs to the
+lock. :class:`~spokenpad.asr.Transcriber` is not thread-safe and is used only
+from the worker; :class:`~spokenpad.nvim.NvimSession` likewise belongs to the
 bridge.
 
 Nothing is ever dropped silently. Every path that discards audio or a decode
@@ -34,7 +34,7 @@ exists to eliminate.
 The sink
 --------
 The transcript is appended to a floating neovim over its RPC socket
-(:mod:`voice_kb.nvim`). Nothing is pasted anywhere and no window but that one
+(:mod:`spokenpad.nvim`). Nothing is pasted anywhere and no window but that one
 is ever written to, so dictating never depends on -- or disturbs -- whatever
 happens to have focus.
 
@@ -81,13 +81,13 @@ import numpy as np
 from PySide6.QtCore import QObject, QThread, QTimer, Signal
 from PySide6.QtWidgets import QApplication
 
-from voice_kb.asr import ModelMissingError, Transcriber, ensure_model_files
-from voice_kb.audio import MAX_UTTERANCE_SECONDS, AudioCapture, MonoAudio
-from voice_kb.config import Config, xdg_state_home
-from voice_kb.decode import decode_capture
-from voice_kb.hotkey import HotkeyPermissionError, HotkeyWatcher
-from voice_kb.nvim import Appended, AppendFailed, NvimSession
-from voice_kb.recorder import (
+from spokenpad.asr import ModelMissingError, Transcriber, ensure_model_files
+from spokenpad.audio import MAX_UTTERANCE_SECONDS, AudioCapture, MonoAudio
+from spokenpad.config import Config, xdg_state_home
+from spokenpad.decode import decode_capture
+from spokenpad.hotkey import HotkeyPermissionError, HotkeyWatcher
+from spokenpad.nvim import Appended, AppendFailed, NvimSession
+from spokenpad.recorder import (
     CaptureRecorder,
     NotRecorded,
     Recorded,
@@ -95,7 +95,7 @@ from voice_kb.recorder import (
     Truncated,
     read_capture,
 )
-from voice_kb.state import (
+from spokenpad.state import (
     AbortDecode,
     Cancelled,
     Command,
@@ -114,10 +114,10 @@ from voice_kb.state import (
     phase_of,
     step,
 )
-from voice_kb.text import postprocess
-from voice_kb.vad import SpeechSegmenter, load_segmenter
+from spokenpad.text import postprocess
+from spokenpad.vad import SpeechSegmenter, load_segmenter
 
-log = logging.getLogger("voice-kb")
+log = logging.getLogger("spokenpad")
 
 _LEVEL_POLL_MS = 33
 _NVIM_LEVEL_EVERY = 3  # so nvim's meter updates at ~10Hz, not 30
@@ -253,7 +253,7 @@ class _Worker(QObject):
                 return None
             text = self._transcriber.transcribe(chunk.samples, rate).text
             if not chunk.settled:
-                # Only the last chunk can be unsettled (voice_kb.vad), so
+                # Only the last chunk can be unsettled (spokenpad.vad), so
                 # this is the tail and there is nothing after it.
                 return text
             self._commit(text, utterance, base + chunk.end_frame)
@@ -276,8 +276,8 @@ class _Worker(QObject):
     def run_decode(self, samples: MonoAudio, utterance: int) -> None:
         """Decode the remainder past the committed offset, emitting each chunk.
 
-        The pipeline itself is :func:`~voice_kb.decode.decode_capture`, shared
-        with ``voice-kb transcribe``, so a transcript recovered from a
+        The pipeline itself is :func:`~spokenpad.decode.decode_capture`, shared
+        with ``spokenpad transcribe``, so a transcript recovered from a
         recording is produced exactly the way the live one would have been.
         All this adds is the thread boundary and the offset: turn each chunk
         into a signal, turn a failure into one too, and start where the ticks
@@ -338,7 +338,7 @@ class _NvimBridge(QObject):
     order the Qt thread emitted them -- which is what makes "open the window,
     then append to it" correct without any explicit handshake.
 
-    Nothing in here raises: :class:`~voice_kb.nvim.NvimSession` reports
+    Nothing in here raises: :class:`~spokenpad.nvim.NvimSession` reports
     failure as a value or a log line, and this class turns that into a signal.
     A dictation window that cannot be opened must not take down a daemon that
     is otherwise recording and decoding perfectly well.
@@ -772,7 +772,7 @@ class Daemon(QObject):
         may. The two messages are not competing for the same slot: a dead
         microphone is news that **invalidates** what the capped notice says.
         Past the ceiling that notice promises the rest of the audio is on disk
-        and recoverable with ``voice-kb transcribe`` -- but the recorder is
+        and recoverable with ``spokenpad transcribe`` -- but the recorder is
         still writing, so if the input stream then dies (a live bug here,
         three occurrences in STATUS.md) what lands in the wav is silence, and
         the promise is false. Saying so, in the capped wording below, is worth
@@ -835,17 +835,17 @@ class Daemon(QObject):
                 log.warning(
                     "this capture has passed the %.0f-minute in-memory ceiling, so the "
                     "transcript will stop there -- but the audio is still being recorded "
-                    "in full. Recover the rest with `voice-kb transcribe %s`.",
+                    "in full. Recover the rest with `spokenpad transcribe %s`.",
                     minutes, path,
                 )
                 message = (
                     f"past the {minutes:.0f}min limit -- the rest is on disk, "
-                    "recover it with voice-kb transcribe"
+                    "recover it with spokenpad transcribe"
                 )
             case Truncated(path=path):
                 # The one case where neither half is working: the transcript
                 # stops at the ceiling and the file stops wherever the disk
-                # gave up. Promising `voice-kb transcribe` here would be worse
+                # gave up. Promising `spokenpad transcribe` here would be worse
                 # than saying nothing.
                 log.warning(
                     "this capture has passed the %.0f-minute in-memory ceiling AND its "
@@ -1089,7 +1089,7 @@ class Daemon(QObject):
         QApplication.instance().quit()  # type: ignore[union-attr]
 
 
-DEFAULT_LOG_FILE = xdg_state_home() / "voice-kb" / "voice-kb.log"
+DEFAULT_LOG_FILE = xdg_state_home() / "spokenpad" / "spokenpad.log"
 
 
 def _configure_logging(*, verbose: bool, log_file: Path | None) -> None:
@@ -1102,7 +1102,7 @@ def _configure_logging(*, verbose: bool, log_file: Path | None) -> None:
     Note the file records transcribed text, so it holds whatever was dictated.
     It stays on this machine, mode 0600, and `--log-file none` turns it off.
     """
-    root = logging.getLogger("voice-kb")
+    root = logging.getLogger("spokenpad")
     root.setLevel(logging.DEBUG)
     root.propagate = False
 
@@ -1140,7 +1140,7 @@ def transcribe_recording(wav: Path, out: Path | None, config: Config) -> int:
     """Decode a recorded capture and write the transcript out. The recovery path.
 
     This is what makes a recording worth having. It runs the *same* pipeline
-    as live dictation -- :func:`~voice_kb.decode.decode_capture`, the same VAD
+    as live dictation -- :func:`~spokenpad.decode.decode_capture`, the same VAD
     segmentation, the same model, the same post-processing -- so what comes
     back is what the daemon would have produced at the time, not an
     approximation of it produced by a second implementation.
@@ -1222,7 +1222,7 @@ def run_daemon(config: Config, dump_audio: Path | None) -> int:
 
 
 def main() -> int:
-    """``voice-kb`` runs the daemon; ``voice-kb transcribe`` recovers a wav.
+    """``spokenpad`` runs the daemon; ``spokenpad transcribe`` recovers a wav.
 
     The subcommand is optional, so the bare invocation the systemd unit and
     every existing habit use is untouched. The options common to both stay on
@@ -1230,7 +1230,7 @@ def main() -> int:
     lets a subparser's defaults overwrite what the top level already parsed,
     so ``-v`` in both places would silently mean *less* verbose, not more.
     """
-    parser = argparse.ArgumentParser(prog="voice-kb", description="Push-to-talk dictation.")
+    parser = argparse.ArgumentParser(prog="spokenpad", description="Push-to-talk dictation.")
     parser.add_argument("-c", "--config", type=Path, default=None)
     parser.add_argument("--model-dir", type=Path, default=None)
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -1253,7 +1253,7 @@ def main() -> int:
         help="decode a recorded capture (see [recording]) and print the transcript",
         description=(
             "Decode a wav through the same VAD and model the daemon uses. "
-            "Global options go before the subcommand: voice-kb -v transcribe FILE."
+            "Global options go before the subcommand: spokenpad -v transcribe FILE."
         ),
     )
     recover.add_argument("wav", type=Path, help="a capture from the recording directory")

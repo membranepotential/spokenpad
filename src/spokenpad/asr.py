@@ -27,7 +27,7 @@ from pathlib import Path
 import numpy as np
 import sherpa_onnx
 
-from voice_kb.config import AsrConfig
+from spokenpad.config import AsrConfig
 
 
 class ModelMissingError(RuntimeError):
@@ -109,7 +109,7 @@ class Transcriber:
                     write_bpe_vocab(config.tokens, config.bpe_vocab)
                 with tempfile.NamedTemporaryFile(
                     mode="w",
-                    prefix="voice-kb-hotwords-",
+                    prefix="spokenpad-hotwords-",
                     suffix=".txt",
                     delete=False,
                     encoding="utf-8",

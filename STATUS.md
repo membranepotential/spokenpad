@@ -1,4 +1,4 @@
-# voice-kb — local push-to-talk dictation for Linux/X11
+# spokenpad — local push-to-talk dictation for Linux/X11
 
 ## Goal
 Hold M4 (or latch with shift), speak, and the text appears in a floating nvim
@@ -15,9 +15,12 @@ For recording long passages while reading something else.
   it; not yet dictated into.** Spec + as-built: `docs/progressive-commit.md`.
   Uncommitted, together with:
 - **audio-safety-net (2026-09-08)** — every capture written to a wav as spoken;
-  `voice-kb transcribe <wav>` replays it. Cap 3600s and loud. **Done.**
+  `spokenpad transcribe <wav>` replays it. Cap 3600s and loud. **Done.**
 
 ## Done
+- Project rename to **spokenpad** (2026-09-09): runtime and installation
+  identifiers are coherent; migration instructions stop `voice-kb` before
+  enabling the renamed service.
 - nvim sink (2026-09-07): pointer-anchored window, winbar indicator, one file per window.
 - Latched recording: shift+M4 records until M4 is pressed again.
 - VAD chunking (`vad.py`): short utterances no longer decode to nothing.
@@ -37,7 +40,7 @@ Read evdev **read-only** (no `EVIOCGRAB`, no uinput clones); **never synthesise
 characters** (no `xdotool type`/enigo) — both destroy per-device `setxkbmap`.
 Every committed sample decoded exactly once, never from a growing buffer. CPU
 only. Bias vocabulary at decode time, never fuzzy replacement. **No window
-voice-kb opens may take focus**, and nothing is written to a window it did not
+spokenpad opens may take focus**, and nothing is written to a window it did not
 open. M4 = evdev `186` (`KEY_F16`) → X keycode `194`, keysym `XF86Launch7`.
 
 ## Next

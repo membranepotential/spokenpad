@@ -19,7 +19,7 @@ running system.
 | **Every committed sample decoded exactly once**, never from a growing buffer | growing-buffer re-decode dropped long utterances | no (functional, silent) |
 | **CPU only** | auto-selection bound the model to the 4 GB GTX 1650 | no |
 | **Bias vocabulary at decode time**, never fuzzy replacement | edit-distance rewrite turned real words into wrong ones | no |
-| **No window voice-kb opens may take focus** | focus steal aborted transcription mid-utterance | no |
+| **No window spokenpad opens may take focus** | focus steal aborted transcription mid-utterance | no |
 
 ## Read evdev read-only
 
@@ -33,7 +33,7 @@ whatever X11's default layout is. The result: keyboard layout for that
 input path silently reverted, corrupting keystrokes system-wide until the
 physical device was replugged.
 
-**Rule:** voice-kb reads `/dev/input/event*` for the hotkey only, never calls
+**Rule:** spokenpad reads `/dev/input/event*` for the hotkey only, never calls
 `EVIOCGRAB`, and never creates a uinput clone. It observes key state; it does
 not intercept or re-emit it.
 
@@ -49,11 +49,11 @@ It is also slow. Measured on this project's hardware: **183 ms** via
 clipboard + `ctrl+v` versus **3.3 s** via character synthesis for the same
 159-character string (README.md).
 
-**Rule:** voice-kb never synthesises characters.
+**Rule:** spokenpad never synthesises characters.
 
 Since 2026-09-07 it does not touch the clipboard either. The transcript is
 appended to a neovim buffer over that editor's msgpack-RPC socket
-([`nvim.py`](../src/voice_kb/nvim.py)), which is strictly stronger than the
+([`nvim.py`](../src/spokenpad/nvim.py)), which is strictly stronger than the
 clipboard sink it replaced: no keystroke is sent anywhere, no global X state
 is read or written, and the transcript never crosses a shell or an argv
 boundary — it is a msgpack string argument, so a dictated `$(rm -rf ~)` is
@@ -75,7 +75,7 @@ discarded at any length.
 
 Until 2026-09-08 that rule was implemented as a single decode of the whole
 buffer after `KeyUp`. It is now implemented *progressively*: the capture is
-split at silence by [`voice_kb.vad`](../src/voice_kb/vad.py) into chunks of
+split at silence by [`spokenpad.vad`](../src/spokenpad/vad.py) into chunks of
 about ten seconds of speech, a chunk is decoded and appended the moment no
 later audio can change it, and releasing the key decodes only the open tail.
 The full design, the rule for deciding that a chunk has settled, and the
@@ -167,7 +167,7 @@ provider.
 An earlier approach corrected ASR output with fuzzy/edit-distance string
 replacement after decoding. On short technical tokens, edit distance is not
 selective enough: `set` → `sed`, `reset` → `rust` (README.md,
-[`config.py`](../src/voice_kb/config.py) — see the `TextConfig.replacements`
+[`config.py`](../src/spokenpad/config.py) — see the `TextConfig.replacements`
 docstring, which names this failure directly).
 
 **Rule:** vocabulary correction happens inside decoding, by biasing the beam
@@ -187,11 +187,11 @@ cooperating — a per-window-class paste combo, a target that reads the
 clipboard slowly enough to race the restore, a terminal that swallows
 `ctrl+v`.
 
-**Rule:** the transcript only ever goes to a window voice-kb opened for the
+**Rule:** the transcript only ever goes to a window spokenpad opened for the
 purpose. The daemon spawns its own neovim and appends to a buffer in it. No
 other window is ever written to, and nothing is pasted anywhere.
 
-## No window voice-kb opens may take focus
+## No window spokenpad opens may take focus
 
 Handy's status overlay was a focusable window. When it appeared during
 recording, it could take focus away from the application the user was
@@ -201,7 +201,7 @@ dictating into, aborting the transcription in progress.
 point in its lifecycle. Since 2026-09-08 it opens exactly one: the
 **dictation window**, which is refused focus by the window manager via a
 `no_focus` rule keyed on its X11 instance name. There is deliberately no
-focus call anywhere in [`nvim.py`](../src/voice_kb/nvim.py) — not even a
+focus call anywhere in [`nvim.py`](../src/spokenpad/nvim.py) — not even a
 "restore the previous focus" one, which would be a focus change of its own.
 See [nvim-window.md](nvim-window.md). (The Qt status overlay that preceded
 it was non-focusable by construction; it is deleted, see

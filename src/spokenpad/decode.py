@@ -1,8 +1,8 @@
 """The decode pipeline: split at silence, decode each chunk exactly once.
 
 This is the functional core the daemon's worker thread runs and that
-``voice-kb transcribe`` runs over a recovered wav. It lives on its own rather
-than inside :mod:`voice_kb.app` so that recovering a lost transcript from disk
+``spokenpad transcribe`` runs over a recovered wav. It lives on its own rather
+than inside :mod:`spokenpad.app` so that recovering a lost transcript from disk
 goes through *the same* pipeline as live dictation -- same segmentation, same
 model, same whole-buffer fallback. A second, parallel implementation of this
 would drift, and the day it is needed is the day nobody is in a position to
@@ -19,11 +19,11 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 
-from voice_kb.asr import Transcriber
-from voice_kb.audio import MonoAudio
-from voice_kb.vad import Segment, SpeechSegmenter
+from spokenpad.asr import Transcriber
+from spokenpad.audio import MonoAudio
+from spokenpad.vad import Segment, SpeechSegmenter
 
-log = logging.getLogger("voice-kb.decode")
+log = logging.getLogger("spokenpad.decode")
 
 
 def _keep_going() -> bool:
@@ -50,7 +50,7 @@ def decode_capture(
     property ``docs/constraints.md`` protects. Live, ``samples`` is the
     remainder past what was committed while the user was still speaking
     (``docs/progressive-commit.md``); from a wav it is the whole recording.
-    Splitting first is a correctness fix (see :mod:`voice_kb.vad`) that
+    Splitting first is a correctness fix (see :mod:`spokenpad.vad`) that
     happens to also let text start appearing in a few hundred milliseconds
     instead of at the end.
 

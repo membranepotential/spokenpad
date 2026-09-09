@@ -1,10 +1,10 @@
-"""End-to-end regression tests for the seams between ``voice_kb``'s modules.
+"""End-to-end regression tests for the seams between ``spokenpad``'s modules.
 
 72 unit tests were green while, in production: a cancelled decode still got
 injected, a missing model silently produced nothing, and holding the hotkey
 spawned ~60 subprocesses/second and stalled the whole event loop. Unit tests
 on ``state.py``/``text.py``/etc. in isolation cannot see any of that -- these
-tests drive the real :class:`~voice_kb.app.Daemon` (state machine, ``_apply``,
+tests drive the real :class:`~spokenpad.app.Daemon` (state machine, ``_apply``,
 ``_sync_indicators``, ``_on_decoded``, the utterance id) against fakes
 for every hardware/subprocess boundary, so a regression in how those pieces
 are wired together shows up here even when every module still passes in
@@ -13,7 +13,7 @@ isolation.
 Hardware-free by construction: ``conftest.py`` sets
 ``QT_QPA_PLATFORM=offscreen`` before PySide6 is ever imported, and every
 ``Daemon`` built by the ``make_daemon`` fixture has a fake ``AudioCapture``,
-a fake ``NvimSession``, and faked ``voice_kb.x11`` queries. No test here
+a fake ``NvimSession``, and faked ``spokenpad.x11`` queries. No test here
 starts ``HotkeyWatcher`` or ``Daemon.start()`` (that would open real
 ``/dev/input`` nodes and touch a real X server), and no test spawns a real
 terminal or writes to a real nvim -- the whole point of a fake
@@ -50,16 +50,16 @@ import pytest
 from fakes import FakeAudioCapture, FakeNvimSession, FakeTranscriber, FakeX11
 from PySide6.QtWidgets import QApplication
 
-from voice_kb import app as app_module
-from voice_kb import x11
-from voice_kb.app import Daemon
-from voice_kb.asr import ModelMissingError, Transcriber, TranscriptionResult
-from voice_kb.audio import AudioCapture, MonoAudio
-from voice_kb.config import AsrConfig, Config, HotkeyConfig, RecordingConfig
-from voice_kb.hotkey import HotkeyWatcher
-from voice_kb.nvim import AppendFailed, NvimSession
-from voice_kb.recorder import CaptureRecorder, NotRecorded, Recorded, Truncated
-from voice_kb.state import (
+from spokenpad import app as app_module
+from spokenpad import x11
+from spokenpad.app import Daemon
+from spokenpad.asr import ModelMissingError, Transcriber, TranscriptionResult
+from spokenpad.audio import AudioCapture, MonoAudio
+from spokenpad.config import AsrConfig, Config, HotkeyConfig, RecordingConfig
+from spokenpad.hotkey import HotkeyWatcher
+from spokenpad.nvim import AppendFailed, NvimSession
+from spokenpad.recorder import CaptureRecorder, NotRecorded, Recorded, Truncated
+from spokenpad.state import (
     MIN_HOLD_SECONDS,
     Cancelled,
     Idle,
@@ -70,7 +70,7 @@ from voice_kb.state import (
     SessionState,
     Transcribing,
 )
-from voice_kb.vad import Segment, SpeechSegmenter
+from spokenpad.vad import Segment, SpeechSegmenter
 
 pytestmark = pytest.mark.usefixtures("qapp")
 
@@ -107,7 +107,7 @@ def _nvim_preview_spy(daemon: Daemon) -> list[str]:
     """Records every string the daemon pushed toward the nvim indicator's
     preview field, the same way :func:`_append_spy` observes appends. This is
     the "sink" a preview must never actually reach in committed form -- see
-    the invariants in the module docstring of ``voice_kb.app``.
+    the invariants in the module docstring of ``spokenpad.app``.
     """
     calls: list[str] = []
     daemon._nvim_preview.connect(calls.append)
@@ -626,12 +626,12 @@ def test_capture_far_shorter_than_the_hold_is_reported_as_an_error(
     daemon = make_daemon(None)
     rate = daemon._config.audio.sample_rate
 
-    with caplog.at_level(logging.ERROR, logger="voice-kb"):
+    with caplog.at_level(logging.ERROR, logger="spokenpad"):
         daemon._log_capture(29.8, np.full(5705, 0.01, dtype=np.float32))
     assert "stopped delivering" in caplog.text
 
     caplog.clear()
-    with caplog.at_level(logging.ERROR, logger="voice-kb"):
+    with caplog.at_level(logging.ERROR, logger="spokenpad"):
         daemon._log_capture(2.0, np.full(2 * rate, 0.01, dtype=np.float32))
     assert caplog.text == ""
 
@@ -802,7 +802,7 @@ def test_failed_append_is_reported_and_does_not_take_the_daemon_down(
     daemon = make_daemon(None)
     _nvim_session(daemon).append_result = AppendFailed(reason="nvim went away")
 
-    with caplog.at_level(logging.ERROR, logger="voice-kb"):
+    with caplog.at_level(logging.ERROR, logger="spokenpad"):
         daemon._nvim.append("some text", False)
 
     assert "could not append" in caplog.text
@@ -828,7 +828,7 @@ def test_phase_changes_reach_the_nvim_bridge(make_daemon: DaemonFactory) -> None
 
 class _FakeSegmenter:
     """Splits a capture into ``count`` equal pieces, like a VAD that found
-    ``count`` runs of speech. Stands in for ``voice_kb.vad.SpeechSegmenter``
+    ``count`` runs of speech. Stands in for ``spokenpad.vad.SpeechSegmenter``
     so these tests need no model and no real audio.
 
     Every piece but the last is ``settled`` -- the rule the real segmenter
@@ -1341,7 +1341,7 @@ def test_a_tick_that_raises_keeps_the_utterance_ticking(
     daemon._request_preview()
     timer.stop()  # as it is while a tick is in flight
     transcriber.next_result = RuntimeError("onnx hiccup")
-    with caplog.at_level(logging.WARNING, logger="voice-kb"):
+    with caplog.at_level(logging.WARNING, logger="spokenpad"):
         daemon._worker.run_preview(*requests[-1])
 
     assert "a tick failed" in caplog.text
@@ -1405,15 +1405,15 @@ def test_the_capture_log_names_the_recording_it_landed_in(
     transcript recoverable after the fact rather than merely regrettable."""
     daemon = make_daemon(None)
     _audio(daemon).recording = Recorded(
-        path=Path("/state/voice-kb/audio/capture-2026-09-08-141530.wav")
+        path=Path("/state/spokenpad/audio/capture-2026-09-08-141530.wav")
     )
 
     daemon._dispatch(KeyDown(at=0.0))
-    with caplog.at_level(logging.INFO, logger="voice-kb"):
+    with caplog.at_level(logging.INFO, logger="spokenpad"):
         daemon._dispatch(KeyUp(at=2.0))
 
     assert "captured 2.0s held" in caplog.text
-    assert "recorded to /state/voice-kb/audio/capture-2026-09-08-141530.wav" in caplog.text
+    assert "recorded to /state/spokenpad/audio/capture-2026-09-08-141530.wav" in caplog.text
 
 
 def test_hitting_the_ceiling_is_loud_in_the_log_and_on_the_indicator(
@@ -1431,17 +1431,20 @@ def test_hitting_the_ceiling_is_loud_in_the_log_and_on_the_indicator(
     previews = _nvim_preview_spy(daemon)
     audio = _audio(daemon)
     audio.recording = Recorded(
-        path=Path("/state/voice-kb/audio/capture-2026-09-08-141530.wav")
+        path=Path("/state/spokenpad/audio/capture-2026-09-08-141530.wav")
     )
     audio.capped = True
 
     daemon._dispatch(KeyDown(at=0.0))
-    with caplog.at_level(logging.WARNING, logger="voice-kb"):
+    with caplog.at_level(logging.WARNING, logger="spokenpad"):
         daemon._poll_level()
 
     assert "in-memory ceiling" in caplog.text
-    assert "voice-kb transcribe /state/voice-kb/audio/capture-2026-09-08-141530.wav" in caplog.text
-    assert "voice-kb transcribe" in previews[-1]
+    assert (
+        "spokenpad transcribe /state/spokenpad/audio/capture-2026-09-08-141530.wav"
+        in caplog.text
+    )
+    assert "spokenpad transcribe" in previews[-1]
 
 
 def test_the_cap_warning_survives_the_preview_that_would_have_erased_it(
@@ -1460,7 +1463,7 @@ def test_the_cap_warning_survives_the_preview_that_would_have_erased_it(
     previews = _nvim_preview_spy(daemon)
     audio = _audio(daemon)
     audio.recording = Recorded(
-        path=Path("/state/voice-kb/audio/capture-2026-09-08-141530.wav")
+        path=Path("/state/spokenpad/audio/capture-2026-09-08-141530.wav")
     )
     audio.capped = True
 
@@ -1482,7 +1485,7 @@ def test_the_cap_warning_survives_the_preview_that_would_have_erased_it(
 
     assert previews[-1] == warning
     assert not daemon._preview_timer.isActive(), "and it did not re-arm the timer"
-    assert "voice-kb transcribe" in warning
+    assert "spokenpad transcribe" in warning
 
 
 def test_a_dead_microphone_replaces_the_cap_notice_it_has_invalidated(
@@ -1491,7 +1494,7 @@ def test_a_dead_microphone_replaces_the_cap_notice_it_has_invalidated(
     """The one message allowed to overwrite the capped notice.
 
     The notice promises the rest of the audio is on disk and recoverable with
-    ``voice-kb transcribe``. The recorder keeps writing past the ceiling, so
+    ``spokenpad transcribe``. The recorder keeps writing past the ceiling, so
     when the input stream dies -- a live bug here, three occurrences in
     STATUS.md -- what lands in the wav from then on is silence and the promise
     is false. This is not a staler message losing a ranking contest; it is
@@ -1502,20 +1505,20 @@ def test_a_dead_microphone_replaces_the_cap_notice_it_has_invalidated(
     previews = _nvim_preview_spy(daemon)
     audio = _audio(daemon)
     audio.recording = Recorded(
-        path=Path("/state/voice-kb/audio/capture-2026-09-08-141530.wav")
+        path=Path("/state/spokenpad/audio/capture-2026-09-08-141530.wav")
     )
     audio.capped = True
 
     daemon._dispatch(KeyDown(at=0.0))
     daemon._poll_level()
-    assert "voice-kb transcribe" in previews[-1]
+    assert "spokenpad transcribe" in previews[-1]
 
     audio.dead = True  # the microphone drops out after the cap
     daemon._poll_level()
 
     assert "no audio from the microphone" in previews[-1]
     assert "silent gap" in previews[-1], "and it does not repeat the false promise"
-    assert "voice-kb transcribe" not in previews[-1]
+    assert "spokenpad transcribe" not in previews[-1]
 
 
 def test_the_dead_microphone_notice_does_not_invent_a_recording(
@@ -1526,7 +1529,7 @@ def test_the_dead_microphone_notice_does_not_invent_a_recording(
     Branching on ``_capped`` alone made this message assert a recording
     exists: it replaced the correct "audio from here is being discarded" with
     a promise of a silent gap in a file that was never opened. That is the
-    same lie as offering `voice-kb transcribe` for a truncated file, pointing
+    same lie as offering `spokenpad transcribe` for a truncated file, pointing
     the other way -- so it branches on the recording, not on the cap.
     """
     daemon = make_daemon(None)
@@ -1554,12 +1557,12 @@ def test_a_cap_crossed_in_the_last_tick_is_still_reported(
     daemon = make_daemon(None)
     audio = _audio(daemon)
     audio.recording = Recorded(
-        path=Path("/state/voice-kb/audio/capture-2026-09-08-141530.wav")
+        path=Path("/state/spokenpad/audio/capture-2026-09-08-141530.wav")
     )
 
     daemon._dispatch(KeyDown(at=0.0))
     audio.capped = True  # crossed after the last _poll_level of the hold
-    with caplog.at_level(logging.WARNING, logger="voice-kb"):
+    with caplog.at_level(logging.WARNING, logger="spokenpad"):
         daemon._dispatch(KeyUp(at=2.0))
 
     assert "in-memory ceiling" in caplog.text
@@ -1574,7 +1577,7 @@ def test_the_ceiling_warning_says_when_nothing_is_being_recorded(
     _audio(daemon).capped = True
 
     daemon._dispatch(KeyDown(at=0.0))
-    with caplog.at_level(logging.WARNING, logger="voice-kb"):
+    with caplog.at_level(logging.WARNING, logger="spokenpad"):
         daemon._poll_level()
 
     assert "being discarded" in caplog.text
@@ -1651,7 +1654,7 @@ def test_transcribe_refuses_a_recording_at_the_wrong_sample_rate(
 def test_a_bare_invocation_still_starts_the_daemon(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The subcommand is optional. ``voice-kb`` with no arguments is what the
+    """The subcommand is optional. ``spokenpad`` with no arguments is what the
     systemd unit runs and what every existing habit types."""
     started: list[Path | None] = []
 
@@ -1659,7 +1662,7 @@ def test_a_bare_invocation_still_starts_the_daemon(
         started.append(dump_audio)
         return 0
 
-    monkeypatch.setattr(sys, "argv", ["voice-kb", "-c", str(tmp_path / "absent.toml")])
+    monkeypatch.setattr(sys, "argv", ["spokenpad", "-c", str(tmp_path / "absent.toml")])
     monkeypatch.setattr(app_module, "_configure_logging", lambda **kwargs: None)
     monkeypatch.setattr(app_module, "run_daemon", fake_daemon)
 
@@ -1682,7 +1685,7 @@ def test_the_transcribe_subcommand_never_reaches_the_daemon(
         sys,
         "argv",
         [
-            "voice-kb",
+            "spokenpad",
             "-c",
             str(tmp_path / "absent.toml"),
             "transcribe",
@@ -1713,7 +1716,7 @@ def test_a_capped_capture_does_not_silence_the_one_after_it(
     previews = _nvim_preview_spy(daemon)
     audio = _audio(daemon)
     audio.recording = Recorded(
-        path=Path("/state/voice-kb/audio/capture-2026-09-08-141530.wav")
+        path=Path("/state/spokenpad/audio/capture-2026-09-08-141530.wav")
     )
     audio.capped = True
 
@@ -1736,7 +1739,7 @@ def test_a_truncated_recording_is_never_offered_as_a_recovery(
     """Both callers of the recording status have to tell the truth.
 
     A recording given up on at 200s does not support "recover the rest with
-    `voice-kb transcribe`" -- that is the same false reassurance the silent
+    `spokenpad transcribe`" -- that is the same false reassurance the silent
     cap gave, dressed up as a fix. When the file is short, the cap notice says
     so and the capture line says so.
     """
@@ -1744,16 +1747,16 @@ def test_a_truncated_recording_is_never_offered_as_a_recovery(
     previews = _nvim_preview_spy(daemon)
     audio = _audio(daemon)
     audio.recording = Truncated(
-        path=Path("/state/voice-kb/audio/capture-2026-09-08-141530.wav")
+        path=Path("/state/spokenpad/audio/capture-2026-09-08-141530.wav")
     )
     audio.capped = True
 
     daemon._dispatch(KeyDown(at=0.0))
-    with caplog.at_level(logging.WARNING, logger="voice-kb"):
+    with caplog.at_level(logging.WARNING, logger="spokenpad"):
         daemon._poll_level()
         daemon._dispatch(KeyUp(at=2.0))
 
-    assert "voice-kb transcribe" not in caplog.text
-    assert "voice-kb transcribe" not in previews[-1]
+    assert "spokenpad transcribe" not in caplog.text
+    assert "spokenpad transcribe" not in previews[-1]
     assert "recording failed" in previews[-1]
     assert "was given up on part-way" in caplog.text

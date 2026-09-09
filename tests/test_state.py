@@ -1,9 +1,9 @@
-"""``voice_kb.state.step`` is a total function: every (state, event) pair is
+"""``spokenpad.state.step`` is a total function: every (state, event) pair is
 covered here, not just the happy path."""
 
 from __future__ import annotations
 
-from voice_kb.state import (
+from spokenpad.state import (
     MIN_HOLD_SECONDS,
     AbortDecode,
     Cancelled,

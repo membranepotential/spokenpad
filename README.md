@@ -1,4 +1,4 @@
-# voice-kb
+# spokenpad
 
 Local push-to-talk dictation for Linux/X11 (i3). Hold a key, speak, release —
 the text appears in a floating neovim window that never takes focus. Fully
@@ -72,15 +72,15 @@ this replaces managed 1.37× on the same hardware and silently discarded the
 uv sync
 uv run scripts/fetch_model.py     # ~630 MB ASR + ~2 MB VAD, not committed
 uv run scripts/install.py         # window manager rules + systemd unit
-systemctl --user daemon-reload && systemctl --user enable --now voice-kb
+systemctl --user daemon-reload && systemctl --user enable --now spokenpad
 ```
 
-`install.py` symlinks the two files voice-kb needs outside the repository:
+`install.py` symlinks the two files spokenpad needs outside the repository:
 
 | from | to | why it cannot live in the repo |
 |---|---|---|
-| `packaging/i3/voice-kb.conf` | `~/.config/i3/i3.d/voice-kb.conf` | i3 reads its rules from its own config directory |
-| `packaging/voice-kb.service` | `~/.config/systemd/user/voice-kb.service` | systemd reads units from its own unit directory |
+| `packaging/i3/spokenpad.conf` | `~/.config/i3/i3.d/spokenpad.conf` | i3 reads its rules from its own config directory |
+| `packaging/spokenpad.service` | `~/.config/systemd/user/spokenpad.service` | systemd reads units from its own unit directory |
 
 Symlinks, so editing them here takes effect on the next reload with no second
 step and no copy to drift; `--copy` installs independent copies instead. It is
@@ -91,25 +91,38 @@ The dictation window runs **your** nvim configuration by default. It opens
 3x faster on the bundled one (`nvim.init = "bundled"`) and still looks like
 your editor if you name your theme (`nvim.colorscheme`), since only that one
 plugin is loaded — measured both ways in
-[docs/nvim-window.md](docs/nvim-window.md). Either way voice-kb strips the
+[docs/nvim-window.md](docs/nvim-window.md). Either way spokenpad strips the
 chrome and sets prose wrapping over RPC, and writes committed text with
 `noautocmd` so a format-on-save cannot reflow a transcript.
 
-The unit assumes the checkout is at `~/Documents/voice-kb`; edit
+The unit assumes the checkout is at `~/Documents/spokenpad`; edit
 `WorkingDirectory`/`ExecStart` if it is not, and `WantedBy` if your session
 target is not `i3-session.target`. Watch it with
-`journalctl --user -u voice-kb -f`; the full DEBUG log is in
-`$XDG_STATE_HOME/voice-kb/voice-kb.log` either way.
+`journalctl --user -u spokenpad -f`; the full DEBUG log is in
+`$XDG_STATE_HOME/spokenpad/spokenpad.log` either way.
+
+### Migrating from voice-kb
+
+Rename the checkout to `~/Documents/spokenpad`, run `uv sync`, then install the
+new unit and rules. Before enabling it, stop the old daemon so two processes do
+not read the same hotkey:
+
+```sh
+systemctl --user disable --now voice-kb
+uv run scripts/install.py
+systemctl --user daemon-reload && systemctl --user enable --now spokenpad
+i3-msg reload
+```
 
 ## Recovering a dictation
 
 Every capture is also written to a wav in
-`$XDG_STATE_HOME/voice-kb/audio/`, as it is spoken and independently of
+`$XDG_STATE_HOME/spokenpad/audio/`, as it is spoken and independently of
 decoding, and the capture's log line names the file. So a decode that failed,
 was cancelled, or stopped short is not a lost dictation:
 
 ```console
-$ voice-kb transcribe ~/.local/state/voice-kb/audio/capture-2026-09-08-141530.wav
+$ spokenpad transcribe ~/.local/state/spokenpad/audio/capture-2026-09-08-141530.wav
 ```
 
 It decodes through the same VAD and model the daemon uses and prints the

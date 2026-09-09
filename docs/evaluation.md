@@ -117,9 +117,9 @@ for two independent reasons:
    `handy-1787827757` (37 s) has `reference: null` because Handy produced an
    empty transcript and the spoken content was never recovered. Scoring it
    would give Handy roughly 100% WER on 37 seconds of speech. It is instead a
-   pass/fail check that Handy would fail outright and voice-kb passes in ~3 s.
+   pass/fail check that Handy would fail outright and spokenpad passes in ~3 s.
 
-So the current aggregate — voice-kb 18.4% vs Handy 15.8% — is not evidence that
+So the current aggregate — spokenpad 18.4% vs Handy 15.8% — is not evidence that
 Handy transcribes better. It is evidence that the reference set is small,
 unverified, partly circular, and excludes the case that motivated this project.
 Fixing that means listening to the audio and marking references `verified: true`.

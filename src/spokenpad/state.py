@@ -1,7 +1,7 @@
 """Session state machine.
 
 Pure. Events go in, ``(next_state, command)`` comes out; nothing here touches a
-device, the model, or X. The imperative shell in :mod:`voice_kb.app` interprets
+device, the model, or X. The imperative shell in :mod:`spokenpad.app` interprets
 the commands.
 
 The state is a closed union, so "recording without a capture start time" or
