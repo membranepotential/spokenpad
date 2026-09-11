@@ -5,8 +5,8 @@ Hold M4 (or latch with shift), speak, and text appears in a floating nvim
 without taking focus. Fully local, CPU-only; the GTX 1650 stays free.
 
 ## Now
-- Review pass 2026-09-11 complete: two fix rounds applied, docs true against
-  the code, all checks green — next: user reviews the diff, commits, restarts.
+- Review pass 2026-09-11 committed (c039aaa) and the service restarted on it
+  at 12:24; awaiting the user's live check.
 
 ## Done
 - Review pass 2026-09-11 fixed nine live bugs: committed text lost on cancel or
@@ -21,7 +21,7 @@ without taking focus. Fully local, CPU-only; the GTX 1650 stays free.
 - Rust rewrite deployed: daemon and recovery run from target/release/spokenpad;
   CPU models ready, callbacks and read-only evdev verified. Python daemon/UI/
   input/recorder removed, offline eval helpers retained. Signed local commits
-  dd3495d and a855dbb; not pushed.
+  dd3495d, a855dbb, c039aaa; not pushed.
 - Progressive commit + audio safety net: every capture has a recovery WAV, the
   3600s memory ceiling is visible, missing tails recovered from intact WAVs.
 - Rust/Python parity 2026-09-09: all 5 eval WAVs matched; a 102.5s passage
@@ -34,10 +34,8 @@ without taking focus. Fully local, CPU-only; the GTX 1650 stays free.
   against Handy 0.9.6's 48.7% on the same five verified clips.
 
 ## Next
-- User live check of the new build. The service still runs the previous release
-  binary — started 2026-09-09 13:22, binary rebuilt 2026-09-11 10:56 — so
-  `systemctl --user restart spokenpad` comes first. Then: first preview, long
-  pauses, scroll-follow, a too-short tap, Escape mid-recording, a latched pass.
+- User live check on the restarted service: first preview, long pauses,
+  scroll-follow, a too-short tap, Escape mid-recording, a latched pass.
 
 ## Known issues / open questions
 - First words lost on some long dictations: **historical**, seen on the Python
