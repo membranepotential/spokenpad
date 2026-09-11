@@ -4,8 +4,9 @@ use anyhow::{Context, Result, anyhow, ensure};
 use rmpv::Value;
 use spokenpad::{
     config::Config,
+    core::state::IndicatorPhase,
     shell::{
-        nvim::{IndicatorPhase, IndicatorState, NvimSession},
+        nvim::{IndicatorState, NvimSession},
         x11,
     },
 };

@@ -4,7 +4,7 @@
 //! writer owns each WAV, checkpoints its header after every buffer, and may be
 //! abandoned after a bounded wait without affecting live capture or ASR.
 
-use crate::config::Recording;
+use crate::{config::Recording, core::session::RecordingStatus};
 use anyhow::{Context, Result, bail, ensure};
 use chrono::Local;
 use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
@@ -67,13 +67,6 @@ impl WavSink for HoundSink {
     fn finalize(self: Box<Self>) -> Result<()> {
         self.wav.finalize().map_err(Into::into)
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RecordingStatus {
-    Recorded(PathBuf),
-    Truncated(PathBuf),
-    NotRecorded,
 }
 
 #[derive(Debug)]

@@ -1,17 +1,25 @@
 //! Main-thread policy, without devices or threads. The bridge owns paragraph order.
-use crate::{
-    core::{
-        decode::{Commit, Preview, Utterance, UtteranceId},
-        frames::Frames,
-        state::{self, Command, DiscardReason, Event, State},
-    },
-    shell::recorder::RecordingStatus,
+use crate::core::{
+    decode::{Commit, Preview, Utterance, UtteranceId},
+    frames::Frames,
+    state::{self, Command, DiscardReason, Event, State},
 };
 use std::{
     borrow::Cow,
+    path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
 };
+
+/// What became of a capture's recovery WAV. Lives beside [`Notice`], the only
+/// place the core cares about it: the shell's `CaptureRecorder` is the sole
+/// producer, reporting the outcome of I/O the core never performs itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecordingStatus {
+    Recorded(PathBuf),
+    Truncated(PathBuf),
+    NotRecorded,
+}
 
 /// Something the user has to know about the capture they just made. Exactly
 /// one is shown at a time, in place of the preview, until the next key press.

@@ -3,17 +3,20 @@
 //! The session owns exactly one thing: a connection to an editor holding a
 //! pinned dictation buffer. That pairing is the invariant — a client without a
 //! buffer, or a buffer without the file it was opened on, is not a state this
-//! module can be in, which is why they live together in [`Connected`].
+//! module can be in, which is why they live together in `Connected`.
 //!
 //! Everything the editor does on its side is in `lua/spokenpad.lua`; the
-//! transport is in [`rpc`]. What is left here is the impure middle: spawning
+//! transport is in `rpc`. What is left here is the impure middle: spawning
 //! or adopting an editor, proving it belongs to spokenpad, and appending
 //! committed text so that a failure to land it is visible rather than silent.
 mod rpc;
 
 use crate::{
     config::{self, Nvim},
-    core::geometry::{Rect, pick_output, placement},
+    core::{
+        geometry::{Rect, pick_output, placement},
+        state::IndicatorPhase,
+    },
     shell::x11,
 };
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -82,23 +85,6 @@ const OPEN_BUFFER: &str = r#"
 vim.cmd.edit(vim.fn.fnameescape(...))
 return vim.api.nvim_get_current_buf()
 "#;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IndicatorPhase {
-    Idle,
-    Recording,
-    Transcribing,
-}
-
-impl IndicatorPhase {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Idle => "idle",
-            Self::Recording => "recording",
-            Self::Transcribing => "transcribing",
-        }
-    }
-}
 
 /// The whole indicator, as the daemon knows it. Pushing all of it at once
 /// keeps the editor's copy a function of daemon state rather than of the

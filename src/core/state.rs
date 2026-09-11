@@ -1,5 +1,4 @@
 //! Pure session transitions. Repeat filtering belongs to the input adapter.
-use crate::shell::nvim::IndicatorPhase;
 use std::time::{Duration, Instant};
 
 /// Below this a press is a stray tap, not dictation. Deliberately not
@@ -47,6 +46,26 @@ pub enum Command {
     Start,
     Decode,
     Discard(DiscardReason),
+}
+
+/// What phase the editor's indicator should show. Owned by the core because
+/// it is a pure function of [`State`]; the shell's `IndicatorState` only
+/// carries it to the editor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndicatorPhase {
+    Idle,
+    Recording,
+    Transcribing,
+}
+
+impl IndicatorPhase {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Recording => "recording",
+            Self::Transcribing => "transcribing",
+        }
+    }
 }
 
 impl State {

@@ -7,8 +7,8 @@
 
 use crate::{
     config::{Audio, Recording},
-    core::frames::Frames,
-    shell::recorder::{CaptureRecorder, RecordingStatus},
+    core::{frames::Frames, session::RecordingStatus},
+    shell::recorder::CaptureRecorder,
 };
 use anyhow::{Context, Result, anyhow, bail};
 use portaudio as pa;

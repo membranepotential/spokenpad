@@ -11,7 +11,7 @@ use crate::{
             Commit, Pipeline, Preview, Recognizer, Segmenter, Utterance, UtteranceId, Worker,
         },
         frames::Frames,
-        session::{Notice, Session},
+        session::{Notice, RecordingStatus, Session},
         state::{Command, DiscardReason, Event, State},
         text::Processor,
     },
@@ -20,7 +20,6 @@ use crate::{
         hotkey::HotkeyWatcher,
         inference::{Transcriber, load_segmenter},
         nvim::{IndicatorState, NvimSession},
-        recorder::RecordingStatus,
     },
 };
 use anyhow::{Context, Result, ensure};
