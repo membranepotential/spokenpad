@@ -106,6 +106,14 @@ empty string when speech is a small fraction of its window — measured, same
 each side gives `'Did the home?'`, 5 s each side gives `''`. In use that was
 pressing the key, saying two words, and getting nothing back.
 
+That measurement has a mirror image. A window with *no* speech in it does not
+come back empty — it comes back invented: a 0.5 s near-silent press (peak
+0.013) was decoded whole and Parakeet returned "Thank you.", which landed in
+the file. So since 2026-09-11, with a VAD model loaded, a capture it finds no
+speech in is not decoded at all. Only the detector may make that call — with
+no VAD model the whole capture is still decoded, because nothing else knows
+better.
+
 Throughput is unchanged — 12.3-12.6x real-time whole-buffer against 11.0-11.7x
 segmented, slightly *worse*, because per-chunk overhead costs about what the
 skipped silence saves. What changes is *when* text appears.

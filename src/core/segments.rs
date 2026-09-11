@@ -7,13 +7,14 @@ use crate::{config::Vad, core::decode::Segment};
 use std::ops::Range;
 
 /// Identical merge/padding/settlement policy to the reference implementation.
+///
+/// No spans means no segments: with a VAD model loaded, a capture it hears no
+/// speech in is not decoded at all. Returning the whole buffer instead is what
+/// let Parakeet hallucinate "Thank you." into the file from a 0.5s empty press
+/// (docs/decisions.md, 2026-09-11).
 pub fn merge_spans(spans: &[Range<usize>], len: usize, config: &Vad, rate: u32) -> Vec<Segment> {
     if spans.is_empty() {
-        return vec![Segment {
-            window: 0..len,
-            speech_end: len,
-            settled: false,
-        }];
+        return vec![];
     }
     struct Chunk {
         start: usize,
@@ -125,6 +126,12 @@ mod tests {
             merge_spans(std::slice::from_ref(&(500..550)), 1000, &c, 100)[0].window,
             450..600
         );
+    }
+
+    #[test]
+    fn no_speech_yields_no_segments_so_silence_is_never_decoded() {
+        assert!(merge_spans(&[], 16_000, &Vad::default(), 16_000).is_empty());
+        assert!(merge_spans(&[], 0, &Vad::default(), 16_000).is_empty());
     }
 
     #[test]

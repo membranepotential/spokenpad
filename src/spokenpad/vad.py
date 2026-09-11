@@ -81,10 +81,22 @@ one is always the last. Hence: every chunk before the last is settled; the
 last is settled only if it reached the merge target *and* the buffer runs
 :data:`SETTLE_SILENCE_SECONDS` past its end, which a flushed span never does.
 
+## Silence is not decoded
+
+Since 2026-09-11 a capture the detector finds no speech in yields **no
+chunks**, and the caller decodes nothing at all. The earlier rule -- fall back
+to the whole buffer, because "the VAD heard nothing" is not "there is nothing
+to hear" -- assumed a silent decode costs only time. It does not: a 0.5s
+near-silent press (peak 0.013) came back as "Thank you.", which landed in the
+file. Asked to transcribe silence, the model invents speech. The cost of the
+new rule is that speech the detector misses entirely is lost, and
+:attr:`VadConfig.threshold` is the knob for that.
+
 Failure is a value, never an exception: if the VAD model is missing or will
 not load, :func:`load_segmenter` returns ``None`` and the caller decodes the
-whole buffer exactly as before. A missing 2 MB optional model must not stop a
-daemon whose 630 MB required model is loaded and working.
+whole buffer exactly as before -- nothing that knows less than the detector
+silences a capture. A missing 2 MB optional model must not stop a daemon whose
+630 MB required model is loaded and working.
 """
 
 from __future__ import annotations
@@ -219,23 +231,23 @@ class SpeechSegmenter:
         it, and 0.5 s of padding was worth another 2-4 on top because Silero's
         boundaries clip word onsets and endings.
 
-        Returns a single chunk covering the whole buffer if the detector finds
-        no speech at all. That is deliberate: "the VAD heard nothing" is not
-        the same claim as "there is nothing to hear", and the cost of being
-        wrong is asymmetric -- decoding a silent buffer wastes a few hundred
-        milliseconds and logs an empty result, while discarding a real
-        utterance loses something the user cannot get back by repeating
-        themselves, because they have already stopped speaking.
+        Returns **no chunks at all** if the detector finds no speech: silence
+        is not decoded. Handing back the whole buffer instead was the original
+        rule, and it cost more than it saved -- a 0.5s near-silent press (peak
+        0.013) was decoded whole and Parakeet hallucinated "Thank you." into
+        the file. A model asked to transcribe silence invents speech, so
+        "decode it anyway, it will come back empty" is not what happens. The
+        trade-off is deliberate and the knob for it is
+        :attr:`VadConfig.threshold`: speech the detector misses entirely is
+        lost, where before it had a second chance at the whole buffer.
         """
         spans = self._speech_spans(samples)
         if not spans:
             log.debug(
-                "VAD found no speech in %.1fs; decoding the whole buffer",
+                "VAD found no speech in %.1fs; nothing to decode",
                 samples.size / self._sample_rate,
             )
-            return [
-                Segment(samples=samples, start_seconds=0.0, end_frame=samples.size, settled=False)
-            ]
+            return []
 
         pad = int(self._pad_seconds * self._sample_rate)
         edge = int(self._edge_pad_seconds * self._sample_rate)

@@ -207,7 +207,7 @@ own re-warning latches, and nothing re-raises a warning on a timer — a message
 that reappears every second is noise, and one that never appears at all is how
 the memory-cap incident went unnoticed.
 
-Four behaviours were settled with it:
+Five behaviours were settled with it:
 
 - **Cancel is ignored once the key is released.** `(Transcribing, Cancel)` is a
   no-op. Escape is read from every keyboard regardless of focus, and the audio
@@ -223,9 +223,24 @@ Four behaviours were settled with it:
   cancelling: `Event::HotkeyLost` fires when the keyboard holding the key
   disappears, and when the last hotkey-capable keyboard disappears during a
   latched recording (which no remaining key could end otherwise).
+- **Silence is not decoded.** With a VAD model loaded, a capture — or release
+  remainder, or preview snapshot — it finds no speech in produces no segments
+  and no recognizer call at all. The old rule handed the whole buffer over
+  instead, on the reasoning that "the VAD heard nothing" is not "there is
+  nothing to hear" and a silent decode only costs time. It costs more than
+  that: observed live, a 0.5 s near-silent press (peak 0.013) was decoded
+  whole and Parakeet returned "Thank you.", which landed in the file. A model
+  asked to transcribe silence invents speech. The whole-buffer retry stays for
+  the different failure it was written for — every chunk of a segmented
+  capture decoding to nothing — and now fires only when there was more than
+  one chunk. Trade-off: speech the VAD misses entirely is lost, where it used
+  to get a second chance at the whole buffer; `vad.threshold` is the knob.
+  Without a VAD model nothing changes, because nothing else knows better.
 
 Rejected: a configurable minimum hold; deleting the WAVs of too-short taps; a
-periodic "still recording" reminder.
+periodic "still recording" reminder; keeping the whole-buffer fallback behind a
+loudness gate, which would be a second, worse detector beside the one already
+loaded.
 
 ## Cloud ASR (Gladia) captured as issue #1, rejected as the default
 

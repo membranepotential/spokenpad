@@ -49,7 +49,8 @@ audio at the next split.
 On each preview tick the inference worker receives audio from a lagging hint,
 then slices from its authoritative committed offset.
 
-1. Split the remainder into chunks.
+1. Split the remainder into chunks. No speech in it means no chunks, and the
+   tick ends there with an empty preview.
 2. Decode and commit every settled chunk in order.
 3. Advance the offset to each committed chunk's `end_frame`.
 4. Decode the first unsettled chunk as preview only.
@@ -87,8 +88,13 @@ a newer one's offset.
 - Preview re-decode is confined to the bounded open tail.
 - Preview text never enters the Neovim buffer or transcript file.
 - Empty chunk text still advances a settled offset.
-- If all segmented release decodes are empty, one whole-buffer retry is
-  allowed as an explicit recovery exception.
+- A capture with no VAD speech in it yields no chunks and is not decoded: no
+  recognizer call, no commit, an empty preview, and the committed offset stays
+  where it was.
+- If all segmented release decodes are empty and there was more than one
+  chunk, one whole-buffer retry is allowed as an explicit recovery exception.
+  It does not apply to a capture that had no chunks: that audio was never
+  claimed to be speech.
 - A missing/corrupt VAD model falls back to one whole-buffer chunk.
 
 ## Verification

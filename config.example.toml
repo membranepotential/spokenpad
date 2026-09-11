@@ -144,6 +144,12 @@ vocabulary = []
 # end. Accuracy costs a little on the five reference clips: 17.6% aggregate WER
 # through `uv run scripts/eval.py --vad` against 13.9% whole-buffer (Handy 0.9.6
 # scores 48.7% on the same five). See docs/rust.md.
+#
+# It also decides what NOT to decode: a capture this finds no speech in is not
+# handed to the recogniser at all. Silence does not decode to an empty string,
+# it decodes to invented words -- an empty half-second press came back "Thank
+# you." and the words landed in the file. With this off, every capture is
+# decoded whole, silence included.
 enabled = true
 
 # Silero VAD weights, ~2 MB, fetched by scripts/fetch_model.py. Relative paths
@@ -151,7 +157,10 @@ enabled = true
 # a warning and decodes whole captures rather than refusing to start.
 model = "models/silero_vad.onnx"
 
-# Speech probability above which a frame counts as speech.
+# Speech probability above which a frame counts as speech. This is also the
+# knob for the silence rule above: what the detector misses entirely is never
+# decoded, so lower it if a quiet voice or a distant microphone is being
+# dropped, and raise it if room noise is being transcribed.
 threshold = 0.5
 
 # Silence needed to end a segment -- the sentence-boundary knob. Too low and a

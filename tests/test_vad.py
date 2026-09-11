@@ -1,8 +1,9 @@
 """Voice activity detection, against the real Silero model where it exists.
 
 The interesting assertions here are not "the VAD finds speech" -- they are the
-two ways it is allowed to be wrong. It must never hand back nothing, and it
-must never carry state from one capture into the next.
+two ways it is allowed to be wrong. It must hand back nothing when it heard
+nothing, because silence handed to Parakeet comes back as invented words, and
+it must never carry state from one capture into the next.
 
 The reproduction of the bug this module exists for lives in
 ``test_short_utterance_in_silence`` and needs the *recogniser* too, so it is
@@ -61,37 +62,35 @@ def _padded(core: MonoAudio, seconds: float) -> MonoAudio:
 # --------------------------------------------------------------- the two rules
 
 
-def test_silence_yields_the_whole_buffer_rather_than_nothing(
-    segmenter: SpeechSegmenter,
-) -> None:
-    """"The VAD heard nothing" is not "there is nothing to hear".
+def test_silence_yields_no_segments(segmenter: SpeechSegmenter) -> None:
+    """Silence is not decoded (2026-09-11), so it comes back as no chunks.
 
-    Returning no segments would silently discard a capture. Decoding a buffer
-    that really is silent costs a few hundred milliseconds and logs an empty
-    result; dropping a real utterance loses words the user cannot recover,
-    because they have already stopped speaking. So the fallback is always the
-    whole buffer.
+    This test asserted the opposite until a 0.5s near-silent press (peak
+    0.013) was handed to Parakeet whole and came back as "Thank you.", which
+    landed in the file. A model asked to transcribe silence invents speech, so
+    "decode it anyway, it will come back empty" was never what happened. The
+    price is that speech the detector misses entirely is now lost, and
+    ``vad.threshold`` is the knob for that.
     """
     silence = np.zeros(3 * RATE, dtype=np.float32)
-    segments = segmenter.split(silence)
 
-    assert len(segments) == 1
-    assert segments[0].start_seconds == 0.0
-    assert segments[0].samples.size == silence.size
+    assert segmenter.split(silence) == []
 
 
-def test_a_buffer_shorter_than_one_vad_frame_still_comes_back(
+def test_a_buffer_shorter_than_one_vad_frame_is_handled_rather_than_crashing(
     segmenter: SpeechSegmenter,
 ) -> None:
-    """A capture too short to feed the detector even once must not vanish.
+    """A capture too short to feed the detector even once is still valid input.
 
-    The frame loop cannot run at all here, so this is the path where an
-    off-by-one would return an empty list rather than the audio.
+    The frame loop cannot run at all here -- 100 samples is under one 512
+    sample Silero window -- so this is the path where an off-by-one would
+    raise or hand back a bogus span instead of returning cleanly. Nothing in
+    6ms can be confirmed as speech, so under the silence rule there is nothing
+    to decode.
     """
     tiny = np.zeros(100, dtype=np.float32)
-    segments = segmenter.split(tiny)
 
-    assert [s.samples.size for s in segments] == [100]
+    assert segmenter.split(tiny) == []
 
 
 @pytest.mark.skipif(not SAMPLE.exists(), reason="eval sample not present")
@@ -154,10 +153,10 @@ def test_short_utterance_in_silence_decodes_to_nothing_without_vad_and_to_text_w
     buried = _padded(_speech_core(_load(SAMPLE)), seconds=5.0)
 
     whole_buffer = transcriber.transcribe(buried, RATE).text
-    segmented = " ".join(
-        transcriber.transcribe(s.samples, RATE).text for s in segmenter.split(buried)
-    )
+    chunks = segmenter.split(buried)
+    segmented = " ".join(transcriber.transcribe(s.samples, RATE).text for s in chunks)
 
+    assert chunks, "real speech buried in silence is still found and still decoded"
     assert whole_buffer.strip() == "", "the bug is gone; re-measure spokenpad.vad"
     assert segmented.strip() != "", "segmenting must recover the text"
 

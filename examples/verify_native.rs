@@ -43,7 +43,7 @@ fn main() -> Result<()> {
                 texts.push(text);
             }
         }
-        if texts.is_empty() && segments.len() != 1 {
+        if texts.is_empty() && segments.len() > 1 {
             texts.push(recognizer.transcribe(&samples)?);
         }
         cases.push(json!({"file":Path::new(&arg).file_name().context("filename")?.to_string_lossy(),"text":texts.join(" "),"elapsed":t.elapsed().as_secs_f64(),"segments":segments.iter().map(|s|json!([s.window.start,s.window.end,s.speech_end,s.settled])).collect::<Vec<_>>() }));

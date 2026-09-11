@@ -189,11 +189,16 @@ impl Recognizer for Counting {
     }
 }
 
-/// Fixed-length chunks: everything but the last one has settled.
+/// Fixed-length chunks: everything but the last one has settled. Audio with
+/// no loud sample in it is silence, and a real VAD reports no speech there —
+/// which, since 2026-09-11, means no segments and therefore no decode.
 struct Fixed(usize);
 
 impl Segmenter for Fixed {
     fn split(&mut self, samples: &[f32]) -> Result<Vec<Segment>> {
+        if loud_samples(samples) == 0 {
+            return Ok(vec![]);
+        }
         Ok((0..samples.len())
             .step_by(self.0)
             .map(|start| {
@@ -596,6 +601,44 @@ fn shutdown_delivers_text_the_engine_produced_on_the_way_out() {
         "word word\n",
         "text decoded while the daemon was stopping never reaches the file"
     );
+}
+
+#[test]
+fn a_capture_with_no_speech_in_it_is_never_decoded() {
+    if !nvim_available() {
+        return;
+    }
+    // A press, a second of saying nothing, a release. Decoding that buffer is
+    // how Parakeet hallucinated "Thank you." into the file; with a segmenter
+    // loaded, the recognizer must not see it at all.
+    let h = Harness::start(Settings {
+        chunk: Some(RATE as usize / 2),
+        words: false,
+        ..Settings::default()
+    });
+    thread::sleep(Duration::from_millis(300));
+    h.press(false);
+    thread::sleep(Duration::from_millis(1000));
+    h.release();
+    wait_until("the daemon returns to idle", || {
+        h.indicator("phase").trim() == "idle"
+    });
+    // The release decode and any last preview have to be given the chance to
+    // append something wrong before "nothing was appended" means anything.
+    thread::sleep(Duration::from_millis(300));
+
+    assert_eq!(h.text(), "", "silence must not append anything");
+    assert!(
+        h.calls().is_empty(),
+        "a silent capture must not reach the recognizer: {:?}",
+        h.calls()
+    );
+    assert!(
+        h.winbar().contains("nearly silent"),
+        "the user is told why nothing appeared: {:?}",
+        h.winbar()
+    );
+    h.finish();
 }
 
 #[test]

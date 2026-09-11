@@ -117,6 +117,17 @@ impl<R: Recognizer, S: Segmenter> Pipeline<R, S> {
             return Ok(String::new());
         }
         let segments = self.split(samples)?;
+        // Silence is not decoded. `split` only returns nothing when a VAD model
+        // found no speech at all; the no-segmenter path always yields one
+        // whole-buffer segment, so nothing that knows less than the VAD is
+        // silenced here. The rate is the validated project-wide constant.
+        if segments.is_empty() {
+            log::debug!(
+                "VAD found no speech in {:.1}s; nothing to decode",
+                Frames(samples.len()).seconds(crate::config::REQUIRED_SAMPLE_RATE)
+            );
+            return Ok(String::new());
+        }
         let mut texts = vec![];
         for s in &segments {
             if abandoned() {
@@ -133,7 +144,7 @@ impl<R: Recognizer, S: Segmenter> Pipeline<R, S> {
             }
         }
         // Explicit failure recovery exception: don't let segmentation erase speech.
-        if texts.is_empty() && segments.len() != 1 && !abandoned() {
+        if texts.is_empty() && segments.len() > 1 && !abandoned() {
             log::warn!(
                 "all {} chunks empty; retrying the complete remainder",
                 segments.len()
@@ -395,6 +406,43 @@ mod tests {
         assert_eq!(text, "recovered");
         assert_eq!(commits.len(), 1);
         assert_eq!(w.pipeline.recognizer.calls.len(), 3);
+    }
+    #[test]
+    fn a_capture_the_vad_hears_no_speech_in_is_not_decoded() {
+        struct Silent;
+        impl Segmenter for Silent {
+            fn split(&mut self, _: &[f32]) -> Result<Vec<Segment>> {
+                Ok(vec![])
+            }
+        }
+        let mut w = Worker::new(Pipeline {
+            recognizer: Fake {
+                calls: vec![],
+                replies: vec![],
+                stop: None,
+            },
+            segmenter: Some(Silent),
+        });
+        let u = Utterance::new(1);
+        assert_eq!(
+            w.tick(&[0.; 10], Frames::ZERO, &u, |_| panic!("committed silence"))
+                .unwrap(),
+            Some(Preview {
+                text: String::new(),
+                through: Frames::ZERO
+            }),
+            "an empty preview, and the committed offset stays where it was"
+        );
+        u.release();
+        let (text, tail) = w
+            .finish(&[0.; 10], &u, |_| panic!("committed silence"))
+            .unwrap();
+        assert_eq!((text.as_str(), tail), ("", 10));
+        assert!(
+            w.pipeline.recognizer.calls.is_empty(),
+            "no chunk decode and no whole-buffer retry: {:?}",
+            w.pipeline.recognizer.calls
+        );
     }
     #[test]
     fn lifecycle_only_moves_forwards() {

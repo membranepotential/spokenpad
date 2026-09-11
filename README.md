@@ -57,6 +57,10 @@ sentence, and the full paths in it.
   quietly, so the pre-roll is full at the next press.
 - **A capture that came back much shorter than the hold, or nearly silent,**
   says so rather than only appearing in the log.
+- **A capture with no speech in it is not transcribed at all.** A recogniser
+  asked to transcribe silence invents words — an empty half-second press once
+  produced "Thank you." — so when the VAD hears nothing, nothing is appended.
+  Without a VAD model the whole capture is still decoded.
 - **Previews pause on a long uncommitted tail** (`preview.max_seconds`, 30 s)
   and resume by themselves once it settles. Without a VAD model no preview is
   issued at all — decoding the whole growing capture is the one thing this

@@ -77,10 +77,6 @@ def render_hotwords(vocabulary: tuple[str, ...]) -> str:
     return "\n".join(vocabulary) + "\n"
 
 
-def write_hotwords_file(vocabulary: tuple[str, ...], path: Path) -> None:
-    path.write_text(render_hotwords(vocabulary), encoding="utf-8")
-
-
 def ensure_model_files(config: AsrConfig) -> None:
     """Raise :class:`ModelMissingError` if any required model file is absent."""
     model_files = (config.encoder, config.decoder, config.joiner, config.tokens)

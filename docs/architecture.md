@@ -130,8 +130,11 @@ recovery does not depend on decoding succeeding.
 - Release decodes only the range after the committed offset.
 - Preview may re-decode only the bounded open tail and cannot reach the file.
   With no segmenter loaded, no preview tick is issued at all.
-- If every segmented decode is empty, one whole-buffer retry is allowed as a
-  recovery exception.
+- A capture the VAD finds no speech in is not decoded at all: no chunks, no
+  recognizer call, no text. With no segmenter loaded the whole capture is
+  decoded as before.
+- If every segmented decode is empty and there was more than one chunk, one
+  whole-buffer retry is allowed as a recovery exception.
 - An `Utterance` moves forwards only: `Live → Released` or `Live → Cancelled`.
   Work queued for an older capture can neither advance nor reset a newer one.
 

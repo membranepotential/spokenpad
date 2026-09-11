@@ -65,6 +65,24 @@ def test_all_empty_segments_retry_the_whole_buffer_once() -> None:
     assert len(transcriber.calls) == 3
 
 
+def test_no_segments_means_no_decode_and_no_retry() -> None:
+    """Silence is not decoded, and the recovery retry does not rescue it.
+
+    The retry exists for chunks that decoded to nothing; a capture the VAD
+    found no speech in has no chunks, and asking the model for a transcript of
+    silence is how "Thank you." got into the file.
+    """
+    transcriber = FakeTranscriber(["never asked for"])
+    text = decode_capture(
+        _samples(),
+        transcriber=transcriber,
+        segmenter=FakeSegmenter([]),
+        sample_rate=16000,
+    )
+    assert text == ""
+    assert transcriber.calls == []
+
+
 def test_abandoned_decode_never_retries() -> None:
     transcriber = FakeTranscriber(["unused"])
     text = decode_capture(
