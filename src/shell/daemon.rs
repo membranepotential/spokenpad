@@ -101,7 +101,8 @@ fn indicator_of(session: &Session, level: f32) -> IndicatorState {
     IndicatorState {
         phase: session.state.indicator_phase(),
         level: f64::from(level),
-        preview: session.shown_preview().into_owned(),
+        preview: session.preview().to_owned(),
+        notice: session.notice().map(Notice::text),
         latched: session.state.latched(),
         previewing: session.previewing(),
     }
@@ -337,8 +338,11 @@ where
                             session.event(Event::Cancel);
                             session.notify(Notice::MicrophoneUnavailable);
                             log::error!("capture could not start: {e:#}");
-                            continue;
                         }
+                        // Either way: on the first press of a session there is
+                        // no editor yet, and a notice pushed at a window that
+                        // does not exist leaves the user with a dead key and
+                        // no explanation anywhere.
                         send(&editor_tx, EditorWork::Ensure)?;
                     }
                     Command::Decode => {
@@ -597,11 +601,11 @@ fn release<B: InputBackend>(
         samples.len()
     );
     log_recording(capture.recording_status());
-    // Past the in-memory ceiling a capture is *expected* to be far shorter
-    // than the hold, and the cap notice already says what to do about it.
-    if matches!(session.notice(), Some(Notice::MemoryCap(_))) {
-        log::info!("capture ended past the in-memory ceiling; keeping the memory-cap notice");
-    } else if held > INCOMPLETE_HOLD && captured < held.as_secs_f64() * 0.5 {
+    // Neither of these can displace the memory-cap notice, which outranks them
+    // (`Notice::priority`): past the in-memory ceiling a capture is *expected*
+    // to be far shorter than the hold, and the cap notice already says what to
+    // do about it. The measurements are still logged, because they are true.
+    if held > INCOMPLETE_HOLD && captured < held.as_secs_f64() * 0.5 {
         log::error!(
             "microphone delivered less than half the expected audio; capture is incomplete"
         );
@@ -657,8 +661,15 @@ fn apply_capture_event(event: CaptureEvent, session: &mut Session) {
             }
         }
         CaptureEvent::MemoryCapReached { recovery } => {
+            // The notice names the recovery WAV by file name, so that a narrow
+            // window still has room for it; the whole path goes here instead.
             let notice = Notice::MemoryCap(recovery.clone());
-            log::warn!("{}", notice.message());
+            match &recovery {
+                RecordingStatus::Recorded(path) | RecordingStatus::Truncated(path) => {
+                    log::warn!("{notice} ({})", path.display())
+                }
+                RecordingStatus::NotRecorded => log::warn!("{notice}"),
+            }
             session.cap(recovery);
         }
         CaptureEvent::Flags(flags) => log::warn!("PortAudio: {flags}"),

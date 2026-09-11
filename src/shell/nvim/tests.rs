@@ -1,4 +1,5 @@
 use super::*;
+use crate::core::session::{Notice, RecordingStatus};
 use std::os::unix::{fs::PermissionsExt, net::UnixListener};
 
 /// The editor tests need a real Neovim. A missing one is a broken environment,
@@ -96,14 +97,56 @@ fn assert_idle_indicator(session: &mut NvimSession) {
 return {
   Spokenpad.state.phase,
   Spokenpad.state.preview,
+  Spokenpad.state.notice,
   #vim.api.nvim_buf_get_extmarks(Spokenpad.buf, Spokenpad.ns, 0, -1, {}),
 }
 "#,
     );
-    let state = state.as_array().expect("three indicator fields");
+    let state = state.as_array().expect("four indicator fields");
     assert_eq!(state[0].as_str(), Some("idle"), "detaching left {state:?}");
     assert_eq!(state[1].as_str(), Some(""), "detaching left {state:?}");
-    assert_eq!(state[2].as_u64(), Some(0), "detaching left {state:?}");
+    assert_eq!(state[2].as_str(), Some(""), "detaching left {state:?}");
+    assert_eq!(state[3].as_u64(), Some(0), "detaching left {state:?}");
+}
+
+/// The window-local winbar of the window the dictation buffer is shown in.
+fn winbar(session: &mut NvimSession) -> String {
+    lua(
+        session,
+        "return vim.api.nvim_get_option_value('winbar', { win = 0 })",
+    )
+    .as_str()
+    .expect("winbar is a string")
+    .to_owned()
+}
+
+/// What the window actually draws, truncation and all. The `winbar` option is
+/// a statusline expression, so only nvim can say what survives the width of
+/// the window it is set on -- which is the whole question a notice raises.
+fn rendered_winbar(session: &mut NvimSession) -> String {
+    lua(
+        session,
+        r#"
+local win = vim.api.nvim_get_current_win()
+return vim.api.nvim_eval_statusline(
+  vim.api.nvim_get_option_value("winbar", { win = win }),
+  { winid = win, use_winbar = true, maxwidth = vim.api.nvim_win_get_width(win) }
+).str
+"#,
+    )
+    .as_str()
+    .expect("rendered winbar is a string")
+    .to_owned()
+}
+
+/// Resizes the editor, and confirms the window took the width: every fitting
+/// decision the winbar makes is measured against it.
+fn set_columns(session: &mut NvimSession, columns: u32) {
+    let width = lua(
+        session,
+        &format!("vim.o.columns = {columns}\nreturn vim.api.nvim_win_get_width(0)"),
+    );
+    assert_eq!(width.as_u64(), Some(u64::from(columns)), "resize refused");
 }
 
 fn recording(preview: &str) -> IndicatorState {
@@ -111,6 +154,7 @@ fn recording(preview: &str) -> IndicatorState {
         phase: IndicatorPhase::Recording,
         level: 0.5,
         preview: preview.to_owned(),
+        notice: None,
         latched: false,
         previewing: true,
     }
@@ -476,6 +520,149 @@ return { #marks, marks[1] and marks[1][4].virt_text[1][1] or vim.NIL }
     let after = after.as_array().expect("two fields");
     assert_eq!(after[0].as_u64(), Some(1));
     assert_eq!(after[1].as_str(), Some("half a sentence"));
+}
+
+/// A notice says what happened to the capture the user just made, so it has to
+/// be readable in the phase they are in when it is raised -- idle, for a tap
+/// too short to have recorded anything, or for one that outlives the decode --
+/// and it must never be mistaken for the preview, which is dictated text.
+#[test]
+fn a_notice_is_winbar_text_in_every_phase_and_never_the_preview() {
+    if !nvim_or_skip() {
+        return;
+    }
+    let held = Notice::HeldTooBriefly.text();
+    let gap = Notice::MicrophoneGap.text();
+    let directory = tempfile::tempdir().unwrap();
+    let mut session = NvimSession::new(headless(directory.path()));
+    session.ensure().unwrap();
+    let _guard = ProcessGroupGuard::for_session(&session);
+    session.append("committed", false).unwrap();
+
+    let mut idle = IndicatorState {
+        notice: Some(held.clone()),
+        ..IndicatorState::default()
+    };
+    // Wide enough for the whole notice beside the dated file name; how a
+    // narrow window fits one is
+    // `a_long_notice_keeps_the_phase_label_and_its_headline_in_a_narrow_window`.
+    set_columns(&mut session, 120);
+    session.set_indicator(&idle).unwrap();
+    let bar = rendered_winbar(&mut session);
+    assert!(
+        bar.contains(held.headline) && bar.contains(held.detail.as_ref()),
+        "an idle notice is invisible, which is the whole defect: {bar}"
+    );
+
+    idle.notice = None;
+    session.set_indicator(&idle).unwrap();
+    let bar = rendered_winbar(&mut session);
+    assert!(bar.contains("spokenpad"), "the idle winbar is gone: {bar}");
+    assert!(
+        !bar.contains(held.headline),
+        "a cleared notice stayed up: {bar}"
+    );
+
+    let mut live = recording("provisional tail");
+    live.notice = Some(gap.clone());
+    session.set_indicator(&live).unwrap();
+    let bar = winbar(&mut session);
+    assert!(bar.contains("REC") && bar.contains(gap.headline), "{bar}");
+    assert!(
+        !bar.contains("provisional tail"),
+        "the live tail belongs below the transcript, not in the winbar: {bar}"
+    );
+    let marks = lua(
+        &mut session,
+        "return vim.json.encode(vim.api.nvim_buf_get_extmarks(Spokenpad.buf, Spokenpad.ns, 0, -1, { details = true }))",
+    );
+    let marks = marks.as_str().expect("encoded extmarks").to_owned();
+    assert!(
+        marks.contains("provisional tail"),
+        "the preview must stay extmark virtual text: {marks}"
+    );
+    assert!(
+        !marks.contains(gap.headline),
+        "the notice reached the preview: {marks}"
+    );
+    let lines = lua(
+        &mut session,
+        "return vim.json.encode(vim.api.nvim_buf_get_lines(Spokenpad.buf, 0, -1, false))",
+    );
+    let lines = lines.as_str().expect("encoded lines").to_owned();
+    assert_eq!(
+        lines, r#"["committed"]"#,
+        "provisional text reached the buffer"
+    );
+    let file = fs::read_to_string(session.path().unwrap()).unwrap();
+    assert_eq!(file, "committed\n", "provisional text reached the file");
+}
+
+/// A notice is a sentence and a dictation window is small, so at 40 columns
+/// the bar cannot hold the phase, the meter and the whole notice at once. What
+/// it must never do is drop the phase and the beginning of the reason, which
+/// is exactly what letting nvim truncate from the left did: the memory-cap
+/// notice rendered as `<aining audio is in /tmp/capture-example.wav — recover`.
+#[test]
+fn a_long_notice_keeps_the_phase_label_and_its_headline_in_a_narrow_window() {
+    if !nvim_or_skip() {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let mut session = NvimSession::new(headless(directory.path()));
+    session.ensure().unwrap();
+    let _guard = ProcessGroupGuard::for_session(&session);
+    let notice = Notice::MemoryCap(RecordingStatus::Recorded(
+        "/tmp/spokenpad/capture-example.wav".into(),
+    ));
+    let notice = notice.text();
+    // The state the memory cap actually leaves behind: still recording, with
+    // previews stopped for good.
+    let mut capped = recording("");
+    capped.previewing = false;
+    capped.notice = Some(notice.clone());
+
+    let idle = IndicatorState {
+        notice: Some(notice.clone()),
+        ..IndicatorState::default()
+    };
+
+    set_columns(&mut session, 40);
+    for state in [&capped, &idle] {
+        session.set_indicator(state).unwrap();
+        let bar = rendered_winbar(&mut session);
+        let phase = if state.phase == IndicatorPhase::Recording {
+            "REC"
+        } else {
+            "spokenpad"
+        };
+        assert!(
+            bar.contains(phase) && bar.contains(notice.headline),
+            "the phase and the headline are the two things 40 columns must keep: {bar:?}"
+        );
+        assert!(
+            !bar.contains('<'),
+            "nvim truncated the winbar instead of the daemon fitting it: {bar:?}"
+        );
+        assert!(
+            !bar.contains("capture-example"),
+            "a detail that cannot fit whole is not shown at all: {bar:?}"
+        );
+    }
+
+    // Given the room, the detail joins the headline -- naming the recovery WAV
+    // by file name, because the winbar has a window's width, not a path's.
+    set_columns(&mut session, 200);
+    session.set_indicator(&capped).unwrap();
+    let bar = rendered_winbar(&mut session);
+    assert!(
+        bar.contains(notice.headline) && bar.contains(notice.detail.as_ref()),
+        "a wide window shows the whole notice: {bar:?}"
+    );
+    assert!(
+        bar.contains("capture-example.wav") && !bar.contains("/tmp"),
+        "the winbar names the file; the log names the directory: {bar:?}"
+    );
 }
 
 #[test]

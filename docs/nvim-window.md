@@ -141,12 +141,25 @@ chunk keeps the previous module's pinned buffer, indicator state, meter history
 and append de-duplication cache, so restarting the daemon neither blanks the
 indicator nor replays an append whose reply was lost.
 
-The whole indicator is pushed at once — phase, level, preview, latched,
-previewing — so the editor's copy is a function of daemon state rather than of
-the history of updates that reached it.
+The whole indicator is pushed at once — phase, level, preview, notice,
+notice_detail, latched, previewing — so the editor's copy is a function of
+daemon state rather than of the history of updates that reached it. `preview`
+and `notice` are separate fields and are drawn in separate places; an absent
+notice travels as the empty string, because nvim turns a msgpack nil inside a
+map into `vim.NIL`, which Lua cannot tell from a field the daemon meant to set.
 
-**The winbar** carries the indicator: a phase dot, and while recording a
-24-cell level meter on a perceptual curve (`level ^ 0.6`). It is set
+A notice travels as **two** fields, `notice` (the headline) and
+`notice_detail`, rather than as one sentence the editor would have to take
+apart: `Notice::headline` and `Notice::detail` in `core/session.rs` are where
+the wording lives, and the editor decides only whether the window has room for
+the second half.
+
+**The winbar** carries the indicator: a phase dot, and while recording a level
+meter on a perceptual curve (`level ^ 0.6`), 24 cells wide where there is room
+for them. It is built per window and fitted to its width: the phase label and,
+when there is one, the notice headline are drawn at any width, and what is left
+over goes first to the meter, then to "no live preview, still recording", then
+to the notice detail. It is set
 window-locally on every window showing the dictation buffer, so a global winbar
 from the user's own config is overridden for this buffer only and left alone
 everywhere else — and a window that stops showing the buffer has its winbar
@@ -190,9 +203,38 @@ whole capture. Without that message, a frozen preview during a long passage
 reads as lost audio rather than as a cost control — which is exactly how it was
 first reported.
 
-The same line carries every other **notice** about the capture just made — held
-too briefly, microphone gap, microphone unavailable, capture incomplete, nearly
-silent. One at a time, in place of the preview, until the next key press.
+Every other **notice** about the capture just made — held too briefly,
+microphone gap, microphone unavailable, capture incomplete, nearly silent,
+memory cap — is appended to the winbar in the same way, in its own
+`SpokenpadNotice` highlight (the theme's `WarningMsg` foreground, or
+`DiagnosticWarn` where that is unset). One at a time, until the next key press.
+
+Which one, when a capture collects two, is decided by `Notice::priority` and
+applied in exactly one place, `Session::notify`: memory cap > capture
+incomplete > microphone unavailable > microphone gap > nearly silent > held too
+briefly > preview paused, ties going to the newer report. A paused preview can
+therefore never take the winbar from a microphone that dropped audio, and the
+microphone events that follow the in-memory ceiling cannot take it from the
+sentence saying where the audio went.
+
+Each notice is a short **headline** and a **detail**. The headline is drawn at
+any window width; the detail is appended only when the rest of the bar leaves
+room for all of it, with a `%<` truncation marker between them as the backstop
+so that nvim, if it ever has to truncate, takes the detail and not the phase.
+Half a sentence is worse than none: at 40 columns the memory-cap notice used to
+render as `<aining audio is in /tmp/capture-example.wav — recover …`, having
+lost the phase, the warning sign and the reason. That is also why the
+memory-cap detail names the recovery WAV by file name — the directory goes to
+the log, which has a terminal's width.
+
+It is drawn in **every phase**, not only while recording: a tap too short to
+record and a notice that outlives the decode are both read while the window is
+idle, which is precisely when the phase-conditional preview showed nothing.
+The notice is in the winbar rather than in the preview for the second half of
+the same reason — the preview is the live tail, so a notice standing in its
+place is indistinguishable from dictated text. Its text is `%`-escaped before
+it reaches the winbar: a winbar is a statusline expression and the memory-cap
+notice carries a file path.
 
 **Which nvim runs it is a choice, and the trade is measured.** `nvim.init`
 selects between three, and the numbers below are key-down to a placed window

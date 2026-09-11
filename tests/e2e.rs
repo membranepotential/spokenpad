@@ -86,6 +86,9 @@ struct FakeMicrophone {
     mouth: Arc<Mutex<VecDeque<f32>>>,
     /// Stop flag of the most recently opened stream, so a test can kill it.
     live: Arc<Mutex<Option<Arc<AtomicBool>>>>,
+    /// Set once the device is gone for good: every `open` then fails, as a
+    /// device whose USB cable was pulled does.
+    unplugged: Arc<AtomicBool>,
 }
 
 struct FakeStream {
@@ -106,6 +109,12 @@ impl FakeMicrophone {
             stop.store(true, Ordering::Relaxed);
         }
     }
+    /// Simulate a device that is gone: the live stream stops and no further
+    /// one can be opened, so the next key press cannot start a capture.
+    fn unplug(&self) {
+        self.unplugged.store(true, Ordering::Relaxed);
+        self.die();
+    }
 }
 
 impl InputStream for FakeStream {
@@ -123,6 +132,9 @@ impl InputStream for FakeStream {
 impl InputBackend for FakeMicrophone {
     type Stream = FakeStream;
     fn open(&self, config: &Audio, core: Arc<CallbackCore>) -> Result<FakeStream> {
+        if self.unplugged.load(Ordering::Relaxed) {
+            anyhow::bail!("no such input device");
+        }
         let stop = Arc::new(AtomicBool::new(false));
         *lock(&self.live) = Some(Arc::clone(&stop));
         let frames = (config.sample_rate as usize / 50).max(1);
@@ -397,6 +409,13 @@ impl Harness {
         self.ask(&format!("luaeval('tostring(Spokenpad.state.{field})')"))
     }
 
+    /// What the dictation window actually renders above the transcript. The
+    /// indicator state the daemon pushed is only half the story: a field the
+    /// winbar never draws tells the user nothing.
+    fn winbar(&self) -> String {
+        self.ask("luaeval('vim.wo.winbar')")
+    }
+
     fn calls(&self) -> Vec<usize> {
         lock(&self.calls).clone()
     }
@@ -590,10 +609,17 @@ fn tap_shorter_than_the_minimum_hold_is_discarded_with_a_notice() {
     thread::sleep(Duration::from_millis(300));
     assert_eq!(h.text(), "", "a tap must not append anything");
     assert!(h.calls().is_empty(), "a tap must not reach the recognizer");
+    // The rendered winbar, not just the pushed state: an idle notice that
+    // reaches Lua and is never drawn is exactly the bug this guards.
     wait_until("the user is told why nothing appeared", || {
-        h.indicator("preview").contains("held too briefly")
+        h.winbar().contains("held too briefly")
     });
     assert_eq!(h.indicator("phase").trim(), "idle");
+    assert_eq!(
+        h.indicator("preview").trim(),
+        "",
+        "a notice is not a preview"
+    );
     h.finish();
 }
 
@@ -732,6 +758,27 @@ fn the_preview_is_virtual_text_and_never_file_content() {
     h.finish();
 }
 
+/// A press that cannot start the microphone has to say so where the user is
+/// looking -- and on the first press of a session there is no window yet, so
+/// the failure has to open one. Setting the notice and returning left a dead
+/// key and an empty screen: nothing recorded, nothing said, nowhere.
+#[test]
+fn a_press_that_cannot_open_the_microphone_opens_the_window_and_says_so() {
+    if !nvim_available() {
+        return;
+    }
+    let h = Harness::start(Settings::default());
+    h.microphone.unplug();
+    // Not `press`: no capture starts, so there is no recovery WAV to wait for.
+    h.press_only(false);
+    wait_until("the window opens and names the failure", || {
+        h.winbar().contains("microphone unavailable")
+    });
+    assert_eq!(h.text(), "", "a failed capture appends nothing");
+    h.release();
+    h.finish();
+}
+
 #[test]
 fn a_microphone_restart_marks_the_gap_and_keeps_the_audio() {
     if !nvim_available() {
@@ -742,7 +789,7 @@ fn a_microphone_restart_marks_the_gap_and_keeps_the_audio() {
     h.say(&tone(1.0));
     h.microphone.die();
     wait_until("the watchdog reports the gap", || {
-        h.indicator("preview").contains("gap")
+        h.winbar().contains("gap")
     });
     h.say(&tone(1.0));
     h.release();

@@ -15,6 +15,7 @@ use crate::{
     config::{self, Nvim},
     core::{
         geometry::{Rect, pick_output, placement},
+        session::NoticeText,
         state::IndicatorPhase,
     },
     shell::x11,
@@ -94,6 +95,12 @@ pub struct IndicatorState {
     pub phase: IndicatorPhase,
     pub level: f64,
     pub preview: String,
+    /// What happened to this capture, split into the headline the winbar always
+    /// draws and the detail it appends when the window is wide enough. Kept
+    /// apart from `preview`: the editor shows the notice in the winbar in
+    /// every phase, while the preview is virtual text that exists only while
+    /// there is a live tail to show.
+    pub notice: Option<NoticeText>,
     pub latched: bool,
     pub previewing: bool,
 }
@@ -106,6 +113,7 @@ impl Default for IndicatorState {
             phase: IndicatorPhase::Idle,
             level: 0.0,
             preview: String::new(),
+            notice: None,
             latched: false,
             previewing: true,
         }
@@ -786,6 +794,23 @@ fn indicator_fields(state: &IndicatorState) -> Vec<(Value, Value)> {
         (Value::from("phase"), Value::from(state.phase.as_str())),
         (Value::from("level"), Value::F64(clamp_level(state.level))),
         (Value::from("preview"), Value::from(state.preview.as_str())),
+        // Absence travels as the empty string rather than as nil: nvim turns a
+        // msgpack nil inside a map into `vim.NIL`, which Lua cannot tell from
+        // a field the daemon meant to set. The two halves travel as two fields
+        // so the editor never has to split a sentence it did not compose.
+        (
+            Value::from("notice"),
+            Value::from(state.notice.as_ref().map_or("", |notice| notice.headline)),
+        ),
+        (
+            Value::from("notice_detail"),
+            Value::from(
+                state
+                    .notice
+                    .as_ref()
+                    .map_or("", |notice| notice.detail.as_ref()),
+            ),
+        ),
         (Value::from("latched"), Value::from(state.latched)),
         (Value::from("previewing"), Value::from(state.previewing)),
     ]

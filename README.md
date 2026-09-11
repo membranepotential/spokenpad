@@ -27,8 +27,20 @@ disturbs whatever window you are working in. See
 The winbar of the dictation window is the whole interface: a phase dot, a level
 meter while recording, a lock while latched, and the live preview of the tail
 below the committed text. When something happened to a capture, a **notice**
-takes the preview's place there until the next key press — one at a time, per
-capture, never a repeating warning:
+is shown in the winbar — in whatever phase you are in, beside the phase label,
+until the next key press — one at a time, per capture, never a repeating
+warning. It never displaces the preview: dictated text and a warning about it
+are different things and are never in the same place.
+
+A notice has two parts: a **headline** (`⚠ microphone gap`), always drawn, and
+the sentence explaining it, appended only when the window is wide enough to
+hold all of it. A narrow window gives up the level meter and then the
+explanation — never the phase label or the headline, and never half a sentence
+ending mid-word. When two things happen to the same capture, the more serious
+one is shown and nothing lesser displaces it afterwards: memory limit reached >
+capture incomplete > microphone unavailable > microphone gap > nearly silent >
+held too briefly > preview paused. The daemon log always has the whole
+sentence, and the full paths in it.
 
 - **Escape cancels, but only while recording.** After the key is released the
   audio is captured and the final decode is already running, so the cancel key
@@ -50,7 +62,8 @@ capture, never a repeating warning:
   issued at all — decoding the whole growing capture is the one thing this
   project refuses — and the capture is decoded at release instead.
 - **Past the 60-minute in-memory ceiling** the capture is released for decoding
-  and the winbar names the recovery WAV, which keeps recording.
+  and the winbar names the recovery WAV, which keeps recording — by file name,
+  since it has a window's width; the log names the directory it is in.
 
 ## Status
 

@@ -18,7 +18,12 @@ the root because both sides read it. Nothing under `core/` may import `evdev`,
 - `core/state.rs` contains the pure state machine, including the 120 ms minimum
   hold and the rule that a cancel after release is a no-op; `core/session.rs`
   handles utterance identity, cancellation, preview scheduling, and the single
-  user-visible notice, which the next key press clears.
+  user-visible notice, which the next key press clears — `Notice::priority`
+  ranks them and `notify` replaces only upwards, so the worst thing that
+  happened to a capture is the thing the user reads. `preview()` and
+  `notice()` are separate: the editor draws the preview below the transcript
+  and the notice in the winbar, in every phase, as a headline plus a detail it
+  appends only when the window is wide enough.
 - `shell/daemon.rs` splits into `run` and `serve`. `run` is the shell: the
   per-user lock, signal handlers, PortAudio, evdev, and the models. `serve` is
   the event loop, generic over the audio backend, recognizer and segmenter and
@@ -167,7 +172,8 @@ evdev, and a
 counting recognizer — against a real `nvim --headless` over msgpack-RPC. It
 asserts the things only the whole loop can show: text landing in the file,
 progressive commits appending before release, a too-short tap discarded with a
-notice, a latched recording ending on the second press, a cancel keeping
+notice the idle winbar really renders, a latched recording ending on the second
+press, a cancel keeping
 committed text and the WAV, a second press during transcription starting a new
 paragraph, the preview staying virtual text, and a microphone restart marking
 the gap while keeping the audio. One further test loads the real CPU models and

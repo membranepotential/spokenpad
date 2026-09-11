@@ -102,8 +102,13 @@ event is delivered exactly once.
 
 The session owns the single user-visible notice — held too briefly, microphone
 gap, microphone unavailable, capture incomplete, nearly silent, preview paused,
-memory cap. It replaces the preview in the winbar and is cleared by the next key
-press, not by a timer and not by the daemon re-warning.
+memory cap. It is shown in the winbar in every phase, beside the phase label
+and never in place of the preview, and is cleared by the next key press, not by
+a timer and not by the daemon re-warning. When a capture collects two, the
+ranking in `Notice::priority` decides which one stands, and `Session::notify`
+is the only place that applies it; each notice carries a short headline the
+winbar always draws and a detail it appends when the window is wide enough
+([nvim-window.md](nvim-window.md)).
 
 The indicator travels on the editor thread's own channel as
 `EditorWork::Indicator(IndicatorState)`, coalesced so only the newest pending

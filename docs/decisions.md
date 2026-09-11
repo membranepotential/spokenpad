@@ -198,8 +198,9 @@ own thread, while the utterance is still being spoken.
 ## What a capture tells the user, and what a cancel means
 
 **2026-09-11.** Everything the user has to know about the capture they just
-made is one `Notice` owned by `Session`, shown in the winbar in place of the
-preview until the next key press: held too briefly, microphone gap, microphone
+made is one `Notice` owned by `Session`, shown in the winbar — in every phase,
+beside the phase label, never in place of the preview — until the next key
+press: held too briefly, microphone gap, microphone
 unavailable, capture incomplete, nearly silent, preview paused, memory cap. One
 at a time, set once by the event that caused it. The daemon no longer keeps its
 own re-warning latches, and nothing re-raises a warning on a timer — a message
@@ -252,6 +253,28 @@ The issue leaves open whether a hybrid (local by default, cloud opt-in per
 context) is worth it later — noting that reintroduces the privacy question
 rather than settling it, so it needs a deliberate decision rather than a
 default.
+
+## A notice is a headline plus a detail, and notices are ranked
+
+**2026-09-11.** Two defects with one root: a notice was a single sentence the
+editor drew whole, and the last code path to call `Session::notify` won.
+
+At 40 columns the winbar was truncated from the left, so the memory-cap notice
+read `<aining audio is in /tmp/capture-example.wav — recover …` — the phase
+label and the reason both gone, the part that survived the least useful. A
+notice is now a short headline (`memory limit reached`) and a detail sentence,
+sent as two fields; the editor always draws the phase and the headline and
+appends the detail only when the window has room for all of it, giving up the
+meter first. The memory-cap detail names the recovery WAV by file name; the
+full path goes to the log, which is not 40 columns wide.
+
+The precedence is `Notice::priority`, applied only in `Session::notify`, which
+replaces a notice when the new one ranks at least as high: memory cap > capture
+incomplete > microphone unavailable > microphone gap > nearly silent > held too
+briefly > preview paused. Before that, a paused preview overwrote a microphone
+gap, and a microphone event after the in-memory ceiling overwrote the one
+notice that says where the audio went — which a special case in `daemon.rs`
+half-repaired at release time and which the ranking now makes structural.
 
 ## Hotword biasing built, then deferred: v1 ships plain transcription
 

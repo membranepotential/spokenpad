@@ -6,7 +6,8 @@ use crate::core::{
 };
 use std::{
     borrow::Cow,
-    path::PathBuf,
+    fmt,
+    path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -22,7 +23,8 @@ pub enum RecordingStatus {
 }
 
 /// Something the user has to know about the capture they just made. Exactly
-/// one is shown at a time, in place of the preview, until the next key press.
+/// one is shown at a time, in the editor's winbar and in every phase, until
+/// the next key press.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Notice {
     HeldTooBriefly,
@@ -34,36 +36,106 @@ pub enum Notice {
     MemoryCap(RecordingStatus),
 }
 
+/// A notice as the winbar draws it: a headline short enough to stand beside the
+/// phase label in a narrow window, and the detail that explains it, which the
+/// editor appends only when the window has room for all of it. The split is
+/// made here rather than in Lua so that the wording, and the decision about
+/// what a narrow window may lose, live in one place.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NoticeText {
+    pub headline: &'static str,
+    pub detail: Cow<'static, str>,
+}
+
+/// The recovery WAV as the notice names it. A path with no final component is
+/// not something the recorder can have written, so falling back to the whole
+/// path is more honest than an empty name.
+fn file_name(path: &Path) -> Cow<'_, str> {
+    path.file_name()
+        .unwrap_or(path.as_os_str())
+        .to_string_lossy()
+}
+
 impl Notice {
-    pub fn message(&self) -> Cow<'static, str> {
+    /// How much this notice matters. Exactly one is shown per capture, so when
+    /// two things happen to the same one this ranking decides which the user
+    /// reads; [`Session::notify`] is the only place it is applied.
+    ///
+    /// Highest first, and this list is the definition:
+    ///
+    /// 1. `MemoryCap` — the capture is over and the audio is only in a WAV.
+    /// 2. `CaptureIncomplete` — most of what was said never arrived.
+    /// 3. `MicrophoneUnavailable` — audio is missing and did not come back.
+    /// 4. `MicrophoneGap` — audio came back, with a hole in the recording.
+    /// 5. `NearlySilent` — everything arrived and may still be worth nothing.
+    /// 6. `HeldTooBriefly` — nothing was recorded, and nothing was lost.
+    /// 7. `PreviewPaused` — cosmetic: only the live tail stopped.
+    pub fn priority(&self) -> u8 {
         match self {
-            Self::HeldTooBriefly => "held too briefly — hold the key while speaking".into(),
+            Self::MemoryCap(_) => 6,
+            Self::CaptureIncomplete => 5,
+            Self::MicrophoneUnavailable => 4,
+            Self::MicrophoneGap => 3,
+            Self::NearlySilent => 2,
+            Self::HeldTooBriefly => 1,
+            Self::PreviewPaused => 0,
+        }
+    }
+    /// The short form, drawn in every window however narrow. Fixed wording per
+    /// variant: it is the part the user learns to recognise at a glance.
+    pub fn headline(&self) -> &'static str {
+        match self {
+            Self::HeldTooBriefly => "held too briefly",
+            Self::MicrophoneGap => "microphone gap",
+            Self::MicrophoneUnavailable => "microphone unavailable",
+            Self::CaptureIncomplete => "capture incomplete",
+            Self::NearlySilent => "nearly silent",
+            Self::PreviewPaused => "preview paused",
+            Self::MemoryCap(_) => "memory limit reached",
+        }
+    }
+    /// Why it happened, or what to do about it. The memory-cap detail names the
+    /// recovery WAV by file name alone: the winbar has a window's width rather
+    /// than a terminal's, and the daemon logs the directory at the same moment.
+    pub fn detail(&self) -> Cow<'static, str> {
+        match self {
+            Self::HeldTooBriefly => "hold the key while speaking".into(),
             Self::MicrophoneGap => {
-                "microphone stopped delivering audio; reopened, but this recording has a gap".into()
-            }
-            Self::MicrophoneUnavailable => "microphone unavailable; audio is missing".into(),
-            Self::CaptureIncomplete => {
-                "microphone delivered less than half the expected audio; this capture is incomplete"
+                "the microphone stopped delivering audio; it was reopened, but this recording has a gap"
                     .into()
             }
-            Self::NearlySilent => {
-                "capture is nearly silent; check microphone gain and device".into()
+            Self::MicrophoneUnavailable => "audio is missing".into(),
+            Self::CaptureIncomplete => {
+                "the microphone delivered less than half the expected audio".into()
             }
-            Self::PreviewPaused => "preview paused: long uncommitted tail".into(),
+            Self::NearlySilent => "check microphone gain and device".into(),
+            Self::PreviewPaused => "long uncommitted tail".into(),
             Self::MemoryCap(RecordingStatus::Recorded(path)) => format!(
-                "past the 60-minute memory limit; remaining audio is in {} — recover with spokenpad transcribe",
-                path.display()
+                "past 60 minutes; remaining audio is in {} — recover with spokenpad transcribe",
+                file_name(path)
             )
             .into(),
             Self::MemoryCap(RecordingStatus::Truncated(_)) => {
-                "past the 60-minute memory limit AND recording failed; stop and start a new recording"
-                    .into()
+                "past 60 minutes AND recording failed; stop and start a new recording".into()
             }
             Self::MemoryCap(RecordingStatus::NotRecorded) => {
-                "past the 60-minute memory limit with no recovery recording; new audio is being discarded"
-                    .into()
+                "past 60 minutes with no recovery recording; new audio is being discarded".into()
             }
         }
+    }
+    /// Both halves, as the indicator carries them to the editor.
+    pub fn text(&self) -> NoticeText {
+        NoticeText {
+            headline: self.headline(),
+            detail: self.detail(),
+        }
+    }
+}
+
+impl fmt::Display for Notice {
+    /// The whole notice on one line, which is what a log line has room for.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} — {}", self.headline(), self.detail())
     }
 }
 
@@ -129,7 +201,7 @@ impl Session {
                 self.due = None;
                 self.preview.clear();
                 if reason == DiscardReason::TooShort {
-                    self.notice = Some(Notice::HeldTooBriefly);
+                    self.notify(Notice::HeldTooBriefly);
                 }
             }
             Command::Nothing => {}
@@ -207,7 +279,9 @@ impl Session {
     pub fn defer_previews(&mut self, retry: Instant) {
         self.paused = true;
         self.due = Some(retry);
-        self.notice = Some(Notice::PreviewPaused);
+        // The lowest-ranked notice there is: a paused preview must never push
+        // aside the reason the capture itself is in trouble.
+        self.notify(Notice::PreviewPaused);
     }
     pub fn resume_previews(&mut self) {
         if !self.paused {
@@ -223,13 +297,23 @@ impl Session {
     pub fn cap(&mut self, recovery: RecordingStatus) {
         self.paused = true;
         self.due = None;
-        self.notice = Some(Notice::MemoryCap(recovery));
+        self.notify(Notice::MemoryCap(recovery));
         if let Some(u) = &self.current {
             u.release();
         }
     }
+    /// Raises `notice`, unless what is already shown matters more. Ties go to
+    /// the newer one: the same kind of trouble, reported again, is the more
+    /// recent fact about this capture. A key press is the only other way the
+    /// slot changes, and it always clears it.
     pub fn notify(&mut self, notice: Notice) {
-        self.notice = Some(notice);
+        if self
+            .notice
+            .as_ref()
+            .is_none_or(|shown| notice.priority() >= shown.priority())
+        {
+            self.notice = Some(notice);
+        }
     }
     pub fn notice(&self) -> Option<&Notice> {
         self.notice.as_ref()
@@ -243,12 +327,11 @@ impl Session {
     pub fn previewing(&self) -> bool {
         self.enabled && !self.paused
     }
-    /// What the indicator shows below the committed text.
-    pub fn shown_preview(&self) -> Cow<'_, str> {
-        match &self.notice {
-            Some(notice) => notice.message(),
-            None => Cow::Borrowed(&self.preview),
-        }
+    /// The live tail the indicator shows below the committed text. Never the
+    /// notice: the two are rendered in different places and one must not hide
+    /// the other.
+    pub fn preview(&self) -> &str {
+        &self.preview
     }
 }
 
@@ -284,7 +367,7 @@ mod tests {
             due + Duration::from_millis(100),
         );
         assert_eq!(s.committed_hint, Frames::ZERO);
-        assert_eq!(s.shown_preview(), "first live preview");
+        assert_eq!(s.preview(), "first live preview");
         assert!(s.previewing());
         assert!(s.tick_due(due + interval));
     }
@@ -333,17 +416,22 @@ mod tests {
             ("new", 4, "new"),
         ] {
             s.tick_finished(id, preview(text, through), Instant::now());
-            assert_eq!(s.shown_preview(), expected);
+            assert_eq!(s.preview(), expected);
         }
     }
     #[test]
-    fn a_notice_replaces_the_preview_without_stopping_it() {
+    fn a_notice_stands_beside_the_preview_without_stopping_it() {
         let mut s = Session::new(true, Duration::from_secs(1));
         start(&mut s);
         let id = s.current.as_ref().unwrap().id;
         s.notify(Notice::MicrophoneGap);
         s.tick_finished(id, preview("still decoding", 0), Instant::now());
-        assert_eq!(s.shown_preview(), Notice::MicrophoneGap.message());
+        assert_eq!(s.notice(), Some(&Notice::MicrophoneGap));
+        assert_eq!(
+            s.preview(),
+            "still decoding",
+            "the notice is rendered elsewhere; it must not swallow the live tail"
+        );
         assert!(
             s.tick_due(Instant::now() + Duration::from_secs(2)),
             "a notice must not silently stop preview work"
@@ -365,7 +453,8 @@ mod tests {
             at: at + Duration::from_millis(50),
         });
         assert_eq!(command, Command::Discard(DiscardReason::TooShort));
-        assert_eq!(s.shown_preview(), Notice::HeldTooBriefly.message());
+        assert_eq!(s.notice(), Some(&Notice::HeldTooBriefly));
+        assert_eq!(s.preview(), "", "a discarded capture has no live tail");
         assert_eq!(s.state, State::Idle);
     }
     #[test]
@@ -375,7 +464,7 @@ mod tests {
         let now = Instant::now();
         s.defer_previews(now + Duration::from_millis(200));
         assert!(!s.previewing());
-        assert_eq!(s.shown_preview(), Notice::PreviewPaused.message());
+        assert_eq!(s.notice(), Some(&Notice::PreviewPaused));
         assert!(
             s.tick_due(now + Duration::from_millis(200)),
             "a paused preview must re-check, not stop"
@@ -395,11 +484,121 @@ mod tests {
         s.tick_finished(id, preview("much longer cosmetic text", 0), Instant::now());
         s.tick_finished(id, None, Instant::now());
         assert_eq!(
-            s.shown_preview(),
-            Notice::MemoryCap(RecordingStatus::NotRecorded).message()
+            s.notice(),
+            Some(&Notice::MemoryCap(RecordingStatus::NotRecorded))
         );
         assert!(!s.previewing());
         assert!(!s.tick_due(Instant::now() + Duration::from_secs(30)));
+    }
+    /// The ranking is what makes "exactly one notice" a decision rather than a
+    /// race between whichever code path spoke last.
+    #[test]
+    fn the_notice_ranking_is_strict_and_total() {
+        let ranked = [
+            Notice::MemoryCap(RecordingStatus::NotRecorded),
+            Notice::CaptureIncomplete,
+            Notice::MicrophoneUnavailable,
+            Notice::MicrophoneGap,
+            Notice::NearlySilent,
+            Notice::HeldTooBriefly,
+            Notice::PreviewPaused,
+        ];
+        for pair in ranked.windows(2) {
+            assert!(
+                pair[0].priority() > pair[1].priority(),
+                "{:?} must outrank {:?}",
+                pair[0],
+                pair[1]
+            );
+        }
+    }
+    /// A preview that stopped is cosmetic; a microphone that dropped audio is
+    /// not. The pause still happens -- it just does not take the winbar.
+    #[test]
+    fn a_paused_preview_never_hides_what_went_wrong_with_the_capture() {
+        let mut s = Session::new(true, Duration::from_millis(200));
+        start(&mut s);
+        let now = Instant::now();
+        s.notify(Notice::MicrophoneGap);
+        s.defer_previews(now + Duration::from_millis(200));
+        assert!(!s.previewing(), "the pause itself still took effect");
+        assert_eq!(s.notice(), Some(&Notice::MicrophoneGap));
+        s.resume_previews();
+        assert_eq!(
+            s.notice(),
+            Some(&Notice::MicrophoneGap),
+            "resuming previews must not clear someone else's notice"
+        );
+    }
+    /// Everything that happens after the ceiling is a consequence of it: the
+    /// capture is over, and the user needs the sentence that says where the
+    /// audio went, not the microphone trouble that follows from the shutdown.
+    #[test]
+    fn the_memory_cap_notice_outlives_every_later_complaint() {
+        let mut s = Session::new(true, Duration::from_secs(1));
+        start(&mut s);
+        let capped = Notice::MemoryCap(RecordingStatus::Recorded("/tmp/capture.wav".into()));
+        s.cap(RecordingStatus::Recorded("/tmp/capture.wav".into()));
+        for later in [
+            Notice::MicrophoneGap,
+            Notice::MicrophoneUnavailable,
+            Notice::CaptureIncomplete,
+            Notice::NearlySilent,
+            Notice::HeldTooBriefly,
+            Notice::PreviewPaused,
+        ] {
+            s.notify(later.clone());
+            assert_eq!(s.notice(), Some(&capped), "{later:?} displaced the ceiling");
+        }
+        // Through the release and its decode, and only then the next press.
+        s.event(Event::Up {
+            at: Instant::now() + Duration::from_secs(1),
+        });
+        assert_eq!(s.notice(), Some(&capped), "the release cleared it");
+        start(&mut s);
+        assert!(s.notice().is_none(), "the next press clears it");
+    }
+    /// Worse news replaces lesser news, and the same news replaces itself: a
+    /// second report of the same trouble is the more recent one.
+    #[test]
+    fn a_worse_notice_replaces_a_lesser_one_and_never_the_reverse() {
+        let mut s = Session::new(true, Duration::from_secs(1));
+        start(&mut s);
+        s.notify(Notice::NearlySilent);
+        s.notify(Notice::CaptureIncomplete);
+        assert_eq!(s.notice(), Some(&Notice::CaptureIncomplete));
+        s.notify(Notice::MicrophoneGap);
+        assert_eq!(
+            s.notice(),
+            Some(&Notice::CaptureIncomplete),
+            "a lesser notice must not overwrite a worse one"
+        );
+        s.notify(Notice::CaptureIncomplete);
+        assert_eq!(s.notice(), Some(&Notice::CaptureIncomplete));
+    }
+    /// The winbar draws the headline always and the detail only when it fits,
+    /// so the headline has to be short and the path in it a file name.
+    #[test]
+    fn a_notice_splits_into_a_short_headline_and_its_detail() {
+        let notice = Notice::MemoryCap(RecordingStatus::Recorded(
+            "/tmp/spokenpad/capture-example.wav".into(),
+        ));
+        let text = notice.text();
+        assert_eq!(text.headline, "memory limit reached");
+        assert!(
+            text.headline.chars().count() <= 24,
+            "a headline has to fit beside the phase label: {}",
+            text.headline
+        );
+        assert!(
+            text.detail.contains("capture-example.wav") && !text.detail.contains("/tmp"),
+            "the winbar names the file, the log names the directory: {}",
+            text.detail
+        );
+        assert_eq!(
+            notice.to_string(),
+            format!("{} — {}", text.headline, text.detail)
+        );
     }
     #[test]
     fn tick_failure_rearms_and_stale_tick_cannot_rearm() {

@@ -4,7 +4,7 @@ use anyhow::{Context, Result, anyhow, ensure};
 use rmpv::Value;
 use spokenpad::{
     config::Config,
-    core::state::IndicatorPhase,
+    core::{session::Notice, state::IndicatorPhase},
     shell::{
         nvim::{IndicatorState, NvimSession},
         x11,
@@ -92,6 +92,10 @@ fn verify(socket_path: &Path, dictation_dir: &Path) -> Result<()> {
         .append(TEST_TEXT, false)
         .context("append fixed smoke text")?;
     indicator.preview = "Provisional trailing preview — never saved.".to_owned();
+    // The notice rides in the winbar, beside the phase label, while the
+    // preview stays virtual text below the transcript: this push is what a
+    // human checks that against.
+    indicator.notice = Some(Notice::HeldTooBriefly.text());
     session.set_indicator(&indicator)?;
     ensure!(
         active_window()? == before,

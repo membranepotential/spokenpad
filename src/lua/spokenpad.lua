@@ -31,13 +31,28 @@ local METER_CELLS = 24
 local PREVIEW_EXTMARK = 1
 local PREVIEW_MAX_LINES = 8
 local PREVIEW_GUTTER = 2  -- breathing room so wrapped text never touches the edge
+-- Only for a winbar built before any window shows the buffer; every real one
+-- is measured against the window it is about to be set on.
+local DEFAULT_WINBAR_WIDTH = 80
 
 -- Speech barely moves a linear meter, so the same perceptual curve the Qt
 -- overlay used (level ^ 0.6) is applied before picking a bar glyph.
 local METER_GAMMA = 0.6
 local AUDIBLE = 0.02
 
-M.state = { phase = "idle", level = 0.0, preview = "", latched = false, previewing = true }
+-- `notice` is the headline the winbar always draws; `notice_detail` is the
+-- sentence behind it, drawn only when the window has room for all of it. The
+-- daemon sends them as two fields so that neither side has to split a sentence
+-- the other composed.
+M.state = {
+  phase = "idle",
+  level = 0.0,
+  preview = "",
+  notice = "",
+  notice_detail = "",
+  latched = false,
+  previewing = true,
+}
 M.levels = {}
 M.preview_views = {}
 M.winbar_windows = {}
@@ -56,7 +71,9 @@ if previous then
   if previous.buf and vim.api.nvim_buf_is_valid(previous.buf) and vim.api.nvim_buf_is_loaded(previous.buf) then
     M.buf = previous.buf
   end
-  M.state = previous.state or M.state
+  -- Field-wise, so state carried over from an older daemon's chunk keeps this
+  -- one's default for any field that version did not have.
+  M.state = vim.tbl_extend("force", M.state, previous.state or {})
   M.levels = previous.levels or M.levels
   M.preview_views = previous.preview_views or M.preview_views
   M.winbar_windows = previous.winbar_windows or M.winbar_windows
@@ -69,10 +86,12 @@ end
 --- Highlight groups, linked to the colourscheme rather than hard-coded, so the
 --- indicator follows whatever theme the user's own config loaded.
 ---
---- The preview is the exception: it is provisional text, so it takes the
---- active colourscheme's Comment foreground *with italics* rather than a link,
---- which is the clear grey the Qt overlay used without hard-coding a colour
---- that fights the theme.
+--- The preview and the notice are the exceptions, each wanting something a
+--- link cannot express: the preview, the active colourscheme's Comment
+--- foreground *with italics* -- the clear grey the Qt overlay used, without
+--- hard-coding a colour that fights the theme -- and the notice, the theme's
+--- warning foreground with a fallback, whichever of `WarningMsg` and
+--- `DiagnosticWarn` the colourscheme actually sets.
 local function define_highlights()
   local links = {
     SpokenpadRec = "DiagnosticError",
@@ -80,6 +99,7 @@ local function define_highlights()
     SpokenpadIdle = "Comment",
     SpokenpadMuted = "NonText",
     SpokenpadPreview = "Comment",
+    SpokenpadNotice = "WarningMsg",
     SpokenpadFile = "Directory",
   }
   for name, target in pairs(links) do
@@ -88,31 +108,93 @@ local function define_highlights()
   local preview = vim.api.nvim_get_hl(0, { name = "Comment", link = false })
   preview.italic = true
   vim.api.nvim_set_hl(0, "SpokenpadPreview", preview)
+  -- A notice is a warning about the capture just made, so it takes the theme's
+  -- warning colour: `WarningMsg`, or `DiagnosticWarn` in a colourscheme that
+  -- leaves it unset. If neither resolves to a colour the default link above
+  -- stands, which is still better than a group set to nothing.
+  local notice = vim.api.nvim_get_hl(0, { name = "WarningMsg", link = false })
+  if not notice.fg then
+    notice = vim.api.nvim_get_hl(0, { name = "DiagnosticWarn", link = false })
+  end
+  if notice.fg then
+    vim.api.nvim_set_hl(0, "SpokenpadNotice", notice)
+  end
 end
 
-local function meter()
+--- The newest `cells` levels as bar glyphs, one column each. The meter is the
+--- one part of the winbar that shrinks: a window too narrow to hold the phase,
+--- a notice and twenty-four cells gives the cells up, because they are the
+--- only part that says nothing the user cannot see again a tenth of a second
+--- later.
+local function meter(cells)
   local out = {}
-  for _, level in ipairs(M.levels) do
-    local amp = level ^ METER_GAMMA
-    local index = math.max(1, math.min(#BARS, math.floor(amp * #BARS + 0.5)))
+  for index = #M.levels - cells + 1, #M.levels do
+    local amp = M.levels[index] ^ METER_GAMMA
+    local bar = math.max(1, math.min(#BARS, math.floor(amp * #BARS + 0.5)))
     local group = amp > AUDIBLE and "SpokenpadRec" or "SpokenpadMuted"
-    out[#out + 1] = "%#" .. group .. "#" .. BARS[index]
+    out[#out + 1] = "%#" .. group .. "#" .. BARS[bar]
   end
   return table.concat(out)
 end
 
---- The winbar string. Rebuilt on every state push; `winbar` is set
---- window-locally on every window showing the dictation buffer, so a global
---- winbar from the user's own config (lualine, breadcrumbs) is overridden for
---- this buffer only and left alone everywhere else.
-local function winbar()
+--- A winbar is a statusline expression, so any `%` in text that came from
+--- outside it -- a file name, a notice naming one -- has to be doubled, or
+--- nvim reads it as an item and draws something else entirely.
+local function escape(text)
+  return (text:gsub("%%", "%%%%"))
+end
+
+local function highlighted(group, text)
+  return "%#" .. group .. "#" .. escape(text) .. "%*"
+end
+
+--- The winbar string for `win`, rebuilt on every state push.
+---
+--- Two things are drawn at any width: the phase label, and -- when there is
+--- one -- the notice's **headline**. Everything else is fitted around them.
+--- A dictation window is small and a notice is a sentence, so at 40 columns
+--- the phase, a 24-cell meter and the whole sentence cannot all be there; what
+--- used to happen is that the winbar was truncated from the left and the user
+--- was left with `<aining audio is in /tmp/capture.wav -- recover ...`, having
+--- lost both the phase and the first half of the reason.
+---
+--- So the daemon sends the notice in two pieces. The headline is always drawn.
+--- The **detail** is appended only when what is already in the bar leaves room
+--- for all of it: half a sentence ending mid-word is worse than no sentence.
+--- `%<` sits between the two as the backstop -- if the measurement is ever
+--- wrong, a window resized between this push and the redraw, nvim truncates
+--- the detail and never the phase or the headline.
+---
+--- What is drawn in every phase, and why it is the winbar rather than the
+--- preview: a tap too short to record and a capture whose notice outlives its
+--- decode are both idle by the time the user can read anything, and the
+--- preview is the live tail -- a notice standing in its place cannot be told
+--- apart from dictated text.
+local function winbar(win)
+  local width = win and vim.api.nvim_win_get_width(win) or DEFAULT_WINBAR_WIDTH
+  local notice, detail = M.state.notice, M.state.notice_detail
+  local headline = notice ~= "" and (" \u{26a0} " .. notice) or ""
+  local bar = ""
+  -- The headline is appended last but reserved first: what it costs is what
+  -- the rest of the bar may not spend.
+  local used = vim.fn.strdisplaywidth(headline)
+  local function add(group, text)
+    bar = bar .. highlighted(group, text)
+    used = used + vim.fn.strdisplaywidth(text)
+  end
+  local function add_if_it_fits(group, text)
+    if used + vim.fn.strdisplaywidth(text) <= width then
+      add(group, text)
+    end
+  end
+
   local phase = M.state.phase
   if phase == "recording" then
     -- A latched recording says so, because the way to stop it is different:
     -- the key has already been released, and pressing it again is what ends
     -- it. Someone who cannot tell which mode they are in is stuck.
-    local label = M.state.latched and "\u{25cf} REC \u{1f512} press to stop " or "\u{25cf} REC "
-    local bar = "%#SpokenpadRec#" .. label .. "%*" .. meter()
+    add("SpokenpadRec", M.state.latched and "\u{25cf} REC \u{1f512} press to stop " or "\u{25cf} REC ")
+    local note = ""
     if not M.state.previewing then
       -- No preview is coming: either none ever was (previews turned off, or a
       -- daemon with no VAD model, where nothing settles and a preview would
@@ -121,22 +203,45 @@ local function winbar()
       -- and the one that matters is the same either way: the recording is
       -- running and only the live text is missing. Saying so is the difference
       -- between "it just stopped showing me" and "it has silently dropped what
-      -- I am saying" -- which is why the phrasing keeps "still recording".
-      bar = bar .. "%#SpokenpadIdle# no live preview, still recording%*"
+      -- I am saying" -- which is why both phrasings keep "recording".
+      note = " no live preview, still recording"
+      -- Dropped only when it does not fit beside a notice -- and a notice is
+      -- then the more specific reason the preview is missing (the memory cap,
+      -- the paused preview), so nothing is lost by preferring it.
+      if used + vim.fn.strdisplaywidth(note) > width then
+        note = ""
+      end
     end
-    return bar
+    local room = width - used - vim.fn.strdisplaywidth(note)
+    local cells = math.max(0, math.min(METER_CELLS, room))
+    bar = bar .. meter(cells)
+    used = used + cells
+    if note ~= "" then
+      add("SpokenpadIdle", note)
+    end
   elseif phase == "transcribing" then
     -- Say the text below is the preview, not the result. Otherwise a preview
     -- left standing through the decode reads as finished text that then
     -- changes under the reader.
-    local bar = "%#SpokenpadWork#\u{25cf} transcribing\u{2026}%*"
+    add("SpokenpadWork", "\u{25cf} transcribing\u{2026}")
     if M.state.preview ~= "" then
-      bar = bar .. " %#SpokenpadIdle#showing the live preview until it lands%*"
+      add_if_it_fits("SpokenpadIdle", " showing the live preview until it lands")
     end
-    return bar
+  else
+    local name = M.buf and vim.api.nvim_buf_get_name(M.buf) or ""
+    add("SpokenpadIdle", "\u{25cb} spokenpad")
+    add_if_it_fits("SpokenpadFile", " " .. vim.fn.fnamemodify(name, ":t"))
   end
-  local name = M.buf and vim.api.nvim_buf_get_name(M.buf) or ""
-  return "%#SpokenpadIdle#\u{25cb} spokenpad%* %#SpokenpadFile#" .. vim.fn.fnamemodify(name, ":t") .. "%*"
+
+  if notice ~= "" then
+    bar = bar .. "%#SpokenpadNotice#" .. escape(headline) .. "%<"
+    -- " -- " is three columns; the detail is all or nothing.
+    if detail ~= "" and used + 3 + vim.fn.strdisplaywidth(detail) <= width then
+      bar = bar .. " \u{2014} " .. escape(detail)
+    end
+    bar = bar .. "%*"
+  end
+  return bar
 end
 
 --- Windows currently displaying the dictation buffer. Usually exactly one;
@@ -154,11 +259,15 @@ local function windows()
   return out
 end
 
+--- The winbar is set window-locally on every window showing the dictation
+--- buffer, so a global winbar from the user's own config (lualine,
+--- breadcrumbs) is overridden for this buffer only and left alone everywhere
+--- else. It is built per window, because the two may differ in width and the
+--- bar is fitted to the window it goes on.
 local function render()
-  local bar = winbar()
   local shown = {}
   for _, win in ipairs(windows()) do
-    vim.api.nvim_set_option_value("winbar", bar, { win = win })
+    vim.api.nvim_set_option_value("winbar", winbar(win), { win = win })
     shown[win] = true
   end
   -- A window that stops showing the dictation buffer -- `:e other.md` in it --
@@ -597,6 +706,14 @@ function M.set_state(update)
   end
   if update.preview ~= nil then
     M.state.preview = update.preview
+  end
+  -- The empty string is how the daemon says "no notice"; it sends one on every
+  -- push, and clears it on the next key press. Nothing here expires it.
+  if update.notice ~= nil then
+    M.state.notice = update.notice
+  end
+  if update.notice_detail ~= nil then
+    M.state.notice_detail = update.notice_detail
   end
   if update.latched ~= nil then
     M.state.latched = update.latched
