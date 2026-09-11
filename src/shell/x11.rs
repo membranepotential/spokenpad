@@ -1,5 +1,5 @@
 //! Timeout-bounded X11/i3 queries used only when opening a dictation window.
-use crate::geometry::{Output, Rect};
+use crate::core::geometry::{Output, Rect};
 use anyhow::{Context, Result, bail};
 use regex::Regex;
 use serde_json::Value;

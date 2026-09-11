@@ -1,8 +1,8 @@
 # The dictation window
 
 ← [docs index](README.md) | Implemented by
-[`nvim.rs`](../src/nvim.rs), its transport
-[`nvim/rpc.rs`](../src/nvim/rpc.rs), and
+[`shell/nvim/mod.rs`](../src/shell/nvim/mod.rs), its transport
+[`shell/nvim/rpc.rs`](../src/shell/nvim/rpc.rs), and
 [`spokenpad.lua`](../src/lua/spokenpad.lua). The reasoning for
 using nvim at all is in
 [decisions.md](decisions.md#the-sink-is-neovim-not-the-clipboard); the rules
@@ -304,15 +304,16 @@ does not litter the desktop with terminals. Quitting nvim simply means the
 next dictation opens a fresh one.
 
 Liveness is checked on every key-down, and a plain `connect` is not enough: a
-socket answers exactly as before the user `:bdelete`s the dictation buffer, and
-every append of that utterance then fails against a buffer that is gone. So the
-check is a real RPC round trip that asks the editor which buffer it still has
-pinned, and it passes only if that is the buffer this session owns. It is
-bounded by an absolute two-second deadline — every call in
-[`nvim/rpc.rs`](../src/nvim/rpc.rs) carries one, because a peer that dribbles
-bytes must not extend a call indefinitely by staying inside a per-read timeout.
-An editor that does not answer in time is dropped and reattached to (or
-respawned) rather than waited on, since the recording is already running.
+socket answers exactly as before the user `:bdelete`s the dictation buffer,
+and every append of that utterance then fails against a buffer that is gone.
+So the check is a real RPC round trip that asks the editor which buffer it
+still has pinned, and it passes only if that is the buffer this session owns.
+It is bounded by an absolute two-second deadline — every call in
+[`shell/nvim/rpc.rs`](../src/shell/nvim/rpc.rs) carries one, because a peer
+that dribbles bytes must not extend a call indefinitely by staying inside a
+per-read timeout. An editor that does not answer in time is dropped and
+reattached to (or respawned) rather than waited on, since the recording is
+already running.
 
 An append that times out is the ambiguous case: the request may have completed
 after its reply was lost. It is retried once, on a fresh connection, with the

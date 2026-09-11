@@ -5,17 +5,23 @@
 //! event loop over whatever devices it is handed, which is what the headless
 //! end-to-end tests drive.
 use crate::{
-    audio::{AudioCapture, CaptureEvent, InputBackend},
     config::Config,
-    decode::{Commit, Pipeline, Preview, Recognizer, Segmenter, Utterance, UtteranceId, Worker},
-    frames::Frames,
-    hotkey::HotkeyWatcher,
-    inference::{Transcriber, load_segmenter},
-    nvim::{IndicatorState, NvimSession},
-    recorder::RecordingStatus,
-    session::{Notice, Session},
-    state::{Command, DiscardReason, Event, State},
-    text::Processor,
+    core::{
+        decode::{
+            Commit, Pipeline, Preview, Recognizer, Segmenter, Utterance, UtteranceId, Worker,
+        },
+        frames::Frames,
+        session::{Notice, Session},
+        state::{Command, DiscardReason, Event, State},
+        text::Processor,
+    },
+    shell::{
+        audio::{AudioCapture, CaptureEvent, InputBackend},
+        hotkey::HotkeyWatcher,
+        inference::{Transcriber, load_segmenter},
+        nvim::{IndicatorState, NvimSession},
+        recorder::RecordingStatus,
+    },
 };
 use anyhow::{Context, Result, ensure};
 use std::{
@@ -348,7 +354,7 @@ where
                         match reason {
                             DiscardReason::TooShort => log::info!(
                                 "capture held under {}ms; discarded, WAV retained",
-                                crate::state::MINIMUM_HOLD.as_millis()
+                                crate::core::state::MINIMUM_HOLD.as_millis()
                             ),
                             DiscardReason::Cancelled => {
                                 log::info!("capture cancelled; settled text and WAV retained")
@@ -610,7 +616,7 @@ fn release<B: InputBackend>(
             "capture-{}.wav",
             chrono::Local::now().format("%Y-%m-%d-%H%M%S-%f")
         ));
-        if let Err(e) = crate::recorder::dump_capture(&path, samples, rate) {
+        if let Err(e) = crate::shell::recorder::dump_capture(&path, samples, rate) {
             log::error!("could not dump capture: {e:#}");
         }
     }

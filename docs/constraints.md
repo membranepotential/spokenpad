@@ -53,11 +53,11 @@ clipboard + `ctrl+v` versus **3.3 s** via character synthesis for the same
 
 Since 2026-09-07 it does not touch the clipboard either. The transcript is
 appended to a neovim buffer over that editor's msgpack-RPC socket
-([`nvim.rs`](../src/nvim.rs)), which is strictly stronger than the
-clipboard sink it replaced: no keystroke is sent anywhere, no global X state
-is read or written, and the transcript never crosses a shell or an argv
-boundary — it is a msgpack string argument, so a dictated `$(rm -rf ~)` is
-just text. The clipboard round trip (`inject.py`) is deleted; see
+([`shell/nvim/mod.rs`](../src/shell/nvim/mod.rs)), which is strictly stronger
+than the clipboard sink it replaced: no keystroke is sent anywhere, no global
+X state is read or written, and the transcript never crosses a shell or an
+argv boundary — it is a msgpack string argument, so a dictated `$(rm -rf ~)`
+is just text. The clipboard round trip (`inject.py`) is deleted; see
 [decisions.md](decisions.md#the-sink-is-neovim-not-the-clipboard).
 
 ## Every committed sample is decoded exactly once, never streamed
@@ -75,15 +75,16 @@ discarded at any length.
 
 Until 2026-09-08 that rule was implemented as a single decode of the whole
 buffer after `KeyUp`. It is now implemented *progressively*: the capture is
-split at silence by [`inference.rs`](../src/inference.rs), driven by
-[`decode.rs`](../src/decode.rs), into chunks of about ten seconds of speech; a
-chunk is decoded and appended the moment no later audio can change it, and
-releasing the key decodes only the open tail. (`spokenpad.vad` mirrors the same
-splitter offline, for evaluation and the Rust/Python differential check — it is
-not in the daemon's path.) The full design, the rule for deciding that a chunk
-has settled, and the latency budget are in
+split at silence by [`shell/inference.rs`](../src/shell/inference.rs) under
+the merge policy in [`core/segments.rs`](../src/core/segments.rs), driven by
+[`core/decode.rs`](../src/core/decode.rs), into chunks of about ten seconds of
+speech; a chunk is decoded and appended the moment no later audio can change
+it, and releasing the key decodes only the open tail. (`spokenpad.vad` mirrors
+the same splitter offline, for evaluation and the Rust/Python differential
+check — it is not in the daemon's path.) The full design, the rule for
+deciding that a chunk has settled, and the latency budget are in
 [progressive-commit.md](progressive-commit.md). The `Decode` command in the
-[state machine](../src/state.rs) still fires only on
+[state machine](../src/core/state.rs) still fires only on
 `Recording → Transcribing`; what it now decodes is the remainder, not the
 whole. The [decode invariants](architecture.md#decode-invariants) list what
 that buys.
@@ -172,9 +173,10 @@ free for other workloads; the project's stated goal was CPU-only local ASR
 from the start (README.md, STATUS.md: "the 4 GB GTX 1650 stays free").
 
 **Rule:** `Asr.num_threads` is fixed at 6 and the ONNX Runtime provider is
-pinned to `cpu` — [`inference.rs`](../src/inference.rs) sets it explicitly for
-both the recognizer and the VAD, as does the Python reference. No code path in
-this project selects a GPU provider, and nothing auto-detects one.
+pinned to `cpu` — [`shell/inference.rs`](../src/shell/inference.rs) sets it
+explicitly for both the recognizer and the VAD, as does the Python reference.
+No code path in this project selects a GPU provider, and nothing auto-detects
+one.
 
 ## Bias vocabulary at decode time, never fuzzy replacement
 
@@ -212,14 +214,14 @@ Handy's status overlay was a focusable window. When it appeared during
 recording, it could take focus away from the application the user was
 dictating into, aborting the transcription in progress.
 
-**Rule:** no window this project opens may receive keyboard focus at any
-point in its lifecycle. Since 2026-09-08 it opens exactly one: the
-**dictation window**, which is refused focus by the window manager via a
-`no_focus` rule keyed on its X11 instance name. There is deliberately no
-focus call anywhere in [`nvim.rs`](../src/nvim.rs) — not even a
-"restore the previous focus" one, which would be a focus change of its own.
-See [nvim-window.md](nvim-window.md). (The Qt status overlay that preceded
-it was non-focusable by construction; it is deleted, see
+**Rule:** no window this project opens may receive keyboard focus at any point
+in its lifecycle. Since 2026-09-08 it opens exactly one: the **dictation
+window**, which is refused focus by the window manager via a `no_focus` rule
+keyed on its X11 instance name. There is deliberately no focus call anywhere
+in [`shell/nvim/mod.rs`](../src/shell/nvim/mod.rs) — not even a "restore the
+previous focus" one, which would be a focus change of its own. See
+[nvim-window.md](nvim-window.md). (The Qt status overlay that preceded it was
+non-focusable by construction; it is deleted, see
 [decisions.md](decisions.md#pyside6-over-gtk4).)
 
 Verified live on 2026-09-07: opening the dictation window left the focused

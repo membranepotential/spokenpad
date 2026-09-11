@@ -13,8 +13,8 @@ mod rpc;
 
 use crate::{
     config::{self, Nvim},
-    geometry::{Rect, pick_output, placement},
-    x11,
+    core::geometry::{Rect, pick_output, placement},
+    shell::x11,
 };
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use rmpv::Value;
@@ -57,8 +57,8 @@ const INDICATOR_TIMEOUT: Duration = Duration::from_millis(250);
 const CONNECT_POLL: Duration = Duration::from_millis(25);
 const MAP_TIMEOUT: Duration = Duration::from_secs(3);
 
-const SPOKENPAD_LUA: &str = include_str!("lua/spokenpad.lua");
-const BUNDLED_INIT: &str = include_str!("lua/dictation_init.lua");
+const SPOKENPAD_LUA: &str = include_str!("../../lua/spokenpad.lua");
+const BUNDLED_INIT: &str = include_str!("../../lua/dictation_init.lua");
 
 /// Everything an attaching session needs to know about an editor answering on
 /// the dictation socket: who owns it, whether its startup has finished, and

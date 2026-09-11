@@ -3,9 +3,11 @@ use anyhow::{Context, Result, ensure};
 use serde_json::json;
 use spokenpad::{
     config::Config,
-    decode::{Pipeline, Recognizer, Segmenter, Utterance, Worker},
-    frames::Frames,
-    inference::{SpeechSegmenter, Transcriber},
+    core::{
+        decode::{Pipeline, Recognizer, Segmenter, Utterance, Worker},
+        frames::Frames,
+    },
+    shell::inference::{SpeechSegmenter, Transcriber},
 };
 use std::{path::Path, time::Instant};
 

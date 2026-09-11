@@ -1,7 +1,8 @@
 # Progressive commit
 
-← [docs index](README.md) | Implemented by `inference.rs`, `decode.rs`, and
-`session.rs`; mirrored offline by `spokenpad.vad` and `spokenpad.decode`.
+← [docs index](README.md) | Implemented by `shell/inference.rs`,
+`core/segments.rs`, `core/decode.rs`, and `core/session.rs`; mirrored offline
+by `spokenpad.vad` and `spokenpad.decode`.
 
 Text is committed while the user is still speaking, once later audio cannot
 change the chunk it came from. Releasing the key decodes only the open tail,

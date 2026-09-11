@@ -2,9 +2,8 @@ use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand};
 use spokenpad::{
     config::Config,
-    decode::Pipeline,
-    inference::{Transcriber, load_segmenter},
-    text::Processor,
+    core::{decode::Pipeline, text::Processor},
+    shell::inference::{Transcriber, load_segmenter},
 };
 use std::{io::Write, os::unix::fs::OpenOptionsExt, path::PathBuf, process::ExitCode};
 
@@ -58,7 +57,7 @@ fn write_transcript(text: &str, out: Option<&std::path::Path>) -> Result<()> {
     Ok(())
 }
 fn run(args: Args) -> Result<u8> {
-    spokenpad::logging::init(args.verbose, args.log_file.as_deref())?;
+    spokenpad::shell::logging::init(args.verbose, args.log_file.as_deref())?;
     let mut config = Config::load(args.config.as_deref())?;
     if let Some(p) = args.model_dir {
         config.asr.model_dir = Some(spokenpad::config::expand_path(&p)?);
@@ -66,7 +65,7 @@ fn run(args: Args) -> Result<u8> {
     config.validate()?;
     match args.command {
         Some(Action::Transcribe { wav, out }) => {
-            let (samples, rate) = match spokenpad::recorder::read_capture(&wav) {
+            let (samples, rate) = match spokenpad::shell::recorder::read_capture(&wav) {
                 Ok(audio) => audio,
                 Err(e) => {
                     log::error!("{e:#}");
@@ -130,7 +129,7 @@ fn run(args: Args) -> Result<u8> {
             if let Some(p) = &args.dump_audio {
                 std::fs::create_dir_all(p)?;
             }
-            if let Err(e) = spokenpad::daemon::run(config, args.dump_audio.as_deref()) {
+            if let Err(e) = spokenpad::shell::daemon::run(config, args.dump_audio.as_deref()) {
                 let Some(code) = permanent_failure(&e) else {
                     return Err(e);
                 };
@@ -145,7 +144,7 @@ fn run(args: Args) -> Result<u8> {
 /// reworded message can never silently turn into a restart loop.
 fn permanent_failure(error: &anyhow::Error) -> Option<u8> {
     error
-        .downcast_ref::<spokenpad::daemon::HotkeyUnavailable>()
+        .downcast_ref::<spokenpad::shell::daemon::HotkeyUnavailable>()
         .map(|_| 3)
 }
 fn main() -> ExitCode {
@@ -162,7 +161,7 @@ fn main() -> ExitCode {
 mod tests {
     use super::*;
     use anyhow::anyhow;
-    use spokenpad::daemon::HotkeyUnavailable;
+    use spokenpad::shell::daemon::HotkeyUnavailable;
 
     #[test]
     fn only_the_typed_hotkey_failure_maps_to_exit_code_three() {

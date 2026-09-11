@@ -7,8 +7,8 @@
 
 use crate::{
     config::{Audio, Recording},
-    frames::Frames,
-    recorder::{CaptureRecorder, RecordingStatus},
+    core::frames::Frames,
+    shell::recorder::{CaptureRecorder, RecordingStatus},
 };
 use anyhow::{Context, Result, anyhow, bail};
 use portaudio as pa;
@@ -987,7 +987,7 @@ mod tests {
         let RecordingStatus::Recorded(path) = capture.recording_status() else {
             panic!("capture was not recorded")
         };
-        let (written, sample_rate) = crate::recorder::read_capture(&path).unwrap();
+        let (written, sample_rate) = crate::shell::recorder::read_capture(&path).unwrap();
         assert_eq!(sample_rate, 1_000);
         assert_eq!(written.len(), 8, "disk keeps frames past the RAM cap");
     }

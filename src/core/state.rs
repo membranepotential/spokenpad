@@ -1,5 +1,5 @@
 //! Pure session transitions. Repeat filtering belongs to the input adapter.
-use crate::nvim::IndicatorPhase;
+use crate::shell::nvim::IndicatorPhase;
 use std::time::{Duration, Instant};
 
 /// Below this a press is a stray tap, not dictation. Deliberately not

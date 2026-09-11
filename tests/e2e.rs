@@ -1,6 +1,6 @@
 //! Headless end-to-end tests of the real daemon loop.
 //!
-//! [`spokenpad::daemon::serve`] runs with three substitutions and nothing
+//! [`spokenpad::shell::daemon::serve`] runs with three substitutions and nothing
 //! else: a synthetic microphone in place of PortAudio, an ordinary channel in
 //! place of evdev, and (outside the ignored real-model test) a counting
 //! recognizer. Session policy, capture arithmetic, the recovery WAV, the
@@ -18,13 +18,17 @@
 
 use anyhow::Result;
 use spokenpad::{
-    audio::{AudioCapture, CallbackCore, InputBackend, InputStream, Teardown},
     config::{Audio, Config},
-    daemon::{Devices, serve},
-    decode::{Pipeline, Recognizer, Segment, Segmenter, Worker},
-    inference::{Transcriber, load_segmenter},
-    recorder::read_capture,
-    state::Event,
+    core::{
+        decode::{Pipeline, Recognizer, Segment, Segmenter, Worker},
+        state::Event,
+    },
+    shell::{
+        audio::{AudioCapture, CallbackCore, InputBackend, InputStream, Teardown},
+        daemon::{Devices, serve},
+        inference::{Transcriber, load_segmenter},
+        recorder::read_capture,
+    },
 };
 use std::{
     collections::VecDeque,

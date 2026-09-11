@@ -1,5 +1,5 @@
 //! Shared live/recovery pipeline. Preview output has a separate event type.
-use crate::frames::Frames;
+use crate::core::frames::Frames;
 use anyhow::{Result, ensure};
 use std::{
     ops::Range,

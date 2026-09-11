@@ -2,7 +2,7 @@
 
 ← [docs index](README.md) | The decode-time-biasing rule this implements is
 justified in [constraints.md](constraints.md#bias-vocabulary-at-decode-time-never-fuzzy-replacement);
-the production implementation is in [`inference.rs`](../src/inference.rs).
+the production implementation is in [`shell/inference.rs`](../src/shell/inference.rs).
 [`asr.py`](../src/spokenpad/asr.py) and
 [`config.py`](../src/spokenpad/config.py) retain the typed offline reference
 used by evaluation and native differential checks.
@@ -85,7 +85,7 @@ score = -index
 
 [`scripts/build_hotwords.py`](../scripts/build_hotwords.py) performs this
 reconstruction through [`src/spokenpad/asr.py`](../src/spokenpad/asr.py).
-The Rust runtime implements the same conversion in `inference.rs`, and
+The Rust runtime implements the same conversion in `shell/inference.rs`, and
 `scripts/verify_rust.py` guards their observable ASR/VAD parity. The recogniser is built with
 `bpe_vocab=<model_dir>/bpe.vocab` and `modeling_unit="bpe"` alongside a
 `hotwords_file`. Verified working -- and now guarded by

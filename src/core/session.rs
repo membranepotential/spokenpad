@@ -1,9 +1,11 @@
 //! Main-thread policy, without devices or threads. The bridge owns paragraph order.
 use crate::{
-    decode::{Commit, Preview, Utterance, UtteranceId},
-    frames::Frames,
-    recorder::RecordingStatus,
-    state::{self, Command, DiscardReason, Event, State},
+    core::{
+        decode::{Commit, Preview, Utterance, UtteranceId},
+        frames::Frames,
+        state::{self, Command, DiscardReason, Event, State},
+    },
+    shell::recorder::RecordingStatus,
 };
 use std::{
     borrow::Cow,

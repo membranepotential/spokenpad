@@ -4,8 +4,10 @@ use anyhow::{Context, Result, anyhow, ensure};
 use rmpv::Value;
 use spokenpad::{
     config::Config,
-    nvim::{IndicatorPhase, IndicatorState, NvimSession},
-    x11,
+    shell::{
+        nvim::{IndicatorPhase, IndicatorState, NvimSession},
+        x11,
+    },
 };
 use std::{
     fs,

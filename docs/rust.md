@@ -9,29 +9,38 @@ Rust runtime. Setup/evaluation scripts remain Python.
 
 ## Ownership and ordering
 
-- `state.rs` contains the pure state machine, including the 120 ms minimum
-  hold and the rule that a cancel after release is a no-op; `session.rs` handles
-  utterance identity, cancellation, preview scheduling, and the single
+`src/` is split in two: `core/` holds the pure modules, `shell/` everything
+that touches a device, a file, a process or a thread, and `config.rs` sits at
+the root because both sides read it. Nothing under `core/` may import `evdev`,
+`libc`, PortAudio, sherpa, `std::fs`, `std::process`, `std::net` or
+`std::thread`.
+
+- `core/state.rs` contains the pure state machine, including the 120 ms minimum
+  hold and the rule that a cancel after release is a no-op; `core/session.rs`
+  handles utterance identity, cancellation, preview scheduling, and the single
   user-visible notice, which the next key press clears.
-- `daemon.rs` splits into `run` and `serve`. `run` is the shell: the per-user
-  lock, signal handlers, PortAudio, evdev, and the models. `serve` is the event
-  loop, generic over the audio backend, recognizer and segmenter and taking its
-  key events from a plain channel, which is what the headless end-to-end tests
-  drive. It drains input before inference results and moves blocking inference
-  and editor RPC to separate threads; the editor thread runs until its own
-  channel says to stop, so text queued before a cancel or a shutdown is still
-  written (bounded at three seconds, with anything undelivered logged at error
-  level).
-- `decode.rs` owns the committed sample offset on one worker. Each capture is
-  an `Utterance` with one monotone lifecycle — `Live`, then either `Released`
-  for its final decode or `Cancelled` — so a later capture cannot revive an
-  earlier one and no pair of booleans can disagree. Preview output never enters
-  the commit path, and a cancel stops decoding without unwriting text the
-  recognizer already produced.
-- `inference.rs` wraps the official sherpa Rust API. The safe wrapper, FFI
-  bindings, and native runtime are pinned together; startup checks the native
-  version. Both models explicitly use the CPU provider.
-- `audio.rs` maintains pre-roll and immutable callback chunks behind an
+- `shell/daemon.rs` splits into `run` and `serve`. `run` is the shell: the
+  per-user lock, signal handlers, PortAudio, evdev, and the models. `serve` is
+  the event loop, generic over the audio backend, recognizer and segmenter and
+  taking its key events from a plain channel, which is what the headless
+  end-to-end tests drive. It drains input before inference results and moves
+  blocking inference and editor RPC to separate threads; the editor thread runs
+  until its own channel says to stop, so text queued before a cancel or a
+  shutdown is still written (bounded at three seconds, with anything
+  undelivered logged at error level).
+- `core/decode.rs` owns the committed sample offset on one worker. Each
+  capture is an `Utterance` with one monotone lifecycle — `Live`, then either
+  `Released` for its final decode or `Cancelled` — so a later capture cannot
+  revive an earlier one and no pair of booleans can disagree. Preview output
+  never enters the commit path, and a cancel stops decoding without unwriting
+  text the recognizer already produced.
+- `shell/inference.rs` wraps the official sherpa Rust API. The safe wrapper,
+  FFI bindings, and native runtime are pinned together; startup checks the
+  native version. Both models explicitly use the CPU provider. The merge,
+  padding and settlement policy it applies to the detector's spans is pure and
+  lives in `core/segments.rs`, which is what the offline differential check
+  compares against the Python splitter.
+- `shell/audio.rs` maintains pre-roll and immutable callback chunks behind an
   `InputBackend` seam, so the capture arithmetic is driven deterministically in
   tests; PortAudio is one implementation of it. Snapshots copy sample data
   outside the callback lock. Everything the loop learns about the device arrives
@@ -46,23 +55,27 @@ Rust runtime. Setup/evaluation scripts remain Python.
   so a wedged device cannot block the event loop; orderly shutdown still stops.
   The in-memory ceiling is `MAX_UTTERANCE_SECONDS = 3600`, a compile-time
   constant, not a config key.
-- `recorder.rs` writes shared chunks independently before the in-memory limit is
-  applied. `start()` never joins the previous writer on the key-press path — it
-  detaches it, because that path must not wait on a sick filesystem.
-- `frames.rs` gives capture-absolute sample offsets their own type, `Frames`,
-  distinct from indices into a snapshot, which may begin after the capture did.
-- `hotkey.rs` opens every evdev descriptor with `File::open` (read-only) and
-  ignores auto-repeat. `WatcherState` is a pure fold over the event stream:
-  which devices hold the hotkey, and which latch modifiers each reports. Kernel
-  state seeds a device when it is registered, and the latch is evaluated in
-  event order thereafter. Devices are identified by `(rdev, ino)`, so a replug
-  that reuses a path is seen. Hotplug uses a 500 ms scan. Losing the keyboard
-  that holds the hotkey, or the last hotkey-capable keyboard while a latched
-  recording runs, sends `Event::HotkeyLost`: the recording ends by decoding
-  what was said, never by cancelling.
-- `nvim.rs` owns the socket and pinned dictation buffer, and `nvim/rpc.rs` the
-  msgpack transport, where every call carries an absolute deadline. `x11.rs`
-  performs bounded placement queries, one per spawn. No module synthesizes
+- `shell/recorder.rs` writes shared chunks independently before the in-memory
+  limit is applied. `start()` never joins the previous writer on the key-press
+  path — it detaches it, because that path must not wait on a sick filesystem.
+- `core/frames.rs` gives capture-absolute sample offsets their own type,
+  `Frames`, distinct from indices into a snapshot, which may begin after the
+  capture did.
+- `shell/hotkey.rs` opens every evdev descriptor with `File::open`
+  (read-only), scans, polls and reads; it owns no policy. `core/hotkey.rs` has
+  the other half: `WatcherState` is a pure fold over the event stream — which
+  devices hold the hotkey, and which latch modifiers each reports — and
+  auto-repeat is discarded there. Kernel state seeds a device when it is
+  registered, and the latch is evaluated in event order thereafter. Devices are
+  identified by `(rdev, ino)`, read off the node by the shell and judged by the
+  pure `verdict`, so a replug that reuses a path is seen. Hotplug uses a 500 ms
+  scan. Losing the keyboard that holds the hotkey, or the last hotkey-capable
+  keyboard while a latched recording runs, sends `Event::HotkeyLost`: the
+  recording ends by decoding what was said, never by cancelling.
+- `shell/nvim/mod.rs` owns the socket and pinned dictation buffer, and
+  `shell/nvim/rpc.rs` the msgpack transport, where every call carries an
+  absolute deadline. `shell/x11.rs` performs bounded placement queries, one per
+  spawn. No module synthesizes
   input or calls X focus APIs.
 
 The dictation preview uses the theme's comment foreground with an italic
@@ -112,8 +125,9 @@ debugging. Subcommands are `transcribe <WAV> [--out PATH]` and `check`.
 
 Exit codes are selected by error *type*, never by matching a message, so a
 reworded error cannot silently turn into a restart loop: `2` model files
-missing, `3` the hotkey watcher could not start (`daemon::HotkeyUnavailable`),
-`4` an unreadable or wrong-rate WAV handed to `transcribe`, `1` everything else.
+missing, `3` the hotkey watcher could not start
+(`shell::daemon::HotkeyUnavailable`), `4` an unreadable or wrong-rate WAV
+handed to `transcribe`, `1` everything else.
 The systemd unit refuses to retry 2 and 3 and does retry 1 — which is what a
 second daemon losing the race for
 `$XDG_STATE_HOME/spokenpad/daemon.lock` (an `flock`, held for the process
@@ -147,8 +161,9 @@ recovery and pruning with temporary files, and real headless nvim RPC tests. No
 test uses the actual keyboard or microphone, takes the daemon lock, or touches
 the real state directory, so the suite runs while the user's own service does.
 
-`tests/e2e.rs` drives `daemon::serve` end to end with three substitutions and
-nothing else — a synthetic microphone, a channel in place of evdev, and a
+`tests/e2e.rs` drives `shell::daemon::serve` end to end with three
+substitutions and nothing else — a synthetic microphone, a channel in place of
+evdev, and a
 counting recognizer — against a real `nvim --headless` over msgpack-RPC. It
 asserts the things only the whole loop can show: text landing in the file,
 progressive commits appending before release, a too-short tap discarded with a

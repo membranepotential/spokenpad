@@ -8,24 +8,29 @@ for ASR/VAD parity and evaluation; the daemon never imports or starts it.
 
 ## Production components
 
+`src/` is split in two: `core/` is the functional core, `shell/` is the
+imperative shell, and `config.rs` sits at the root because both sides read it.
+
 | Module | Responsibility | External boundary |
 |---|---|---|
 | `config.rs` | Parse and validate the TOML once, before any thread or model | filesystem |
-| `state.rs` | Total session-state transition function, and the minimum hold | none |
-| `frames.rs` | `Frames`: capture-absolute sample offsets, distinct from slice indices | none |
-| `geometry.rs` | Which output the pointer is on, and the clamped window rect | none |
-| `text.rs` | Filler stripping, exact replacements, whitespace repair | none |
-| `session.rs` | Utterance lifecycle, preview cadence, and the one user-visible notice | internal channels |
-| `decode.rs` | Committed sample offset, settled commits, release tails, preview isolation | worker messages |
-| `inference.rs` | CPU-only models plus VAD merge/pad/settlement | ONNX Runtime |
-| `hotkey.rs` | Observe evdev keys read-only; `WatcherState` is the pure half | `/dev/input` |
-| `audio.rs` | Pre-roll, immutable capture chunks, the memory ceiling, stream repair | PortAudio (behind `InputBackend`) |
-| `recorder.rs` | Persist every capture independently of decode, and prune the directory | filesystem |
-| `nvim.rs` | Owned editor lifecycle, ownership proof, transactional appends, indicator | Unix socket, i3 |
-| `nvim/rpc.rs` | msgpack-RPC transport with absolute deadlines; pure codec | Unix socket |
-| `x11.rs` | Bounded `xrandr`/`xdotool`/`i3-msg` queries, once per spawn | subprocesses |
-| `logging.rs` | Private 0600 diagnostic log, rotated at 1 MB | filesystem |
-| `daemon.rs` | `run` (the shell) and `serve` (the event loop) | all of the above |
+| `core/state.rs` | Total session-state transition function, and the minimum hold | none |
+| `core/frames.rs` | `Frames`: capture-absolute sample offsets, distinct from slice indices | none |
+| `core/geometry.rs` | Which output the pointer is on, and the clamped window rect | none |
+| `core/text.rs` | Filler stripping, exact replacements, whitespace repair | none |
+| `core/session.rs` | Utterance lifecycle, preview cadence, and the one user-visible notice | internal channels |
+| `core/decode.rs` | Committed sample offset, settled commits, release tails, preview isolation | worker messages |
+| `core/segments.rs` | VAD merge/pad/settlement: spans in, decode windows out | none |
+| `core/hotkey.rs` | `WatcherState`: which keyboards hold the hotkey and which latch modifiers they report | none |
+| `shell/inference.rs` | CPU-only models; the sherpa recognizer and the Silero detector | ONNX Runtime |
+| `shell/hotkey.rs` | Observe evdev keys read-only: scan, open, poll, read | `/dev/input` |
+| `shell/audio.rs` | Pre-roll, immutable capture chunks, the memory ceiling, stream repair | PortAudio (behind `InputBackend`) |
+| `shell/recorder.rs` | Persist every capture independently of decode, and prune the directory | filesystem |
+| `shell/nvim/mod.rs` | Owned editor lifecycle, ownership proof, transactional appends, indicator | Unix socket, i3 |
+| `shell/nvim/rpc.rs` | msgpack-RPC transport with absolute deadlines; pure codec | Unix socket |
+| `shell/x11.rs` | Bounded `xrandr`/`xdotool`/`i3-msg` queries, once per spawn | subprocesses |
+| `shell/logging.rs` | Private 0600 diagnostic log, rotated at 1 MB | filesystem |
+| `shell/daemon.rs` | `run` (the shell) and `serve` (the event loop) | all of the above |
 
 The Neovim presentation code is embedded from `src/lua/spokenpad.lua` (one
 file: the buffer, the winbar indicator, the level meter, the preview extmark,
@@ -35,27 +40,33 @@ buffer content.
 
 ## Functional core, imperative shell
 
-The core is pure and unit-tested without a device, a thread, or a process:
+The split is the directory layout: everything under `core/` is pure and
+unit-tested without a device, a thread, or a process. Nothing there may import
+`evdev`, `libc`, PortAudio, sherpa, `std::fs`, `std::process`, `std::net` or
+`std::thread`; code that needs one of those belongs in `shell/`.
 
-- `state.rs` — `step(State, Event) -> (State, Command)`, total.
-- `session.rs` — what a capture means: which utterance is current, whether a
-  preview is due, which notice is showing.
-- `decode.rs` — offsets, settlement, and what a release still owes.
-- `frames.rs`, `geometry.rs`, `text.rs` — values and arithmetic.
-- the pure halves of two device modules: `hotkey::WatcherState` (which
-  keyboards hold the hotkey and which latch modifiers they report) and, in
-  `nvim`, the RPC codec, the spawn argv, and ownership parsing.
+- `core/state.rs` — `step(State, Event) -> (State, Command)`, total.
+- `core/session.rs` — what a capture means: which utterance is current, whether
+  a preview is due, which notice is showing.
+- `core/decode.rs` — offsets, settlement, and what a release still owes.
+- `core/segments.rs` — VAD spans merged into padded, settled decode windows.
+- `core/hotkey.rs` — which keyboards hold the hotkey and which latch modifiers
+  they report, and when a rescan must reprobe a device node.
+- `core/frames.rs`, `core/geometry.rs`, `core/text.rs` — values and arithmetic.
+- one pure half still lives inside a shell module: in `shell/nvim`, the RPC
+  codec, the spawn argv, and ownership parsing.
 
 The shell owns everything that can fail for reasons outside the program:
-`daemon::run` and `daemon::serve`, the audio backends, `recorder`, the hotkey
-run loop, the nvim session, `x11`, and `logging`.
+`shell::daemon::run` and `shell::daemon::serve`, the audio backends,
+`shell::recorder`, the hotkey run loop, the nvim session, `shell::x11`, and
+`shell::logging`.
 
-`daemon::run` is the imperative shell proper — it takes the per-user lock,
-registers signal handlers, opens PortAudio and evdev, and loads the models.
-`daemon::serve` is the event loop over whatever devices it is handed: it is
-generic over the audio backend, the recognizer and the segmenter, takes a
-`Receiver<state::Event>` and a stop flag, and touches no process-global state.
-That is the seam `tests/e2e.rs` drives headlessly.
+`shell::daemon::run` is the imperative shell proper — it takes the per-user
+lock, registers signal handlers, opens PortAudio and evdev, and loads the
+models. `shell::daemon::serve` is the event loop over whatever devices it is
+handed: it is generic over the audio backend, the recognizer and the segmenter,
+takes a `Receiver<state::Event>` and a stop flag, and touches no
+process-global state. That is the seam `tests/e2e.rs` drives headlessly.
 
 ## Event and data flow
 
@@ -122,7 +133,8 @@ recovery does not depend on decoding succeeding.
 ## Concurrency and ownership
 
 Four owners: the main loop (session state), the input watcher, the inference
-worker, and the editor thread; `recorder` owns disk I/O on a thread of its own.
+worker, and the editor thread; `shell::recorder` owns disk I/O on a thread of
+its own.
 
 Capture callbacks do bounded work — one allocation, one lock, no I/O — and hand
 immutable chunks to the recording and decode consumers. One inference worker
