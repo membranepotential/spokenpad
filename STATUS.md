@@ -5,8 +5,9 @@ Hold M4 (or latch with shift), speak, and text appears in a floating nvim
 without taking focus. Fully local, CPU-only; the GTX 1650 stays free.
 
 ## Now
-- Review pass 2026-09-11 committed (c039aaa) and the service restarted on it
-  at 12:24; awaiting the user's live check.
+- 2026-09-11 follow-ups verified (Astra review applied: ranked, width-fitted
+  notices; peer-gone probe retry): splitting into logical commits — next:
+  fast-forward main, restart the service, user re-check.
 
 ## Done
 - Review pass 2026-09-11 fixed nine live bugs: committed text lost on cancel or
@@ -28,14 +29,13 @@ without taking focus. Fully local, CPU-only; the GTX 1650 stays free.
   matched all six commits, offsets and final text (see Known issues).
 - First live Rust dictation: 89.3s captured, 2.6s tail decoded in 0.27s, append
   33ms; X11 smoke: exact Unicode save, focus unchanged.
-- Editor hardening: retry dedup, RPC deadlines, safe sockets, i3-rule proof.
 - 123 lib + 1 bin + 4 CLI + 10 e2e Rust tests and 68 Python tests pass; strict
   clippy/fmt, Ruff and mypy clean. Accuracy: 17.6% WER with VAD, 13.9% without,
   against Handy 0.9.6's 48.7% on the same five verified clips.
 
 ## Next
-- User live check on the restarted service: first preview, long pauses,
-  scroll-follow, a too-short tap, Escape mid-recording, a latched pass.
+- After the restart: a too-short tap (< 120 ms) shows its winbar notice, an
+  empty press produces nothing, a long notice keeps the phase label visible.
 
 ## Known issues / open questions
 - First words lost on some long dictations: **historical**, seen on the Python
@@ -44,9 +44,10 @@ without taking focus. Fully local, CPU-only; the GTX 1650 stays free.
   addressed candidate cause; watch for recurrence.
 - Dying input stream: root cause unknown; the watchdog recovers it, and a gap
   during a capture is now reported to the user rather than only logged.
-- Short commands error-prone: the `cd home` clip now decodes empty in Rust
-  (Python: `C D home.`, same segments; reproduced at b1159ec, so pre-existing).
-  VAD splitting costs ~3.7 WER points on five clips.
+- Rust/Python ASR divergence on 3 of 5 clips (`cd home` empty vs `C D home.`;
+  `um z E T` vs `um Z S E T`; punctuation/one token in 3 of 6 progressive
+  commits). Segments, offsets and settlement match exactly; reproduced at
+  b1159ec, so a native-runtime difference. VAD splitting costs ~3.7 WER points.
 - LLM cleanup / technical vocabulary open; no fuzzy replacements. Latched
   capture ~230 MB RAM/hour, capped at 3600s; the WAV continues past it.
 

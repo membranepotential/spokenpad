@@ -232,9 +232,9 @@ decoded in 0.53 seconds in that run.
 
 The native suite and the focused offline Python reference suite are both part
 of verification. As of 2026-09-11, `cargo test --locked --all-targets` passes
-**123 library, 1 binary, 4 CLI and 10 end-to-end tests**, with the one real-model
+**132 library, 1 binary, 4 CLI and 12 end-to-end tests**, with the one real-model
 e2e test ignored by default, and the retained Python suite collects and passes
-**68** tests. Strict all-target clippy, rustfmt, Ruff, and mypy checks apply.
+**69** tests. Strict all-target clippy, rustfmt, Ruff, and mypy checks apply.
 The optional `cargo run --example verify_window` smoke harness opened a real
 dedicated editor, saved multiline Unicode exactly, confirmed unchanged X11
 focus after opening and appending, and closed its temporary editor. Run this
