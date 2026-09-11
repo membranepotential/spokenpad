@@ -34,26 +34,39 @@ pub(super) enum RpcFailure {
     Timeout(String),
     /// The socket file exists but nothing is listening on it.
     StaleSocket(std::io::Error),
+    /// The connection was accepted, then the peer closed it before answering.
+    /// Linux queues a Unix-socket connect on the listener before anyone calls
+    /// accept, so a listener that is closed in that window (an editor exiting,
+    /// or another process still holding the descriptor across a fork) yields
+    /// a broken pipe or a reset on the first exchange rather than a refusal.
+    PeerGone(std::io::Error),
     Other(anyhow::Error),
 }
 
 impl RpcFailure {
+    /// A socket path with no live listener behind it.
     pub(super) fn is_stale_socket(&self) -> bool {
         matches!(
             self,
             Self::StaleSocket(error)
-                if matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound
+                        | std::io::ErrorKind::ConnectionRefused
+                        | std::io::ErrorKind::ConnectionReset
+                )
         )
     }
 
     fn from_io(error: std::io::Error, timed_out: &str) -> Self {
-        if matches!(
-            error.kind(),
-            std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
-        ) {
-            Self::Timeout(timed_out.to_owned())
-        } else {
-            Self::Other(error.into())
+        match error.kind() {
+            std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => {
+                Self::Timeout(timed_out.to_owned())
+            }
+            std::io::ErrorKind::BrokenPipe
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::UnexpectedEof => Self::PeerGone(error),
+            _ => Self::Other(error.into()),
         }
     }
 }
@@ -63,6 +76,7 @@ impl std::fmt::Display for RpcFailure {
         match self {
             Self::Timeout(message) => formatter.write_str(message),
             Self::StaleSocket(error) => error.fmt(formatter),
+            Self::PeerGone(error) => write!(formatter, "nvim closed the connection: {error}"),
             Self::Other(error) => error.fmt(formatter),
         }
     }
@@ -73,6 +87,9 @@ impl From<RpcFailure> for anyhow::Error {
         match value {
             RpcFailure::Timeout(message) => anyhow!(message),
             RpcFailure::StaleSocket(error) => error.into(),
+            RpcFailure::PeerGone(error) => {
+                anyhow::Error::from(error).context("nvim closed the connection before answering")
+            }
             RpcFailure::Other(error) => error,
         }
     }

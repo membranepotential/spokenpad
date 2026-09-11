@@ -59,6 +59,8 @@ const SETUP_TIMEOUT: Duration = Duration::from_secs(5);
 /// state at `close`, which a detaching daemon waits this long for.
 const INDICATOR_TIMEOUT: Duration = Duration::from_millis(250);
 const CONNECT_POLL: Duration = Duration::from_millis(25);
+/// Ownership probes retried when the peer closes the connection unanswered.
+const PROBE_ATTEMPTS: usize = 3;
 const MAP_TIMEOUT: Duration = Duration::from_secs(3);
 
 const SPOKENPAD_LUA: &str = include_str!("../../lua/spokenpad.lua");
@@ -303,6 +305,39 @@ impl NvimSession {
         self.connection = None;
     }
 
+    /// Connects to the socket and asks who owns it. A peer that accepts the
+    /// connection and then closes it before answering is retried briefly: an
+    /// editor exiting, or a listener whose descriptor a forking process still
+    /// held for a moment, looks exactly like that, and a few milliseconds later
+    /// the same path is either refused (stale) or answered (live).
+    fn probe_existing(&self) -> Result<Probe> {
+        let mut last_gone = None;
+        for _ in 0..PROBE_ATTEMPTS {
+            let mut client =
+                match RpcClient::connect(&self.config.socket_path, deadline(PROBE_TIMEOUT)) {
+                    Ok(client) => client,
+                    Err(error) if error.is_stale_socket() => return Ok(Probe::Stale),
+                    Err(error) => return Err(error.into()),
+                };
+            match client.request(
+                "nvim_exec_lua",
+                vec![Value::from(OWNERSHIP_QUERY), Value::Array(Vec::new())],
+                deadline(PROBE_TIMEOUT),
+            ) {
+                Ok(value) => return Ok(Probe::Live(client, parse_ownership(&value)?)),
+                Err(error @ RpcFailure::PeerGone(_)) => {
+                    last_gone = Some(error);
+                    std::thread::sleep(CONNECT_POLL);
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err(
+            anyhow::Error::from(last_gone.expect("at least one attempt"))
+                .context("the nvim socket keeps accepting and closing connections"),
+        )
+    }
+
     fn attach_existing(&mut self) -> Result<bool> {
         let metadata = match fs::symlink_metadata(&self.config.socket_path) {
             Ok(metadata) => metadata,
@@ -314,16 +349,13 @@ impl NvimSession {
             "refusing non-socket path at {}",
             self.config.socket_path.display()
         );
-        let mut client = match RpcClient::connect(&self.config.socket_path, deadline(PROBE_TIMEOUT))
-        {
-            Ok(client) => client,
-            Err(error) if error.is_stale_socket() => {
+        let (mut client, ownership) = match self.probe_existing()? {
+            Probe::Stale => {
                 remove_stale_socket(&self.config.socket_path)?;
                 return Ok(false);
             }
-            Err(error) => return Err(error.into()),
+            Probe::Live(client, ownership) => (client, ownership),
         };
-        let ownership = query_ownership(&mut client, deadline(PROBE_TIMEOUT))?;
         let expected_marker = read_marker(&marker_path(&self.config.socket_path))?;
         // The marker file proves spokenpad launched this editor. A pinned
         // buffer under the dictation directory proves the same thing from the
@@ -927,6 +959,12 @@ fn still_pinned(open: &mut Connected) -> bool {
             .pinned
             .is_some_and(|pin| pin.buffer == open.buffer)
     })
+}
+
+enum Probe {
+    /// Nothing listens on the socket path.
+    Stale,
+    Live(RpcClient, Ownership),
 }
 
 fn query_ownership(client: &mut RpcClient, deadline: Instant) -> Result<Ownership> {
