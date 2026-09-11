@@ -2,6 +2,7 @@ pub mod audio;
 pub mod config;
 pub mod daemon;
 pub mod decode;
+pub mod frames;
 pub mod geometry;
 pub mod hotkey;
 pub mod inference;

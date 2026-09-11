@@ -1,10 +1,16 @@
 -- The nvim half of spokenpad: the dictation buffer and its indicator.
 --
--- Loaded once per connection by Rust's `NvimSession` via
--- `nvim_exec_lua`, so it is re-applied automatically whenever the daemon
--- reattaches to a new nvim. Everything it defines hangs off `_G.Spokenpad`;
--- the Rust side calls `Spokenpad.setup`, transactional `Spokenpad.append_once`
--- (provided by nvim_rust.lua), and `Spokenpad.set_state`.
+-- Loaded once per connection by Rust's `NvimSession` via `nvim_exec_lua`, so
+-- it is re-applied automatically whenever the daemon reattaches to a running
+-- nvim. Everything it defines hangs off `_G.Spokenpad`; the Rust side calls
+-- `Spokenpad.setup`, transactional `Spokenpad.append_once`, and
+-- `Spokenpad.push`.
+--
+-- Reloading must not lose what the running editor already holds, so the first
+-- line keeps the previous module and the block below carries its state over:
+-- the pinned buffer, the indicator state, the meter history, and the append
+-- de-duplication cache. That is why this file is a chunk evaluated over RPC
+-- rather than a `require`d module.
 --
 -- Two things live here rather than in the daemon, for the same reason: they are
 -- per-frame work that would otherwise be a round trip.
@@ -15,6 +21,8 @@
 --    "a preview is never committed" holds *physically* -- virtual text
 --    cannot be written to the file, yanked, or undone into the buffer. See
 --    docs/constraints.md, "One-shot committed decode".
+
+local previous = _G.Spokenpad
 
 local M = {}
 
@@ -32,15 +40,39 @@ local AUDIBLE = 0.02
 M.state = { phase = "idle", level = 0.0, preview = "", latched = false, previewing = true }
 M.levels = {}
 M.preview_views = {}
+M.winbar_windows = {}
 M.buf = nil
+M.dedicated = false
 M.ns = vim.api.nvim_create_namespace("spokenpad")
 
 for _ = 1, METER_CELLS do
   M.levels[#M.levels + 1] = 0.0
 end
 
+-- Carry the running editor's state across a reload. A daemon restart must not
+-- blank the indicator, forget which buffer is pinned, or replay an append
+-- whose reply was lost.
+if previous then
+  if previous.buf and vim.api.nvim_buf_is_valid(previous.buf) and vim.api.nvim_buf_is_loaded(previous.buf) then
+    M.buf = previous.buf
+  end
+  M.state = previous.state or M.state
+  M.levels = previous.levels or M.levels
+  M.preview_views = previous.preview_views or M.preview_views
+  M.winbar_windows = previous.winbar_windows or M.winbar_windows
+  M.dedicated = previous.dedicated or false
+  M.last_append_id = previous.last_append_id
+  M.last_append_buf = previous.last_append_buf
+  M.last_append_result = previous.last_append_result
+end
+
 --- Highlight groups, linked to the colourscheme rather than hard-coded, so the
 --- indicator follows whatever theme the user's own config loaded.
+---
+--- The preview is the exception: it is provisional text, so it takes the
+--- active colourscheme's Comment foreground *with italics* rather than a link,
+--- which is the clear grey the Qt overlay used without hard-coding a colour
+--- that fights the theme.
 local function define_highlights()
   local links = {
     SpokenpadRec = "DiagnosticError",
@@ -53,6 +85,9 @@ local function define_highlights()
   for name, target in pairs(links) do
     vim.api.nvim_set_hl(0, name, { link = target, default = true })
   end
+  local preview = vim.api.nvim_get_hl(0, { name = "Comment", link = false })
+  preview.italic = true
+  vim.api.nvim_set_hl(0, "SpokenpadPreview", preview)
 end
 
 local function meter()
@@ -79,12 +114,15 @@ local function winbar()
     local label = M.state.latched and "\u{25cf} REC \u{1f512} press to stop " or "\u{25cf} REC "
     local bar = "%#SpokenpadRec#" .. label .. "%*" .. meter()
     if not M.state.previewing then
-      -- Previews stop past the in-memory ceiling, or -- without a VAD model,
-      -- where nothing settles and every preview decodes the whole capture --
-      -- past preview.max_seconds. Saying so is the difference between "it is
-      -- still recording, it just stopped showing me" and "it has silently
-      -- dropped what I am saying".
-      bar = bar .. "%#SpokenpadIdle# preview paused, still recording%*"
+      -- No preview is coming: either none ever was (previews turned off, or a
+      -- daemon with no VAD model, where nothing settles and a preview would
+      -- have to re-decode the whole capture), or they stopped for a long
+      -- uncommitted tail or the memory cap. One flag cannot tell those apart,
+      -- and the one that matters is the same either way: the recording is
+      -- running and only the live text is missing. Saying so is the difference
+      -- between "it just stopped showing me" and "it has silently dropped what
+      -- I am saying" -- which is why the phrasing keeps "still recording".
+      bar = bar .. "%#SpokenpadIdle# no live preview, still recording%*"
     end
     return bar
   elseif phase == "transcribing" then
@@ -118,9 +156,21 @@ end
 
 local function render()
   local bar = winbar()
+  local shown = {}
   for _, win in ipairs(windows()) do
     vim.api.nvim_set_option_value("winbar", bar, { win = win })
+    shown[win] = true
   end
+  -- A window that stops showing the dictation buffer -- `:e other.md` in it --
+  -- would otherwise keep a frozen "REC" winbar over someone else's file. An
+  -- empty window-local value is how nvim says "use the global one", so this
+  -- hands the window back to whatever the user's own config put there.
+  for win in pairs(M.winbar_windows) do
+    if not shown[win] and vim.api.nvim_win_is_valid(win) then
+      pcall(vim.api.nvim_set_option_value, "winbar", "", { win = win })
+    end
+  end
+  M.winbar_windows = shown
 end
 
 --- Word-wrap `text` to `width` display columns, keeping the last `max_lines`.
@@ -273,8 +323,8 @@ local function render_preview()
   -- second or more on a long passage, and clearing the preview at the key
   -- release blanked the screen for exactly as long as the user had to wait --
   -- so the one moment they most want to start reading was the one moment
-  -- there was nothing to read. It is replaced when the real text lands
-  -- (`M.append` clears it), which is the only correct moment to drop it.
+  -- there was nothing to read. It is replaced when the real text lands (the
+  -- append clears it), which is the only correct moment to drop it.
   if text == "" or (M.state.phase ~= "recording" and M.state.phase ~= "transcribing") then
     pcall(vim.api.nvim_buf_del_extmark, M.buf, M.ns, PREVIEW_EXTMARK)
     M.preview_views = {}
@@ -345,12 +395,16 @@ end
 --- `laststatus` goes to 0: the statusline would otherwise sit below the text
 --- saying nothing the winbar does not already say.
 ---
---- Globals are set as well as window-locals because this is a dedicated
---- instance, not the user's general editor -- their own nvim is untouched.
+--- The window-local half applies wherever the dictation buffer is shown. The
+--- *global* half only applies in an editor spokenpad opened for the purpose,
+--- because there it is the whole instance and nothing else is in it; in an
+--- adopted editor those globals are the user's own and are left alone.
 local function apply_chrome()
-  vim.opt.laststatus = 0
-  vim.opt.showtabline = 0
-  vim.opt.ruler = false
+  if M.dedicated then
+    vim.opt.laststatus = 0
+    vim.opt.showtabline = 0
+    vim.opt.ruler = false
+  end
   for _, win in ipairs(windows()) do
     local opts = { win = win }
     -- Each utterance is one long line; without wrap it runs off the right
@@ -369,10 +423,20 @@ local function apply_chrome()
 end
 
 --- Bind to the dictation buffer. Idempotent: called on every (re)connection.
-function M.setup(buf)
+---
+--- `dedicated` says whether this editor was opened by spokenpad for dictation
+--- and nothing else. It is remembered across reloads, so a daemon restart
+--- that reattaches to the window it opened last time keeps its chrome.
+function M.setup(buf, dedicated)
   M.buf = buf
+  M.dedicated = M.dedicated or dedicated == true
+  -- Before the markdown FileType autocmds can lint the empty backing buffer,
+  -- and again after, since a plugin may enable diagnostics from FileType. The
+  -- buffer filter keeps every other buffer in the user's editor untouched.
+  vim.diagnostic.enable(false, { bufnr = buf })
   define_highlights()
   vim.api.nvim_set_option_value("filetype", "markdown", { buf = buf })
+  vim.diagnostic.enable(false, { bufnr = buf })
   apply_chrome()
   -- A colourscheme change clears `default = true` links, and a window can
   -- start showing this buffer at any time, so both re-assert the indicator
@@ -396,9 +460,31 @@ function M.setup(buf)
     end,
   })
   render()
+  -- The preview belongs to the capture, not to the buffer it was last drawn
+  -- in: a daemon that re-pins mid-recording pushes the same indicator state
+  -- afterwards, and `set_state` redraws only what changed. Without this, the
+  -- live preview would stay in the abandoned buffer until the next word.
+  render_preview()
 end
 
---- Append committed text, then save.
+--- Split `text` into buffer lines on literal newlines, keeping empty ones.
+--- `vim.split` would do this, but not the empty trailing line that a text
+--- ending in "\n" must keep producing for `nvim_buf_set_lines`.
+local function literal_lines(text)
+  local lines = {}
+  local start = 1
+  while true do
+    local newline = text:find("\n", start, true)
+    if not newline then
+      lines[#lines + 1] = text:sub(start)
+      return lines
+    end
+    lines[#lines + 1] = text:sub(start, newline - 1)
+    start = newline + 1
+  end
+end
+
+--- Append committed text and save, or leave the buffer exactly as it was.
 ---
 --- One utterance is delivered as several calls, one per speech segment the
 --- VAD found, so that text starts landing while the rest is still decoding.
@@ -409,68 +495,92 @@ end
 --- Returns the buffer's new line count, which is what the daemon logs -- a
 --- request rather than a notification, so a failure to land text is visible
 --- instead of silent. That is the whole point of this project.
-function M.append(text, continued)
+local function transactional_append(text, continued)
   if not M.buf or not vim.api.nvim_buf_is_valid(M.buf) then
     error("spokenpad: dictation buffer is gone")
   end
-  local lines = vim.api.nvim_buf_get_lines(M.buf, 0, -1, false)
 
-  -- Trailing blank lines are trimmed before appending, so the gap between
+  local old_lines = vim.api.nvim_buf_get_lines(M.buf, 0, -1, false)
+  local old_modified = vim.bo[M.buf].modified
+  -- Trailing blank lines are ignored when appending, so the gap between
   -- utterances is always exactly one blank line however the buffer got into
   -- its current shape -- an editing session in the window, a plugin adding a
   -- final newline. Without this the separation drifts and never recovers.
-  local last_text = last_text_line(lines)
+  local last_text = last_text_line(old_lines)
   local followers = {}
   for _, win in ipairs(windows()) do
-    followers[win] = follows_preview(win, lines, last_text)
+    followers[win] = follows_preview(win, old_lines, last_text)
   end
-
   -- Paragraph separation, not a running wall of text: one blank line between
   -- utterances, and none at the very top of a fresh file. `continued` instead
   -- extends the last line, so the segments of one utterance read as the one
   -- sentence-stream they are.
-  local addition
+  local addition = literal_lines(text)
   local from = last_text
   if continued and last_text > 0 then
     from = last_text - 1
-    addition = { lines[last_text] .. " " .. text }
-  elseif last_text == 0 then
-    addition = { text }
-  else
-    addition = { "", text }
+    local separator = addition[1] == "" and "" or " "
+    addition[1] = old_lines[last_text] .. separator .. addition[1]
+  elseif last_text > 0 then
+    table.insert(addition, 1, "")
   end
+
   vim.api.nvim_buf_set_lines(M.buf, from, -1, false, addition)
-  local last = vim.api.nvim_buf_line_count(M.buf)
+  -- `noautocmd`, deliberately. The dictation window runs a bundled config
+  -- with nothing on BufWritePre, but `nvim.init` can point at any config, and
+  -- a format-on-save that reflowed dictated prose would rewrite the
+  -- transcript behind the user's back.
+  local ok, write_error = pcall(vim.api.nvim_buf_call, M.buf, function()
+    vim.cmd("silent noautocmd write")
+  end)
+  if not ok then
+    vim.api.nvim_buf_set_lines(M.buf, 0, -1, false, old_lines)
+    vim.bo[M.buf].modified = old_modified
+    render_preview()
+    error(write_error)
+  end
 
   -- Follow the text only for a reader who was already at the end. Someone who
   -- scrolled up to re-read or edit an earlier passage keeps their place --
   -- yanking the cursor away mid-edit is exactly the kind of interruption this
   -- window exists to avoid.
+  local last = vim.api.nvim_buf_line_count(M.buf)
   for _, win in ipairs(windows()) do
     if followers[win] then
       position_at_end(win, last, false, 0)
     end
   end
-
   M.state.preview = ""
   render_preview()
-
-  -- `noautocmd`, deliberately. The dictation window runs a bundled config
-  -- with nothing on BufWritePre, but `nvim.init` can point at any config, and
-  -- a format-on-save that reflowed dictated prose would rewrite the
-  -- transcript behind the user's back.
-  vim.api.nvim_buf_call(M.buf, function()
-    vim.cmd("silent! noautocmd write")
-  end)
   return last
 end
 
---- Push indicator state. Called as a notification, many times a second.
+--- Append exactly once per operation id.
+---
+--- A reply lost to a timeout leaves the daemon unable to tell "not appended"
+--- from "appended, reply lost", so it reconnects and repeats the same id. The
+--- cached result answers the repeat instead of writing the text twice. It is
+--- keyed on the pinned buffer as well: after a reconnection pinned a
+--- different buffer, the cached line count describes a buffer this text never
+--- reached, and replaying the append really is the right answer.
+function M.append_once(id, text, continued)
+  if M.last_append_id == id and M.last_append_buf == M.buf then
+    return M.last_append_result
+  end
+  local result = transactional_append(text, continued)
+  M.last_append_id = id
+  M.last_append_buf = M.buf
+  M.last_append_result = result
+  return result
+end
+
+--- Push indicator state.
 ---
 --- Any field may be omitted; only what is present changes. `level` is folded
 --- into the rolling meter history rather than replacing it.
 function M.set_state(update)
   local phase_changed = update.phase ~= nil and update.phase ~= M.state.phase
+  local preview_before = M.state.preview
   if update.phase ~= nil then
     M.state.phase = update.phase
   end
@@ -506,8 +616,25 @@ function M.set_state(update)
     end
   end
   render()
-  if update.preview ~= nil or phase_changed then
+  -- Compared, not merely present: the daemon pushes the whole indicator state
+  -- ten times a second, and rebuilding the preview extmark on every level
+  -- sample would scroll the window under a reader for nothing.
+  if phase_changed or M.state.preview ~= preview_before then
     render_preview()
+  end
+end
+
+--- Notification entry point: pushes state and never raises.
+---
+--- The daemon sends indicator updates as notifications, so an error here has
+--- no reply to travel back on -- it surfaces as a message in the editor, and
+--- a message long enough to need a hit-enter prompt would sit unanswerable in
+--- a window that cannot take focus. The failure is kept for inspection
+--- instead.
+function M.push(update)
+  local ok, failure = pcall(M.set_state, update)
+  if not ok then
+    M.last_error = tostring(failure)
   end
 end
 

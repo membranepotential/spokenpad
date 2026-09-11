@@ -75,14 +75,18 @@ discarded at any length.
 
 Until 2026-09-08 that rule was implemented as a single decode of the whole
 buffer after `KeyUp`. It is now implemented *progressively*: the capture is
-split at silence by [`spokenpad.vad`](../src/spokenpad/vad.py) into chunks of
-about ten seconds of speech, a chunk is decoded and appended the moment no
-later audio can change it, and releasing the key decodes only the open tail.
-The full design, the rule for deciding that a chunk has settled, and the
-latency budget are in [progressive-commit.md](progressive-commit.md). The
-`Decode` command in the [state machine](architecture.md#statestep-a-total-function)
-still fires only on `Recording → Transcribing`; what it now decodes is the
-remainder, not the whole.
+split at silence by [`inference.rs`](../src/inference.rs), driven by
+[`decode.rs`](../src/decode.rs), into chunks of about ten seconds of speech; a
+chunk is decoded and appended the moment no later audio can change it, and
+releasing the key decodes only the open tail. (`spokenpad.vad` mirrors the same
+splitter offline, for evaluation and the Rust/Python differential check — it is
+not in the daemon's path.) The full design, the rule for deciding that a chunk
+has settled, and the latency budget are in
+[progressive-commit.md](progressive-commit.md). The `Decode` command in the
+[state machine](../src/state.rs) still fires only on
+`Recording → Transcribing`; what it now decodes is the remainder, not the
+whole. The [decode invariants](architecture.md#decode-invariants) list what
+that buys.
 
 ### Segmented is not streamed
 
@@ -111,15 +115,23 @@ model gets no context across a boundary. Runs are therefore merged until a
 chunk holds `vad.chunk_seconds` (10 s) of speech, and each chunk is padded by
 `vad.pad_seconds` (0.5 s) of the real surrounding audio, since Silero's
 boundaries clip word onsets and endings. Measured on the eval samples, per-run
-33.7% → 37.7% WER, merged-and-padded 33.4%; and through `scripts/eval.py
---vad`, which scores the way the harness always has, **13.4% either way**.
-Anyone lowering `chunk_seconds` for faster text is spending accuracy, and
-should re-run that harness.
+33.7% → 37.7% WER, merged-and-padded 33.4%. Measured again after the
+endpoint-padding fix, the harness scores the VAD path spokenpad actually uses at
+**17.6%** aggregate WER against **13.9%** whole-buffer (`uv run
+scripts/eval.py --vad` and without the flag; Handy 0.9.6 scores 48.7% on the
+same five clips). Splitting is not free on this set — it is bought for
+incremental delivery and for the empty-transcript failure below. Anyone
+lowering `chunk_seconds` for faster text is spending more of it, and should
+re-run that harness.
 
 One property is weaker than a single decode at release, and it is stated
-rather than hidden: a cancel no longer means the text never existed. During
-recording, at release, or during the tail decode, it means "stop adding" —
-what is already in the buffer stays, because it is the user's file.
+rather than hidden: a cancel no longer means the text never existed. While
+recording it means "stop adding" — what is already in the buffer stays,
+because it is the user's file. After the key is released it means nothing at
+all: the cancel key is read from every keyboard regardless of focus, the audio
+is already captured, and the final decode is about to land, so
+`(Transcribing, Cancel)` is a no-op rather than a way to destroy a finished
+dictation.
 
 ### The one relaxation: a cosmetic preview of the open tail
 
@@ -135,9 +147,11 @@ Rust session/nvim tests and retained Python decode tests:
    reads preview state.
 2. **Preview cost is bounded by the chunk, not the utterance.** Only the open
    tail is decoded, and it is at most one unclosed chunk. A preview costs the
-   same at ten minutes as at ten seconds. `[preview].max_seconds`
-   survives only as a backstop for a daemon running without a VAD model,
-   where the tail is the whole buffer.
+   same at ten minutes as at ten seconds. Without a segmenter loaded there is
+   no bounded tail, so **no preview tick is issued at all** and the capture is
+   decoded at release. `[preview].max_seconds` (30 s) is the remaining
+   backstop for a chunk that somehow never settles: past it previews pause and
+   say so, and resume by themselves once the tail is short again.
 3. **A preview can never make the user wait.** Previews are abandoned the
    instant a release or a cancel is due: a preview still queued on the single
    worker is skipped, and one already running stops after its current chunk
@@ -157,23 +171,24 @@ model to the discrete GPU — a GTX 1650 with 4 GB VRAM. That GPU needs to stay
 free for other workloads; the project's stated goal was CPU-only local ASR
 from the start (README.md, STATUS.md: "the 4 GB GTX 1650 stays free").
 
-**Rule:** `Asr.num_threads` is fixed at 6 and the ONNX Runtime provider
-is pinned to `cpu` (`scripts/spike_decode.py` builds the recognizer with
-`provider="cpu"` explicitly). No code path in this project selects a GPU
-provider.
+**Rule:** `Asr.num_threads` is fixed at 6 and the ONNX Runtime provider is
+pinned to `cpu` — [`inference.rs`](../src/inference.rs) sets it explicitly for
+both the recognizer and the VAD, as does the Python reference. No code path in
+this project selects a GPU provider, and nothing auto-detects one.
 
 ## Bias vocabulary at decode time, never fuzzy replacement
 
 An earlier approach corrected ASR output with fuzzy/edit-distance string
 replacement after decoding. On short technical tokens, edit distance is not
-selective enough: `set` → `sed`, `reset` → `rust` (README.md,
-[`config.py`](../src/spokenpad/config.py) — see the `TextConfig.replacements`
-docstring, which names this failure directly).
+selective enough: `set` → `sed`, `reset` → `rust` (README.md; the
+`[text].replacements` comment in
+[`config.example.toml`](../config.example.toml) names this failure directly,
+and `eval-samples/references.json` keeps it as a scored regression check).
 
 **Rule:** vocabulary correction happens inside decoding, by biasing the beam
-search toward configured hotwords (`AsrConfig.vocabulary`,
-`AsrConfig.hotwords_score` — see [asr.md](asr.md) for the mechanism and the
-measured tuning table). `TextConfig.replacements` still exists for exact,
+search toward configured hotwords (`asr.vocabulary`,
+`asr.hotwords_score` — see [asr.md](asr.md) for the mechanism and the
+measured tuning table). `text.replacements` still exists for exact,
 whole-word substitutions only — never fuzzy/edit-distance matching — and is
 explicitly a secondary tool, not the primary correction mechanism.
 

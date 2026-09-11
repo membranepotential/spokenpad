@@ -63,6 +63,13 @@ impl Transcriber {
         })
     }
 }
+impl Transcriber {
+    /// One second of silence through the model, so the first real decode does
+    /// not pay for lazy native initialisation.
+    pub fn warm_up(&mut self) -> Result<()> {
+        self.transcribe(&vec![0.; self.rate as usize]).map(drop)
+    }
+}
 impl Recognizer for Transcriber {
     fn transcribe(&mut self, samples: &[f32]) -> Result<String> {
         if samples.is_empty() {
@@ -129,13 +136,13 @@ pub struct SpeechSegmenter {
 impl SpeechSegmenter {
     pub fn new(config: &Vad, rate: u32) -> Result<Self> {
         ensure!(
-            config.model.is_file(),
+            config.model().is_file(),
             "missing VAD model {}",
-            config.model.display()
+            config.model().display()
         );
         let c = VadModelConfig {
             silero_vad: SileroVadModelConfig {
-                model: Some(path_string(&config.model)?),
+                model: Some(path_string(config.model())?),
                 threshold: config.threshold as f32,
                 min_silence_duration: config.min_silence_seconds as f32,
                 min_speech_duration: config.min_speech_seconds as f32,
@@ -203,8 +210,8 @@ pub fn load_segmenter(config: &Vad, rate: u32) -> Option<SpeechSegmenter> {
 pub fn merge_spans(spans: &[Range<usize>], len: usize, config: &Vad, rate: u32) -> Vec<Segment> {
     if spans.is_empty() {
         return vec![Segment {
-            samples: 0..len,
-            end_frame: len,
+            window: 0..len,
+            speech_end: len,
             settled: false,
         }];
     }
@@ -280,8 +287,8 @@ pub fn merge_spans(spans: &[Range<usize>], len: usize, config: &Vad, rate: u32) 
                 pad
             };
             Segment {
-                samples: c.start.saturating_sub(lead)..len.min(c.end + trail),
-                end_frame: c.end,
+                window: c.start.saturating_sub(lead)..len.min(c.end + trail),
+                speech_end: c.end,
                 settled: c.closed && (i < last || len.saturating_sub(c.end) >= rate as usize),
             }
         })
@@ -313,23 +320,23 @@ mod tests {
         assert_eq!(
             s[0],
             Segment {
-                samples: 0..1250,
-                end_frame: 1200,
+                window: 0..1250,
+                speech_end: 1200,
                 settled: true
             }
         );
         assert_eq!(
             s[1],
             Segment {
-                samples: 1450..1900,
-                end_frame: 1800,
+                window: 1450..1900,
+                speech_end: 1800,
                 settled: false
             }
         );
         assert!(!merge_spans(std::slice::from_ref(&(200..1200)), 1299, &c, 100)[0].settled);
         assert!(merge_spans(std::slice::from_ref(&(200..1200)), 1300, &c, 100)[0].settled);
         assert_eq!(
-            merge_spans(std::slice::from_ref(&(500..550)), 1000, &c, 100)[0].samples,
+            merge_spans(std::slice::from_ref(&(500..550)), 1000, &c, 100)[0].window,
             450..600
         );
     }
@@ -339,15 +346,15 @@ mod tests {
         let c = Vad::default();
         let split = merge_spans(&[100..300, 700..800], 900, &c, 100);
         assert_eq!(split.len(), 2);
-        assert_eq!(split[0].samples, 50..350);
-        assert_eq!(split[0].end_frame, 300);
+        assert_eq!(split[0].window, 50..350);
+        assert_eq!(split[0].speech_end, 300);
         assert!(split[0].settled);
-        assert_eq!(split[1].samples, 650..850);
+        assert_eq!(split[1].window, 650..850);
         assert!(!split[1].settled);
 
         let merged = merge_spans(&[100..300, 699..800], 900, &c, 100);
         assert_eq!(merged.len(), 1, "ordinary pauses still aggregate");
-        assert_eq!(merged[0].samples, 0..900);
+        assert_eq!(merged[0].window, 0..900);
 
         let mut wide_pad = c.clone();
         wide_pad.pad_seconds = 3.0;
@@ -358,15 +365,15 @@ mod tests {
         );
 
         let wide = merge_spans(&[100..500, 900..1300], 1400, &c, 100);
-        assert_eq!(wide[0].samples, 0..700);
-        assert_eq!(wide[1].samples, 700..1400);
+        assert_eq!(wide[0].window, 0..700);
+        assert_eq!(wide[1].window, 700..1400);
 
         let target_then_gap = merge_spans(&[100..1100, 1500..1600], 1700, &c, 100);
-        assert_eq!(target_then_gap[0].samples, 0..1300);
-        assert_eq!(target_then_gap[1].samples, 1450..1650);
+        assert_eq!(target_then_gap[0].window, 0..1300);
+        assert_eq!(target_then_gap[1].window, 1450..1650);
         let target_then_short_gap = merge_spans(&[100..1100, 1499..1600], 1700, &c, 100);
-        assert_eq!(target_then_short_gap[0].samples, 0..1150);
-        assert_eq!(target_then_short_gap[1].samples, 1449..1650);
+        assert_eq!(target_then_short_gap[0].window, 0..1150);
+        assert_eq!(target_then_short_gap[1].window, 1449..1650);
     }
     #[test]
     fn bpe_format() {

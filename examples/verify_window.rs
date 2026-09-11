@@ -4,7 +4,8 @@ use anyhow::{Context, Result, anyhow, ensure};
 use rmpv::Value;
 use spokenpad::{
     config::Config,
-    nvim::{IndicatorPhase, IndicatorUpdate, NvimSession},
+    nvim::{IndicatorPhase, IndicatorState, NvimSession},
+    x11,
 };
 use std::{
     fs,
@@ -53,6 +54,14 @@ fn verify(socket_path: &Path, dictation_dir: &Path) -> Result<()> {
         config.window_instance == "spokenpad",
         "configured window instance no longer matches the smoke test's i3 no_focus rule"
     );
+    // This check opens a window of its own and then kills it. Running it
+    // beside a live dictation window would adopt that window's socket and
+    // close someone's passage, so refuse before anything is opened.
+    ensure!(
+        !x11::i3_window_exists(&config.window_instance),
+        "a {} window is already open; close the dictation window before running this check",
+        config.window_instance
+    );
     config.socket_path = socket_path.to_owned();
     config.dictation_dir = dictation_dir.to_owned();
 
@@ -65,11 +74,12 @@ fn verify(socket_path: &Path, dictation_dir: &Path) -> Result<()> {
         "active X11 window changed while ensuring the Neovim session"
     );
 
-    session.set_state(IndicatorUpdate {
-        phase: Some(IndicatorPhase::Recording),
-        preview: Some("Provisional first preview — never saved."),
-        ..IndicatorUpdate::default()
-    })?;
+    let mut indicator = IndicatorState {
+        phase: IndicatorPhase::Recording,
+        preview: "Provisional first preview — never saved.".to_owned(),
+        ..IndicatorState::default()
+    };
+    session.set_indicator(&indicator)?;
     ensure!(
         active_window()? == before,
         "active X11 window changed while showing the first preview"
@@ -78,10 +88,8 @@ fn verify(socket_path: &Path, dictation_dir: &Path) -> Result<()> {
     session
         .append(TEST_TEXT, false)
         .context("append fixed smoke text")?;
-    session.set_state(IndicatorUpdate {
-        preview: Some("Provisional trailing preview — never saved."),
-        ..IndicatorUpdate::default()
-    })?;
+    indicator.preview = "Provisional trailing preview — never saved.".to_owned();
+    session.set_indicator(&indicator)?;
     ensure!(
         active_window()? == before,
         "active X11 window changed while appending to Neovim"

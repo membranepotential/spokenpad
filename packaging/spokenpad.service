@@ -25,9 +25,16 @@ ExecStart=%h/Documents/spokenpad/target/release/spokenpad
 Restart=on-failure
 RestartSec=3
 
-# Exit 2 is "model files missing" and exit 3 is "not in the input group".
-# Neither becomes true by trying again, and restarting on them turns one
-# clear error into an endless loop that buries it.
+# Exit 2 is "model files missing"; exit 3 is "the hotkey watcher could not
+# start" -- no readable /dev/input device advertising the configured key code,
+# whatever the reason (not in the input group, no such device, no /dev/input at
+# all). Neither becomes true by trying again, and restarting on them turns one
+# clear error into an endless loop that buries it. The code is selected by
+# error type, not by matching the message, so rewording it changes nothing.
+#
+# Exit 1 is deliberately NOT listed: it covers "another spokenpad daemon holds
+# $XDG_STATE_HOME/spokenpad/daemon.lock", which a retry three seconds later can
+# legitimately resolve once the other process exits.
 RestartPreventExitStatus=2 3
 
 [Install]

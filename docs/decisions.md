@@ -43,9 +43,12 @@ runtime; it is no longer a project dependency.
 
 ## TOML config over a settings GUI
 
-There is no settings application. Configuration is a TOML file parsed once
-at startup into frozen dataclasses (`Config.load` in
-[`config.py`](../src/spokenpad/config.py)), and the only runtime UI is the
+There is no settings application. Configuration is a TOML file parsed and
+validated once at startup, before any thread, device or model —
+`Config::load` in [`config.rs`](../src/config.rs) is the production path;
+`config.py` retains a mirror of it for the offline evaluation tools. Unknown
+sections and keys are a hard error rather than a silent default. The only
+runtime UI is the
 dictation window's winbar. This keeps the UI surface to exactly the one
 window that must exist for user feedback during recording, rather than
 building a second, larger UI surface purely for configuration.
@@ -54,9 +57,9 @@ building a second, larger UI surface purely for configuration.
 
 Vocabulary correction for v1 is decode-time hotword biasing only (see
 [asr.md](asr.md#hotwords-biasing-the-beam-not-rewriting-the-output)) — no LLM
-cleanup pass. `TextConfig.replacements` in
-[`config.py`](../src/spokenpad/config.py) exists as an escape hatch for exact,
-whole-word substitutions, but hotword biasing is the primary mechanism.
+cleanup pass. `[text].replacements` in the TOML
+([`config.example.toml`](../config.example.toml)) exists as an escape hatch for
+exact, whole-word substitutions, but hotword biasing is the primary mechanism.
 
 An LLM pass is deferred, not ruled out. STATUS.md records this as an open
 question: "Does hotword biasing alone close the technical-vocabulary gap
@@ -177,8 +180,10 @@ caller is a code path that rots untested while looking maintained. It is one
 `git revert` away if the need returns.
 
 **Historical consequences.** The Qt overlay was disabled; the same indicator (phase,
-level meter, live preview) is rendered in the nvim window's winbar by
-`src/lua/nvim_indicator.lua`, where the text is about to land. Preview settings moved
+level meter, live preview) is rendered in the nvim window's winbar, where the
+text is about to land. (That code lived in `src/lua/nvim_indicator.lua` and
+`src/lua/nvim_rust.lua` at the time; both were merged into
+`src/lua/spokenpad.lua` on 2026-09-11.) Preview settings moved
 out of `[overlay]` into their own `[preview]` section, because they are no
 longer an overlay concern. A fourth thread was added for the RPC connection
 (see [architecture.md](architecture.md)). The Rust runtime later replaced this
@@ -189,6 +194,37 @@ adapter and removed `pynvim`.
 did one-time work); reattach to a running nvim 430 ms; append 19-62 ms. All
 of it off the user's latency path — the window is opened on key-down, on its
 own thread, while the utterance is still being spoken.
+
+## What a capture tells the user, and what a cancel means
+
+**2026-09-11.** Everything the user has to know about the capture they just
+made is one `Notice` owned by `Session`, shown in the winbar in place of the
+preview until the next key press: held too briefly, microphone gap, microphone
+unavailable, capture incomplete, nearly silent, preview paused, memory cap. One
+at a time, set once by the event that caused it. The daemon no longer keeps its
+own re-warning latches, and nothing re-raises a warning on a timer — a message
+that reappears every second is noise, and one that never appears at all is how
+the memory-cap incident went unnoticed.
+
+Four behaviours were settled with it:
+
+- **Cancel is ignored once the key is released.** `(Transcribing, Cancel)` is a
+  no-op. Escape is read from every keyboard regardless of focus, and the audio
+  is already captured, so honouring it there destroys finished dictations. It
+  still discards while recording.
+- **Committed text is never dropped.** Cancelling stops *decoding*. An append
+  queued before the cancel is still written, and shutdown drains the editor
+  queue with a bounded deadline, logging anything undelivered at error level.
+- **A tap under 120 ms is discarded with a notice** rather than silently. The
+  threshold is a named constant in `state.rs`, not a setting: it is a property
+  of how a key feels, not of a deployment. The recovery WAV is kept anyway.
+- **Losing the hotkey keyboard ends the recording by decoding**, never by
+  cancelling: `Event::HotkeyLost` fires when the keyboard holding the key
+  disappears, and when the last hotkey-capable keyboard disappears during a
+  latched recording (which no remaining key could end otherwise).
+
+Rejected: a configurable minimum hold; deleting the WAVs of too-short taps; a
+periodic "still recording" reminder.
 
 ## Cloud ASR (Gladia) captured as issue #1, rejected as the default
 
@@ -234,12 +270,16 @@ this project replaced shipped exactly that kind of correction (as fuzzy
 post-replacement rather than decode-time biasing) and it is what produced
 `set` → `sed` and `reset` → `rust` in the first place.
 
-Measured on the five verified references with an empty vocabulary: 13.4% WER
-against Handy's 48.7%, though that margin is entirely the 37s clip Handy
-discarded. On the four Handy completed it is 18.4% ours to 15.8% theirs — some
-of Handy's edge coming from the very replacement map that broke set/reset. So
-the gap hotwords would close is real but small, and the failure mode they
-introduce is the one this project exists to avoid.
+Measured on the five verified references with an empty vocabulary: **13.9%**
+aggregate WER whole-buffer and **17.6%** through the VAD path the daemon uses,
+against Handy's **48.7%** on the same five. Most of that margin is the 37 s
+clip Handy discarded outright, which is now scored rather than excluded; on the
+four clips Handy completed the two tools are close, some of Handy's showing
+coming from the very replacement map that broke set/reset. So the gap hotwords
+would close is real but small, and the failure mode they introduce is the one
+this project exists to avoid. Current figures live in
+[rust.md](rust.md#verification) — re-run `uv run scripts/eval.py` rather than
+quoting these.
 
 Deferred rather than dropped: the `--sweep` harness stays, and a vocabulary
 can be added later against measurements rather than intuition. Known costs of

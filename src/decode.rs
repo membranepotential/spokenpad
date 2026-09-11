@@ -1,10 +1,11 @@
 //! Shared live/recovery pipeline. Preview output has a separate event type.
+use crate::frames::Frames;
 use anyhow::{Result, ensure};
 use std::{
     ops::Range,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicU8, Ordering},
     },
 };
 
@@ -14,11 +15,34 @@ pub trait Recognizer {
 pub trait Segmenter {
     fn split(&mut self, samples: &[f32]) -> Result<Vec<Segment>>;
 }
+/// One recognizer input. `window` indexes the slice that was segmented;
+/// `speech_end` is the unpadded speech boundary inside the same slice, which
+/// is what a settled commit advances the offset to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Segment {
-    pub samples: Range<usize>,
-    pub end_frame: usize,
+    pub window: Range<usize>,
+    pub speech_end: usize,
     pub settled: bool,
+}
+
+/// An utterance moves forwards only: recording, then either released for its
+/// final decode or cancelled outright.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u8)]
+pub enum Lifecycle {
+    Live = 0,
+    Released = 1,
+    Cancelled = 2,
+}
+
+impl Lifecycle {
+    fn from_bits(bits: u8) -> Self {
+        match bits {
+            0 => Self::Live,
+            1 => Self::Released,
+            _ => Self::Cancelled,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -26,29 +50,33 @@ pub struct UtteranceId(pub u64);
 #[derive(Debug)]
 pub struct Utterance {
     pub id: UtteranceId,
-    ticking: AtomicBool,
-    cancelled: AtomicBool,
+    lifecycle: AtomicU8,
 }
 impl Utterance {
     pub fn new(id: u64) -> Arc<Self> {
         Arc::new(Self {
             id: UtteranceId(id),
-            ticking: AtomicBool::new(true),
-            cancelled: AtomicBool::new(false),
+            lifecycle: AtomicU8::new(Lifecycle::Live as u8),
         })
     }
+    fn advance(&self, to: Lifecycle) {
+        self.lifecycle.fetch_max(to as u8, Ordering::AcqRel);
+    }
     pub fn release(&self) {
-        self.ticking.store(false, Ordering::Release);
+        self.advance(Lifecycle::Released);
     }
     pub fn cancel(&self) {
-        self.cancelled.store(true, Ordering::Release);
-        self.release();
+        self.advance(Lifecycle::Cancelled);
+    }
+    pub fn lifecycle(&self) -> Lifecycle {
+        Lifecycle::from_bits(self.lifecycle.load(Ordering::Acquire))
     }
     pub fn cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::Acquire)
+        self.lifecycle() == Lifecycle::Cancelled
     }
+    /// Still recording: preview ticks may be issued and their text shown.
     pub fn ticking(&self) -> bool {
-        self.ticking.load(Ordering::Acquire) && !self.cancelled()
+        self.lifecycle() == Lifecycle::Live
     }
 }
 
@@ -61,21 +89,21 @@ impl<R: Recognizer, S: Segmenter> Pipeline<R, S> {
         let segments = match &mut self.segmenter {
             Some(s) => s.split(samples)?,
             None => vec![Segment {
-                samples: 0..samples.len(),
-                end_frame: samples.len(),
+                window: 0..samples.len(),
+                speech_end: samples.len(),
                 settled: false,
             }],
         };
         let mut end = 0;
         for s in &segments {
             ensure!(
-                s.samples.start <= s.end_frame
-                    && s.end_frame <= s.samples.end
-                    && s.samples.end <= samples.len()
-                    && s.end_frame >= end,
+                s.window.start <= s.speech_end
+                    && s.speech_end <= s.window.end
+                    && s.window.end <= samples.len()
+                    && s.speech_end >= end,
                 "invalid segment boundaries"
             );
-            end = s.end_frame;
+            end = s.speech_end;
         }
         Ok(segments)
     }
@@ -94,8 +122,8 @@ impl<R: Recognizer, S: Segmenter> Pipeline<R, S> {
             if abandoned() {
                 return Ok(texts.join(" "));
             }
-            let text = self.recognizer.transcribe(&samples[s.samples.clone()])?;
-            log::debug!("chunk {:?}: {text:?}", s.samples);
+            let text = self.recognizer.transcribe(&samples[s.window.clone()])?;
+            log::debug!("chunk {:?}: {text:?}", s.window);
             if abandoned() {
                 return Ok(texts.join(" "));
             }
@@ -124,17 +152,19 @@ impl<R: Recognizer, S: Segmenter> Pipeline<R, S> {
 pub struct Commit {
     pub utterance: Arc<Utterance>,
     pub text: String,
-    pub through: usize,
+    pub through: Frames,
 }
-#[derive(Debug, PartialEq, Eq)]
-pub enum Tick {
-    Preview { text: String, through: usize },
-    Stopped,
+/// Cosmetic text for the open tail. Absence of a `Preview` is the single
+/// encoding of "this tick produced nothing to show".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Preview {
+    pub text: String,
+    pub through: Frames,
 }
 #[derive(Default)]
 struct Progress {
     id: Option<UtteranceId>,
-    through: usize,
+    through: Frames,
 }
 pub struct Worker<R, S> {
     pub pipeline: Pipeline<R, S>,
@@ -151,71 +181,63 @@ impl<R: Recognizer, S: Segmenter> Worker<R, S> {
         if self.progress.id != Some(utterance.id) {
             self.progress = Progress {
                 id: Some(utterance.id),
-                through: 0,
+                through: Frames::ZERO,
             };
         }
     }
+    /// Commits every chunk that has settled and returns the open tail's
+    /// cosmetic text, or `None` once the utterance stopped ticking.
     pub fn tick(
         &mut self,
         samples: &[f32],
-        start: usize,
+        start: Frames,
         utterance: &Arc<Utterance>,
         mut commit: impl FnMut(Commit),
-    ) -> Result<Tick> {
+    ) -> Result<Option<Preview>> {
         if !utterance.ticking() {
-            return Ok(Tick::Stopped);
+            return Ok(None);
         }
         self.begin(utterance);
         ensure!(
             start <= self.progress.through,
             "snapshot begins after the worker's offset"
         );
-        let skip = (self.progress.through - start).min(samples.len());
+        let skip = self.progress.through.since(start).min(samples.len());
         let remainder = &samples[skip..];
         if remainder.is_empty() {
-            return Ok(Tick::Preview {
-                text: String::new(),
-                through: self.progress.through,
-            });
+            return Ok(Some(self.open_tail(String::new())));
         }
         let base = self.progress.through;
         for segment in self.pipeline.split(remainder)? {
             if !utterance.ticking() {
-                return Ok(Tick::Stopped);
+                return Ok(None);
             }
             let text = self
                 .pipeline
                 .recognizer
-                .transcribe(&remainder[segment.samples.clone()])?;
-            if utterance.cancelled() {
-                return Ok(Tick::Stopped);
-            }
+                .transcribe(&remainder[segment.window.clone()])?;
             if !segment.settled {
-                return Ok(if utterance.ticking() {
-                    Tick::Preview {
-                        text,
-                        through: self.progress.through,
-                    }
-                } else {
-                    Tick::Stopped
-                });
+                return Ok(utterance.ticking().then(|| self.open_tail(text)));
+            }
+            if utterance.cancelled() {
+                return Ok(None);
             }
             // A release during this decode keeps this completed settled chunk.
-            self.progress.through = base + segment.end_frame;
+            self.progress.through = base + segment.speech_end;
             commit(Commit {
                 utterance: Arc::clone(utterance),
                 text,
                 through: self.progress.through,
             });
         }
-        Ok(if utterance.ticking() {
-            Tick::Preview {
-                text: String::new(),
-                through: self.progress.through,
-            }
-        } else {
-            Tick::Stopped
-        })
+        Ok(utterance.ticking().then(|| self.open_tail(String::new())))
+    }
+
+    fn open_tail(&self, text: String) -> Preview {
+        Preview {
+            text,
+            through: self.progress.through,
+        }
     }
     pub fn finish(
         &mut self,
@@ -224,7 +246,7 @@ impl<R: Recognizer, S: Segmenter> Worker<R, S> {
         mut commit: impl FnMut(Commit),
     ) -> Result<(String, usize)> {
         self.begin(utterance);
-        let remainder = &samples[self.progress.through.min(samples.len())..];
+        let remainder = &samples[self.progress.through.get().min(samples.len())..];
         let tail_frames = remainder.len();
         let result = self.pipeline.decode(
             remainder,
@@ -233,7 +255,7 @@ impl<R: Recognizer, S: Segmenter> Worker<R, S> {
                 commit(Commit {
                     utterance: Arc::clone(utterance),
                     text,
-                    through: samples.len(),
+                    through: Frames(samples.len()),
                 })
             },
         );
@@ -269,8 +291,8 @@ mod tests {
             Ok((0..s.len())
                 .step_by(4)
                 .map(|i| Segment {
-                    samples: i..(i + 4).min(s.len()),
-                    end_frame: (i + 4).min(s.len()),
+                    window: i..(i + 4).min(s.len()),
+                    speech_end: (i + 4).min(s.len()),
                     settled: i + 4 < s.len(),
                 })
                 .collect())
@@ -293,15 +315,16 @@ mod tests {
         let samples: Vec<_> = (0..10).map(|i| i as f32).collect();
         let mut commits = vec![];
         assert_eq!(
-            w.tick(&samples, 0, &u, |c| commits.push(c)).unwrap(),
-            Tick::Preview {
+            w.tick(&samples, Frames::ZERO, &u, |c| commits.push(c))
+                .unwrap(),
+            Some(Preview {
                 text: "text".into(),
-                through: 8
-            }
+                through: Frames(8)
+            })
         );
         assert_eq!(
             commits.iter().map(|c| c.through).collect::<Vec<_>>(),
-            vec![4, 8]
+            vec![Frames(4), Frames(8)]
         );
         u.release();
         let (_, tail) = w.finish(&samples, &u, |c| commits.push(c)).unwrap();
@@ -322,16 +345,16 @@ mod tests {
         let mut w = worker();
         let a = Utterance::new(1);
         let s: Vec<_> = (0..10).map(|i| i as f32).collect();
-        w.tick(&s, 0, &a, |_| {}).unwrap();
-        w.tick(&s[4..], 4, &a, |_| panic!("duplicate commit"))
+        w.tick(&s, Frames::ZERO, &a, |_| {}).unwrap();
+        w.tick(&s[4..], Frames(4), &a, |_| panic!("duplicate commit"))
             .unwrap();
         assert_eq!(w.pipeline.recognizer.calls.last().unwrap(), &vec![8., 9.]);
         a.release();
         let b = Utterance::new(2);
-        assert_eq!(w.tick(&s, 0, &a, |_| panic!()).unwrap(), Tick::Stopped);
+        assert_eq!(w.tick(&s, Frames::ZERO, &a, |_| panic!()).unwrap(), None);
         w.finish(&s, &a, |_| {}).unwrap();
-        w.tick(&s, 0, &b, |_| {}).unwrap();
-        assert_eq!(w.progress.through, 8);
+        w.tick(&s, Frames::ZERO, &b, |_| {}).unwrap();
+        assert_eq!(w.progress.through, Frames(8));
     }
     #[test]
     fn release_in_settled_decode_commits_current_chunk_then_stops() {
@@ -340,11 +363,12 @@ mod tests {
         w.pipeline.recognizer.stop = Some(u.clone());
         let mut commits = vec![];
         assert_eq!(
-            w.tick(&[1.; 10], 0, &u, |c| commits.push(c)).unwrap(),
-            Tick::Stopped
+            w.tick(&[1.; 10], Frames::ZERO, &u, |c| commits.push(c))
+                .unwrap(),
+            None
         );
         assert_eq!(commits.len(), 1);
-        assert_eq!(w.progress.through, 4);
+        assert_eq!(w.progress.through, Frames(4));
     }
     #[test]
     fn cancel_and_no_vad() {
@@ -355,8 +379,8 @@ mod tests {
         assert!(w.pipeline.recognizer.calls.is_empty());
         let u = Utterance::new(2);
         w.pipeline.segmenter = None;
-        w.tick(&[1.; 10], 0, &u, |_| panic!()).unwrap();
-        assert_eq!(w.progress.through, 0);
+        w.tick(&[1.; 10], Frames::ZERO, &u, |_| panic!()).unwrap();
+        assert_eq!(w.progress.through, Frames::ZERO);
         u.release();
         assert_eq!(w.finish(&[1.; 10], &u, |_| {}).unwrap().1, 10);
     }
@@ -371,6 +395,20 @@ mod tests {
         assert_eq!(text, "recovered");
         assert_eq!(commits.len(), 1);
         assert_eq!(w.pipeline.recognizer.calls.len(), 3);
+    }
+    #[test]
+    fn lifecycle_only_moves_forwards() {
+        let u = Utterance::new(1);
+        assert_eq!(u.lifecycle(), Lifecycle::Live);
+        assert!(u.ticking() && !u.cancelled());
+        u.release();
+        assert_eq!(u.lifecycle(), Lifecycle::Released);
+        assert!(!u.ticking() && !u.cancelled());
+        u.cancel();
+        assert_eq!(u.lifecycle(), Lifecycle::Cancelled);
+        u.release();
+        assert_eq!(u.lifecycle(), Lifecycle::Cancelled, "a cancel is final");
+        assert!(u.cancelled() && !u.ticking());
     }
     #[test]
     fn cancel_during_decode_suppresses_result() {

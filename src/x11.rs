@@ -102,6 +102,8 @@ fn terminate_group(child: &mut Child) {
     let _ = child.wait();
 }
 
+/// The monitor layout, queried afresh. Once per window spawn, so a monitor
+/// plugged in a moment ago is on the list.
 pub(crate) fn outputs() -> Vec<Output> {
     let Ok(text) = run(&["xrandr", "--query"]) else {
         return Vec::new();
@@ -192,7 +194,10 @@ fn has_no_focus_rule_in_json(config: &str, instance: &str) -> bool {
     })
 }
 
-pub(crate) fn i3_window_exists(instance: &str) -> bool {
+/// Whether i3 currently holds a window with this X11 instance name. Public
+/// because the manual window smoke check must refuse to run beside a live
+/// dictation window.
+pub fn i3_window_exists(instance: &str) -> bool {
     let Ok(text) = run(&["i3-msg", "-t", "get_tree"]) else {
         return false;
     };

@@ -2,10 +2,35 @@ use crate::config::Text;
 use anyhow::Result;
 use regex::{Captures, Regex};
 
+/// Whitespace and punctuation repair applied after fillers are removed.
+struct Cleanup {
+    runs: Regex,
+    before_punctuation: Regex,
+    comma_before_punctuation: Regex,
+    leading: Regex,
+}
+impl Cleanup {
+    fn new() -> Result<Self> {
+        Ok(Self {
+            runs: Regex::new(r"[ \t]+")?,
+            before_punctuation: Regex::new(r"[ \t]+([,.!?;:])")?,
+            comma_before_punctuation: Regex::new(r",([.!?;:])")?,
+            leading: Regex::new(r"^[ ,]+")?,
+        })
+    }
+    fn apply(&self, text: &str) -> String {
+        let out = self.runs.replace_all(text, " ");
+        let out = self.before_punctuation.replace_all(&out, "$1");
+        let out = self.comma_before_punctuation.replace_all(&out, "$1");
+        self.leading.replace_all(&out, "").trim().to_owned()
+    }
+}
+
 pub struct Processor {
     config: Text,
     fillers: Option<Regex>,
     replacements: Option<Regex>,
+    cleanup: Cleanup,
 }
 impl Processor {
     pub fn new(config: &Text) -> Result<Self> {
@@ -36,6 +61,7 @@ impl Processor {
                 r"\b",
                 r"\b",
             )?,
+            cleanup: Cleanup::new()?,
         })
     }
     pub fn process(&self, text: &str) -> String {
@@ -43,24 +69,18 @@ impl Processor {
         if self.config.strip_fillers
             && let Some(re) = &self.fillers
         {
-            out = re.replace_all(&out, " ").into_owned();
-            for (pattern, replacement) in [
-                (r"[ \t]+", " "),
-                (r"[ \t]+([,.!?;:])", "$1"),
-                (r",([.!?;:])", "$1"),
-                (r"^[ ,]+", ""),
-            ] {
-                out = Regex::new(pattern)
-                    .expect("constant regex")
-                    .replace_all(&out, replacement)
-                    .into_owned();
-            }
-            out = out.trim().to_owned();
+            out = self.cleanup.apply(&re.replace_all(&out, " "));
         }
         if let Some(re) = &self.replacements {
             out = re
                 .replace_all(&out, |c: &Captures<'_>| {
-                    self.config.replacements[&c[0]].clone()
+                    // The pattern is built from these keys, but never index a
+                    // map with recognizer output: leave anything unknown alone.
+                    self.config
+                        .replacements
+                        .get(&c[0])
+                        .cloned()
+                        .unwrap_or_else(|| c[0].to_owned())
                 })
                 .into_owned();
         }

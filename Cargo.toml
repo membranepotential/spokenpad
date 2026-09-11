@@ -2,6 +2,7 @@
 name = "spokenpad"
 version = "0.2.0"
 edition = "2024"
+rust-version = "1.88"
 license = "MIT"
 description = "Local push-to-talk dictation for Linux/X11"
 
@@ -25,6 +26,11 @@ sherpa-onnx-sys = { version = "=1.13.6", default-features = false, features = ["
 signal-hook = "0.4"
 tempfile = "3.27"
 toml = { version = "0.8", features = ["preserve_order"] }
+
+[dev-dependencies]
+# Already a runtime dependency; integration tests need it to reap the editor
+# process group they spawned.
+libc = "0.2"
 
 [profile.release]
 lto = "thin"

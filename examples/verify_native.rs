@@ -4,6 +4,7 @@ use serde_json::json;
 use spokenpad::{
     config::Config,
     decode::{Pipeline, Recognizer, Segmenter, Utterance, Worker},
+    frames::Frames,
     inference::{SpeechSegmenter, Transcriber},
 };
 use std::{path::Path, time::Instant};
@@ -35,7 +36,7 @@ fn main() -> Result<()> {
         let t = Instant::now();
         let mut texts = vec![];
         for s in &segments {
-            let text = recognizer.transcribe(&samples[s.samples.clone()])?;
+            let text = recognizer.transcribe(&samples[s.window.clone()])?;
             if !text.trim().is_empty() {
                 texts.push(text);
             }
@@ -43,7 +44,7 @@ fn main() -> Result<()> {
         if texts.is_empty() && segments.len() != 1 {
             texts.push(recognizer.transcribe(&samples)?);
         }
-        cases.push(json!({"file":Path::new(&arg).file_name().context("filename")?.to_string_lossy(),"text":texts.join(" "),"elapsed":t.elapsed().as_secs_f64(),"segments":segments.iter().map(|s|json!([s.samples.start,s.samples.end,s.end_frame,s.settled])).collect::<Vec<_>>() }));
+        cases.push(json!({"file":Path::new(&arg).file_name().context("filename")?.to_string_lossy(),"text":texts.join(" "),"elapsed":t.elapsed().as_secs_f64(),"segments":segments.iter().map(|s|json!([s.window.start,s.window.end,s.speech_end,s.settled])).collect::<Vec<_>>() }));
         if samples.len() > 32000 {
             passage.extend(samples);
             passage.extend(vec![0.; 16000]);
@@ -54,14 +55,14 @@ fn main() -> Result<()> {
         segmenter: Some(segmenter),
     });
     let u = Utterance::new(1);
-    let mut through = 0;
+    let mut through = Frames::ZERO;
     let mut commits = vec![];
     let mut texts = vec![];
     let step = 17600;
     for end in (step..passage.len()).step_by(step) {
-        worker.tick(&passage[through..end], through, &u, |c| {
+        worker.tick(&passage[through.get()..end], through, &u, |c| {
             through = c.through;
-            commits.push(json!([end, c.through, c.text]));
+            commits.push(json!([end, c.through.get(), c.text]));
             if !c.text.trim().is_empty() {
                 texts.push(c.text);
             }

@@ -1,4 +1,16 @@
 //! A dedicated Neovim sink, spoken to directly over msgpack-RPC.
+//!
+//! The session owns exactly one thing: a connection to an editor holding a
+//! pinned dictation buffer. That pairing is the invariant — a client without a
+//! buffer, or a buffer without the file it was opened on, is not a state this
+//! module can be in, which is why they live together in [`Connected`].
+//!
+//! Everything the editor does on its side is in `lua/spokenpad.lua`; the
+//! transport is in [`rpc`]. What is left here is the impure middle: spawning
+//! or adopting an editor, proving it belongs to spokenpad, and appending
+//! committed text so that a failure to land it is visible rather than silent.
+mod rpc;
+
 use crate::{
     config::{self, Nvim},
     geometry::{Rect, pick_output, placement},
@@ -6,50 +18,69 @@ use crate::{
 };
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use rmpv::Value;
+use rpc::{RpcClient, RpcFailure};
 use std::{
     fs::{self, File, OpenOptions},
-    io::{BufReader, Read, Write},
-    os::{
-        fd::{AsRawFd, FromRawFd, OwnedFd},
-        unix::{
-            ffi::OsStrExt,
-            fs::{FileTypeExt, OpenOptionsExt},
-            net::UnixStream,
-            process::CommandExt,
-        },
+    io::{Read, Write},
+    os::unix::{
+        fs::{FileTypeExt, OpenOptionsExt},
+        process::CommandExt,
     },
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     time::{Duration, Instant},
 };
 
-const RPC_TIMEOUT: Duration = Duration::from_secs(2);
+/// Liveness and ownership probes: one cheap round trip on an editor that is
+/// otherwise idle. This is on the dictation path — the window is checked on
+/// every key-down — so a wedged editor has to be given up on quickly and
+/// reattached to, rather than delaying the recording that is already running.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+/// Committed text. Deliberately as short as the probe: an append that has not
+/// come back in two seconds is ambiguous rather than lost, and the operation
+/// id makes the reconnect-and-repeat that follows idempotent. A longer
+/// deadline would only make the editor thread sit on a queue of undelivered
+/// utterances for longer before doing anything about it.
+const APPEND_TIMEOUT: Duration = Duration::from_secs(2);
+/// Loading the Lua module, opening the dictation file and pinning its buffer.
+/// The `:edit` in there can run the user's own autocommands on a cold
+/// filetype, so it is given more room than a probe; it happens once per
+/// connection, off the latency path.
+const SETUP_TIMEOUT: Duration = Duration::from_secs(5);
+/// A cosmetic indicator push, sent as a notification about ten times a second
+/// — so only the socket write is waited for, and the only way to reach this
+/// deadline is an editor that has stopped draining its socket. Dropping the
+/// push, and the connection with it, is then exactly right: committed text
+/// must not queue behind a level meter. The one confirmed push is the idle
+/// state at `close`, which a detaching daemon waits this long for.
+const INDICATOR_TIMEOUT: Duration = Duration::from_millis(250);
 const CONNECT_POLL: Duration = Duration::from_millis(25);
 const MAP_TIMEOUT: Duration = Duration::from_secs(3);
-const RPC_MAX_DEPTH: usize = 32;
-const RPC_MAX_BYTES: usize = 8 * 1024 * 1024;
-const INDICATOR: &str = include_str!("lua/nvim_indicator.lua");
-const RUST_EXTENSION: &str = include_str!("lua/nvim_rust.lua");
+
+const SPOKENPAD_LUA: &str = include_str!("lua/spokenpad.lua");
 const BUNDLED_INIT: &str = include_str!("lua/dictation_init.lua");
 
+/// Everything an attaching session needs to know about an editor answering on
+/// the dictation socket: who owns it, whether its startup has finished, and
+/// which buffer — if any — a previous session pinned in it.
 const OWNERSHIP_QUERY: &str = r#"
 local marker = vim.g.spokenpad_owner
+local ready = vim.g.spokenpad_startup_ready
 local buf = _G.Spokenpad and _G.Spokenpad.buf or nil
-if buf and vim.api.nvim_buf_is_valid(buf) and vim.api.nvim_buf_is_loaded(buf) then
-  return { marker or vim.NIL, buf, vim.api.nvim_buf_get_name(buf) }
+if not (buf and vim.api.nvim_buf_is_valid(buf) and vim.api.nvim_buf_is_loaded(buf)) then
+  buf = nil
 end
-return { marker or vim.NIL, vim.NIL, vim.NIL }
+return {
+  marker or vim.NIL,
+  ready or vim.NIL,
+  buf or vim.NIL,
+  buf and vim.api.nvim_buf_get_name(buf) or vim.NIL,
+}
 "#;
 
 const OPEN_BUFFER: &str = r#"
 vim.cmd.edit(vim.fn.fnameescape(...))
 return vim.api.nvim_get_current_buf()
-"#;
-
-const SPAWN_READINESS_QUERY: &str = r#"
-local marker = vim.g.spokenpad_owner
-local ready = vim.g.spokenpad_startup_ready
-return { marker or vim.NIL, ready or vim.NIL }
 "#;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,22 +100,46 @@ impl IndicatorPhase {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default)]
-pub struct IndicatorUpdate<'a> {
-    pub phase: Option<IndicatorPhase>,
-    pub level: Option<f64>,
-    pub preview: Option<&'a str>,
-    pub latched: Option<bool>,
-    pub previewing: Option<bool>,
+/// The whole indicator, as the daemon knows it. Pushing all of it at once
+/// keeps the editor's copy a function of daemon state rather than of the
+/// history of updates that reached it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IndicatorState {
+    pub phase: IndicatorPhase,
+    pub level: f64,
+    pub preview: String,
+    pub latched: bool,
+    pub previewing: bool,
+}
+
+impl Default for IndicatorState {
+    /// Nothing is being recorded and previews are not paused: the state a
+    /// window is left in when the daemon detaches from it.
+    fn default() -> Self {
+        Self {
+            phase: IndicatorPhase::Idle,
+            level: 0.0,
+            preview: String::new(),
+            latched: false,
+            previewing: true,
+        }
+    }
+}
+
+/// A live connection and the buffer it pins. These three are meaningless
+/// apart: an editor this session has not pinned a buffer in cannot be
+/// appended to, and a path with no buffer behind it cannot be returned as the
+/// place the transcript is going.
+struct Connected {
+    client: RpcClient,
+    buffer: i64,
+    path: PathBuf,
 }
 
 pub struct NvimSession {
     config: Nvim,
-    client: Option<RpcClient>,
-    buffer: Option<i64>,
-    path: Option<PathBuf>,
+    connection: Option<Connected>,
     process: Option<Child>,
-    marker: Option<String>,
     session_nonce: Option<String>,
     append_sequence: u64,
 }
@@ -93,54 +148,43 @@ impl NvimSession {
     pub fn new(config: Nvim) -> Self {
         Self {
             config,
-            client: None,
-            buffer: None,
-            path: None,
+            connection: None,
             process: None,
-            marker: None,
             session_nonce: None,
             append_sequence: 0,
         }
     }
 
     pub fn connected(&self) -> bool {
-        self.client.is_some()
+        self.connection.is_some()
     }
 
     pub fn path(&self) -> Option<&Path> {
-        self.path.as_deref()
+        self.connection.as_ref().map(|open| open.path.as_path())
     }
 
     /// Returns the pinned dictation path, reattaching or spawning as needed.
     pub fn ensure(&mut self) -> Result<PathBuf> {
-        if let Some(client) = self.client.as_mut() {
-            if client
-                .request("nvim_eval", vec![Value::from("1")], RPC_TIMEOUT)
-                .is_ok()
-            {
-                return self
-                    .path
-                    .clone()
-                    .context("connected nvim has no pinned dictation path");
+        if let Some(open) = self.connection.as_mut() {
+            if still_pinned(open) {
+                return Ok(open.path.clone());
             }
             self.drop_connection();
         }
 
         if self.attach_existing()? || self.spawn_and_attach()? {
-            return self
-                .path
-                .clone()
-                .context("nvim connected without a dictation path");
+            let open = self
+                .connection
+                .as_ref()
+                .context("nvim connected without a dictation path")?;
+            return Ok(open.path.clone());
         }
         bail!("could not connect to the dictation nvim")
     }
 
     /// Appends literal text and does not return until Neovim confirms its save.
     pub fn append(&mut self, text: &str, continued: bool) -> Result<usize> {
-        ensure!(
-            self.client.is_some() && self.buffer.is_some(),
-            "not connected to nvim"
-        );
+        ensure!(self.connection.is_some(), "not connected to nvim");
         self.append_sequence = self
             .append_sequence
             .checked_add(1)
@@ -153,39 +197,48 @@ impl NvimSession {
             self.session_nonce.as_deref().expect("initialized above"),
             self.append_sequence
         );
-        let args = vec![
-            Value::from(operation.clone()),
+        let arguments = vec![
+            Value::from(operation),
             Value::from(text),
             Value::from(continued),
         ];
 
-        let first = self.client.as_mut().expect("checked above").request(
-            "nvim_exec_lua",
-            vec![
-                Value::from("return Spokenpad.append_once(...)"),
-                Value::Array(args.clone()),
-            ],
-            RPC_TIMEOUT,
-        );
-        let value = match first {
+        let value = match self.request_append(arguments.clone()) {
             Ok(value) => value,
             Err(RpcFailure::Timeout(reason)) => {
-                // The request may have completed after its reply was lost. Reconnect
-                // and repeat the same operation ID; the Lua side returns its cached
-                // result instead of appending twice.
+                // The request may have completed after its reply was lost.
+                // Reconnect and repeat the same operation id; the Lua side
+                // returns its cached result instead of appending twice. Any
+                // failure of the retry leaves this session disconnected, so
+                // the next utterance reattaches rather than writing into a
+                // client whose reply stream is out of step.
+                let pinned = self
+                    .path()
+                    .context("append timed out on a session with no pinned file")?
+                    .to_owned();
                 self.drop_connection();
                 ensure!(
                     self.attach_existing()?,
                     "append outcome is unknown after timeout: {reason}"
                 );
-                self.client.as_mut().expect("attached above").request(
-                    "nvim_exec_lua",
-                    vec![
-                        Value::from("return Spokenpad.append_once(...)"),
-                        Value::Array(args),
-                    ],
-                    RPC_TIMEOUT,
-                )?
+                // The cache that makes the repeat idempotent is keyed on the
+                // pinned buffer, and a buffer that is gone takes it with it —
+                // reattaching then pins a *fresh* file, and repeating there
+                // would write this utterance into a second one. Same path,
+                // same buffer: a file that is still pinned is the buffer the
+                // editor was already holding. So the text stays in the log
+                // and the recovery WAV rather than landing twice.
+                if self.path() != Some(pinned.as_path()) {
+                    self.drop_connection();
+                    bail!("append outcome is unknown: the dictation file changed during reconnect");
+                }
+                match self.request_append(arguments) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        self.drop_connection();
+                        return Err(error.into());
+                    }
+                }
             }
             Err(error) => {
                 self.drop_connection();
@@ -194,47 +247,42 @@ impl NvimSession {
         };
         let count = value
             .as_u64()
-            .or_else(|| value.as_i64().and_then(|value| u64::try_from(value).ok()))
             .context("nvim append returned a non-integer line count")?;
         usize::try_from(count).context("nvim line count does not fit usize")
     }
 
-    /// Sends a cosmetic update as a notification; transport failures surface.
-    pub fn set_state(&mut self, update: IndicatorUpdate<'_>) -> Result<()> {
-        let Some(client) = self.client.as_mut() else {
+    /// Pushes the whole indicator as a notification; transport failures surface.
+    pub fn set_indicator(&mut self, state: &IndicatorState) -> Result<()> {
+        self.push(indicator_fields(state))
+    }
+
+    /// Detaches without killing the editor or closing the user's passage.
+    pub fn close(&mut self) {
+        if let Some(open) = self.connection.as_mut() {
+            // A window left showing "REC", a half-lit meter and a preview
+            // that will never land says the daemon is still listening when it
+            // has exited. Sent as a request, unlike every other indicator
+            // push: nvim discards input it has not parsed yet when a channel
+            // reaches EOF, so a notification written immediately before the
+            // socket closes is regularly lost. Best effort all the same — a
+            // detaching daemon waits a quarter of a second for cosmetics.
+            let _ = open.client.request(
+                "nvim_exec_lua",
+                indicator_call(indicator_fields(&IndicatorState::default())),
+                deadline(INDICATOR_TIMEOUT),
+            );
+        }
+        self.drop_connection();
+    }
+
+    fn push(&mut self, fields: Vec<(Value, Value)>) -> Result<()> {
+        let Some(open) = self.connection.as_mut() else {
             return Ok(());
         };
-        let mut fields = Vec::new();
-        if let Some(phase) = update.phase {
-            fields.push((Value::from("phase"), Value::from(phase.as_str())));
-        }
-        if let Some(level) = update.level {
-            let level = if level.is_finite() {
-                level.clamp(0.0, 1.0)
-            } else {
-                0.0
-            };
-            fields.push((Value::from("level"), Value::F64(level)));
-        }
-        if let Some(preview) = update.preview {
-            fields.push((Value::from("preview"), Value::from(preview)));
-        }
-        if let Some(latched) = update.latched {
-            fields.push((Value::from("latched"), Value::from(latched)));
-        }
-        if let Some(previewing) = update.previewing {
-            fields.push((Value::from("previewing"), Value::from(previewing)));
-        }
-        if fields.is_empty() {
-            return Ok(());
-        }
-        let result = client.notify(
+        let result = open.client.notify(
             "nvim_exec_lua",
-            vec![
-                Value::from("Spokenpad.set_state(...)"),
-                Value::Array(vec![Value::Map(fields)]),
-            ],
-            RPC_TIMEOUT,
+            indicator_call(fields),
+            deadline(INDICATOR_TIMEOUT),
         );
         if result.is_err() {
             self.drop_connection();
@@ -242,19 +290,23 @@ impl NvimSession {
         result.map_err(Into::into)
     }
 
-    /// Detaches without killing the editor or closing the user's passage.
-    pub fn close(&mut self) {
-        self.drop_connection();
-    }
-
-    pub fn detach(&mut self) {
-        self.close();
+    fn request_append(&mut self, arguments: Vec<Value>) -> Result<Value, RpcFailure> {
+        let open = self
+            .connection
+            .as_mut()
+            .ok_or_else(|| RpcFailure::Other(anyhow!("not connected to nvim")))?;
+        open.client.request(
+            "nvim_exec_lua",
+            vec![
+                Value::from("return Spokenpad.append_once(...)"),
+                Value::Array(arguments),
+            ],
+            deadline(APPEND_TIMEOUT),
+        )
     }
 
     fn drop_connection(&mut self) {
-        self.client = None;
-        self.buffer = None;
-        self.path = None;
+        self.connection = None;
     }
 
     fn attach_existing(&mut self) -> Result<bool> {
@@ -268,7 +320,8 @@ impl NvimSession {
             "refusing non-socket path at {}",
             self.config.socket_path.display()
         );
-        let mut client = match RpcClient::connect(&self.config.socket_path, RPC_TIMEOUT) {
+        let mut client = match RpcClient::connect(&self.config.socket_path, deadline(PROBE_TIMEOUT))
+        {
             Ok(client) => client,
             Err(error) if error.is_stale_socket() => {
                 remove_stale_socket(&self.config.socket_path)?;
@@ -276,49 +329,50 @@ impl NvimSession {
             }
             Err(error) => return Err(error.into()),
         };
-        let ownership = client.request(
-            "nvim_exec_lua",
-            vec![Value::from(OWNERSHIP_QUERY), Value::Array(Vec::new())],
-            RPC_TIMEOUT,
-        )?;
-        let details = ownership
-            .as_array()
-            .filter(|values| values.len() == 3)
-            .context("nvim ownership query returned malformed data")?;
+        let ownership = query_ownership(&mut client, deadline(PROBE_TIMEOUT))?;
         let expected_marker = read_marker(&marker_path(&self.config.socket_path))?;
-        let marker_matches = expected_marker
-            .as_deref()
-            .is_some_and(|expected| details[0].as_str().is_some_and(|actual| actual == expected));
-        let adoptable = self.adoptable_buffer(&details[1], &details[2])?;
+        // The marker file proves spokenpad launched this editor. A pinned
+        // buffer under the dictation directory proves the same thing from the
+        // other side, for a marker file that was lost or replaced.
+        let owned = expected_marker.is_some() && expected_marker == ownership.marker;
+        let adoptable = self.adoptable_buffer(ownership.pinned.as_ref())?;
         ensure!(
-            marker_matches || adoptable.is_some(),
+            owned || adoptable.is_some(),
             "refusing unrelated nvim socket {}",
             self.config.socket_path.display()
         );
 
-        let source = indicator_source()?;
         client.request(
             "nvim_exec_lua",
-            vec![Value::from(source), Value::Array(Vec::new())],
-            RPC_TIMEOUT,
+            vec![Value::from(SPOKENPAD_LUA), Value::Array(Vec::new())],
+            deadline(SETUP_TIMEOUT),
         )?;
-        let (buffer, path) = if let Some(adopted) = adoptable {
-            adopted
-        } else {
-            let target = self.new_file()?;
-            let buffer = open_buffer(&mut client, &target)?;
-            (buffer, target)
+        let mut fresh = None;
+        let (buffer, path) = match adoptable {
+            Some(adopted) => adopted,
+            None => {
+                let file = fresh.insert(NewFileGuard::create(&self.config)?);
+                let buffer = open_buffer(&mut client, file.path(), deadline(SETUP_TIMEOUT))?;
+                (buffer, file.path().to_owned())
+            }
         };
-        setup_buffer(&mut client, buffer)?;
-        self.marker = expected_marker.or_else(|| details[0].as_str().map(str::to_owned));
-        self.client = Some(client);
-        self.buffer = Some(buffer);
-        self.path = Some(path);
+        // The editor is only dedicated if spokenpad opened it. The Lua side
+        // also remembers this across reloads, so reattaching to the window
+        // this daemon opened before a restart keeps its chrome.
+        setup_buffer(&mut client, buffer, owned, deadline(SETUP_TIMEOUT))?;
+        if let Some(file) = fresh.as_mut() {
+            file.keep();
+        }
+        self.connection = Some(Connected {
+            client,
+            buffer,
+            path,
+        });
         Ok(true)
     }
 
-    fn adoptable_buffer(&self, buffer: &Value, path: &Value) -> Result<Option<(i64, PathBuf)>> {
-        let (Some(buffer), Some(raw_path)) = (buffer.as_i64(), path.as_str()) else {
+    fn adoptable_buffer(&self, pinned: Option<&Pinned>) -> Result<Option<(i64, PathBuf)>> {
+        let Some(pinned) = pinned else {
             return Ok(None);
         };
         let root = match self.config.dictation_dir.canonicalize() {
@@ -326,13 +380,13 @@ impl NvimSession {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error).context("canonicalize dictation directory"),
         };
-        let candidate = match Path::new(raw_path).canonicalize() {
+        let candidate = match Path::new(&pinned.name).canonicalize() {
             Ok(candidate) => candidate,
             Err(_) => return Ok(None),
         };
         Ok(candidate
             .starts_with(&root)
-            .then_some((buffer, PathBuf::from(raw_path))))
+            .then(|| (pinned.buffer, PathBuf::from(&pinned.name))))
     }
 
     fn spawn_and_attach(&mut self) -> Result<bool> {
@@ -355,16 +409,32 @@ impl NvimSession {
                 self.config.window_instance
             );
         }
+        // Only a window manager can be asked where the window should go, and
+        // only a graphical editor has one. On the headless path these are two
+        // subprocess round trips (xrandr, xdotool) that answer nothing.
+        let window_rect = (!self.config.terminal.is_empty())
+            .then(|| self.window_placement())
+            .flatten();
 
-        let target = self.new_file()?;
+        let mut fresh = NewFileGuard::create(&self.config)?;
         if let Some(parent) = self.config.socket_path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("create socket directory {}", parent.display()))?;
         }
         let marker = new_marker()?;
         write_marker(&marker_path(&self.config.socket_path), &marker)?;
-        let window_rect = self.window_placement();
-        let argv = self.spawn_argv(&target, &marker, window_rect)?;
+        let init = match self.config.init.as_deref() {
+            Some(path) if path == Path::new("bundled") => Some(materialize_bundled_init()?),
+            Some(path) => Some(path.to_owned()),
+            None => None,
+        };
+        let argv = spawn_argv(
+            &self.config,
+            fresh.path(),
+            &marker,
+            window_rect,
+            init.as_deref(),
+        )?;
         let (program, arguments) = argv.split_first().context("empty nvim command")?;
         let mut command = Command::new(program);
         command
@@ -395,87 +465,39 @@ impl NvimSession {
         let child = command
             .spawn()
             .with_context(|| format!("start {program}"))?;
-        let mut startup_guard = ProcessGroupKillGuard::new(child.id());
+        let mut editor = SpawnedEditorGuard::new(child);
         self.reap_replaced_process();
-        self.process = Some(child);
 
         let deadline = Instant::now() + Duration::from_secs_f64(self.config.startup_timeout_s);
-        if let Some(rect) = window_rect.filter(|_| !self.config.terminal.is_empty()) {
-            self.place_when_mapped(rect, deadline);
+        if let Some(rect) = window_rect {
+            self.place_when_mapped(&mut editor, rect, deadline);
         }
         let mut last_error = None;
+        // A healthy client is handed back to the next attempt: an editor that
+        // is merely still initializing answers the next probe on the same
+        // connection, so only a connection that actually broke is remade.
+        let mut client = None;
         while Instant::now() < deadline {
-            if self
-                .process
-                .as_mut()
-                .and_then(|child| child.try_wait().ok().flatten())
-                .is_some()
-            {
+            if editor.exited() {
                 bail!("dictation editor exited during startup");
             }
             if self.config.socket_path.exists() {
-                match RpcClient::connect_until(&self.config.socket_path, deadline) {
-                    Ok(mut client) => {
-                        match client.request_until("nvim_eval", vec![Value::from("1")], deadline) {
-                            Ok(_) => {
-                                let readiness = client.request_until(
-                                    "nvim_exec_lua",
-                                    vec![
-                                        Value::from(SPAWN_READINESS_QUERY),
-                                        Value::Array(Vec::new()),
-                                    ],
-                                    deadline,
-                                )?;
-                                let details = readiness
-                                    .as_array()
-                                    .filter(|values| values.len() == 2)
-                                    .context(
-                                        "spawned nvim readiness query returned malformed data",
-                                    )?;
-                                if details[0].is_nil() {
-                                    last_error = Some(
-                                        "spawned nvim has not initialized its ownership marker"
-                                            .to_owned(),
-                                    );
-                                    std::thread::sleep(CONNECT_POLL);
-                                    continue;
-                                }
-                                let actual_marker = details[0].as_str().context(
-                                    "spawned nvim returned a malformed ownership marker",
-                                )?;
-                                ensure!(
-                                    actual_marker == marker,
-                                    "spawned nvim reported a different ownership marker"
-                                );
-                                if details[1].as_str() != Some(marker.as_str()) {
-                                    last_error = Some(
-                                        "spawned nvim user configuration is still initializing"
-                                            .to_owned(),
-                                    );
-                                    std::thread::sleep(CONNECT_POLL);
-                                    continue;
-                                }
-                                client.request_until(
-                                    "nvim_exec_lua",
-                                    vec![
-                                        Value::from(indicator_source()?),
-                                        Value::Array(Vec::new()),
-                                    ],
-                                    deadline,
-                                )?;
-                                let buffer = open_buffer_until(&mut client, &target, deadline)?;
-                                setup_buffer_until(&mut client, buffer, deadline)?;
-                                self.client = Some(client);
-                                self.buffer = Some(buffer);
-                                self.path = Some(target);
-                                self.marker = Some(marker);
-                                startup_guard.disarm();
-                                return Ok(true);
-                            }
-                            Err(error) => last_error = Some(error.to_string()),
-                        }
+                // Everything in here is transient until the outer deadline:
+                // an editor still loading a plugin manager answers late, half
+                // ready, or not at all, and treating that as a hard failure
+                // used to SIGKILL a perfectly healthy editor mid-startup.
+                match self.connect_spawned(client.take(), fresh.path(), &marker, deadline) {
+                    Ok(Readiness::Ready(open)) => {
+                        self.connection = Some(open);
+                        self.process = editor.release();
+                        fresh.keep();
+                        return Ok(true);
                     }
-                    Err(error) => last_error = Some(error.to_string()),
+                    Ok(Readiness::Waiting { reason, keep }) => {
+                        last_error = Some(reason.to_owned());
+                        client = Some(keep);
+                    }
+                    Err(error) => last_error = Some(format!("{error:#}")),
                 }
             }
             std::thread::sleep(CONNECT_POLL);
@@ -490,15 +512,81 @@ impl NvimSession {
         )
     }
 
-    fn place_when_mapped(&mut self, rect: Rect, startup_deadline: Instant) {
+    /// One attempt at adopting the editor this session just spawned, over
+    /// `client` if a previous attempt left one healthy. Each RPC is capped
+    /// well inside the startup deadline so that one slow call cannot consume
+    /// the whole window and leave no attempt to retry with.
+    ///
+    /// The client is taken by value and returned only with [`Readiness`]: an
+    /// attempt that failed drops it, which is exactly when reconnecting is
+    /// the right answer.
+    fn connect_spawned(
+        &self,
+        client: Option<RpcClient>,
+        target: &Path,
+        marker: &str,
+        startup_deadline: Instant,
+    ) -> Result<Readiness> {
+        let mut client = match client {
+            Some(client) => client,
+            None => RpcClient::connect(
+                &self.config.socket_path,
+                capped(startup_deadline, PROBE_TIMEOUT),
+            )?,
+        };
+        let ownership = query_ownership(&mut client, capped(startup_deadline, PROBE_TIMEOUT))?;
+        match ownership.marker.as_deref() {
+            None => {
+                return Ok(Readiness::Waiting {
+                    reason: "spawned nvim has not initialized its ownership marker",
+                    keep: client,
+                });
+            }
+            Some(actual) if actual != marker => {
+                return Ok(Readiness::Waiting {
+                    reason: "another nvim is answering on the dictation socket",
+                    keep: client,
+                });
+            }
+            Some(_) => {}
+        }
+        // The marker alone only proves our `--cmd` ran. The readiness flag is
+        // set from a one-shot VimEnter registered after it, so it also proves
+        // the user's own startup handlers have finished.
+        if ownership.ready.as_deref() != Some(marker) {
+            return Ok(Readiness::Waiting {
+                reason: "spawned nvim user configuration is still initializing",
+                keep: client,
+            });
+        }
+        client.request(
+            "nvim_exec_lua",
+            vec![Value::from(SPOKENPAD_LUA), Value::Array(Vec::new())],
+            capped(startup_deadline, SETUP_TIMEOUT),
+        )?;
+        let buffer = open_buffer(&mut client, target, capped(startup_deadline, SETUP_TIMEOUT))?;
+        setup_buffer(
+            &mut client,
+            buffer,
+            true,
+            capped(startup_deadline, SETUP_TIMEOUT),
+        )?;
+        Ok(Readiness::Ready(Connected {
+            client,
+            buffer,
+            path: target.to_owned(),
+        }))
+    }
+
+    fn place_when_mapped(
+        &self,
+        editor: &mut SpawnedEditorGuard,
+        rect: Rect,
+        startup_deadline: Instant,
+    ) {
         let deadline = (Instant::now() + MAP_TIMEOUT).min(startup_deadline);
         while Instant::now() < deadline {
-            if self
-                .process
-                .as_mut()
-                .and_then(|child| child.try_wait().ok().flatten())
-                .is_some()
-            {
+            if editor.exited() {
                 return;
             }
             if x11::i3_window_exists(&self.config.window_instance) {
@@ -530,92 +618,6 @@ impl NvimSession {
         Some(placement(output, pointer, self.config.window_fraction))
     }
 
-    fn spawn_argv(&self, target: &Path, marker: &str, rect: Option<Rect>) -> Result<Vec<String>> {
-        let (x, y) = rect.map_or((0, 0), |rect| (rect.x, rect.y));
-        let substitute = |argument: &str| {
-            argument
-                .replace("{instance}", &self.config.window_instance)
-                .replace("{x}", &x.to_string())
-                .replace("{y}", &y.to_string())
-        };
-        let mut argv: Vec<String> = self
-            .config
-            .terminal
-            .iter()
-            .map(|arg| substitute(arg))
-            .collect();
-        argv.extend(self.config.editor.iter().cloned());
-        if let Some(init) = &self.config.init {
-            let init = if init == Path::new("bundled") {
-                materialize_bundled_init()?
-            } else {
-                init.clone()
-            };
-            argv.extend(["-u".to_owned(), utf8_path(&init)?.to_owned()]);
-        }
-        if let Some(colorscheme) = &self.config.colorscheme {
-            let name = serde_json::to_string(colorscheme)?;
-            let opaque = !self.config.transparent;
-            argv.extend([
-                "-c".to_owned(),
-                format!("lua if _G.SpokenpadColorscheme then SpokenpadColorscheme({name}, {opaque}) else pcall(vim.cmd.colorscheme, {name}) end"),
-            ]);
-        }
-        argv.extend([
-            "--cmd".to_owned(),
-            format!("let g:spokenpad_owner = '{marker}'"),
-            "--listen".to_owned(),
-            utf8_path(&self.config.socket_path)?.to_owned(),
-            "-c".to_owned(),
-            format!(
-                "lua vim.g.spokenpad_startup_ready = nil; vim.api.nvim_create_autocmd('VimEnter', {{ once = true, callback = function() vim.g.spokenpad_startup_ready = '{marker}' end }})"
-            ),
-            utf8_path(target)?.to_owned(),
-        ]);
-        Ok(argv)
-    }
-
-    fn new_file(&self) -> Result<PathBuf> {
-        fs::create_dir_all(&self.config.dictation_dir).with_context(|| {
-            format!(
-                "create dictation directory {}",
-                self.config.dictation_dir.display()
-            )
-        })?;
-        let base = chrono::Local::now()
-            .format(&self.config.file_template)
-            .to_string();
-        let original = Path::new(&base);
-        let stem = original
-            .file_stem()
-            .and_then(|value| value.to_str())
-            .unwrap_or(&base);
-        let extension = original.extension().and_then(|value| value.to_str());
-        for collision in 0_u32..10_000 {
-            let name = if collision == 0 {
-                base.clone()
-            } else if let Some(extension) = extension {
-                format!("{stem}-{collision}.{extension}")
-            } else {
-                format!("{stem}-{collision}")
-            };
-            let path = self.config.dictation_dir.join(name);
-            match OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(&path)
-            {
-                Ok(_) => return Ok(path),
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(error) => {
-                    return Err(error).with_context(|| format!("create {}", path.display()));
-                }
-            }
-        }
-        bail!("could not allocate a collision-free dictation filename")
-    }
-
     fn reap_replaced_process(&mut self) {
         if let Some(mut process) = self.process.take()
             && process.try_wait().ok().flatten().is_none()
@@ -625,6 +627,135 @@ impl NvimSession {
             });
         }
     }
+}
+
+impl Drop for NvimSession {
+    fn drop(&mut self) {
+        self.reap_replaced_process();
+    }
+}
+
+/// The outcome of one attempt to adopt a freshly spawned editor.
+enum Readiness {
+    Ready(Connected),
+    /// Not ready yet, for `reason`; `keep` is the still-healthy connection the
+    /// next attempt should reuse.
+    Waiting {
+        reason: &'static str,
+        keep: RpcClient,
+    },
+}
+
+/// What an editor answering on the dictation socket says about itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Ownership {
+    /// `g:spokenpad_owner`, set by the `--cmd` spokenpad spawned it with.
+    marker: Option<String>,
+    /// `g:spokenpad_startup_ready`, set from a one-shot `VimEnter` registered
+    /// after the user's own startup handlers.
+    ready: Option<String>,
+    /// The buffer a previous session pinned, if it is still loaded.
+    pinned: Option<Pinned>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Pinned {
+    buffer: i64,
+    name: String,
+}
+
+fn parse_ownership(value: &Value) -> Result<Ownership> {
+    let fields = value
+        .as_array()
+        .filter(|fields| fields.len() == 4)
+        .context("nvim ownership query returned malformed data")?;
+    let text = |field: &Value| -> Result<Option<String>> {
+        if field.is_nil() {
+            return Ok(None);
+        }
+        Ok(Some(
+            field
+                .as_str()
+                .context("nvim ownership query returned a non-string field")?
+                .to_owned(),
+        ))
+    };
+    let name = text(&fields[3])?;
+    let pinned = match fields[2] {
+        Value::Nil => None,
+        ref handle => Some(Pinned {
+            buffer: handle
+                .as_i64()
+                .context("nvim returned a non-integer buffer handle")?,
+            name: name.context("nvim reported a pinned buffer with no file name")?,
+        }),
+    };
+    Ok(Ownership {
+        marker: text(&fields[0])?,
+        ready: text(&fields[1])?,
+        pinned,
+    })
+}
+
+/// The argv for a fresh editor. Pure: the caller materializes `init` and
+/// resolves the window rect, so what is left is a total function of the
+/// configuration and can be read — and tested — as one.
+fn spawn_argv(
+    config: &Nvim,
+    target: &Path,
+    marker: &str,
+    rect: Option<Rect>,
+    init: Option<&Path>,
+) -> Result<Vec<String>> {
+    let (x, y) = rect.map_or((0, 0), |rect| (rect.x, rect.y));
+    let substitute = |argument: &str| {
+        argument
+            .replace("{instance}", &config.window_instance)
+            .replace("{x}", &x.to_string())
+            .replace("{y}", &y.to_string())
+    };
+    let mut argv: Vec<String> = config.terminal.iter().map(|arg| substitute(arg)).collect();
+    argv.extend(config.editor.iter().cloned());
+    if let Some(init) = init {
+        argv.extend(["-u".to_owned(), utf8_path(init)?.to_owned()]);
+    }
+    if let Some(colorscheme) = &config.colorscheme {
+        let name = lua_colorscheme_literal(colorscheme)?;
+        let opaque = !config.transparent;
+        argv.extend([
+            "-c".to_owned(),
+            format!("lua if _G.SpokenpadColorscheme then SpokenpadColorscheme({name}, {opaque}) else pcall(vim.cmd.colorscheme, {name}) end"),
+        ]);
+    }
+    argv.extend([
+        "--cmd".to_owned(),
+        format!("let g:spokenpad_owner = '{marker}'"),
+        "--listen".to_owned(),
+        utf8_path(&config.socket_path)?.to_owned(),
+        "-c".to_owned(),
+        format!(
+            "lua vim.g.spokenpad_startup_ready = nil; vim.api.nvim_create_autocmd('VimEnter', {{ once = true, callback = function() vim.g.spokenpad_startup_ready = '{marker}' end }})"
+        ),
+        utf8_path(target)?.to_owned(),
+    ]);
+    Ok(argv)
+}
+
+/// A colourscheme name as a Lua string literal.
+///
+/// Defence in depth: `config.rs` validates the same pattern when it loads, and
+/// this refuses anything else again at the one point where the value becomes
+/// code. Quoting a name that cannot contain a quote, a backslash or a newline
+/// is then just interpolation, with no escaping layer to get wrong.
+fn lua_colorscheme_literal(name: &str) -> Result<String> {
+    ensure!(
+        !name.is_empty()
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-')),
+        "nvim.colorscheme must match [A-Za-z0-9_.-]+, got {name:?}"
+    );
+    Ok(format!("'{name}'"))
 }
 
 fn alacritty_declares_instance(arguments: &[String]) -> bool {
@@ -639,14 +770,18 @@ fn alacritty_declares_instance(arguments: &[String]) -> bool {
         return false;
     };
     // The editor is appended after this template. A class flag inside the
-    // child command, a second class override, or embedding in another window
-    // cannot prove the identity of the window we are about to open.
+    // child command, a second class override, an alternative config file that
+    // could carry one, or embedding in another window all make the identity of
+    // the window we are about to open unprovable.
     if program != "alacritty"
         || !matches!(command.as_str(), "-e" | "--command")
         || options.iter().any(|argument| {
-            matches!(argument.as_str(), "-e" | "--command" | "--embed")
-                || argument.starts_with("--class=")
+            matches!(
+                argument.as_str(),
+                "-e" | "--command" | "--embed" | "--config-file"
+            ) || argument.starts_with("--class=")
                 || argument.starts_with("--embed=")
+                || argument.starts_with("--config-file=")
                 || argument.contains("window.class")
         })
     {
@@ -660,40 +795,136 @@ fn alacritty_declares_instance(arguments: &[String]) -> bool {
     }) && classes.next().is_none()
 }
 
-impl Drop for NvimSession {
-    fn drop(&mut self) {
-        self.reap_replaced_process();
+fn indicator_fields(state: &IndicatorState) -> Vec<(Value, Value)> {
+    vec![
+        (Value::from("phase"), Value::from(state.phase.as_str())),
+        (Value::from("level"), Value::F64(clamp_level(state.level))),
+        (Value::from("preview"), Value::from(state.preview.as_str())),
+        (Value::from("latched"), Value::from(state.latched)),
+        (Value::from("previewing"), Value::from(state.previewing)),
+    ]
+}
+
+/// `Spokenpad.push` wraps the update in a pcall, so an error never becomes a
+/// message in a window that cannot take focus to answer the prompt it raises.
+fn indicator_call(fields: Vec<(Value, Value)>) -> Vec<Value> {
+    vec![
+        Value::from("Spokenpad.push(...)"),
+        Value::Array(vec![Value::Map(fields)]),
+    ]
+}
+
+fn clamp_level(level: f64) -> f64 {
+    if level.is_finite() {
+        level.clamp(0.0, 1.0)
+    } else {
+        0.0
     }
 }
 
-struct ProcessGroupKillGuard {
-    process_group: libc::pid_t,
-    armed: bool,
+fn deadline(timeout: Duration) -> Instant {
+    Instant::now() + timeout
 }
 
-impl ProcessGroupKillGuard {
-    fn new(pid: u32) -> Self {
-        Self {
-            process_group: pid as libc::pid_t,
-            armed: true,
+fn capped(deadline: Instant, timeout: Duration) -> Instant {
+    (Instant::now() + timeout).min(deadline)
+}
+
+/// Kills a spawned editor, and its process group, unless startup succeeded.
+///
+/// The guard owns the `Child`: a bare `waitpid` behind `Child`'s back would
+/// race the wait `Child` performs itself and could reap a recycled pid.
+struct SpawnedEditorGuard(Option<Child>);
+
+impl SpawnedEditorGuard {
+    fn new(child: Child) -> Self {
+        Self(Some(child))
+    }
+
+    fn exited(&mut self) -> bool {
+        self.0
+            .as_mut()
+            .is_some_and(|child| child.try_wait().ok().flatten().is_some())
+    }
+
+    /// Hands the editor over to a caller that intends to keep it running.
+    fn release(&mut self) -> Option<Child> {
+        self.0.take()
+    }
+}
+
+impl Drop for SpawnedEditorGuard {
+    fn drop(&mut self) {
+        let Some(mut child) = self.0.take() else {
+            return;
+        };
+        let group = i32::try_from(child.id()).unwrap_or(i32::MAX);
+        // SAFETY: spawned editors call setsid, so the child's pid is also its
+        // process-group id, and a negative pid signals that group alone. The
+        // child has not been reaped yet, so its pid cannot have been recycled.
+        let _ = unsafe { libc::kill(-group, libc::SIGKILL) };
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
+/// Removes a freshly created dictation file unless a session pins it.
+///
+/// The file is created before the editor is started, so that its name is
+/// settled and its permissions are ours from the first byte. A spawn that then
+/// failed used to leave a zero-byte file behind on every attempt. Anything
+/// with content in it is left alone: that is the user's transcript.
+struct NewFileGuard {
+    path: PathBuf,
+    keep: bool,
+}
+
+impl NewFileGuard {
+    fn create(config: &Nvim) -> Result<Self> {
+        Ok(Self {
+            path: new_file(config)?,
+            keep: false,
+        })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn keep(&mut self) {
+        self.keep = true;
+    }
+}
+
+impl Drop for NewFileGuard {
+    fn drop(&mut self) {
+        if self.keep {
+            return;
+        }
+        if fs::metadata(&self.path).is_ok_and(|metadata| metadata.len() == 0) {
+            let _ = fs::remove_file(&self.path);
         }
     }
-
-    fn disarm(&mut self) {
-        self.armed = false;
-    }
 }
 
-impl Drop for ProcessGroupKillGuard {
-    fn drop(&mut self) {
-        if self.armed {
-            // SAFETY: spawned editors call setsid, making their pid their process-group id.
-            let _ = unsafe { libc::kill(-self.process_group, libc::SIGKILL) };
-            let mut status = 0;
-            // SAFETY: waits only for the exact child pid and writes to this local status.
-            let _ = unsafe { libc::waitpid(self.process_group, &mut status, 0) };
-        }
-    }
+fn still_pinned(open: &mut Connected) -> bool {
+    // A bare `nvim_eval "1"` proves only that the editor answers. After the
+    // user `:bdelete`s the dictation buffer it answers exactly as before, and
+    // every append of that utterance failed against a buffer that was gone.
+    query_ownership(&mut open.client, deadline(PROBE_TIMEOUT)).is_ok_and(|ownership| {
+        ownership
+            .pinned
+            .is_some_and(|pin| pin.buffer == open.buffer)
+    })
+}
+
+fn query_ownership(client: &mut RpcClient, deadline: Instant) -> Result<Ownership> {
+    let value = client.request(
+        "nvim_exec_lua",
+        vec![Value::from(OWNERSHIP_QUERY), Value::Array(Vec::new())],
+        deadline,
+    )?;
+    parse_ownership(&value)
 }
 
 fn remove_stale_socket(path: &Path) -> Result<()> {
@@ -707,13 +938,9 @@ fn remove_stale_socket(path: &Path) -> Result<()> {
     fs::remove_file(path).with_context(|| format!("remove stale socket {}", path.display()))
 }
 
-fn open_buffer(client: &mut RpcClient, path: &Path) -> Result<i64> {
-    open_buffer_until(client, path, Instant::now() + RPC_TIMEOUT)
-}
-
-fn open_buffer_until(client: &mut RpcClient, path: &Path, deadline: Instant) -> Result<i64> {
+fn open_buffer(client: &mut RpcClient, path: &Path, deadline: Instant) -> Result<i64> {
     client
-        .request_until(
+        .request(
             "nvim_exec_lua",
             vec![
                 Value::from(OPEN_BUFFER),
@@ -725,36 +952,62 @@ fn open_buffer_until(client: &mut RpcClient, path: &Path, deadline: Instant) -> 
         .context("nvim returned a non-integer buffer handle")
 }
 
-fn setup_buffer(client: &mut RpcClient, buffer: i64) -> Result<()> {
-    setup_buffer_until(client, buffer, Instant::now() + RPC_TIMEOUT)
-}
-
-fn setup_buffer_until(client: &mut RpcClient, buffer: i64, deadline: Instant) -> Result<()> {
-    client.request_until(
+fn setup_buffer(
+    client: &mut RpcClient,
+    buffer: i64,
+    dedicated: bool,
+    deadline: Instant,
+) -> Result<()> {
+    client.request(
         "nvim_exec_lua",
         vec![
             Value::from("Spokenpad.setup(...)"),
-            Value::Array(vec![Value::from(buffer)]),
+            Value::Array(vec![Value::from(buffer), Value::from(dedicated)]),
         ],
         deadline,
     )?;
     Ok(())
 }
 
-fn indicator_source() -> Result<String> {
-    let write_hook = "vim.cmd(\"silent! noautocmd write\")";
-    ensure!(
-        INDICATOR.matches(write_hook).count() == 1,
-        "indicator write hook changed unexpectedly"
-    );
-    let write_checked = INDICATOR.replacen(write_hook, "vim.cmd(\"silent noautocmd write\")", 1);
-    let footer = "_G.Spokenpad = M\nreturn true";
-    ensure!(
-        write_checked.matches(footer).count() == 1,
-        "indicator module footer changed unexpectedly"
-    );
-    let body = write_checked.replacen(footer, RUST_EXTENSION, 1);
-    Ok(format!("local previous = _G.Spokenpad\n{body}"))
+fn new_file(config: &Nvim) -> Result<PathBuf> {
+    fs::create_dir_all(&config.dictation_dir).with_context(|| {
+        format!(
+            "create dictation directory {}",
+            config.dictation_dir.display()
+        )
+    })?;
+    let base = chrono::Local::now()
+        .format(&config.file_template)
+        .to_string();
+    let original = Path::new(&base);
+    let stem = original
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or(&base);
+    let extension = original.extension().and_then(|value| value.to_str());
+    for collision in 0_u32..10_000 {
+        let name = if collision == 0 {
+            base.clone()
+        } else if let Some(extension) = extension {
+            format!("{stem}-{collision}.{extension}")
+        } else {
+            format!("{stem}-{collision}")
+        };
+        let path = config.dictation_dir.join(name);
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+        {
+            Ok(_) => return Ok(path),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("create {}", path.display()));
+            }
+        }
+    }
+    bail!("could not allocate a collision-free dictation filename")
 }
 
 fn utf8_path(path: &Path) -> Result<&str> {
@@ -830,1056 +1083,5 @@ fn materialize_bundled_init() -> Result<PathBuf> {
     Ok(path)
 }
 
-struct RpcClient {
-    reader: BufReader<UnixStream>,
-    writer: UnixStream,
-    next_id: u64,
-}
-
-#[derive(Debug)]
-enum RpcFailure {
-    Timeout(String),
-    StaleSocket(std::io::Error),
-    Other(anyhow::Error),
-}
-
-impl RpcFailure {
-    fn is_stale_socket(&self) -> bool {
-        matches!(
-            self,
-            Self::StaleSocket(error)
-                if matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused)
-        )
-    }
-}
-
-impl std::fmt::Display for RpcFailure {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Timeout(message) => formatter.write_str(message),
-            Self::StaleSocket(error) => error.fmt(formatter),
-            Self::Other(error) => error.fmt(formatter),
-        }
-    }
-}
-
-impl From<RpcFailure> for anyhow::Error {
-    fn from(value: RpcFailure) -> Self {
-        match value {
-            RpcFailure::Timeout(message) => anyhow!(message),
-            RpcFailure::StaleSocket(error) => error.into(),
-            RpcFailure::Other(error) => error,
-        }
-    }
-}
-
-impl RpcClient {
-    fn connect(path: &Path, timeout: Duration) -> std::result::Result<Self, RpcFailure> {
-        Self::connect_until(path, Instant::now() + timeout)
-    }
-
-    fn connect_until(path: &Path, deadline: Instant) -> std::result::Result<Self, RpcFailure> {
-        let writer = connect_unix_until(path, deadline)?;
-        let reader = BufReader::new(
-            writer
-                .try_clone()
-                .map_err(|error| RpcFailure::Other(error.into()))?,
-        );
-        Ok(Self {
-            reader,
-            writer,
-            next_id: 1,
-        })
-    }
-
-    fn request(
-        &mut self,
-        method: &str,
-        arguments: Vec<Value>,
-        timeout: Duration,
-    ) -> std::result::Result<Value, RpcFailure> {
-        self.request_until(method, arguments, Instant::now() + timeout)
-    }
-
-    fn request_until(
-        &mut self,
-        method: &str,
-        arguments: Vec<Value>,
-        deadline: Instant,
-    ) -> std::result::Result<Value, RpcFailure> {
-        let id = self.next_id;
-        self.next_id = self.next_id.wrapping_add(1);
-        self.send_until(
-            Value::Array(vec![
-                Value::from(0),
-                Value::from(id),
-                Value::from(method),
-                Value::Array(arguments),
-            ]),
-            deadline,
-        )?;
-        loop {
-            let mut reader = DeadlineRead::new(&mut self.reader, deadline, RPC_MAX_BYTES);
-            let message = rmpv::decode::read_value_with_max_depth(&mut reader, RPC_MAX_DEPTH)
-                .map_err(|error| {
-                    if matches!(
-                        error.kind(),
-                        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
-                    ) {
-                        RpcFailure::Timeout(format!("nvim RPC {method} timed out"))
-                    } else {
-                        RpcFailure::Other(error.into())
-                    }
-                })?;
-            let Some(parts) = message.as_array() else {
-                continue;
-            };
-            if parts.len() != 4 || parts[0].as_i64() != Some(1) || parts[1].as_u64() != Some(id) {
-                continue;
-            }
-            if !parts[2].is_nil() {
-                return Err(RpcFailure::Other(anyhow!(
-                    "nvim RPC {method} failed: {}",
-                    parts[2]
-                )));
-            }
-            return Ok(parts[3].clone());
-        }
-    }
-
-    fn notify(
-        &mut self,
-        method: &str,
-        arguments: Vec<Value>,
-        timeout: Duration,
-    ) -> std::result::Result<(), RpcFailure> {
-        self.send_until(
-            Value::Array(vec![
-                Value::from(2),
-                Value::from(method),
-                Value::Array(arguments),
-            ]),
-            Instant::now() + timeout,
-        )
-    }
-
-    fn send_until(
-        &mut self,
-        message: Value,
-        deadline: Instant,
-    ) -> std::result::Result<(), RpcFailure> {
-        let mut bytes = Vec::new();
-        rmpv::encode::write_value(&mut bytes, &message)
-            .map_err(|error| RpcFailure::Other(error.into()))?;
-        if bytes.len() > RPC_MAX_BYTES {
-            return Err(RpcFailure::Other(anyhow!(
-                "nvim RPC request exceeded {RPC_MAX_BYTES} bytes"
-            )));
-        }
-        let mut writer = DeadlineWrite::new(&mut self.writer, deadline);
-        writer.write_all(&bytes).map_err(|error| {
-            if matches!(
-                error.kind(),
-                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
-            ) {
-                RpcFailure::Timeout("nvim RPC write timed out".to_owned())
-            } else {
-                RpcFailure::Other(error.into())
-            }
-        })?;
-        writer.flush().map_err(|error| {
-            if matches!(
-                error.kind(),
-                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
-            ) {
-                RpcFailure::Timeout("nvim RPC flush timed out".to_owned())
-            } else {
-                RpcFailure::Other(error.into())
-            }
-        })
-    }
-}
-
-struct DeadlineRead<'a> {
-    reader: &'a mut BufReader<UnixStream>,
-    deadline: Instant,
-    remaining: usize,
-}
-
-impl<'a> DeadlineRead<'a> {
-    fn new(reader: &'a mut BufReader<UnixStream>, deadline: Instant, budget: usize) -> Self {
-        Self {
-            reader,
-            deadline,
-            remaining: budget,
-        }
-    }
-}
-
-impl Read for DeadlineRead<'_> {
-    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
-        let remaining_time = self.deadline.saturating_duration_since(Instant::now());
-        if remaining_time.is_zero() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "nvim RPC read deadline expired",
-            ));
-        }
-        if self.remaining == 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "nvim RPC response exceeded byte budget",
-            ));
-        }
-        self.reader
-            .get_ref()
-            .set_read_timeout(Some(remaining_time))?;
-        let capacity = buffer.len().min(self.remaining);
-        let count = self.reader.read(&mut buffer[..capacity])?;
-        self.remaining -= count;
-        Ok(count)
-    }
-}
-
-struct DeadlineWrite<'a> {
-    writer: &'a mut UnixStream,
-    deadline: Instant,
-}
-
-impl<'a> DeadlineWrite<'a> {
-    fn new(writer: &'a mut UnixStream, deadline: Instant) -> Self {
-        Self { writer, deadline }
-    }
-}
-
-impl Write for DeadlineWrite<'_> {
-    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
-        let remaining = self.deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "nvim RPC write deadline expired",
-            ));
-        }
-        self.writer.set_write_timeout(Some(remaining))?;
-        self.writer.write(buffer)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        let remaining = self.deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "nvim RPC flush deadline expired",
-            ));
-        }
-        self.writer.set_write_timeout(Some(remaining))?;
-        self.writer.flush()
-    }
-}
-
-fn connect_unix_until(
-    path: &Path,
-    deadline: Instant,
-) -> std::result::Result<UnixStream, RpcFailure> {
-    let bytes = path.as_os_str().as_bytes();
-    ensure_socket_path(bytes).map_err(RpcFailure::Other)?;
-    // SAFETY: socket has no pointer arguments and returns a new owned descriptor.
-    let raw_fd = unsafe {
-        libc::socket(
-            libc::AF_UNIX,
-            libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
-            0,
-        )
-    };
-    if raw_fd == -1 {
-        return Err(RpcFailure::Other(std::io::Error::last_os_error().into()));
-    }
-    // SAFETY: `raw_fd` was just returned by socket and has no other owner.
-    let owned = unsafe { OwnedFd::from_raw_fd(raw_fd) };
-    // SAFETY: zero is a valid initial representation for sockaddr_un.
-    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
-    address.sun_family = libc::AF_UNIX as libc::sa_family_t;
-    for (target, source) in address.sun_path.iter_mut().zip(bytes.iter().copied()) {
-        *target = source as libc::c_char;
-    }
-    let address_length =
-        (std::mem::offset_of!(libc::sockaddr_un, sun_path) + bytes.len() + 1) as libc::socklen_t;
-    // SAFETY: address points to an initialized sockaddr_un of `address_length` bytes.
-    let result = unsafe {
-        libc::connect(
-            owned.as_raw_fd(),
-            (&raw const address).cast::<libc::sockaddr>(),
-            address_length,
-        )
-    };
-    if result == -1 {
-        let error = std::io::Error::last_os_error();
-        if error.raw_os_error() != Some(libc::EINPROGRESS) {
-            return Err(RpcFailure::StaleSocket(error));
-        }
-        wait_for_connect(owned.as_raw_fd(), deadline)?;
-    }
-    set_blocking(owned.as_raw_fd()).map_err(|error| RpcFailure::Other(error.into()))?;
-    Ok(UnixStream::from(owned))
-}
-
-fn ensure_socket_path(path: &[u8]) -> Result<()> {
-    ensure!(!path.contains(&0), "nvim socket path contains NUL");
-    ensure!(
-        path.len()
-            < std::mem::size_of::<libc::sockaddr_un>()
-                - std::mem::offset_of!(libc::sockaddr_un, sun_path),
-        "nvim socket path is too long"
-    );
-    Ok(())
-}
-
-fn wait_for_connect(fd: libc::c_int, deadline: Instant) -> std::result::Result<(), RpcFailure> {
-    loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err(RpcFailure::Timeout(
-                "nvim socket connect timed out".to_owned(),
-            ));
-        }
-        let millis = remaining.as_millis().max(1).min(i32::MAX as u128) as libc::c_int;
-        let mut descriptor = libc::pollfd {
-            fd,
-            events: libc::POLLOUT,
-            revents: 0,
-        };
-        // SAFETY: descriptor is valid for one pollfd element for this call.
-        let ready = unsafe { libc::poll(&mut descriptor, 1, millis) };
-        if ready == 0 {
-            return Err(RpcFailure::Timeout(
-                "nvim socket connect timed out".to_owned(),
-            ));
-        }
-        if ready == -1 {
-            let error = std::io::Error::last_os_error();
-            if error.kind() == std::io::ErrorKind::Interrupted {
-                continue;
-            }
-            return Err(RpcFailure::Other(error.into()));
-        }
-        let mut socket_error: libc::c_int = 0;
-        let mut length = std::mem::size_of_val(&socket_error) as libc::socklen_t;
-        // SAFETY: pointers reference writable objects of the advertised sizes.
-        if unsafe {
-            libc::getsockopt(
-                fd,
-                libc::SOL_SOCKET,
-                libc::SO_ERROR,
-                (&raw mut socket_error).cast(),
-                &mut length,
-            )
-        } == -1
-        {
-            return Err(RpcFailure::Other(std::io::Error::last_os_error().into()));
-        }
-        if socket_error != 0 {
-            return Err(RpcFailure::StaleSocket(std::io::Error::from_raw_os_error(
-                socket_error,
-            )));
-        }
-        return Ok(());
-    }
-}
-
-fn set_blocking(fd: libc::c_int) -> std::io::Result<()> {
-    // SAFETY: fd is owned and live; fcntl does not retain pointers.
-    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-    if flags == -1 {
-        return Err(std::io::Error::last_os_error());
-    }
-    // SAFETY: as above; flags came from F_GETFL for this descriptor.
-    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK) } == -1 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(())
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::{
-        io::Write,
-        os::unix::{fs::PermissionsExt, net::UnixListener},
-        process::Command,
-        thread,
-    };
-
-    struct ProcessGroupGuard(libc::pid_t);
-
-    impl ProcessGroupGuard {
-        fn for_session(session: &NvimSession) -> Self {
-            Self(session.process.as_ref().expect("session spawned nvim").id() as libc::pid_t)
-        }
-    }
-
-    impl Drop for ProcessGroupGuard {
-        fn drop(&mut self) {
-            // SAFETY: spawned editors create a process group whose id is their pid.
-            let _ = unsafe { libc::kill(-self.0, libc::SIGKILL) };
-        }
-    }
-
-    fn headless(directory: &Path) -> Nvim {
-        Nvim {
-            terminal: Vec::new(),
-            editor: vec![
-                "nvim".to_owned(),
-                "--headless".to_owned(),
-                "-u".to_owned(),
-                "NONE".to_owned(),
-                "-i".to_owned(),
-                "NONE".to_owned(),
-            ],
-            socket_path: directory.join("nvim.sock"),
-            dictation_dir: directory.join("dictation"),
-            startup_timeout_s: 10.0,
-            ..Nvim::default()
-        }
-    }
-
-    #[test]
-    fn headless_append_literal_text_and_adopt() {
-        if Command::new("nvim").arg("--version").output().is_err() {
-            return;
-        }
-        let directory = tempfile::tempdir().unwrap();
-        let config = headless(directory.path());
-        let mut first = NvimSession::new(config.clone());
-        let path = first.ensure().unwrap();
-        let _guard = ProcessGroupGuard::for_session(&first);
-        assert_eq!(
-            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
-        assert_eq!(first.append("$(touch nope)\nGrüße 東京", false).unwrap(), 2);
-        first.detach();
-
-        let mut restarted = NvimSession::new(config);
-        assert_eq!(restarted.ensure().unwrap(), path);
-        restarted.append("continued", true).unwrap();
-        assert_eq!(
-            fs::read_to_string(path).unwrap(),
-            "$(touch nope)\nGrüße 東京 continued\n"
-        );
-    }
-
-    #[test]
-    fn headless_append_preserves_trailing_lf_and_empty_continuation() {
-        if Command::new("nvim").arg("--version").output().is_err() {
-            return;
-        }
-        let directory = tempfile::tempdir().unwrap();
-        let mut session = NvimSession::new(headless(directory.path()));
-        let path = session.ensure().unwrap();
-        let _guard = ProcessGroupGuard::for_session(&session);
-
-        assert_eq!(session.append("first\nsecond\n", false).unwrap(), 3);
-        assert_eq!(session.append("", true).unwrap(), 2);
-        assert_eq!(fs::read_to_string(path).unwrap(), "first\nsecond\n");
-    }
-
-    #[test]
-    fn spawned_editor_waits_for_owner_and_user_init() {
-        if Command::new("nvim").arg("--version").output().is_err() {
-            return;
-        }
-        let directory = tempfile::tempdir().unwrap();
-        let init = directory.path().join("delayed-init.lua");
-        fs::write(
-            &init,
-            r#"
-vim.wait(250)
-vim.g.spokenpad_init_finished = true
-vim.api.nvim_create_autocmd("VimEnter", {
-  once = true,
-  callback = function()
-    vim.wait(250)
-    vim.g.spokenpad_vimenter_finished = true
-  end,
-})
-"#,
-        )
-        .unwrap();
-        let mut config = headless(directory.path());
-        config.editor = vec![
-            "nvim".to_owned(),
-            "--headless".to_owned(),
-            "-i".to_owned(),
-            "NONE".to_owned(),
-            "--cmd".to_owned(),
-            "lua vim.wait(250)".to_owned(),
-        ];
-        config.init = Some(init);
-        let mut session = NvimSession::new(config);
-        session.ensure().unwrap();
-        let _guard = ProcessGroupGuard::for_session(&session);
-
-        let ready = session
-            .client
-            .as_mut()
-            .unwrap()
-            .request(
-                "nvim_exec_lua",
-                vec![
-                    Value::from(
-                        "return vim.g.spokenpad_init_finished == true and vim.g.spokenpad_vimenter_finished == true",
-                    ),
-                    Value::Array(Vec::new()),
-                ],
-                RPC_TIMEOUT,
-            )
-            .unwrap();
-        assert_eq!(ready.as_bool(), Some(true));
-    }
-
-    #[test]
-    fn headless_preview_is_inline_virtual_and_buffer_local() {
-        if Command::new("nvim").arg("--version").output().is_err() {
-            return;
-        }
-        let directory = tempfile::tempdir().unwrap();
-        let config = headless(directory.path());
-        let mut session = NvimSession::new(config.clone());
-        let path = session.ensure().unwrap();
-        let _guard = ProcessGroupGuard::for_session(&session);
-        session
-            .client
-            .as_mut()
-            .unwrap()
-            .request(
-                "nvim_ui_attach",
-                vec![
-                    Value::from(40),
-                    Value::from(10),
-                    Value::Map(vec![
-                        (Value::from("rgb"), Value::from(true)),
-                        (Value::from("ext_linegrid"), Value::from(true)),
-                    ]),
-                ],
-                RPC_TIMEOUT,
-            )
-            .unwrap();
-
-        session
-            .set_state(IndicatorUpdate {
-                phase: Some(IndicatorPhase::Recording),
-                preview: Some("draft words"),
-                ..IndicatorUpdate::default()
-            })
-            .unwrap();
-        session
-            .client
-            .as_mut()
-            .unwrap()
-            .request(
-                "nvim_exec_lua",
-                vec![
-                    Value::from(
-                        r#"
-local buf = Spokenpad.buf
-local marks = vim.api.nvim_buf_get_extmarks(buf, Spokenpad.ns, 0, -1, { details = true })
-assert(#marks == 1, "preview must use exactly one extmark")
-local details = marks[1][4]
-assert(details.virt_lines == nil, "short empty-buffer preview added a virtual spacer")
-assert(details.virt_text[1][1] == "draft words", "preview must overlay the empty buffer row")
-assert(details.virt_text_pos == "overlay", "empty-buffer preview is not inline")
-assert(vim.deep_equal(vim.api.nvim_buf_get_lines(buf, 0, -1, false), { "" }))
-
-vim.cmd("redraw!")
-local function screen_contains(needle)
-  for row = 1, 10 do
-    local line = ""
-    for col = 1, 40 do
-      line = line .. vim.fn.screenstring(row, col)
-    end
-    if line:find(needle, 1, true) then
-      return true
-    end
-  end
-  return false
-end
-assert(screen_contains("draft words"), "first preview exists but is clipped off-screen")
-
-vim.fn.setreg("z", "sentinel")
-vim.api.nvim_buf_call(buf, function()
-  vim.cmd([[normal! gg0"zy$]])
-end)
-assert(not vim.fn.getreg("z"):find("draft words", 1, true), "preview leaked into yank")
-
-assert(not vim.diagnostic.is_enabled({ bufnr = buf }), "owned buffer diagnostics enabled")
-local ordinary = vim.api.nvim_create_buf(true, false)
-assert(vim.diagnostic.is_enabled({ bufnr = ordinary }), "ordinary buffer diagnostics disabled")
-vim.api.nvim_buf_delete(ordinary, { force = true })
-
-for _, foreground in ipairs({ 0x123456, 0xabcdef }) do
-  vim.api.nvim_set_hl(0, "Normal", { fg = foreground })
-  vim.api.nvim_set_hl(0, "Comment", { fg = foreground + 1 })
-  vim.api.nvim_exec_autocmds("ColorScheme", { modeline = false })
-  local comment = vim.api.nvim_get_hl(0, { name = "Comment", link = false })
-  local preview = vim.api.nvim_get_hl(0, { name = "SpokenpadPreview", link = false })
-  assert(preview.fg == comment.fg, "preview foreground drifted from Comment")
-  assert(preview.italic == true, "preview lost its provisional italic")
-end
-return true
-"#,
-                    ),
-                    Value::Array(Vec::new()),
-                ],
-                RPC_TIMEOUT,
-            )
-            .unwrap();
-        assert_eq!(fs::read_to_string(&path).unwrap(), "");
-
-        session.detach();
-        let mut reloaded = NvimSession::new(config);
-        assert_eq!(reloaded.ensure().unwrap(), path);
-        reloaded
-            .client
-            .as_mut()
-            .unwrap()
-            .request(
-                "nvim_ui_attach",
-                vec![
-                    Value::from(40),
-                    Value::from(10),
-                    Value::Map(vec![
-                        (Value::from("rgb"), Value::from(true)),
-                        (Value::from("ext_linegrid"), Value::from(true)),
-                    ]),
-                ],
-                RPC_TIMEOUT,
-            )
-            .unwrap();
-        reloaded
-            .client
-            .as_mut()
-            .unwrap()
-            .request(
-                "nvim_exec_lua",
-                vec![
-                    Value::from(
-                        r#"
-assert(Spokenpad.state.phase == "recording", "phase lost on reload")
-assert(Spokenpad.state.preview == "draft words", "preview lost on reload")
-local marks = vim.api.nvim_buf_get_extmarks(
-  Spokenpad.buf, Spokenpad.ns, 0, -1, { details = true }
-)
-assert(#marks == 1 and marks[1][4].virt_text[1][1] == "draft words")
-vim.cmd("messages clear")
-return true
-"#,
-                    ),
-                    Value::Array(Vec::new()),
-                ],
-                RPC_TIMEOUT,
-            )
-            .unwrap();
-
-        reloaded.append("committed", false).unwrap();
-        let messages = reloaded
-            .client
-            .as_mut()
-            .unwrap()
-            .request(
-                "nvim_exec_lua",
-                vec![
-                    Value::from("return vim.api.nvim_exec2('messages', { output = true }).output"),
-                    Value::Array(Vec::new()),
-                ],
-                RPC_TIMEOUT,
-            )
-            .unwrap();
-        assert_eq!(messages.as_str(), Some(""), "successful write was noisy");
-        reloaded
-            .set_state(IndicatorUpdate {
-                preview: Some("next draft"),
-                ..IndicatorUpdate::default()
-            })
-            .unwrap();
-        reloaded
-            .client
-            .as_mut()
-            .unwrap()
-            .request(
-                "nvim_exec_lua",
-                vec![
-                    Value::from(
-                        r#"
-local marks = vim.api.nvim_buf_get_extmarks(
-  Spokenpad.buf, Spokenpad.ns, 0, -1, { details = true }
-)
-assert(#marks == 1, "preview after committed text must use exactly one extmark")
-local details = marks[1][4]
-assert(#details.virt_lines == 1, "preview after committed text has a virtual spacer")
-assert(details.virt_lines[1][1][1] == "next draft", "preview text must be first")
-assert(details.virt_lines_above == false, "non-empty preview must follow committed text")
-assert(vim.deep_equal(
-  vim.api.nvim_buf_get_lines(Spokenpad.buf, 0, -1, false), { "committed" }
-))
-return true
-"#,
-                    ),
-                    Value::Array(Vec::new()),
-                ],
-                RPC_TIMEOUT,
-            )
-            .unwrap();
-        assert_eq!(fs::read_to_string(path).unwrap(), "committed\n");
-
-        let long_paragraph = (0..48)
-            .map(|index| format!("word{index}"))
-            .collect::<Vec<_>>()
-            .join(" ");
-        reloaded.append(&long_paragraph, true).unwrap();
-        reloaded
-            .client
-            .as_mut()
-            .unwrap()
-            .request(
-                "nvim_exec_lua",
-                vec![
-                    Value::from(
-                        r#"
-vim.cmd("redraw!")
-local visible = false
-for row = 1, 10 do
-  local line = ""
-  for col = 1, 40 do
-    line = line .. vim.fn.screenstring(row, col)
-  end
-  visible = visible or line:find("word47", 1, true) ~= nil
-end
-assert(visible, "committed tail fell below the viewport")
-return true
-"#,
-                    ),
-                    Value::Array(Vec::new()),
-                ],
-                RPC_TIMEOUT,
-            )
-            .unwrap();
-        reloaded
-            .set_state(IndicatorUpdate {
-                preview: Some("growing preview keeps its newest tailmarker visible"),
-                ..IndicatorUpdate::default()
-            })
-            .unwrap();
-        reloaded
-            .client
-            .as_mut()
-            .unwrap()
-            .request(
-                "nvim_exec_lua",
-                vec![
-                    Value::from(
-                        r#"
-vim.cmd("redraw!")
-local function screen_contains(needle)
-  local rows = {}
-  for row = 1, 10 do
-    local line = ""
-    for col = 1, 40 do
-      line = line .. vim.fn.screenstring(row, col)
-    end
-    rows[#rows + 1] = line
-    if line:find(needle, 1, true) then
-      return true, table.concat(rows, "|")
-    end
-  end
-  return false, table.concat(rows, "|")
-end
-local tail_visible, rendered = screen_contains("tailmarker")
-assert(tail_visible, "preview tail fell below a long wrapped paragraph: " .. rendered
-  .. " view=" .. vim.inspect(vim.fn.winsaveview())
-  .. " height=" .. vim.inspect(vim.api.nvim_win_text_height(0, { start_row = 0, end_row = 0 }))
-  .. " winheight=" .. vim.api.nvim_win_get_height(0))
-Spokenpad.set_state({
-  preview = "a longer replacement preview still follows through to growthmarker",
-})
-vim.cmd("redraw!")
-assert(screen_contains("growthmarker"), "growing preview stopped following before commit")
-
-vim.api.nvim_win_call(0, function()
-  vim.cmd("normal! gg0zt")
-end)
-local before = vim.fn.winsaveview()
-Spokenpad.set_state({ preview = "do not snap back to moved reader" })
-vim.cmd("redraw!")
-local after = vim.fn.winsaveview()
-assert(vim.deep_equal(before, after), "preview update snapped a moved reader to the end")
-assert(not screen_contains("do not snap"), "moved reader unexpectedly followed preview")
-Spokenpad.set_state({ preview = "still do not snap on a later update" })
-vim.cmd("redraw!")
-assert(vim.deep_equal(before, vim.fn.winsaveview()), "later preview update resumed following")
-assert(not screen_contains("still do not snap"), "later preview update snapped back")
-return true
-"#,
-                    ),
-                    Value::Array(Vec::new()),
-                ],
-                RPC_TIMEOUT,
-            )
-            .unwrap();
-    }
-
-    #[test]
-    fn failed_save_rolls_back_before_the_next_append() {
-        if Command::new("nvim").arg("--version").output().is_err() {
-            return;
-        }
-        let directory = tempfile::tempdir().unwrap();
-        let mut session = NvimSession::new(headless(directory.path()));
-        let path = session.ensure().unwrap();
-        let _guard = ProcessGroupGuard::for_session(&session);
-        session.append("first", false).unwrap();
-        session
-            .client
-            .as_mut()
-            .unwrap()
-            .request(
-                "nvim_exec_lua",
-                vec![
-                    Value::from("vim.bo[Spokenpad.buf].readonly = true"),
-                    Value::Array(Vec::new()),
-                ],
-                RPC_TIMEOUT,
-            )
-            .unwrap();
-
-        assert!(session.append("must roll back", false).is_err());
-        session.ensure().unwrap();
-        session
-            .client
-            .as_mut()
-            .unwrap()
-            .request(
-                "nvim_exec_lua",
-                vec![
-                    Value::from("vim.bo[Spokenpad.buf].readonly = false"),
-                    Value::Array(Vec::new()),
-                ],
-                RPC_TIMEOUT,
-            )
-            .unwrap();
-        session.append("second", false).unwrap();
-        assert_eq!(fs::read_to_string(path).unwrap(), "first\n\nsecond\n");
-    }
-
-    #[test]
-    fn append_retries_an_ambiguous_timeout_exactly_once() {
-        if Command::new("nvim").arg("--version").output().is_err() {
-            return;
-        }
-        let directory = tempfile::tempdir().unwrap();
-        let mut session = NvimSession::new(headless(directory.path()));
-        let path = session.ensure().unwrap();
-        let _guard = ProcessGroupGuard::for_session(&session);
-        session
-            .client
-            .as_mut()
-            .unwrap()
-            .request(
-                "nvim_exec_lua",
-                vec![
-                    Value::from(
-                        r#"
-local append_once = Spokenpad.append_once
-local first = true
-Spokenpad.append_once = function(...)
-  local result = append_once(...)
-  if first then
-    first = false
-    vim.wait(2200)
-  end
-  return result
-end
-"#,
-                    ),
-                    Value::Array(Vec::new()),
-                ],
-                RPC_TIMEOUT,
-            )
-            .unwrap();
-
-        assert_eq!(session.append("only once", false).unwrap(), 1);
-        assert_eq!(fs::read_to_string(path).unwrap(), "only once\n");
-    }
-
-    #[test]
-    fn unrelated_socket_is_rejected_without_mutation() {
-        if Command::new("nvim").arg("--version").output().is_err() {
-            return;
-        }
-        let directory = tempfile::tempdir().unwrap();
-        let config = headless(directory.path());
-        let mut child = Command::new("nvim")
-            .args(["--headless", "-u", "NONE", "--listen"])
-            .arg(&config.socket_path)
-            .args(["-i", "NONE"])
-            .env("NVIM_LOG_FILE", directory.path().join("nvim.log"))
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .process_group(0)
-            .spawn()
-            .unwrap();
-        let _guard = ProcessGroupGuard(child.id() as libc::pid_t);
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !config.socket_path.exists() && Instant::now() < deadline {
-            std::thread::sleep(CONNECT_POLL);
-        }
-        let mut session = NvimSession::new(config);
-        let error = session.ensure().unwrap_err().to_string();
-        assert!(error.contains("unrelated nvim socket"), "{error}");
-        let _ = child.kill();
-        let _ = child.wait();
-    }
-
-    #[test]
-    fn ordinary_file_at_socket_path_is_refused_and_preserved() {
-        let directory = tempfile::tempdir().unwrap();
-        let config = headless(directory.path());
-        fs::write(&config.socket_path, b"not a socket").unwrap();
-        let mut session = NvimSession::new(config.clone());
-
-        let error = session.ensure().unwrap_err().to_string();
-        assert!(error.contains("refusing non-socket path"), "{error}");
-        assert_eq!(fs::read(&config.socket_path).unwrap(), b"not a socket");
-        assert!(!config.dictation_dir.exists());
-    }
-
-    #[test]
-    fn graphical_editor_without_a_terminal_is_refused_before_file_creation() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut config = headless(directory.path());
-        config.editor = vec!["neovide".to_owned()];
-        let mut session = NvimSession::new(config.clone());
-
-        let error = session.ensure().unwrap_err().to_string();
-        assert!(error.contains("explicitly contains --headless"), "{error}");
-        assert!(!config.dictation_dir.exists());
-    }
-
-    #[test]
-    fn graphical_terminal_must_set_the_x11_instance_not_just_a_title() {
-        assert!(alacritty_declares_instance(&[
-            "alacritty".to_owned(),
-            "--class".to_owned(),
-            "Floating,{instance}".to_owned(),
-            "-e".to_owned(),
-        ]));
-        assert!(!alacritty_declares_instance(&[
-            "alacritty".to_owned(),
-            "--title".to_owned(),
-            "{instance}".to_owned(),
-            "-e".to_owned(),
-        ]));
-        assert!(!alacritty_declares_instance(&[
-            "other-terminal".to_owned(),
-            "--class".to_owned(),
-            "Floating,{instance}".to_owned(),
-        ]));
-        for arguments in [
-            vec![
-                "alacritty",
-                "-e",
-                "echo",
-                "--class",
-                "Floating,{instance}",
-                "-e",
-            ],
-            vec![
-                "alacritty",
-                "--class",
-                "Floating,{instance}",
-                "--class",
-                "Other,other",
-                "-e",
-            ],
-            vec![
-                "alacritty",
-                "--class",
-                "Floating,{instance}",
-                "-o",
-                "window.class.instance='other'",
-                "-e",
-            ],
-        ] {
-            let arguments = arguments.into_iter().map(str::to_owned).collect::<Vec<_>>();
-            assert!(!alacritty_declares_instance(&arguments));
-        }
-    }
-
-    #[test]
-    fn rpc_request_has_one_deadline_while_bytes_dribble_in() {
-        let directory = tempfile::tempdir().unwrap();
-        let socket = directory.path().join("dribble.sock");
-        let listener = UnixListener::bind(&socket).unwrap();
-        let peer = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut request = [0_u8; 256];
-            let _ = stream.read(&mut request);
-            let mut response = Vec::new();
-            rmpv::encode::write_value(
-                &mut response,
-                &Value::Array(vec![
-                    Value::from(1),
-                    Value::from(1),
-                    Value::Nil,
-                    Value::from(1),
-                ]),
-            )
-            .unwrap();
-            for byte in response {
-                if stream.write_all(&[byte]).is_err() {
-                    break;
-                }
-                thread::sleep(Duration::from_millis(30));
-            }
-        });
-        let mut client = RpcClient::connect(&socket, Duration::from_secs(1)).unwrap();
-        let started = Instant::now();
-        let error = client
-            .request(
-                "nvim_eval",
-                vec![Value::from("1")],
-                Duration::from_millis(100),
-            )
-            .unwrap_err();
-        assert!(matches!(error, RpcFailure::Timeout(_)), "{error}");
-        assert!(started.elapsed() < Duration::from_millis(300));
-        drop(client);
-        peer.join().unwrap();
-    }
-
-    #[test]
-    fn rpc_request_times_out_when_peer_never_replies() {
-        let directory = tempfile::tempdir().unwrap();
-        let socket = directory.path().join("stalled.sock");
-        let listener = UnixListener::bind(&socket).unwrap();
-        let peer = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut request = [0_u8; 256];
-            let _ = stream.read(&mut request);
-            thread::sleep(Duration::from_millis(200));
-        });
-        let mut client = RpcClient::connect(&socket, Duration::from_secs(1)).unwrap();
-        let started = Instant::now();
-        let error = client
-            .request(
-                "nvim_eval",
-                vec![Value::from("1")],
-                Duration::from_millis(50),
-            )
-            .unwrap_err();
-        assert!(matches!(error, RpcFailure::Timeout(_)), "{error}");
-        assert!(started.elapsed() < Duration::from_millis(200));
-        drop(client);
-        peer.join().unwrap();
-    }
-}
+mod tests;

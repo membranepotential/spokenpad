@@ -54,9 +54,16 @@ then slices from its authoritative committed offset.
 4. Decode the first unsettled chunk as preview only.
 5. Render that preview as Neovim extmark virtual text.
 
+No tick is issued at all when the pipeline has no segmenter: with nothing ever
+settling, the preview would be a re-decode of the whole growing capture. Ticks
+also pause while the uncommitted tail exceeds `preview.max_seconds` (30 s) and
+resume by themselves once it falls back under; the winbar says which.
+
 The worker owns the offset because preview and release inference are serialized
 there. The main loop's hint exists only to avoid copying an entire long capture
-on every tick and is never trusted for correctness.
+on every tick and is never trusted for correctness. Both are `Frames` —
+capture-absolute sample offsets with their own type, distinct from indices into
+a snapshot, which may begin after the capture did.
 
 ## Release and cancellation
 
@@ -66,8 +73,12 @@ inference may finish its current chunk; any settled commit it produced stands,
 and release begins after it.
 
 Cancellation means “stop adding.” Already committed text and the independently
-recorded WAV remain. Utterance-specific generation tokens prevent work queued
-for an older capture from advancing or resetting a newer one's offset.
+recorded WAV remain, and an append queued before the cancel is still written.
+It applies only while recording: once the key is released the audio is captured
+and the final decode is under way, so a cancel is ignored rather than allowed to
+destroy it. The `Utterance` lifecycle (`Live` → `Released` | `Cancelled`,
+monotone) prevents work queued for an older capture from advancing or resetting
+a newer one's offset.
 
 ## Invariants
 

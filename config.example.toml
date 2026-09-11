@@ -11,10 +11,23 @@
 # M4 key. This is the evdev code, not the X11 keycode (which is this + 8).
 key_code = 186
 
-# evdev key code that cancels an in-progress recording/transcription.
-# 1 is KEY_ESC. Set to a bare integer to change it, or comment out /
-# omit for the default. TOML has no null value, so this option cannot be
-# disabled from the configuration file.
+# evdev key code that discards a recording in progress. 1 is KEY_ESC. Set to a
+# bare integer to change it, or comment out / omit for the default. TOML has no
+# null value, so this option cannot be disabled from the configuration file.
+#
+# It cancels ONLY while recording. Once the key is released the audio is already
+# captured and the final decode is about to land, so a cancel is ignored from
+# there on -- this key is read from every keyboard regardless of focus, and
+# honouring it then would destroy a finished dictation. Cancelling never unwrites
+# text that already reached the file: it stops further decoding, and the
+# recovery WAV is kept.
+#
+# A press held for less than 120 ms is a stray tap, not dictation: the capture is
+# discarded and the winbar says "held too briefly". That threshold is a property
+# of how a key feels rather than of a deployment, so it is a constant in
+# state.rs, not a setting. Losing the keyboard that holds the hotkey (or the last
+# hotkey-capable keyboard during a latched recording) ends the recording by
+# decoding what was said rather than throwing it away.
 cancel_key_code = 1
 
 # Modifier that turns a press into a LATCHED recording: hold it together with
@@ -31,7 +44,9 @@ cancel_key_code = 1
 latch_modifier = "shift"
 
 [audio]
-# Parakeet expects 16 kHz input. Changing this requires a matching model.
+# Must be 16000. Silero's VAD window is 512 samples at 16 kHz and Parakeet's
+# feature extractor assumes the same rate; nothing resamples in between, so
+# any other value is rejected at startup rather than silently degrading.
 sample_rate = 16000
 
 # Audio retained before the key goes down, so the first word isn't clipped.
@@ -57,6 +72,13 @@ preroll_ms = 250
 # model the daemon uses and prints the transcript.
 #
 # The cost is ~32 KB per second of speech (16 kHz 16-bit mono), pruned below.
+#
+# The in-memory ceiling that incident hit is 3600 seconds (MAX_UTTERANCE_SECONDS
+# in audio.rs), a compile-time constant rather than a setting: it is a bound on
+# how much a capture may occupy of this machine's RAM (~230 MB/hour at 16 kHz),
+# not a policy. Reaching it now says so in the winbar and names the WAV that
+# keeps recording past it; the recovery file is written before the ceiling is
+# consulted, so the cap can never truncate it.
 enabled = true
 
 # Where the recordings go. Created mode 0700, each file mode 0600 -- a capture
@@ -78,9 +100,11 @@ enabled = true
 max_total_bytes = 5368709120
 
 [asr]
-# Path to the model directory. Relative paths resolve against the config
-# file's own directory, not the current working directory, so this file
-# can be edited from anywhere.
+# Path to the model directory. A path set HERE resolves against the config
+# file's own directory, not the current working directory, so this file can be
+# edited from anywhere. Leaving the key out keeps the built-in default, which
+# stays relative to the working directory -- which is why the systemd unit sets
+# WorkingDirectory to the checkout.
 model_dir = "models/parakeet-tdt-0.6b-v3-int8"
 
 # CPU threads for decoding.
@@ -117,7 +141,9 @@ vocabulary = []
 # against 11.0-11.7x segmented. What it changes is WHEN text appears: the first
 # chunk lands after ~1s instead of after the whole recording, so a five-minute
 # latched passage starts arriving immediately rather than all at once at the
-# end. Accuracy is unchanged: 13.4% WER either way through scripts/eval.py.
+# end. Accuracy costs a little on the five reference clips: 17.6% aggregate WER
+# through `uv run scripts/eval.py --vad` against 13.9% whole-buffer (Handy 0.9.6
+# scores 48.7% on the same five). See docs/rust.md.
 enabled = true
 
 # Silero VAD weights, ~2 MB, fetched by scripts/fetch_model.py. Relative paths
@@ -278,8 +304,11 @@ socket_path = "/run/user/1000/spokenpad-nvim.sock"
 dictation_dir = "~/.local/state/spokenpad/dictation"
 file_template = "dictation-%Y-%m-%d-%H%M%S.md"
 
-# How long to wait for a freshly spawned nvim to start listening.
-startup_timeout_s = 5.0
+# How long to wait for a freshly spawned nvim to be ready: listening on the
+# socket, its ownership nonce set, AND the user's own startup handlers finished.
+# Generous on purpose -- a first-ever open took 13.5s while a plugin manager did
+# one-time work, and killing a healthy editor mid-startup is the worse failure.
+startup_timeout_s = 20.0
 
 [preview]
 # The tick of progressive commit (docs/progressive-commit.md): every
@@ -300,9 +329,10 @@ enabled = true
 # half the time however long the passage gets.
 interval_ms = 1100
 
-# Backstop for a daemon running WITHOUT a VAD model, where nothing settles and
-# every preview decodes the whole capture from its beginning. Past this many
-# seconds of audio previews stop, the last one stays on screen, and the winbar
-# says so. With the VAD model the tick only ever decodes the open tail -- at
-# most one chunk -- so this is never reached.
-max_seconds = 600.0
+# Backstop on how much uncommitted audio a preview may decode. Without a VAD
+# model no preview is issued at all -- the whole growing capture would have to
+# be re-decoded, which this project refuses -- so with a VAD model the tick
+# only ever decodes the open tail, at most one chunk, and this is reached only
+# if a chunk somehow never settles. Past this many seconds previews pause, the
+# winbar says so, and they resume by themselves once the tail is short again.
+max_seconds = 30.0

@@ -31,17 +31,20 @@ SCORE [SCORE...]`, `--json`. `--vocabulary`/`--hotwords-score` only have an
 effect under `decoding = modified_beam_search` (the config default) — see
 [asr.md](asr.md#hotwords-biasing-the-beam-not-rewriting-the-output).
 
-The script exits non-zero if the 37 s long-clip check (below) fails; a
-normal run with all references unscored-but-decoded exits 0.
+The script exits non-zero if the 37 s long-clip check (below) fails, and
+zero otherwise.
 
 ## What the numbers mean
 
-For each sample with a reference: **WER** (word error rate) and **CER**
-(character error rate), decode time, and real-time factor (clip duration ÷
-decode time — higher is faster), plus the **Handy 0.9.6 baseline WER** for
-the same clip from `eval-samples/transcripts.json` for comparison. Handy is
-the *baseline to beat*, not the target — do not read "beats Handy" as "is
-good."
+For each sample: **WER** (word error rate) and **CER** (character error rate),
+decode time, and real-time factor (clip duration ÷ decode time — higher is
+faster), plus the **Handy 0.9.6 baseline WER** for the same clip from
+`eval-samples/transcripts.json` for comparison. Handy is the *baseline to
+beat*, not the target — do not read "beats Handy" as "is good."
+
+All five samples have a verified reference and are scored. Current aggregate,
+measured 2026-09-11: **17.6%** WER through `--vad` (the path the daemon uses)
+and **13.9%** without it, against Handy's **48.7%** on the same five.
 
 WER and CER need normalisation to mean anything; `scripts/eval.py` does,
 exactly:
@@ -75,53 +78,55 @@ word pair are checked this way; `test_file` → `test underscore file`
 behaviour to assert, so it's excluded rather than given a check that can
 never pass.
 
-## Why one sample is pass/fail, not a WER row
+## Why one sample is also pass/fail, not only a WER row
 
-`handy-1787827757.wav` (37 s) has `reference: null` — it's the clip Handy
-discarded outright (`Timed out waiting 30s for live transcription to
-finalize`), so what was actually said was never recovered and there is
-nothing to score WER against. It is still the single most important sample
-in the set, so it gets a hard assertion instead: a one-shot decode must
-return non-empty text, comfortably inside the clip's own duration.
-"Comfortably" is deliberately loose — `scripts/eval.py` asserts decode time
-under 0.5× the clip's duration (18.5 s here), not a fixed wall-clock
-threshold, because the eval machine may be under load. `docs/asr.md`
+`handy-1787827757.wav` (37 s) is the clip Handy discarded outright (`Timed out
+waiting 30s for live transcription to finalize`). It had no reference for a
+long time, because what was said was never recovered; since 2026-08-27 it has a
+verified one and is scored like every other sample — which is what finally put
+Handy's worst failure into the aggregate.
+
+It also keeps a hard assertion of its own (`long_clip_check: true` in
+`references.json`), because a WER row cannot express "returned something, in
+time": a one-shot decode must return non-empty text comfortably inside the
+clip's own duration. "Comfortably" is deliberately loose — `scripts/eval.py`
+asserts decode time under 0.5× the clip's duration (18.5 s here), not a fixed
+wall-clock threshold, because the eval machine may be under load. `docs/asr.md`
 measures ~14.5x real-time warm and idle, degrading to roughly 3x under
 heavy load (~13 s for this clip) — the 0.5x margin stays clear of that
-without hardcoding a number that would make the harness flaky.
+without hardcoding a number that would make the harness flaky. The flag is
+deliberately independent of whether the sample has a reference: inferring it
+from `reference is None` silently disabled the check on the one sample it
+exists for, the moment that clip was finally transcribed.
 
-## Standing caveat: references are unverified
+## What the references are worth
 
-Every entry in `eval-samples/references.json` has `"verified": false`. They
-were reconstructed from the chat session in which the samples were
-recorded — including the speaker's own typed corrections — not by someone
-listening to the audio afterward. `scripts/eval.py` tags every WER/CER
-figure derived from them accordingly (`[UNVERIFIED ref]` in the table,
-`"verified": false` per sample and `"references_verified": false` on the
-aggregate in `--json` output). Treat WER/CER numbers from this harness as
-directional until someone listens to the five clips and flips the flags —
-they are not yet established fact.
+All five entries in `eval-samples/references.json` carry `"verified": true`.
+They were reconstructed from the session in which the samples were recorded and
+then confirmed against the audio by the speaker on 2026-08-27, with `uv run
+scripts/verify_references.py`. Four were confirmed unchanged; the fifth
+(`handy-1787827757`) had no reference at all and gained one. `scripts/eval.py`
+tags any unverified sample with `[UNVERIFIED ref]` in the table, so the absence
+of that marker is the check. (`--json` still reports
+`"references_verified": false` on the aggregate: that field is hardcoded in
+`scripts/eval.py` and has not been updated — the per-sample `"verified"` flags
+are the true ones.)
 
+That verification pass also discharged the two biases that used to make the
+`handy WER` column unquotable: `handy-1787828395`'s reference is no longer
+Handy's own output with a word corrected but independently confirmed text, and
+the 37 s clip Handy discarded is scored rather than excluded — so the aggregate
+finally contains Handy's worst failure instead of omitting it.
 
-## The Handy baseline column is biased — do not quote it
+Two caveats remain, in our own disfavour:
 
-`scripts/eval.py` prints a `handy WER` column from `eval-samples/transcripts.json`.
-It is useful for spotting per-sample regressions and misleading as a verdict,
-for two independent reasons:
-
-1. **Some references were derived from Handy's own output.**
-   `handy-1787828395`'s reference is Handy's transcript with a single word
-   corrected, so Handy is scored against a reference produced by Handy. Its
-   1.7% there is close to meaningless.
-2. **Handy's worst failure is excluded from the aggregate.**
-   `handy-1787827757` (37 s) has `reference: null` because Handy produced an
-   empty transcript and the spoken content was never recovered. Scoring it
-   would give Handy roughly 100% WER on 37 seconds of speech. It is instead a
-   pass/fail check that Handy would fail outright and spokenpad passes in ~3 s.
-
-So the current aggregate — spokenpad 18.4% vs Handy 15.8% — is not evidence that
-Handy transcribes better. It is evidence that the reference set is small,
-unverified, partly circular, and excludes the case that motivated this project.
-Fixing that means listening to the audio and marking references `verified: true`.
-Until then, treat per-sample movement and the `exercises` checks as the signal
-and the aggregate as noise.
+- The `handy-1787827757` reference was drafted from **this project's** model
+  output and then corrected by the speaker. The correction was substantial (it
+  fixed set/sed, reset/rust and recovered a whole trailing passage), so it is
+  not circular, but a residual bias toward our model on that one sample cannot
+  be fully excluded. A from-scratch transcription would settle it if the number
+  ever mattered that much.
+- Five clips of one speaker on one microphone is a **regression proxy, not an
+  accuracy measurement**. Read per-sample movement and the `exercises` checks as
+  the signal; the aggregate is for noticing that something moved, not for
+  quoting as this tool's word error rate.

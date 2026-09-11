@@ -31,6 +31,8 @@ const MAX_SAME_SECOND: usize = 100;
 const FULL_SCALE: f32 = 32_767.0;
 const WRITER_JOIN: Duration = Duration::from_secs(3);
 const QUEUE_SECONDS: usize = 60;
+/// Recovery refuses implausibly long WAVs rather than allocating for them.
+const MAX_RECOVERY_SECONDS: f64 = 4.0 * 3600.0;
 
 trait WavSink: Send {
     fn write(&mut self, samples: &[f32]) -> Result<()>;
@@ -146,7 +148,10 @@ impl CaptureRecorder {
             lock(&self.lifecycle).last = None;
             return;
         }
-        self.stop();
+        // The key-press path must never wait on a sick filesystem, so the
+        // previous writer is abandoned rather than joined; it owns its WAV and
+        // finalises itself.
+        self.detach();
 
         let opened = (|| -> Result<_> {
             DirBuilder::new()
@@ -237,10 +242,10 @@ impl CaptureRecorder {
         });
     }
 
-    /// Copy and enqueue samples. Prefer `write_shared` when the caller already
-    /// owns an immutable callback buffer.
-    #[allow(dead_code)]
-    pub fn write(&self, samples: &[f32]) {
+    /// Copy and enqueue samples. Production callers hand over the immutable
+    /// callback buffer they already own through `write_shared`.
+    #[cfg(test)]
+    fn write(&self, samples: &[f32]) {
         self.write_shared(Arc::from(samples));
     }
 
@@ -267,6 +272,17 @@ impl CaptureRecorder {
             state.queued.fetch_sub(error.0.len(), Ordering::AcqRel);
             state.broken.store(true, Ordering::Release);
         }
+    }
+
+    /// Stop feeding the current writer and let it finish on its own thread.
+    fn detach(&self) {
+        let active = lock(&self.lifecycle).current.take();
+        let Some(mut active) = active else { return };
+        active.state.stopping.store(true, Ordering::Release);
+        // Dropping the handle detaches: `drain` still finalises the WAV and
+        // removes the path from the open registry when it is done.
+        drop(active.writer.take());
+        report_dropped(&active.state, self.sample_rate);
     }
 
     /// Flush the current capture, but never wait on a sick filesystem for
@@ -427,6 +443,11 @@ pub fn read_capture(path: &Path) -> Result<(Vec<f32>, u32)> {
         WavReader::open(path).with_context(|| format!("{}: not a readable wav", path.display()))?;
     let spec = wav.spec();
     ensure!(
+        spec.sample_rate > 0,
+        "{}: wav declares a zero sample rate",
+        path.display()
+    );
+    ensure!(
         spec.channels == 1,
         "{}: expected mono audio, got {} channels",
         path.display(),
@@ -438,6 +459,12 @@ pub fn read_capture(path: &Path) -> Result<(Vec<f32>, u32)> {
         path.display(),
         spec.bits_per_sample,
         spec.sample_format
+    );
+    let seconds = f64::from(wav.duration()) / f64::from(spec.sample_rate);
+    ensure!(
+        seconds <= MAX_RECOVERY_SECONDS,
+        "{}: {seconds:.0}s of audio exceeds the {MAX_RECOVERY_SECONDS:.0}s recovery limit",
+        path.display()
     );
     let samples = wav
         .samples::<i16>()
@@ -527,10 +554,17 @@ fn secure_recordings(directory: &Path) {
             continue;
         }
         let result = (|| -> Result<()> {
-            let metadata = fs::symlink_metadata(&path)?;
+            // Narrow the file we actually hold open, never a path that could be
+            // swapped for a symlink between the check and the chmod. O_NOFOLLOW
+            // refuses symlinks and O_NONBLOCK refuses to wait on a FIFO.
+            let file = OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+                .open(&path)?;
+            let metadata = file.metadata()?;
             if metadata.file_type().is_file() && metadata.permissions().mode() & 0o777 != FILE_MODE
             {
-                fs::set_permissions(&path, fs::Permissions::from_mode(FILE_MODE))?;
+                file.set_permissions(fs::Permissions::from_mode(FILE_MODE))?;
             }
             Ok(())
         })();
@@ -788,6 +822,108 @@ mod tests {
         prune_recordings(directory, 64, |_| false);
         assert!(!old.exists());
         assert!(new.exists() && stranger.exists() && link.symlink_metadata().is_ok());
+    }
+
+    #[test]
+    fn same_second_captures_get_distinct_names_until_the_ceiling() {
+        let temporary = tempdir().unwrap();
+        let directory = temporary.path();
+        let mut opened = Vec::new();
+        for _ in 0..3 {
+            let (path, file) = open_capture(directory).unwrap();
+            drop(file);
+            opened.push(path);
+        }
+        let names: HashSet<_> = opened.iter().collect();
+        assert_eq!(names.len(), 3, "same-second captures must not collide");
+        assert!(
+            opened[1]
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .ends_with("-1.wav")
+        );
+
+        // Fill the whole second, then prove the ceiling is an error, not a
+        // silent overwrite of somebody else's recording.
+        let stamp = opened[0]
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .trim_start_matches(CAPTURE_PREFIX)
+            .trim_end_matches(CAPTURE_SUFFIX)
+            .to_owned();
+        for index in 3..MAX_SAME_SECOND {
+            fs::write(
+                directory.join(format!("{CAPTURE_PREFIX}{stamp}-{index}{CAPTURE_SUFFIX}")),
+                [],
+            )
+            .unwrap();
+        }
+        let error = open_capture(directory).unwrap_err().to_string();
+        assert!(error.contains("already have timestamp"), "{error}");
+    }
+
+    #[test]
+    fn pruning_keeps_every_file_a_live_writer_still_owns() {
+        let temporary = tempdir().unwrap();
+        let directory = temporary.path();
+        for name in ["capture-a.wav", "capture-b.wav"] {
+            fs::write(directory.join(name), [0; 64]).unwrap();
+            thread::sleep(Duration::from_millis(5));
+        }
+        // Over quota by a wide margin, but nothing may be deleted.
+        prune_recordings(directory, 0, |_| true);
+        assert_eq!(fs::read_dir(directory).unwrap().count(), 2);
+        prune_recordings(directory, 0, |_| false);
+        assert_eq!(fs::read_dir(directory).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn read_rejects_implausibly_long_recordings() {
+        let temporary = tempdir().unwrap();
+        let path = temporary.path().join("long.wav");
+        // One sample per second: four hours of "audio" in five frames.
+        let mut writer = WavWriter::create(&path, mono_pcm16(1)).unwrap();
+        for _ in 0..(4 * 3600 + 1) {
+            writer.write_sample(0_i16).unwrap();
+        }
+        writer.finalize().unwrap();
+        let error = read_capture(&path).unwrap_err().to_string();
+        assert!(error.contains("recovery limit"), "{error}");
+    }
+
+    #[test]
+    fn starting_a_capture_does_not_wait_for_a_stalled_writer() {
+        let temporary = tempdir().unwrap();
+        let mut recorder = CaptureRecorder::new(config(temporary.path().join("audio")), 1_000);
+        recorder.writer_join = Duration::from_secs(3);
+        let stalled = temporary.path().join("capture-stalled.wav");
+        fs::write(&stalled, []).unwrap();
+        let (entered_tx, entered_rx) = test_mpsc::channel();
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        recorder.launch(
+            stalled,
+            Box::new(BlockingSink {
+                entered: entered_tx,
+                release: Arc::clone(&release),
+            }),
+            1_000,
+        );
+        recorder.write(&[1.0]);
+        entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+        let started = Instant::now();
+        recorder.start();
+        assert!(
+            started.elapsed() < Duration::from_millis(250),
+            "the key-press path joined the previous writer"
+        );
+        assert!(matches!(recorder.status(), RecordingStatus::Recorded(_)));
+
+        let (released, condition) = &*release;
+        *lock(released) = true;
+        condition.notify_all();
     }
 
     #[test]

@@ -327,6 +327,17 @@ class EvalReport:
     long_clip: LongClipCheck | None
     aggregate: AggregateStats
 
+    @property
+    def unverified(self) -> int:
+        """How many scored samples carry a reference nobody has checked."""
+        return sum(1 for s in self.samples if not s.verified)
+
+    @property
+    def references_verified(self) -> bool:
+        """Every scored sample has a hand-checked reference, and there is at
+        least one. A run that scored nothing has verified nothing."""
+        return bool(self.samples) and not self.unverified
+
 
 def _aggregate(samples: Sequence[SampleResult]) -> AggregateStats:
     if not samples:
@@ -488,7 +499,7 @@ def print_report(report: EvalReport) -> None:
     print("-" * len(header))
     agg = report.aggregate
     handy_agg = f"{agg.handy_wer * 100:9.1f}%" if agg.handy_wer is not None else f"{'N/A':>10}"
-    unverified = sum(1 for s in report.samples if not s.verified)
+    unverified = report.unverified
     caveat = (
         f" -- {unverified}/{len(report.samples)} references are UNVERIFIED; this "
         "aggregate is not quotable, see docs/evaluation.md"
@@ -568,7 +579,7 @@ def report_to_dict(report: EvalReport) -> dict[str, object]:
             "cer": report.aggregate.cer,
             "handy_wer": report.aggregate.handy_wer,
             "samples_scored": report.aggregate.samples_scored,
-            "references_verified": False,
+            "references_verified": report.references_verified,
         },
     }
 

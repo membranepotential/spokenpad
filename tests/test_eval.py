@@ -5,7 +5,15 @@ from pathlib import Path
 
 import numpy as np
 
-from scripts.eval import character_error_rate, load_wav, normalize, word_error_rate
+from scripts.eval import (
+    AggregateStats,
+    EvalReport,
+    SampleResult,
+    character_error_rate,
+    load_wav,
+    normalize,
+    word_error_rate,
+)
 from scripts.verify_rust import read_wav as read_reference_wav
 
 
@@ -48,3 +56,38 @@ def test_reference_reader_accepts_a_one_sample_pcm_payload(tmp_path: Path) -> No
     assert samples.dtype == np.float32
     assert samples.shape == (1,)
     assert samples[0] == np.float32(1.0)
+
+
+def _report(*verified: bool) -> EvalReport:
+    samples = tuple(
+        SampleResult(
+            file=f"{index}.wav",
+            verified=flag,
+            duration_s=1.0,
+            reference="word",
+            hypothesis="word",
+            decode_seconds=0.1,
+            rtf=10.0,
+            wer=0.0,
+            cer=0.0,
+            handy_hypothesis=None,
+            handy_wer=None,
+            exercises=(),
+        )
+        for index, flag in enumerate(verified)
+    )
+    return EvalReport(
+        vocabulary=(),
+        hotwords_score=0.0,
+        decoding="greedy_search",
+        samples=samples,
+        long_clip=None,
+        aggregate=AggregateStats(wer=0.0, cer=0.0, handy_wer=None, samples_scored=len(samples)),
+    )
+
+
+def test_references_are_verified_only_when_every_scored_sample_is() -> None:
+    assert _report(True, True).references_verified
+    assert not _report(True, False).references_verified
+    # A run that scored nothing has verified nothing.
+    assert not _report().references_verified

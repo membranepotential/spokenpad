@@ -10,42 +10,101 @@ for ASR/VAD parity and evaluation; the daemon never imports or starts it.
 
 | Module | Responsibility | External boundary |
 |---|---|---|
-| `config.rs` | Parse and validate the shared TOML | filesystem |
-| `state.rs` | Total session-state transition function | none |
-| `hotkey.rs` | Observe evdev keys read-only | `/dev/input` |
-| `audio.rs` | Capture pre-roll and immutable audio chunks | PortAudio |
-| `recorder.rs` | Persist every capture independently of decode | filesystem |
+| `config.rs` | Parse and validate the TOML once, before any thread or model | filesystem |
+| `state.rs` | Total session-state transition function, and the minimum hold | none |
+| `frames.rs` | `Frames`: capture-absolute sample offsets, distinct from slice indices | none |
+| `geometry.rs` | Which output the pointer is on, and the clamped window rect | none |
+| `text.rs` | Filler stripping, exact replacements, whitespace repair | none |
+| `session.rs` | Utterance lifecycle, preview cadence, and the one user-visible notice | internal channels |
+| `decode.rs` | Committed sample offset, settled commits, release tails, preview isolation | worker messages |
 | `inference.rs` | CPU-only models plus VAD merge/pad/settlement | ONNX Runtime |
-| `decode.rs` | Own progressive commit offsets and release tails | worker messages |
-| `session.rs` | Utterance identity, cancellation, preview cadence | internal channels |
-| `nvim.rs` | Owned editor lifecycle and transactional RPC appends | Unix socket, i3 |
-| `daemon.rs` | Event loop and component orchestration | all of the above |
+| `hotkey.rs` | Observe evdev keys read-only; `WatcherState` is the pure half | `/dev/input` |
+| `audio.rs` | Pre-roll, immutable capture chunks, the memory ceiling, stream repair | PortAudio (behind `InputBackend`) |
+| `recorder.rs` | Persist every capture independently of decode, and prune the directory | filesystem |
+| `nvim.rs` | Owned editor lifecycle, ownership proof, transactional appends, indicator | Unix socket, i3 |
+| `nvim/rpc.rs` | msgpack-RPC transport with absolute deadlines; pure codec | Unix socket |
+| `x11.rs` | Bounded `xrandr`/`xdotool`/`i3-msg` queries, once per spawn | subprocesses |
+| `logging.rs` | Private 0600 diagnostic log, rotated at 1 MB | filesystem |
+| `daemon.rs` | `run` (the shell) and `serve` (the event loop) | all of the above |
 
-The Neovim presentation code is embedded from `src/lua/nvim_indicator.lua`
-and `src/lua/dictation_init.lua`. Preview text is extmark virtual text, never
+The Neovim presentation code is embedded from `src/lua/spokenpad.lua` (one
+file: the buffer, the winbar indicator, the level meter, the preview extmark,
+and the transactional append) and `src/lua/dictation_init.lua` (the optional
+bundled editor configuration). Preview text is extmark virtual text, never
 buffer content.
+
+## Functional core, imperative shell
+
+The core is pure and unit-tested without a device, a thread, or a process:
+
+- `state.rs` — `step(State, Event) -> (State, Command)`, total.
+- `session.rs` — what a capture means: which utterance is current, whether a
+  preview is due, which notice is showing.
+- `decode.rs` — offsets, settlement, and what a release still owes.
+- `frames.rs`, `geometry.rs`, `text.rs` — values and arithmetic.
+- the pure halves of two device modules: `hotkey::WatcherState` (which
+  keyboards hold the hotkey and which latch modifiers they report) and, in
+  `nvim`, the RPC codec, the spawn argv, and ownership parsing.
+
+The shell owns everything that can fail for reasons outside the program:
+`daemon::run` and `daemon::serve`, the audio backends, `recorder`, the hotkey
+run loop, the nvim session, `x11`, and `logging`.
+
+`daemon::run` is the imperative shell proper — it takes the per-user lock,
+registers signal handlers, opens PortAudio and evdev, and loads the models.
+`daemon::serve` is the event loop over whatever devices it is handed: it is
+generic over the audio backend, the recognizer and the segmenter, takes a
+`Receiver<state::Event>` and a stop flag, and touches no process-global state.
+That is the seam `tests/e2e.rs` drives headlessly.
 
 ## Event and data flow
 
 ```text
-read-only evdev event
-        │
-        ▼
-state transition ──► capture command ──► PortAudio chunks
-                                           │
-                        ┌──────────────────┴──────────────────┐
-                        ▼                                     ▼
-                 recording writer                     decode worker
-                                                              │
-                                             settled commits + open preview
-                                                              │
-                                                              ▼
-                                                owned Neovim RPC buffer
+read-only evdev ──► state::step ──► Command
+                                      │
+        ┌─────────────────────────────┼──────────────────────────┐
+        ▼                             ▼                          ▼
+  Start: capture                Decode: release            Discard: reason
+        │                             │                          │
+        ▼                             ▼                          ▼
+  PortAudio chunks            Work::Finish ──► worker      Session notice
+        │      │                                  │
+        │      └──► recovery WAV                  │
+        ▼                                         ▼
+  AudioCapture::poll ──► CaptureEvent ──►  Commit / Preview
+        (gap, unavailable, cap, flags)            │
+                        │                         │
+                        ▼                         ▼
+                    Session (state, committed hint, notice)
+                                      │
+                                      ▼
+                       EditorWork::{Ensure, Append, Indicator}
+                                      │
+                                      ▼
+                          owned Neovim RPC buffer
 ```
 
-The state transition is pure. Blocking model and editor work runs off the
-event loop. Audio recording receives chunks before the in-memory capture cap,
-so recovery does not depend on decoding succeeding.
+Everything the event loop learns about the microphone arrives as a typed
+`CaptureEvent` from `AudioCapture::poll`, drained on a fixed interval and again
+at every release; there is no separate watchdog, health or notice query. Each
+event is delivered exactly once.
+
+The session owns the single user-visible notice — held too briefly, microphone
+gap, microphone unavailable, capture incomplete, nearly silent, preview paused,
+memory cap. It replaces the preview in the winbar and is cleared by the next key
+press, not by a timer and not by the daemon re-warning.
+
+The indicator travels on the editor thread's own channel as
+`EditorWork::Indicator(IndicatorState)`, coalesced so only the newest pending
+update is sent; there is no shared indicator state. Appends queued ahead of it
+are written first, which is why cancelling or shutting down cannot lose text
+that has already been produced: the editor thread runs until its channel says to
+stop, and shutdown gives it a bounded three seconds to drain, logging anything
+undelivered at error level.
+
+The state transition is pure. Blocking model and editor work runs off the event
+loop. Audio recording receives chunks before the in-memory capture cap, so
+recovery does not depend on decoding succeeding.
 
 ## Decode invariants
 
@@ -54,14 +113,23 @@ so recovery does not depend on decoding succeeding.
   ordinary pauses still merge for recognizer context.
 - Release decodes only the range after the committed offset.
 - Preview may re-decode only the bounded open tail and cannot reach the file.
+  With no segmenter loaded, no preview tick is issued at all.
 - If every segmented decode is empty, one whole-buffer retry is allowed as a
   recovery exception.
+- An `Utterance` moves forwards only: `Live → Released` or `Live → Cancelled`.
+  Work queued for an older capture can neither advance nor reset a newer one.
 
 ## Concurrency and ownership
 
-The main loop owns session state. Capture callbacks do bounded work and hand
-immutable chunks to recording/decode consumers. One inference worker owns the
-recognizer and VAD instances, keeping their non-thread-safe state serialized.
+Four owners: the main loop (session state), the input watcher, the inference
+worker, and the editor thread; `recorder` owns disk I/O on a thread of its own.
+
+Capture callbacks do bounded work — one allocation, one lock, no I/O — and hand
+immutable chunks to the recording and decode consumers. One inference worker
+owns the recognizer and VAD instances, keeping their non-thread-safe state
+serialized, and owns the committed offset because it is the one thread that
+serialises decodes; the main loop keeps only a lagging hint, used to avoid
+copying a long capture on every tick.
 
 Neovim appends use request/reply RPC and are transaction-like: mutate, write
 with autocommands suppressed, then acknowledge; a failed write rolls the

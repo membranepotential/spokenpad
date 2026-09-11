@@ -88,4 +88,75 @@ mod tests {
         );
         assert_eq!(pick_output(&[], r), None);
     }
+
+    fn screen(x: i32, primary: bool) -> Output {
+        Output {
+            rect: Rect {
+                x,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            },
+            primary,
+        }
+    }
+
+    fn pointer(x: i32) -> Rect {
+        Rect {
+            x,
+            y: 10,
+            width: 1,
+            height: 1,
+        }
+    }
+
+    #[test]
+    fn multi_monitor_pick_follows_the_pointer_then_the_primary() {
+        let outputs = [screen(-1920, false), screen(0, true), screen(1920, false)];
+        for (x, expected) in [(-1000, -1920), (10, 0), (2000, 1920)] {
+            assert_eq!(
+                pick_output(&outputs, pointer(x)).map(|rect| rect.x),
+                Some(expected),
+                "pointer at {x} landed on the wrong monitor"
+            );
+        }
+        // A pointer nobody can read falls back to the primary, not to the
+        // first-listed monitor.
+        assert_eq!(
+            pick_output(&outputs, pointer(i32::MAX)).map(|rect| rect.x),
+            Some(0)
+        );
+        // With no primary declared, the first monitor is the fallback.
+        let unmarked = [screen(-1920, false), screen(0, false)];
+        assert_eq!(
+            pick_output(&unmarked, pointer(i32::MAX)).map(|rect| rect.x),
+            Some(-1920)
+        );
+    }
+
+    #[test]
+    fn mirrored_monitors_tie_break_on_the_earlier_one() {
+        // Two outputs covering the same corner intersect the pointer equally.
+        // The tie-break is the order xrandr listed them, so the choice is
+        // stable across queries rather than whichever compared last.
+        let mirrored = |width: u32, primary: bool| Output {
+            rect: Rect {
+                x: 0,
+                y: 0,
+                width,
+                height: 1080,
+            },
+            primary,
+        };
+        assert_eq!(
+            pick_output(&[mirrored(1920, false), mirrored(1280, true)], pointer(10))
+                .map(|rect| rect.width),
+            Some(1920)
+        );
+        assert_eq!(
+            pick_output(&[mirrored(1280, true), mirrored(1920, false)], pointer(10))
+                .map(|rect| rect.width),
+            Some(1280)
+        );
+    }
 }

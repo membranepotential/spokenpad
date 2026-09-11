@@ -4,7 +4,7 @@
 (see [architecture.md](architecture.md)) must read evdev directly instead of
 using a keysym-based hotkey library — reinforced by
 [constraints.md](constraints.md#read-evdev-read-only). The dictation
-window's per-output placement is `dictation_rect` in
+window's per-output placement is `pick_output`/`placement` in
 [`geometry.rs`](../src/geometry.rs).
 
 This is not a general compatibility target. spokenpad is built and tuned
@@ -74,9 +74,20 @@ function over output rectangles (see
 
 ## Audio
 
-PipeWire. `Audio.device = None`
-([`config.rs`](../src/config.rs)) means the PipeWire/PulseAudio
-default source; no device is hardcoded.
+PipeWire, reached through PortAudio. `audio.device` unset
+([`config.rs`](../src/config.rs)) means PortAudio's default input device; no
+device is hardcoded. A configured value is a *query*, not a name: PortAudio's
+device list is enumerated and the query's whitespace-separated words are matched
+case-insensitively, **in order**, against `"<device name>, <host API>"`, with a
+unique exact match winning an otherwise ambiguous query. That is deliberately
+the same rule Python's `sounddevice` uses, so a device string that worked before
+the port still works (see `[audio]` in
+[`config.example.toml`](../config.example.toml)).
+
+The input stream stays open while spokenpad runs, because the pre-roll ring has
+to be warm at the key press. A stream that stops delivering audio is reopened by
+the watchdog — mid-capture, where the gap is reported to the user, and while
+idle, where it is only logged.
 
 ## Window manager
 

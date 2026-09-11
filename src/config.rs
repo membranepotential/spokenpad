@@ -6,6 +6,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// Both models are 16kHz: Silero's window is 512 samples at that rate and
+/// Parakeet's feature extractor assumes it. Nothing resamples in between.
+pub const REQUIRED_SAMPLE_RATE: u32 = 16_000;
+
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Decoding {
@@ -81,10 +85,15 @@ impl Audio {
     }
 }
 
+pub const DEFAULT_MODEL_DIR: &str = "models/parakeet-tdt-0.6b-v3-int8";
+pub const DEFAULT_VAD_MODEL: &str = "models/silero_vad.onnx";
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Asr {
-    pub model_dir: PathBuf,
+    /// `None` keeps the working-directory-relative default; a configured path
+    /// is resolved against the config file's own directory.
+    pub model_dir: Option<PathBuf>,
     pub num_threads: u16,
     pub decoding: Decoding,
     pub hotwords_score: f32,
@@ -93,7 +102,7 @@ pub struct Asr {
 impl Default for Asr {
     fn default() -> Self {
         Self {
-            model_dir: "models/parakeet-tdt-0.6b-v3-int8".into(),
+            model_dir: None,
             num_threads: 6,
             decoding: Decoding::ModifiedBeamSearch,
             hotwords_score: 1.5,
@@ -102,6 +111,11 @@ impl Default for Asr {
     }
 }
 impl Asr {
+    pub fn model_dir(&self) -> &Path {
+        self.model_dir
+            .as_deref()
+            .unwrap_or(Path::new(DEFAULT_MODEL_DIR))
+    }
     pub fn model_files(&self) -> [PathBuf; 4] {
         [
             "encoder.int8.onnx",
@@ -109,7 +123,7 @@ impl Asr {
             "joiner.int8.onnx",
             "tokens.txt",
         ]
-        .map(|s| self.model_dir.join(s))
+        .map(|s| self.model_dir().join(s))
     }
     pub fn check_files(&self) -> Result<()> {
         for p in self.model_files() {
@@ -127,7 +141,8 @@ impl Asr {
 #[serde(default, deny_unknown_fields)]
 pub struct Vad {
     pub enabled: bool,
-    pub model: PathBuf,
+    /// `None` keeps the working-directory-relative default.
+    pub model: Option<PathBuf>,
     pub threshold: f64,
     pub min_silence_seconds: f64,
     pub min_speech_seconds: f64,
@@ -140,7 +155,7 @@ impl Default for Vad {
     fn default() -> Self {
         Self {
             enabled: true,
-            model: "models/silero_vad.onnx".into(),
+            model: None,
             threshold: 0.5,
             min_silence_seconds: 0.35,
             min_speech_seconds: 0.15,
@@ -149,6 +164,14 @@ impl Default for Vad {
             pad_seconds: 0.5,
             edge_pad_seconds: 2.,
         }
+    }
+}
+
+impl Vad {
+    pub fn model(&self) -> &Path {
+        self.model
+            .as_deref()
+            .unwrap_or(Path::new(DEFAULT_VAD_MODEL))
     }
 }
 
@@ -263,7 +286,7 @@ impl Default for Preview {
         Self {
             enabled: true,
             interval_ms: 1100,
-            max_seconds: 600.,
+            max_seconds: 30.,
         }
     }
 }
@@ -281,36 +304,46 @@ pub struct Config {
     pub preview: Preview,
 }
 impl Config {
+    /// An explicit path must exist: silently running on defaults because a
+    /// `--config` typo pointed nowhere is how a user loses their settings.
+    /// Only the default location may be absent.
     pub fn load(path: Option<&Path>) -> Result<Self> {
-        let default = env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home().join(".config"))
-            .join("spokenpad/config.toml");
-        let p = path.unwrap_or(&default);
-        if !p.exists() {
-            let c = Self::default();
-            c.validate()?;
-            return Ok(c);
-        }
+        let Some(p) = path else {
+            let default = env::var_os("XDG_CONFIG_HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| home().join(".config"))
+                .join("spokenpad/config.toml");
+            if !default.exists() {
+                let c = Self::default();
+                c.validate()?;
+                return Ok(c);
+            }
+            return Self::read(&default);
+        };
+        ensure!(p.exists(), "configuration file {} not found", p.display());
+        Self::read(p)
+    }
+    fn read(path: &Path) -> Result<Self> {
         Self::parse(
-            &std::fs::read_to_string(p).with_context(|| format!("read config {}", p.display()))?,
-            p.parent(),
+            &std::fs::read_to_string(path)
+                .with_context(|| format!("read config {}", path.display()))?,
+            path.parent(),
         )
     }
     pub fn parse(input: &str, base: Option<&Path>) -> Result<Self> {
         let mut c: Self = toml::from_str(input).context("invalid configuration")?;
-        let raw: toml::Table = toml::from_str(input)?;
-        for (section, key, path) in [
-            ("asr", "model_dir", &mut c.asr.model_dir),
-            ("vad", "model", &mut c.vad.model),
-        ] {
-            if raw.get(section).and_then(|v| v.get(key)).is_some() {
-                *path = expand_path(path)?;
-                if path.is_relative()
-                    && let Some(b) = base
-                {
-                    *path = b.join(&*path);
-                }
+        // A configured model path is relative to the config file; the built-in
+        // defaults stay relative to the working directory, which is exactly
+        // what `Option::None` means here.
+        for p in [&mut c.asr.model_dir, &mut c.vad.model]
+            .into_iter()
+            .flatten()
+        {
+            *p = expand_path(p)?;
+            if p.is_relative()
+                && let Some(b) = base
+            {
+                *p = b.join(&*p);
             }
         }
         for p in [
@@ -338,8 +371,8 @@ impl Config {
             );
         }
         ensure!(
-            self.audio.sample_rate > 0 && self.audio.sample_rate <= i32::MAX as u32,
-            "audio.sample_rate must fit the native positive sample-rate field"
+            self.audio.sample_rate == REQUIRED_SAMPLE_RATE,
+            "audio.sample_rate must be {REQUIRED_SAMPLE_RATE}: the Silero VAD window is 512 samples at 16kHz and Parakeet's features assume 16kHz input"
         );
         ensure!(
             self.audio.preroll_ms <= 60_000,
@@ -375,8 +408,10 @@ impl Config {
             );
         }
         ensure!(
-            self.vad.chunk_seconds.is_finite() && (0.0..=3600.).contains(&self.vad.chunk_seconds),
-            "vad.chunk_seconds must be in [0,3600]"
+            self.vad.chunk_seconds.is_finite()
+                && self.vad.chunk_seconds > 0.
+                && self.vad.chunk_seconds <= 3600.,
+            "vad.chunk_seconds must be in (0,3600]"
         );
         ensure!(
             self.vad.max_speech_seconds > self.vad.min_speech_seconds,
@@ -437,9 +472,20 @@ impl Config {
             "preview.interval_ms must be in [200,3600000]"
         );
         ensure!(
-            self.preview.max_seconds.is_finite() && self.preview.max_seconds > 0.,
-            "preview.max_seconds must be positive and finite"
+            self.preview.max_seconds.is_finite()
+                && self.preview.max_seconds > 0.
+                && self.preview.max_seconds <= 3600.,
+            "preview.max_seconds must be in (0,3600]"
         );
+        if let Some(name) = &self.nvim.colorscheme {
+            ensure!(
+                !name.is_empty()
+                    && name
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b)),
+                "nvim.colorscheme must match [A-Za-z0-9_.-]+"
+            );
+        }
         for s in self
             .text
             .fillers
@@ -450,8 +496,8 @@ impl Config {
         }
         // The native wrapper builds CStrings; reject interior NULs at this boundary.
         for p in [
-            &self.asr.model_dir,
-            &self.vad.model,
+            self.asr.model_dir(),
+            self.vad.model(),
             &self.nvim.socket_path,
             &self.nvim.dictation_dir,
             &self.recording.dir,
@@ -518,6 +564,11 @@ mod tests {
             "[wat]",
             "[audio]\nprerol_ms=2",
             "[audio]\nsample_rate=0",
+            "[audio]\nsample_rate=44100",
+            "[vad]\nchunk_seconds=0",
+            "[preview]\nmax_seconds=3601",
+            "[nvim]\ncolorscheme='ha ha; !'",
+            "[nvim]\ncolorscheme=''",
             "[audio]\npreroll_ms=-1",
             "[preview]\ninterval_ms=199",
             "[preview]\nmax_seconds=nan",
@@ -536,17 +587,35 @@ mod tests {
         }
     }
     #[test]
-    fn absent_config_and_existing_audio_rates_remain_compatible() {
+    fn a_missing_explicit_config_is_an_error() {
+        // Only the default location may be absent; a --config typo must not
+        // silently run the daemon on built-in defaults.
         let temporary = tempfile::tempdir().unwrap();
-        let c = Config::load(Some(&temporary.path().join("absent.toml"))).unwrap();
-        assert_eq!(c.audio.sample_rate, 16000);
-        let c = Config::parse(
-            "[audio]\nsample_rate=48000\npreroll_ms=0\n[vad]\nchunk_seconds=0",
-            None,
-        )
-        .unwrap();
-        assert_eq!(c.audio.sample_rate, 48000);
-        assert_eq!(c.audio.preroll_frames(), 0);
+        let absent = temporary.path().join("absent.toml");
+        let error = Config::load(Some(&absent)).unwrap_err().to_string();
+        assert!(error.contains("not found"), "{error}");
+
+        let c = Config::default();
+        c.validate().unwrap();
+        assert_eq!(c.audio.sample_rate, REQUIRED_SAMPLE_RATE);
+        assert_eq!(c.preview.max_seconds, 30.);
+    }
+    #[test]
+    fn the_models_only_accept_sixteen_kilohertz() {
+        let error = Config::parse("[audio]\nsample_rate=48000", None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("Silero") && error.contains("Parakeet"),
+            "{error}"
+        );
+        assert_eq!(
+            Config::parse("[audio]\npreroll_ms=0", None)
+                .unwrap()
+                .audio
+                .preroll_frames(),
+            0
+        );
     }
     #[test]
     fn explicit_model_paths_use_config_directory() {
@@ -555,15 +624,13 @@ mod tests {
             Some(Path::new("/tmp/conf")),
         )
         .unwrap();
-        assert_eq!(c.asr.model_dir, Path::new("/tmp/conf/weights"));
-        assert_eq!(c.vad.model, Path::new("/tmp/conf/vad.onnx"));
-        assert_eq!(
-            Config::parse("", Some(Path::new("/tmp")))
-                .unwrap()
-                .asr
-                .model_dir,
-            Asr::default().model_dir
-        );
+        assert_eq!(c.asr.model_dir(), Path::new("/tmp/conf/weights"));
+        assert_eq!(c.vad.model(), Path::new("/tmp/conf/vad.onnx"));
+        // An unconfigured path keeps the working-directory-relative default,
+        // whatever directory the config file happens to live in.
+        let c = Config::parse("", Some(Path::new("/tmp"))).unwrap();
+        assert_eq!(c.asr.model_dir(), Path::new(DEFAULT_MODEL_DIR));
+        assert_eq!(c.vad.model(), Path::new(DEFAULT_VAD_MODEL));
     }
     #[test]
     fn unset_environment_rejected() {

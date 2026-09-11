@@ -52,6 +52,9 @@ struct Logger {
     file: Mutex<Option<LogFile>>,
 }
 impl Log for Logger {
+    /// Debug always reaches the private log file; `verbose` only decides
+    /// whether it is also copied to stderr, so the answer here does not
+    /// depend on it.
     fn enabled(&self, m: &Metadata<'_>) -> bool {
         m.level() <= Level::Debug
     }

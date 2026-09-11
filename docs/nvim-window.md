@@ -1,8 +1,9 @@
 # The dictation window
 
 ← [docs index](README.md) | Implemented by
-[`nvim.rs`](../src/nvim.rs) and
-[`nvim_indicator.lua`](../src/lua/nvim_indicator.lua). The reasoning for
+[`nvim.rs`](../src/nvim.rs), its transport
+[`nvim/rpc.rs`](../src/nvim/rpc.rs), and
+[`spokenpad.lua`](../src/lua/spokenpad.lua). The reasoning for
 using nvim at all is in
 [decisions.md](decisions.md#the-sink-is-neovim-not-the-clipboard); the rules
 it must not break are in [constraints.md](constraints.md).
@@ -27,7 +28,7 @@ config value must not be able to become i3 syntax.
 
 The window is opened lazily, on the **first key-down**, not at daemon start:
 until you dictate there is no reason for a terminal to be sitting on your
-desktop. It is opened on the bridge thread while the utterance is still being
+desktop. It is opened on the editor thread while the utterance is still being
 spoken, so the wait is paid in parallel with the recording rather than added
 to it, and the append that follows simply queues behind it.
 
@@ -48,6 +49,13 @@ for_window [instance="spokenpad"] floating enable
 no_focus   [instance="spokenpad"]
 ```
 
+spokenpad refuses to **spawn** a graphical editor unless it can prove that rule
+is in the *loaded* i3 configuration, include files and all, for this exact
+instance name. The proof is taken at spawn only: reattaching to an editor that
+is already on screen trusts the rule that was proven when it was opened, because
+the window is already mapped and unfocused and a later i3 reload cannot un-steal
+focus that was never stolen.
+
 Verified live on 2026-09-07: the focused window was unchanged across an open,
 and i3 reported the new window as `focused: false`.
 
@@ -59,15 +67,15 @@ things only a window manager can do.
 The window is **a third of the screen on each axis** (`nvim.window_fraction`,
 0.33) with its **top-left corner at the mouse pointer**, on whichever monitor
 the pointer is on — it opens beside what you are reading rather than in a
-fixed corner you have to look away to find. The rect is clamped fully
-on-screen by `geometry.dictation_rect`, so a
-pointer near an edge tucks the window flush against it; a pointer in the
-bottom-right corner (or a pointer that cannot be read at all) puts it in the
-bottom-right corner.
+fixed corner you have to look away to find. `geometry::pick_output` chooses the
+output and `geometry::placement` clamps the rect fully on-screen — both pure
+functions over output rectangles — so a pointer near an edge tucks the window
+flush against it, and a pointer in the bottom-right corner (or one that cannot
+be read at all) puts it in the bottom-right corner.
 
-Placement happens **once, on spawn**. On later dictations the window is only
-moved to the current workspace — a window that jumped back under the pointer
-on every keypress would fight anyone who had put it somewhere they wanted it.
+Placement happens **once, on spawn**, and never again: a window that jumped back
+under the pointer on every keypress would fight anyone who had put it somewhere
+they wanted it. Reattaching to a running editor moves nothing.
 
 ## Latched recording
 
@@ -75,18 +83,26 @@ Holding the latch modifier (`hotkey.latch_modifier`, shift by default) with
 the hotkey starts a recording that outlives the key release: let go, keep
 talking, press the hotkey again to stop. Push-to-talk is unchanged without it.
 
-The mode lives in the state machine — `Recording(latched=True)` — rather than
+The mode lives in the state machine — `Recording { latched: true }` — rather than
 being read off whichever event ends the recording, because the ending event
 differs between the modes: a `KeyUp` for push-to-talk, a `KeyDown` for a
 latch. The stopping press does *not* need the modifier, so there is nothing to
 remember about which hand started it. The winbar shows a lock while latched.
 
-The modifier is read with evdev's `active_keys()` at the moment of the press —
-a query of the kernel's current key state — rather than by tracking modifier
-events. Tracking would need the watcher to have seen every modifier event on
-every device since it started, and it has not: devices come and go through
-udev, so a modifier already held when a keyboard is plugged in would be
-invisible forever after.
+The latch is decided from the **event stream**: the watcher folds every key
+event in as it reads it, per device, and a hotkey press latches if a latch
+modifier is held on *any* watched keyboard — a modifier-only keyboard is watched
+precisely so shift on one can latch the hotkey on another. Each device's
+modifier set is seeded from the kernel (`active_keys()`) when the device is
+registered, which is what makes a modifier already held at plug-in time visible;
+after that, querying the kernel again would answer for the wrong moment, since a
+batch of events is read at once and the press has to be judged in event order.
+
+Devices are identified by `(rdev, ino)`, not by path: a replug within one 500 ms
+rescan reuses `/dev/input/eventN` for a freshly created node, and the path alone
+would hide it. Losing the keyboard that holds the hotkey — or the last
+hotkey-capable keyboard during a latched recording — sends `HotkeyLost`, not
+`Cancel`: what was said is decoded rather than thrown away.
 
 ## The file
 
@@ -117,14 +133,31 @@ re-read or edit an earlier passage keeps their place.
 
 ## What runs inside nvim
 
-`nvim_indicator.lua` is loaded over RPC on every connection (so a reattach
-re-applies it), and defines `_G.Spokenpad`. The daemon calls exactly three
-things: `setup`, `append`, and `set_state`.
+`spokenpad.lua` — one file since 2026-09-11, previously split in two — is
+loaded over RPC on every connection (so a reattach re-applies it) and defines
+`_G.Spokenpad`. The daemon calls exactly three things: `setup`,
+`append_once`, and `push`. Reloading is state-preserving by construction: the
+chunk keeps the previous module's pinned buffer, indicator state, meter history
+and append de-duplication cache, so restarting the daemon neither blanks the
+indicator nor replays an append whose reply was lost.
+
+The whole indicator is pushed at once — phase, level, preview, latched,
+previewing — so the editor's copy is a function of daemon state rather than of
+the history of updates that reached it.
 
 **The winbar** carries the indicator: a phase dot, and while recording a
-24-cell level meter on a perceptual curve (`level ^ 0.6`). It is set window-locally on every window showing the dictation
-buffer, so a global winbar from the user's own config is overridden for this
-buffer only and left alone everywhere else. Levels are sent at ~10 Hz as
+24-cell level meter on a perceptual curve (`level ^ 0.6`). It is set
+window-locally on every window showing the dictation buffer, so a global winbar
+from the user's own config is overridden for this buffer only and left alone
+everywhere else — and a window that stops showing the buffer has its winbar
+cleared, so a split the user moved off the transcript does not keep a frozen
+"REC" over someone else's file.
+
+The rest of the chrome — line numbers, sign and fold columns, cursorline, list —
+is window-local too. Only the **global** half (`laststatus`, `showtabline`,
+`ruler`) is applied, and only in an editor spokenpad opened for the purpose,
+where the dictation buffer is the whole instance. In an adopted editor those
+globals are the user's own and are left alone. Levels are sent at ~10 Hz as
 notifications, not requests — a round trip per sample would put nvim's event
 loop on the dictation latency path for something purely cosmetic.
 
@@ -148,11 +181,18 @@ byte counting would break `längeren` several columns early. It keeps the last
 eight lines; the newest words are the ones being checked against what was
 just said.
 
-When previews stop — past `preview.max_seconds`, which only a daemon running
-without a VAD model can reach, or past the in-memory ceiling — the winbar
-says `preview paused, still recording`. Without that, a frozen preview during
-a long passage reads as lost audio rather than as a cost control — which is
-exactly how it was first reported.
+When previews stop, the winbar says so instead of freezing. Past
+`preview.max_seconds` (30 s of uncommitted tail) they **pause and resume by
+themselves** once the tail settles; past the in-memory ceiling they stop for
+good and the notice names the WAV that keeps recording. A daemon running
+without a VAD model issues no preview at all, and says so the same way for the
+whole capture. Without that message, a frozen preview during a long passage
+reads as lost audio rather than as a cost control — which is exactly how it was
+first reported.
+
+The same line carries every other **notice** about the capture just made — held
+too briefly, microphone gap, microphone unavailable, capture incomplete, nearly
+silent. One at a time, in place of the preview, until the next key press.
 
 **Which nvim runs it is a choice, and the trade is measured.** `nvim.init`
 selects between three, and the numbers below are key-down to a placed window
@@ -215,7 +255,7 @@ the chrome off in its first frame.
 
 **244 ms** from key-down to a window that is placed, chrome-free and
 answering RPC; **92 ms** to reattach to one that is already open. Both are off
-the latency path — the window is opened on every key-down, on the bridge
+the latency path — the window is opened on every key-down, on the editor
 thread, while the user is still speaking.
 
 Neither number is about nvim. Measured time-to-RPC-ready is 0.26 s under a
@@ -228,13 +268,16 @@ the cost. Three other things were, and all three are fixed:
   reply arrives when nvim's event loop reaches it. It still has a hard
   timeout, which is why the Rust client enforces one absolute deadline; an
   editor that is still starting must not
-  block the bridge thread with no way out, hanging the daemon's shutdown.
+  block the editor thread with no way out, hanging the daemon's shutdown.
   `nvim.startup_timeout_s` stays a generous 20 s: a first-ever open took
   13.5 s while a plugin manager did one-time work.
 - **The first X query of the process cost ~1.9 s**, where every later one
   costs ~50 ms. That landed on the first dictation of a session — the one
-  occasion with nothing on screen to hide it. The bridge now warms it up when
-  its thread starts, and caches the monitor layout for 5 s besides.
+  occasion with nothing on screen to hide it. The layout is queried once per
+  spawn, before the editor starts, so a slow editor start costs one `xrandr`,
+  not one per attempt. (There is no warm-up on thread start: the first query of
+  a session still pays that cost, on the spawn path where the window is opening
+  anyway.) On the headless path no X query is made at all.
 - **The window was placed after nvim answered.** It is now told where to open
   (`window.position.x`/`y`, which i3 honours for a floating window: verified,
   the window maps at exactly the requested point, floating and unfocused), so
@@ -260,12 +303,37 @@ A live socket is reattached to rather than respawned, so restarting the daemon
 does not litter the desktop with terminals. Quitting nvim simply means the
 next dictation opens a fresh one.
 
-Liveness is checked on every key-down with a plain `connect` to the socket —
-not an RPC round trip, which has no timeout and would block the bridge on
-what is meant to be a cheap check. A socket that is connectable but not
-answering (an editor still starting, or one wedged) is left alone rather than
-attached to.
+Liveness is checked on every key-down, and a plain `connect` is not enough: a
+socket answers exactly as before the user `:bdelete`s the dictation buffer, and
+every append of that utterance then fails against a buffer that is gone. So the
+check is a real RPC round trip that asks the editor which buffer it still has
+pinned, and it passes only if that is the buffer this session owns. It is
+bounded by an absolute two-second deadline — every call in
+[`nvim/rpc.rs`](../src/nvim/rpc.rs) carries one, because a peer that dribbles
+bytes must not extend a call indefinitely by staying inside a per-read timeout.
+An editor that does not answer in time is dropped and reattached to (or
+respawned) rather than waited on, since the recording is already running.
+
+An append that times out is the ambiguous case: the request may have completed
+after its reply was lost. It is retried once, on a fresh connection, with the
+**same operation id** — the Lua side returns its cached result instead of
+appending twice. If that retry fails, the session disconnects, so the next
+utterance reattaches rather than writing into a client whose reply stream is out
+of step.
 
 When the daemon exits it **detaches without closing nvim**: the user may still
 be editing what they dictated, and killing their editor because a daemon
-exited would lose exactly the text this window exists to keep.
+exited would lose exactly the text this window exists to keep. It pushes one
+last idle indicator on the way out — a window left showing "REC", a half-lit
+meter and a preview that will never land says the daemon is still listening when
+it has exited. That one push is sent as a *request*, unlike every other
+indicator update, because nvim discards input it has not parsed when a channel
+reaches EOF and a notification written immediately before the socket closes is
+regularly lost; it is still best-effort, with a quarter of a second allowed for
+cosmetics.
+
+A spawn that fails leaves nothing behind: the dictation file is created before
+the editor starts, so its name is settled and its permissions are ours from the
+first byte, and it is removed again unless a session pins it — but only if it is
+still zero bytes. Anything with content in it is the user's transcript and is
+left alone.

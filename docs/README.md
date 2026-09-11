@@ -30,6 +30,9 @@ build, and verification. Historical measurements are labeled where retained.
 ## Scope
 
 These docs describe the system as implemented. Every module described in
-[architecture.md](architecture.md) exists and is covered by tests. For current
-build status and the active task list, see [STATUS.md](../STATUS.md), not this
-folder.
+[architecture.md](architecture.md) exists. All of them carry unit tests; the
+event loop in `daemon.rs`, which has no unit tests of its own, is covered
+end to end by `tests/e2e.rs` — the real `daemon::serve` driven headlessly
+against a synthetic microphone, a counting recognizer and a real
+`nvim --headless`. For current build status and the active task list, see
+[STATUS.md](../STATUS.md), not this folder.

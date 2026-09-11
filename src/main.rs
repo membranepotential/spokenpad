@@ -2,7 +2,7 @@ use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand};
 use spokenpad::{
     config::Config,
-    decode::{Pipeline, Recognizer},
+    decode::Pipeline,
     inference::{Transcriber, load_segmenter},
     text::Processor,
 };
@@ -11,15 +11,20 @@ use std::{io::Write, os::unix::fs::OpenOptionsExt, path::PathBuf, process::ExitC
 #[derive(Parser)]
 #[command(version, about = "Local push-to-talk dictation for Linux/X11")]
 struct Args {
-    #[arg(short, long, global = true)]
+    /// Configuration file; must exist if given [default: $XDG_CONFIG_HOME/spokenpad/config.toml]
+    #[arg(short, long, global = true, value_name = "PATH")]
     config: Option<PathBuf>,
-    #[arg(long, global = true)]
+    /// Directory holding the ASR model, overriding asr.model_dir
+    #[arg(long, global = true, value_name = "DIR")]
     model_dir: Option<PathBuf>,
+    /// Also write the log, at DEBUG level, to stderr
     #[arg(short, long, global = true)]
     verbose: bool,
-    #[arg(long, global = true)]
+    /// Diagnostic log file, or "none" for no file [default: $XDG_STATE_HOME/spokenpad/spokenpad.log]
+    #[arg(long, global = true, value_name = "PATH")]
     log_file: Option<PathBuf>,
-    #[arg(long)]
+    /// Write every capture into DIR as a WAV, for offline evaluation
+    #[arg(long, value_name = "DIR")]
     dump_audio: Option<PathBuf>,
     #[command(subcommand)]
     command: Option<Action>,
@@ -56,7 +61,7 @@ fn run(args: Args) -> Result<u8> {
     spokenpad::logging::init(args.verbose, args.log_file.as_deref())?;
     let mut config = Config::load(args.config.as_deref())?;
     if let Some(p) = args.model_dir {
-        config.asr.model_dir = spokenpad::config::expand_path(&p)?;
+        config.asr.model_dir = Some(spokenpad::config::expand_path(&p)?);
     }
     config.validate()?;
     match args.command {
@@ -102,7 +107,7 @@ fn run(args: Args) -> Result<u8> {
                 return Ok(2);
             }
             let mut model = Transcriber::new(&config.asr, config.audio.sample_rate)?;
-            model.transcribe(&vec![0.; config.audio.sample_rate as usize])?;
+            model.warm_up()?;
             let segmenter = load_segmenter(&config.vad, config.audio.sample_rate);
             ensure!(
                 !config.vad.enabled || segmenter.is_some(),
@@ -126,18 +131,22 @@ fn run(args: Args) -> Result<u8> {
                 std::fs::create_dir_all(p)?;
             }
             if let Err(e) = spokenpad::daemon::run(config, args.dump_audio.as_deref()) {
-                // Keep the established systemd permanent-failure exit code.
-                if e.chain()
-                    .any(|c| c.to_string() == "hotkey watcher could not start")
-                {
-                    log::error!("{e:#}");
-                    return Ok(3);
-                }
-                return Err(e);
+                let Some(code) = permanent_failure(&e) else {
+                    return Err(e);
+                };
+                log::error!("{e:#}");
+                return Ok(code);
             }
         }
     }
     Ok(0)
+}
+/// Exit codes systemd must treat as permanent, selected by error type so a
+/// reworded message can never silently turn into a restart loop.
+fn permanent_failure(error: &anyhow::Error) -> Option<u8> {
+    error
+        .downcast_ref::<spokenpad::daemon::HotkeyUnavailable>()
+        .map(|_| 3)
 }
 fn main() -> ExitCode {
     match run(Args::parse()) {
@@ -146,5 +155,35 @@ fn main() -> ExitCode {
             eprintln!("spokenpad: {e:#}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::anyhow;
+    use spokenpad::daemon::HotkeyUnavailable;
+
+    #[test]
+    fn only_the_typed_hotkey_failure_maps_to_exit_code_three() {
+        let wrapped: anyhow::Error = Err::<(), _>(anyhow!("no permission on /dev/input/event3"))
+            .context(HotkeyUnavailable)
+            .unwrap_err();
+        assert_eq!(permanent_failure(&wrapped), Some(3));
+        assert!(
+            wrapped
+                .to_string()
+                .contains("hotkey watcher could not start"),
+            "{wrapped}"
+        );
+        assert!(
+            format!("{wrapped:#}").contains("/dev/input/event3"),
+            "the cause must stay in the message"
+        );
+
+        // A message that merely reads like it is not a permanent failure.
+        let lookalike = anyhow!("hotkey watcher could not start");
+        assert_eq!(permanent_failure(&lookalike), None);
+        assert_eq!(permanent_failure(&anyhow!("editor died")), None);
     }
 }

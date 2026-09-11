@@ -17,7 +17,7 @@
 -- and as the written-down statement of what the window actually needs. Point
 -- `nvim.init` at it to get exactly that, at the price of the above.
 --
--- Nothing here is required for correctness either way. `nvim_indicator.lua`
+-- Nothing here is required for correctness either way. `spokenpad.lua`
 -- applies the chrome and prose settings itself over RPC and re-applies them
 -- on BufWinEnter/WinNew/FileType, so they hold under any configuration; and
 -- committed text is written with `noautocmd`, so a format-on-save cannot
