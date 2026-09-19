@@ -76,9 +76,11 @@ vim.opt.termguicolors = true
 -- This window is where you read a transcript and copy a piece of it out, so a
 -- `y` that does not reach the clipboard makes it useless for its actual job.
 --
--- Not in tension with spokenpad never touching the clipboard itself: that rule
--- is about the *daemon* not writing anywhere the user did not ask it to. A
--- person pressing `y` in their own editor has asked.
+-- spokenpad does touch the clipboard now, but only in one place and only this
+-- far: `Spokenpad.copy_buffer` (spokenpad.lua) sets the `+` register to the
+-- whole dictation buffer after every release, through this same clipboard
+-- provider. The daemon still spawns no clipboard process of its own, pastes
+-- nothing, and writes to no window the user did not open for this.
 vim.opt.clipboard = "unnamedplus"
 
 -- No colourscheme, deliberately: this inherits the terminal's own colours, so

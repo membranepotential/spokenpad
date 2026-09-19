@@ -63,6 +63,12 @@ fn nvim_available() -> bool {
     Command::new("nvim").arg("--version").output().is_ok()
 }
 
+/// A fake `g:clipboard` that stores what it is given in a plain Lua global
+/// instead of shelling out to xclip/xsel, so these tests never touch the
+/// real system clipboard. Set with `--cmd`, which runs before nvim would
+/// otherwise probe for a real provider (`:h g:clipboard`).
+const TEST_CLIPBOARD_CMD: &str = r#"lua vim.g.clipboard = { name = "spokenpad-test", copy = { ["+"] = function(lines) _G.spokenpad_test_clipboard = lines end, ["*"] = function(lines) end }, paste = { ["+"] = function() return { _G.spokenpad_test_clipboard or {}, "v" } end, ["*"] = function() return { {}, "v" } end } }"#;
+
 /// Constant-amplitude "speech": every sample counts as loud, so the counting
 /// recognizer's arithmetic is exact.
 fn tone(seconds: f64) -> Vec<f32> {
@@ -255,9 +261,18 @@ impl Harness {
         config.audio.preroll_ms = settings.preroll_ms;
         config.recording.dir = root.join("audio");
         config.nvim.terminal = Vec::new();
-        config.nvim.editor = ["nvim", "--headless", "-u", "NONE", "-i", "NONE"]
-            .map(str::to_owned)
-            .into();
+        config.nvim.editor = [
+            "nvim",
+            "--headless",
+            "-u",
+            "NONE",
+            "-i",
+            "NONE",
+            "--cmd",
+            TEST_CLIPBOARD_CMD,
+        ]
+        .map(str::to_owned)
+        .into();
         config.nvim.socket_path = root.join("nvim.sock");
         config.nvim.dictation_dir = root.join("dictation");
         config.nvim.startup_timeout_s = 10.0;
@@ -414,6 +429,14 @@ impl Harness {
         self.ask(&format!("luaeval('tostring(Spokenpad.state.{field})')"))
     }
 
+    /// The test clipboard's `+` register, joined the way multiple lines of a
+    /// real system clipboard would be. Empty when `Spokenpad.copy_buffer` has
+    /// never set it -- an untouched real clipboard is exactly what an empty
+    /// dictation buffer must leave behind.
+    fn clipboard(&self) -> String {
+        self.ask(r#"luaeval('table.concat(_G.spokenpad_test_clipboard or {}, "\n")')"#)
+    }
+
     /// What the dictation window actually renders above the transcript. The
     /// indicator state the daemon pushed is only half the story: a field the
     /// winbar never draws tells the user nothing.
@@ -540,6 +563,44 @@ fn press_speak_release_lands_text_in_the_file() {
         wav.len() > RATE as usize + RATE as usize / 8,
         "the WAV carries the pre-roll as well as the speech: {} frames",
         wav.len()
+    );
+    h.finish();
+}
+
+/// The clipboard rule is the whole window, not the utterance that just
+/// finished: a release must copy everything in the buffer, including a
+/// paragraph an earlier utterance already committed.
+#[test]
+fn release_copies_the_whole_buffer_to_the_clipboard() {
+    if !nvim_available() {
+        return;
+    }
+    let h = Harness::start(Settings::default());
+    thread::sleep(Duration::from_millis(300));
+    h.press(false);
+    h.say(&tone(1.0));
+    h.release();
+    wait_until("the first utterance reaches the file", || {
+        !h.text().is_empty()
+    });
+    wait_until("the first utterance reaches the clipboard", || {
+        !h.clipboard().is_empty()
+    });
+    assert_eq!(h.clipboard(), "word word");
+
+    h.press(false);
+    h.say(&tone(1.0));
+    h.release();
+    wait_until("the second utterance reaches the file", || {
+        h.text().matches("word word").count() == 2
+    });
+    wait_until("the clipboard follows the second release", || {
+        h.clipboard() == "word word\n\nword word"
+    });
+    assert_eq!(
+        h.clipboard(),
+        h.text().trim_end(),
+        "the clipboard must hold the whole buffer, including the earlier utterance's paragraph"
     );
     h.finish();
 }
@@ -874,9 +935,18 @@ fn real_models_transcribe_the_kennedy_sample() {
     let mut config = Config::default();
     config.recording.dir = root.join("audio");
     config.nvim.terminal = Vec::new();
-    config.nvim.editor = ["nvim", "--headless", "-u", "NONE", "-i", "NONE"]
-        .map(str::to_owned)
-        .into();
+    config.nvim.editor = [
+        "nvim",
+        "--headless",
+        "-u",
+        "NONE",
+        "-i",
+        "NONE",
+        "--cmd",
+        TEST_CLIPBOARD_CMD,
+    ]
+    .map(str::to_owned)
+    .into();
     config.nvim.socket_path = root.join("nvim.sock");
     config.nvim.dictation_dir = root.join("dictation");
     config.nvim.startup_timeout_s = 10.0;

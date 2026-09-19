@@ -19,7 +19,7 @@ use crate::{
         audio::{AudioCapture, CaptureEvent, InputBackend},
         hotkey::HotkeyWatcher,
         inference::{Transcriber, load_segmenter},
-        nvim::{IndicatorState, NvimSession},
+        nvim::{CopyOutcome, IndicatorState, NvimSession},
     },
 };
 use anyhow::{Context, Result, ensure};
@@ -115,6 +115,11 @@ enum EditorWork {
         text: String,
     },
     Indicator(IndicatorState),
+    /// Copy the whole dictation buffer to `+`. Sent once per utterance, after
+    /// its `Finished` result -- see the comment where it is sent, in
+    /// `serve`, for why every `Append` of that utterance is already ahead of
+    /// it in this same queue.
+    Copy,
     Quit,
 }
 
@@ -184,6 +189,23 @@ fn editor_thread(config: crate::config::Nvim, rx: Receiver<EditorWork>) {
                                 "append failed: {e:#}; transcript retained in diagnostic log; recover from the capture WAV if available"
                             );
                             log::debug!("undelivered text: {text:?}");
+                        }
+                    }
+                }
+                EditorWork::Copy => {
+                    // Never on a session with no editor: nothing has been
+                    // spoken into a window that was never opened, and there
+                    // is nothing to copy.
+                    if nvim.connected() {
+                        match nvim.copy_buffer() {
+                            Ok(CopyOutcome::Copied) => {
+                                log::debug!("copied the dictation buffer to the clipboard")
+                            }
+                            Ok(CopyOutcome::Empty) => {}
+                            Ok(CopyOutcome::Failed(reason)) => {
+                                log::warn!("clipboard copy failed: {reason}")
+                            }
+                            Err(e) => log::warn!("clipboard copy unavailable: {e:#}"),
                         }
                     }
                 }
@@ -423,6 +445,18 @@ where
                             Err(e) => log::error!("decode failed for utterance {}: {e:#}", id.0),
                         }
                         session.finish(id);
+                        // Every `Commit` of this utterance was sent on this
+                        // same `results` channel, synchronously, before the
+                        // engine thread sent `Finished` -- see
+                        // `engine_thread`'s `Work::Finish` arm. The `for`
+                        // loop above therefore already turned each of them
+                        // into an `EditorWork::Append` and queued it on
+                        // `editor_tx` ahead of the copy queued here, so the
+                        // editor always writes the append before it reads
+                        // the buffer to copy. Sent on every `Finished`,
+                        // whatever the release decode did: progressively
+                        // committed text is in the buffer either way.
+                        send(&editor_tx, EditorWork::Copy)?;
                     }
                 }
             }
@@ -494,13 +528,24 @@ where
     capture.shutdown();
     let _ = work_tx.send(Work::Quit);
     join_bounded(engine, "inference");
-    // The engine may have committed while the loop was already leaving, or
-    // during the join above; that text is queued here, never dropped.
+    // The engine may have committed, and finished, while the loop was
+    // already leaving or during the join above; neither is dropped here.
     for event in results.try_iter() {
-        if let ResultEvent::Commit(c) = event
-            && let Err(e) = commit(c, &mut session, &processor, &editor_tx)
-        {
-            log::error!("could not queue a commit made during shutdown: {e:#}");
+        match event {
+            ResultEvent::Commit(c) => {
+                if let Err(e) = commit(c, &mut session, &processor, &editor_tx) {
+                    log::error!("could not queue a commit made during shutdown: {e:#}");
+                }
+            }
+            // Same ordering guarantee as in the main loop: this utterance's
+            // commits were drained from the same channel, in order, by the
+            // arm above, on an earlier pass of this same `for`.
+            ResultEvent::Finished { .. } => {
+                if let Err(e) = send(&editor_tx, EditorWork::Copy) {
+                    log::error!("could not queue a shutdown clipboard copy: {e:#}");
+                }
+            }
+            ResultEvent::Tick { .. } => {}
         }
     }
     // Sent last: everything the editor still has to write is already queued

@@ -32,6 +32,12 @@ impl Drop for ProcessGroupGuard {
     }
 }
 
+/// A fake `g:clipboard` that never touches the real one: `copy` stores what
+/// it was given in a plain Lua global instead of shelling out to xclip/xsel,
+/// and `paste` reads it back. Set with `--cmd`, which runs before nvim would
+/// otherwise probe for a real provider (`:h g:clipboard`).
+const TEST_CLIPBOARD_CMD: &str = r#"lua vim.g.clipboard = { name = "spokenpad-test", copy = { ["+"] = function(lines) _G.spokenpad_test_clipboard = lines end, ["*"] = function(lines) end }, paste = { ["+"] = function() return { _G.spokenpad_test_clipboard or {}, "v" } end, ["*"] = function() return { {}, "v" } end } }"#;
+
 fn headless(directory: &Path) -> Nvim {
     Nvim {
         terminal: Vec::new(),
@@ -42,12 +48,32 @@ fn headless(directory: &Path) -> Nvim {
             "NONE".to_owned(),
             "-i".to_owned(),
             "NONE".to_owned(),
+            "--cmd".to_owned(),
+            TEST_CLIPBOARD_CMD.to_owned(),
         ],
         socket_path: directory.join("nvim.sock"),
         dictation_dir: directory.join("dictation"),
         startup_timeout_s: 10.0,
         ..Nvim::default()
     }
+}
+
+/// The test clipboard's current `+` contents, joined on `\n` the way the real
+/// system clipboard would hold multiple lines; `None` while it was never
+/// written to, which is how an untouched clipboard is told apart from one
+/// that was set to the empty string.
+fn test_clipboard(session: &mut NvimSession) -> Option<String> {
+    lua(
+        session,
+        r#"
+if _G.spokenpad_test_clipboard == nil then
+  return vim.NIL
+end
+return table.concat(_G.spokenpad_test_clipboard, "\n")
+"#,
+    )
+    .as_str()
+    .map(str::to_owned)
 }
 
 /// Runs a Lua chunk in the connected editor and returns its value.
@@ -1302,6 +1328,73 @@ fn an_indicator_level_is_clamped_into_the_meter_range() {
     assert_eq!(clamp_level(f64::NAN), 0.0);
     assert_eq!(clamp_level(f64::INFINITY), 0.0);
     assert_eq!(clamp_level(f64::NEG_INFINITY), 0.0);
+}
+
+#[test]
+fn copy_buffer_sets_the_clipboard_to_exactly_the_buffer_text() {
+    if !nvim_or_skip() {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let mut session = NvimSession::new(headless(directory.path()));
+    session.ensure().unwrap();
+    let _guard = ProcessGroupGuard::for_session(&session);
+    assert_eq!(
+        test_clipboard(&mut session),
+        None,
+        "clipboard set before any copy"
+    );
+
+    session.append("first utterance", false).unwrap();
+    session.append("second utterance", false).unwrap();
+    let outcome = session.copy_buffer().unwrap();
+    assert_eq!(outcome, CopyOutcome::Copied, "{outcome:?}");
+    assert_eq!(
+        test_clipboard(&mut session).as_deref(),
+        Some("first utterance\n\nsecond utterance"),
+        "the clipboard must hold the whole buffer, not just the last append"
+    );
+
+    // A user edit belongs too: the rule is the whole buffer, not what the
+    // daemon itself appended.
+    lua(
+        &mut session,
+        r#"vim.api.nvim_buf_set_lines(Spokenpad.buf, -1, -1, false, { "", "typed by hand" })"#,
+    );
+    let outcome = session.copy_buffer().unwrap();
+    assert_eq!(outcome, CopyOutcome::Copied, "{outcome:?}");
+    assert_eq!(
+        test_clipboard(&mut session).as_deref(),
+        Some("first utterance\n\nsecond utterance\n\ntyped by hand")
+    );
+}
+
+#[test]
+fn copy_buffer_leaves_the_clipboard_untouched_on_an_empty_buffer() {
+    if !nvim_or_skip() {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let mut session = NvimSession::new(headless(directory.path()));
+    session.ensure().unwrap();
+    let _guard = ProcessGroupGuard::for_session(&session);
+
+    let outcome = session.copy_buffer().unwrap();
+    assert_eq!(outcome, CopyOutcome::Empty, "{outcome:?}");
+    assert_eq!(
+        test_clipboard(&mut session),
+        None,
+        "an empty buffer must not touch the clipboard"
+    );
+
+    // Trailing blank lines only -- still nothing worth copying.
+    lua(
+        &mut session,
+        r#"vim.api.nvim_buf_set_lines(Spokenpad.buf, 0, -1, false, { "", "" })"#,
+    );
+    let outcome = session.copy_buffer().unwrap();
+    assert_eq!(outcome, CopyOutcome::Empty, "{outcome:?}");
+    assert_eq!(test_clipboard(&mut session), None);
 }
 
 #[test]

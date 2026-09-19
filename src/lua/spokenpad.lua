@@ -755,5 +755,43 @@ function M.push(update)
   end
 end
 
+--- Copies the whole dictation buffer -- every press in this window, and
+--- anything the user typed by hand -- to the `+` register, through whatever
+--- clipboard provider nvim's own `setreg` resolves (xclip/xsel under X11).
+--- The daemon spawns no clipboard process itself; this is the one place
+--- spokenpad's "never touch the clipboard" rule is deliberately lifted, and
+--- only this far: nothing is pasted, and no other window is ever written to.
+---
+--- Trailing blank lines are stripped first, the same way `transactional_append`
+--- ignores them, so the copy never carries a dangling blank past the last
+--- utterance. A buffer with nothing left after that is left alone -- the
+--- clipboard keeps whatever it already held.
+---
+--- Called over a *request*, not a notification (see `shell/nvim/mod.rs`), so
+--- it must never raise: a missing clipboard provider would otherwise surface
+--- as a message in a window that cannot take focus to answer it. Instead it
+--- reports what happened as `{ status, detail }`, `status` one of `"copied"`,
+--- `"empty"`, or `"error"` (with `detail` the failure message), for the
+--- daemon to log.
+function M.copy_buffer()
+  if not M.buf or not vim.api.nvim_buf_is_valid(M.buf) then
+    return { "error", "spokenpad: dictation buffer is gone" }
+  end
+  local lines = vim.api.nvim_buf_get_lines(M.buf, 0, -1, false)
+  local last = last_text_line(lines)
+  if last == 0 then
+    return { "empty", vim.NIL }
+  end
+  local text = table.concat(lines, "\n", 1, last)
+  local ok, result = pcall(vim.fn.setreg, "+", text)
+  if not ok then
+    return { "error", tostring(result) }
+  end
+  if result ~= 0 then
+    return { "error", "nvim setreg('+', ...) reported failure" }
+  end
+  return { "copied", vim.NIL }
+end
+
 _G.Spokenpad = M
 return true

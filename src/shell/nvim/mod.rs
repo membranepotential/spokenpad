@@ -252,6 +252,33 @@ impl NvimSession {
         self.push(indicator_fields(state))
     }
 
+    /// Asks the editor to copy its whole dictation buffer to `+`.
+    ///
+    /// A request, not a notification: a missing clipboard provider or a
+    /// buffer that went away is something the caller must see, not a fact
+    /// left to a log nobody is watching. `Spokenpad.copy_buffer` never
+    /// raises -- it wraps its own work in `pcall` -- so an `Err` here is a
+    /// transport failure, exactly like any other request, and the connection
+    /// is dropped the same way `request_append` drops it.
+    pub fn copy_buffer(&mut self) -> Result<CopyOutcome> {
+        let open = self.connection.as_mut().context("not connected to nvim")?;
+        let result = open.client.request(
+            "nvim_exec_lua",
+            vec![
+                Value::from("return Spokenpad.copy_buffer()"),
+                Value::Array(Vec::new()),
+            ],
+            deadline(APPEND_TIMEOUT),
+        );
+        match result {
+            Ok(value) => parse_copy_outcome(&value),
+            Err(error) => {
+                self.drop_connection();
+                Err(error.into())
+            }
+        }
+    }
+
     /// Detaches without killing the editor or closing the user's passage.
     pub fn close(&mut self) {
         if let Some(open) = self.connection.as_mut() {
@@ -690,6 +717,18 @@ struct Pinned {
     name: String,
 }
 
+/// What `Spokenpad.copy_buffer` did, as it reported it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CopyOutcome {
+    /// The buffer's text, past its trailing blank lines, is now in `+`.
+    Copied,
+    /// Nothing but trailing blank lines was there; the clipboard is untouched.
+    Empty,
+    /// The Lua side caught a failure (typically a missing clipboard
+    /// provider) and reported it rather than raising.
+    Failed(String),
+}
+
 fn parse_ownership(value: &Value) -> Result<Ownership> {
     let fields = value
         .as_array()
@@ -721,6 +760,29 @@ fn parse_ownership(value: &Value) -> Result<Ownership> {
         ready: text(&fields[1])?,
         pinned,
     })
+}
+
+/// `Spokenpad.copy_buffer` returns `{status, detail}`; `detail` is only
+/// meaningful for `"error"`, and is `vim.NIL` otherwise.
+fn parse_copy_outcome(value: &Value) -> Result<CopyOutcome> {
+    let fields = value
+        .as_array()
+        .filter(|fields| fields.len() == 2)
+        .context("nvim copy_buffer returned malformed data")?;
+    let status = fields[0]
+        .as_str()
+        .context("nvim copy_buffer status is not a string")?;
+    match status {
+        "copied" => Ok(CopyOutcome::Copied),
+        "empty" => Ok(CopyOutcome::Empty),
+        "error" => Ok(CopyOutcome::Failed(
+            fields[1]
+                .as_str()
+                .context("nvim copy_buffer error carries no message")?
+                .to_owned(),
+        )),
+        other => bail!("nvim copy_buffer returned an unknown status {other:?}"),
+    }
 }
 
 /// The argv for a fresh editor. Pure: the caller materializes `init` and
