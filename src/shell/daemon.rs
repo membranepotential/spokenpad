@@ -109,6 +109,13 @@ impl Keys {
             || !self.alive
     }
 
+    /// No event is queued and none can arrive again. Disconnection alone is
+    /// not enough: `press_waiting` may have seen it while events it moved into
+    /// `early` are still owed to the loop.
+    fn exhausted(&self) -> bool {
+        !self.alive && self.early.is_empty()
+    }
+
     fn receive(&mut self) -> Option<Event> {
         match self.receiver.try_recv() {
             Ok(event) => Some(event),
@@ -224,6 +231,15 @@ fn editor_thread(config: crate::config::Nvim, rx: Receiver<EditorWork>) {
                     Err(e) => log::error!("could not open dictation window: {e:#}"),
                 },
                 EditorWork::Append { utterance, text } => {
+                    // A failed request elsewhere (a clipboard copy that timed
+                    // out, an indicator push) drops the connection; text that
+                    // is owed to the file reattaches rather than waiting for
+                    // the next key-down to do it.
+                    if !nvim.connected()
+                        && let Err(e) = nvim.ensure()
+                    {
+                        log::warn!("could not reattach to the dictation window: {e:#}");
+                    }
                     let now = Instant::now();
                     match nvim.append(&text, paragraph == Some(utterance)) {
                         Ok(line) => {
@@ -564,7 +580,7 @@ where
                 EditorWork::Indicator(indicator_of(&session, level)),
             )?;
             ensure!(
-                keys.alive && !engine.is_finished() && !editor.is_finished(),
+                !keys.exhausted() && !engine.is_finished() && !editor.is_finished(),
                 "a required worker stopped unexpectedly"
             );
             thread::sleep(LOOP_INTERVAL);
@@ -744,7 +760,7 @@ fn note_postroll(postroll: PostRoll, session: &mut Session) {
             log::debug!("post-roll ended early by a key event or shutdown")
         }
         PostRoll::TimedOut => {
-            log::debug!(
+            log::warn!(
                 "the device delivered less than the post-roll in time; decoding what arrived"
             )
         }

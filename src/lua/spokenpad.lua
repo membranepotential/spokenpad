@@ -782,6 +782,11 @@ function M.copy_buffer()
   if last == 0 then
     return { "empty", vim.NIL }
   end
+  -- `setreg('+')` without a provider prints "No provider" and still returns
+  -- 0, so success from it only means the provider was handed the text.
+  if vim.fn.has("clipboard") ~= 1 then
+    return { "error", "no clipboard provider (see :checkhealth provider)" }
+  end
   local text = table.concat(lines, "\n", 1, last)
   local ok, result = pcall(vim.fn.setreg, "+", text)
   if not ok then

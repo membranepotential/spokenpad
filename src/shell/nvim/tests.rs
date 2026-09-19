@@ -1398,6 +1398,29 @@ fn copy_buffer_leaves_the_clipboard_untouched_on_an_empty_buffer() {
 }
 
 #[test]
+fn copy_buffer_reports_a_missing_clipboard_provider() {
+    if !nvim_or_skip() {
+        return;
+    }
+    // No provider at all: `setreg('+')` then prints "No provider" and still
+    // returns 0, which must not be reported as a copy.
+    let directory = tempfile::tempdir().unwrap();
+    let mut config = headless(directory.path());
+    let last = config.editor.len() - 1;
+    config.editor[last] = "let g:loaded_clipboard_provider = 1".to_owned();
+    let mut session = NvimSession::new(config);
+    session.ensure().unwrap();
+    let _guard = ProcessGroupGuard::for_session(&session);
+    session.append("text to copy", false).unwrap();
+
+    let outcome = session.copy_buffer().unwrap();
+    assert!(
+        matches!(&outcome, CopyOutcome::Failed(reason) if reason.contains("no clipboard provider")),
+        "{outcome:?}"
+    );
+}
+
+#[test]
 fn a_disconnected_session_accepts_indicator_pushes_silently() {
     let directory = tempfile::tempdir().unwrap();
     let mut session = NvimSession::new(headless(directory.path()));
