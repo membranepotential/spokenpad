@@ -34,6 +34,7 @@ def _default_config_path() -> Path:
 class AudioConfig:
     sample_rate: int = 16000
     preroll_ms: int = 250
+    postroll_ms: int = 250
     device: str | None = None
 
     def __post_init__(self) -> None:
@@ -41,6 +42,8 @@ class AudioConfig:
             raise ConfigError(f"audio.sample_rate must be positive: {self.sample_rate}")
         if self.preroll_ms < 0:
             raise ConfigError(f"audio.preroll_ms must not be negative: {self.preroll_ms}")
+        if not 0 <= self.postroll_ms <= 1000:
+            raise ConfigError(f"audio.postroll_ms must be within 0..=1000: {self.postroll_ms}")
 
 
 @dataclass(frozen=True, slots=True)
