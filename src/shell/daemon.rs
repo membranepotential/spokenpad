@@ -71,9 +71,10 @@ pub struct Devices<B: InputBackend, R, S> {
     pub worker: Worker<R, S>,
 }
 
-/// Key events in arrival order. A release's post-roll ends as soon as another
-/// key event is waiting; it looks by moving that event into `early`, which the
-/// loop drains before receiving anything newer, so nothing is lost or reordered.
+/// Key events in arrival order. A release's post-roll ends as soon as a key
+/// press is waiting; it looks by moving every received event into `early`,
+/// which the loop drains before receiving anything newer, so nothing is lost
+/// or reordered.
 struct Keys {
     receiver: Receiver<Event>,
     early: VecDeque<Event>,
@@ -94,14 +95,18 @@ impl Keys {
         self.early.pop_front().or_else(|| self.receive())
     }
 
-    /// Whether a key event is waiting, or none can ever arrive again.
-    fn waiting(&mut self) -> bool {
-        if self.early.is_empty()
-            && let Some(event) = self.receive()
-        {
+    /// Whether a key press is waiting, or no event can ever arrive again.
+    /// Only a press would start a new capture: the key-up of the press that
+    /// stopped a latched recording, a cancel, or a lost keyboard must not
+    /// shorten the post-roll of the capture that is ending.
+    fn press_waiting(&mut self) -> bool {
+        while let Some(event) = self.receive() {
             self.early.push_back(event);
         }
-        !self.early.is_empty() || !self.alive
+        self.early
+            .iter()
+            .any(|event| matches!(event, Event::Down { .. }))
+            || !self.alive
     }
 
     fn receive(&mut self) -> Option<Event> {
@@ -415,8 +420,9 @@ where
                             &editor_tx,
                             EditorWork::Indicator(indicator_of(&session, 0.)),
                         )?;
-                        let (samples, postroll) = capture
-                            .finish_capture(|| stopping.load(Ordering::Acquire) || keys.waiting());
+                        let (samples, postroll) = capture.finish_capture(|| {
+                            stopping.load(Ordering::Acquire) || keys.press_waiting()
+                        });
                         note_postroll(postroll, &mut session);
                         for event in capture.poll() {
                             apply_capture_event(event, &mut session);

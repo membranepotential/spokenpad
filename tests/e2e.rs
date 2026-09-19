@@ -833,6 +833,36 @@ fn speech_still_sounding_at_key_up_is_decoded() {
     h.finish();
 }
 
+/// A latched recording ends on a key press, and that key's release follows
+/// within the post-roll. Only a press may cut the post-roll short.
+#[test]
+fn the_key_up_after_a_latched_stop_does_not_cut_the_postroll() {
+    if !nvim_available() {
+        return;
+    }
+    let h = Harness::start(Settings {
+        words: false,
+        ..Settings::default()
+    });
+    thread::sleep(Duration::from_millis(300));
+    h.press(true);
+    h.release();
+    h.say(&tone(1.0));
+    h.press_only(false);
+    let tail = tone(0.15);
+    h.microphone.speak(&tail);
+    thread::sleep(Duration::from_millis(50));
+    h.release();
+    wait_until("the transcript reaches the file", || !h.text().is_empty());
+    assert_eq!(
+        counted(&h.text()),
+        RATE as usize + tail.len(),
+        "the key-up cut the post-roll short: {:?}",
+        h.text()
+    );
+    h.finish();
+}
+
 /// A press during the previous release's post-roll ends it at once: the new
 /// capture starts without waiting it out, so its first word is its own.
 #[test]
