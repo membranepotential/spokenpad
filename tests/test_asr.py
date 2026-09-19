@@ -9,6 +9,7 @@ import sherpa_onnx
 
 from spokenpad.asr import (
     ModelMissingError,
+    TrailingSilence,
     Transcriber,
     ensure_model_files,
     generate_bpe_vocab,
@@ -78,3 +79,16 @@ def test_transcribe_submits_audio_plus_one_second_silence_once() -> None:
     assert padded_samples.shape == (16080,)
     np.testing.assert_array_equal(padded_samples[:80], samples)
     assert not padded_samples[80:].any()
+
+
+def test_bare_transcribe_submits_the_audio_unpadded() -> None:
+    recognizer = _Recognizer()
+    transcriber = object.__new__(Transcriber)
+    transcriber._recognizer = cast(sherpa_onnx.OfflineRecognizer, recognizer)
+    transcriber._trailing_silence = {}
+    samples = np.ones(80, dtype=np.float32)
+
+    transcriber.transcribe(samples, 16000, TrailingSilence.BARE)
+
+    [(_, submitted)] = recognizer.stream.waveforms
+    np.testing.assert_array_equal(submitted, samples)

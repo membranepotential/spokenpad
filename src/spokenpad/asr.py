@@ -22,6 +22,7 @@ from __future__ import annotations
 import tempfile
 import time
 from dataclasses import dataclass
+from enum import Enum, auto
 from pathlib import Path
 
 import numpy as np
@@ -33,6 +34,20 @@ from spokenpad.config import AsrConfig
 
 class ModelMissingError(RuntimeError):
     """A required model file is absent. Run ``scripts/fetch_model.py``."""
+
+
+class TrailingSilence(Enum):
+    """Whether :meth:`Transcriber.transcribe` appends one second of zeros.
+
+    ``PADDED`` is the normal presentation. Parakeet sometimes decodes a short
+    utterance to ``""`` with the silence and to the right words without it,
+    and sometimes the other way round, so neither is safe on its own; ``BARE``
+    exists for the retry in :func:`spokenpad.decode.transcribe_speech`.
+    Mirrors ``TrailingSilence`` in ``src/core/decode.rs``.
+    """
+
+    PADDED = auto()
+    BARE = auto()
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,16 +153,22 @@ class Transcriber:
             if hotwords_path is not None:
                 hotwords_path.unlink(missing_ok=True)
 
-    def transcribe(self, samples: MonoAudio, sample_rate: int) -> TranscriptionResult:
+    def transcribe(
+        self,
+        samples: MonoAudio,
+        sample_rate: int,
+        trailing: TrailingSilence = TrailingSilence.PADDED,
+    ) -> TranscriptionResult:
         """Decode ``samples`` (mono float32 PCM in ``[-1, 1]``) in one shot."""
         t0 = time.perf_counter()
         stream = self._recognizer.create_stream()
-        silence = self._trailing_silence.get(sample_rate)
-        if silence is None:
-            silence = np.zeros(sample_rate, dtype=np.float32)
-            self._trailing_silence[sample_rate] = silence
-        padded_samples = np.concatenate((samples, silence))
-        stream.accept_waveform(sample_rate, padded_samples)
+        if trailing is TrailingSilence.PADDED:
+            silence = self._trailing_silence.get(sample_rate)
+            if silence is None:
+                silence = np.zeros(sample_rate, dtype=np.float32)
+                self._trailing_silence[sample_rate] = silence
+            samples = np.concatenate((samples, silence))
+        stream.accept_waveform(sample_rate, samples)
         self._recognizer.decode_stream(stream)
         elapsed = time.perf_counter() - t0
         text: str = stream.result.text

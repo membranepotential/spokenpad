@@ -20,7 +20,7 @@ use anyhow::Result;
 use spokenpad::{
     config::{Audio, Config},
     core::{
-        decode::{Pipeline, Recognizer, Segment, Segmenter, Worker},
+        decode::{Pipeline, Recognizer, Segment, Segmenter, TrailingSilence, Worker},
         state::Event,
     },
     shell::{
@@ -183,7 +183,7 @@ struct Counting {
 }
 
 impl Recognizer for Counting {
-    fn transcribe(&mut self, samples: &[f32]) -> Result<String> {
+    fn transcribe(&mut self, samples: &[f32], _: TrailingSilence) -> Result<String> {
         let loud = loud_samples(samples);
         lock(&self.calls).push(loud);
         thread::sleep(self.delay);

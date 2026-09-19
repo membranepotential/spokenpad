@@ -5,7 +5,7 @@
 use crate::{
     config::{Asr, Vad},
     core::{
-        decode::{Recognizer, Segment, Segmenter},
+        decode::{Recognizer, Segment, Segmenter, TrailingSilence},
         segments::merge_spans,
     },
 };
@@ -73,15 +73,21 @@ impl Transcriber {
     /// One second of silence through the model, so the first real decode does
     /// not pay for lazy native initialisation.
     pub fn warm_up(&mut self) -> Result<()> {
-        self.transcribe(&vec![0.; self.rate as usize]).map(drop)
+        self.transcribe(&vec![0.; self.rate as usize], TrailingSilence::Padded)
+            .map(drop)
     }
 }
 impl Recognizer for Transcriber {
-    fn transcribe(&mut self, samples: &[f32]) -> Result<String> {
+    /// `Padded` appends one second of zeros; `Bare` submits `samples` as is.
+    fn transcribe(&mut self, samples: &[f32], trailing: TrailingSilence) -> Result<String> {
         if samples.is_empty() {
             return Ok(String::new());
         }
-        prepare_padded_input(&mut self.input, samples, self.rate as usize)?;
+        let silence = match trailing {
+            TrailingSilence::Padded => self.rate as usize,
+            TrailingSilence::Bare => 0,
+        };
+        prepare_padded_input(&mut self.input, samples, silence)?;
         let stream = self.recognizer.create_stream();
         // One call is essential: sherpa's offline AcceptWaveform finalizes
         // feature extraction on every call despite the wrapper saying append.

@@ -9,8 +9,18 @@ use std::{
     },
 };
 
+/// Whether the recognizer appends its trailing silence to the samples it is
+/// given. `Padded` is the normal presentation. Parakeet sometimes decodes a
+/// short utterance to "" with the silence and to the right words without it,
+/// and sometimes the other way round, so neither is safe on its own; `Bare`
+/// exists for the retry in [`Pipeline::transcribe_speech`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrailingSilence {
+    Padded,
+    Bare,
+}
 pub trait Recognizer {
-    fn transcribe(&mut self, samples: &[f32]) -> Result<String>;
+    fn transcribe(&mut self, samples: &[f32], trailing: TrailingSilence) -> Result<String>;
 }
 pub trait Segmenter {
     fn split(&mut self, samples: &[f32]) -> Result<Vec<Segment>>;
@@ -107,6 +117,30 @@ impl<R: Recognizer, S: Segmenter> Pipeline<R, S> {
         }
         Ok(segments)
     }
+    /// Decodes one segment's window. A window the VAD marked as speech that
+    /// decodes to nothing is decoded once more without the trailing silence,
+    /// and that result stands. This is the only second decode of committed
+    /// audio: it runs only when the first decode produced no text, so every
+    /// window's output still comes from exactly one decode. Without a
+    /// segmenter nothing claims the window holds speech, so it is not retried.
+    fn transcribe_speech(&mut self, window: &[f32]) -> Result<String> {
+        let text = self
+            .recognizer
+            .transcribe(window, TrailingSilence::Padded)?;
+        if !text.trim().is_empty() || self.segmenter.is_none() {
+            return Ok(text);
+        }
+        let retry = self.recognizer.transcribe(window, TrailingSilence::Bare)?;
+        let seconds = Frames(window.len()).seconds(crate::config::REQUIRED_SAMPLE_RATE);
+        if retry.trim().is_empty() {
+            log::debug!("{seconds:.1}s of speech decoded empty with and without trailing silence");
+        } else {
+            log::info!(
+                "{seconds:.1}s of speech decoded empty; without trailing silence: {retry:?}"
+            );
+        }
+        Ok(retry)
+    }
     pub fn decode(
         &mut self,
         samples: &[f32],
@@ -133,7 +167,7 @@ impl<R: Recognizer, S: Segmenter> Pipeline<R, S> {
             if abandoned() {
                 return Ok(texts.join(" "));
             }
-            let text = self.recognizer.transcribe(&samples[s.window.clone()])?;
+            let text = self.transcribe_speech(&samples[s.window.clone()])?;
             log::debug!("chunk {:?}: {text:?}", s.window);
             if abandoned() {
                 return Ok(texts.join(" "));
@@ -149,7 +183,9 @@ impl<R: Recognizer, S: Segmenter> Pipeline<R, S> {
                 "all {} chunks empty; retrying the complete remainder",
                 segments.len()
             );
-            let text = self.recognizer.transcribe(samples)?;
+            let text = self
+                .recognizer
+                .transcribe(samples, TrailingSilence::Padded)?;
             if !text.trim().is_empty() && !abandoned() {
                 texts.push(text.clone());
                 on_segment(text);
@@ -223,13 +259,17 @@ impl<R: Recognizer, S: Segmenter> Worker<R, S> {
             if !utterance.ticking() {
                 return Ok(None);
             }
-            let text = self
-                .pipeline
-                .recognizer
-                .transcribe(&remainder[segment.window.clone()])?;
+            let window = &remainder[segment.window.clone()];
+            // The preview is cosmetic and redrawn every tick, so an empty open
+            // tail is not retried; only a settled chunk's text is permanent.
             if !segment.settled {
+                let text = self
+                    .pipeline
+                    .recognizer
+                    .transcribe(window, TrailingSilence::Padded)?;
                 return Ok(utterance.ticking().then(|| self.open_tail(text)));
             }
+            let text = self.pipeline.transcribe_speech(window)?;
             if utterance.cancelled() {
                 return Ok(None);
             }
@@ -284,7 +324,7 @@ mod tests {
         stop: Option<Arc<Utterance>>,
     }
     impl Recognizer for Fake {
-        fn transcribe(&mut self, s: &[f32]) -> Result<String> {
+        fn transcribe(&mut self, s: &[f32], _: TrailingSilence) -> Result<String> {
             self.calls.push(s.to_vec());
             if let Some(u) = &self.stop {
                 u.release();
@@ -398,14 +438,109 @@ mod tests {
     #[test]
     fn empty_chunks_retry_whole_buffer() {
         let mut w = worker();
-        w.pipeline.recognizer.replies = vec!["".into(), "".into(), "recovered".into()];
+        // Two chunks, each decoded padded and then bare, then the remainder.
+        w.pipeline.recognizer.replies = vec![
+            "".into(),
+            "".into(),
+            " ".into(),
+            "".into(),
+            "recovered".into(),
+        ];
         let mut commits = vec![];
         let (text, _) = w
             .finish(&[1.; 8], &Utterance::new(1), |c| commits.push(c))
             .unwrap();
         assert_eq!(text, "recovered");
         assert_eq!(commits.len(), 1);
-        assert_eq!(w.pipeline.recognizer.calls.len(), 3);
+        assert_eq!(w.pipeline.recognizer.calls.len(), 5);
+    }
+    /// Parakeet's failure mode: nothing with the trailing silence, `bare`
+    /// without it.
+    struct DeafWhenPadded {
+        bare: &'static str,
+        calls: Vec<TrailingSilence>,
+    }
+    impl Recognizer for DeafWhenPadded {
+        fn transcribe(&mut self, _: &[f32], trailing: TrailingSilence) -> Result<String> {
+            self.calls.push(trailing);
+            Ok(match trailing {
+                TrailingSilence::Padded => "",
+                TrailingSilence::Bare => self.bare,
+            }
+            .into())
+        }
+    }
+    fn deaf_worker(bare: &'static str) -> Worker<DeafWhenPadded, Split> {
+        Worker::new(Pipeline {
+            recognizer: DeafWhenPadded {
+                bare,
+                calls: vec![],
+            },
+            segmenter: Some(Split),
+        })
+    }
+    #[test]
+    fn empty_speech_is_decoded_again_without_trailing_silence() {
+        use TrailingSilence::{Bare, Padded};
+        let mut w = deaf_worker("words");
+        let u = Utterance::new(1);
+        let samples = [1.; 10];
+        let mut commits = vec![];
+        let preview = w
+            .tick(&samples, Frames::ZERO, &u, |c| commits.push(c))
+            .unwrap();
+        assert_eq!(
+            commits
+                .iter()
+                .map(|c| (c.text.as_str(), c.through))
+                .collect::<Vec<_>>(),
+            vec![("words", Frames(4)), ("words", Frames(8))],
+            "each settled chunk commits its retried text"
+        );
+        assert_eq!(
+            preview.map(|p| p.text),
+            Some(String::new()),
+            "the preview is not retried"
+        );
+        assert_eq!(
+            w.pipeline.recognizer.calls,
+            [Padded, Bare, Padded, Bare, Padded]
+        );
+        u.release();
+        let (text, tail) = w.finish(&samples, &u, |c| commits.push(c)).unwrap();
+        assert_eq!(
+            (text.as_str(), tail),
+            ("words", 2),
+            "the release path retries"
+        );
+        assert_eq!(commits.len(), 3);
+    }
+    #[test]
+    fn speech_empty_either_way_commits_nothing_and_still_advances() {
+        use TrailingSilence::{Bare, Padded};
+        let mut w = deaf_worker("");
+        let u = Utterance::new(1);
+        let mut commits = vec![];
+        w.tick(&[1.; 10], Frames::ZERO, &u, |c| commits.push(c))
+            .unwrap();
+        assert!(commits.iter().all(|c| c.text.is_empty()));
+        assert_eq!(w.progress.through, Frames(8));
+        let fresh = Utterance::new(2);
+        let (text, _) = w.finish(&[1.; 8], &fresh, |_| panic!()).unwrap();
+        assert_eq!(text, "");
+        assert_eq!(
+            w.pipeline.recognizer.calls[5..],
+            [Padded, Bare, Padded, Bare, Padded],
+            "both chunks retried once, then the whole remainder once"
+        );
+    }
+    #[test]
+    fn without_a_segmenter_empty_text_is_not_retried() {
+        let mut w = deaf_worker("words");
+        w.pipeline.segmenter = None;
+        let (text, _) = w.finish(&[1.; 8], &Utterance::new(1), |_| {}).unwrap();
+        assert_eq!(text, "");
+        assert_eq!(w.pipeline.recognizer.calls, [TrailingSilence::Padded]);
     }
     #[test]
     fn a_capture_the_vad_hears_no_speech_in_is_not_decoded() {
@@ -462,7 +597,7 @@ mod tests {
     fn cancel_during_decode_suppresses_result() {
         struct Cancel(Arc<Utterance>);
         impl Recognizer for Cancel {
-            fn transcribe(&mut self, _: &[f32]) -> Result<String> {
+            fn transcribe(&mut self, _: &[f32], _: TrailingSilence) -> Result<String> {
                 self.0.cancel();
                 Ok("late".into())
             }

@@ -145,6 +145,11 @@ vocabulary = []
 # the key, saying two words, and getting nothing back. Turning this off
 # restores the old whole-buffer behaviour, that bug included.
 #
+# A chunk this finds speech in that still decodes to an empty string is
+# decoded once more without the second of trailing silence the recogniser
+# normally appends; some short utterances only come back that way. Without
+# the detector nothing is known to be speech, so nothing is retried.
+#
 # It does NOT make decoding faster -- measured 12.3-12.6x real-time whole-buffer
 # against 11.0-11.7x segmented. What it changes is WHEN text appears: the first
 # chunk lands after ~1s instead of after the whole recording, so a five-minute

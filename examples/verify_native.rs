@@ -4,7 +4,7 @@ use serde_json::json;
 use spokenpad::{
     config::Config,
     core::{
-        decode::{Pipeline, Recognizer, Segmenter, Utterance, Worker},
+        decode::{Pipeline, Segmenter, Utterance, Worker},
         frames::Frames,
     },
     shell::inference::{SpeechSegmenter, Transcriber},
@@ -28,34 +28,29 @@ fn read(path: &Path) -> Result<Vec<f32>> {
 fn main() -> Result<()> {
     let config = Config::default();
     let mut recognizer = Transcriber::new(&config.asr, 16000)?;
-    recognizer.transcribe(&vec![0.; 16000])?;
-    let mut segmenter = SpeechSegmenter::new(&config.vad, 16000)?;
+    recognizer.warm_up()?;
+    let mut pipeline = Pipeline {
+        recognizer,
+        segmenter: Some(SpeechSegmenter::new(&config.vad, 16000)?),
+    };
     let mut cases = vec![];
     let mut passage = vec![];
     for arg in std::env::args().skip(1) {
         let samples = read(Path::new(&arg))?;
-        let segments = segmenter.split(&samples)?;
+        let segments = pipeline
+            .segmenter
+            .as_mut()
+            .context("segmenter")?
+            .split(&samples)?;
         let t = Instant::now();
-        let mut texts = vec![];
-        for s in &segments {
-            let text = recognizer.transcribe(&samples[s.window.clone()])?;
-            if !text.trim().is_empty() {
-                texts.push(text);
-            }
-        }
-        if texts.is_empty() && segments.len() > 1 {
-            texts.push(recognizer.transcribe(&samples)?);
-        }
-        cases.push(json!({"file":Path::new(&arg).file_name().context("filename")?.to_string_lossy(),"text":texts.join(" "),"elapsed":t.elapsed().as_secs_f64(),"segments":segments.iter().map(|s|json!([s.window.start,s.window.end,s.speech_end,s.settled])).collect::<Vec<_>>() }));
+        let text = pipeline.decode(&samples, || false, drop)?;
+        cases.push(json!({"file":Path::new(&arg).file_name().context("filename")?.to_string_lossy(),"text":text,"elapsed":t.elapsed().as_secs_f64(),"segments":segments.iter().map(|s|json!([s.window.start,s.window.end,s.speech_end,s.settled])).collect::<Vec<_>>() }));
         if samples.len() > 32000 {
             passage.extend(samples);
             passage.extend(vec![0.; 16000]);
         }
     }
-    let mut worker = Worker::new(Pipeline {
-        recognizer,
-        segmenter: Some(segmenter),
-    });
+    let mut worker = Worker::new(pipeline);
     let u = Utterance::new(1);
     let mut through = Frames::ZERO;
     let mut commits = vec![];

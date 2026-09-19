@@ -17,7 +17,7 @@ import logging
 from collections.abc import Callable
 from typing import Protocol
 
-from spokenpad.asr import TranscriptionResult
+from spokenpad.asr import TrailingSilence, TranscriptionResult
 from spokenpad.audio import MonoAudio
 from spokenpad.vad import Segment
 
@@ -27,13 +27,40 @@ log = logging.getLogger("spokenpad.decode")
 class Transcriber(Protocol):
     """The one operation the pure decode pipeline needs from an ASR model."""
 
-    def transcribe(self, samples: MonoAudio, sample_rate: int) -> TranscriptionResult: ...
+    def transcribe(
+        self,
+        samples: MonoAudio,
+        sample_rate: int,
+        trailing: TrailingSilence = ...,
+    ) -> TranscriptionResult: ...
 
 
 class Segmenter(Protocol):
     """The segmentation operation used by the pure decode pipeline."""
 
     def split(self, samples: MonoAudio) -> list[Segment]: ...
+
+
+def transcribe_speech(transcriber: Transcriber, samples: MonoAudio, sample_rate: int) -> str:
+    """Decode a chunk the VAD marked as speech, retrying bare if it is empty.
+
+    Parakeet can return ``""`` for a short utterance followed by the usual
+    second of trailing silence and the right words without it. A chunk that
+    decodes to nothing is decoded once more with ``TrailingSilence.BARE`` and
+    that result stands. This is the only second decode of a chunk, and it runs
+    only when the first produced no text, so each chunk's output still comes
+    from exactly one decode. Mirrors ``Pipeline::transcribe_speech`` in Rust.
+    """
+    text = transcriber.transcribe(samples, sample_rate).text
+    if text.strip():
+        return text
+    retry = transcriber.transcribe(samples, sample_rate, TrailingSilence.BARE).text
+    seconds = samples.size / sample_rate
+    if retry.strip():
+        log.info("%.1fs of speech decoded empty; without trailing silence: %r", seconds, retry)
+    else:
+        log.debug("%.1fs of speech decoded empty with and without trailing silence", seconds)
+    return retry
 
 
 def _keep_going() -> bool:
@@ -68,6 +95,9 @@ def decode_capture(
     adding text rather than running to the end of a passage the user has
     already walked away from.
 
+    A chunk the segmenter found speech in that decodes to nothing is decoded
+    once more without trailing silence (:func:`transcribe_speech`).
+
     A segmenter that reports no speech means there is nothing to decode, and
     the recogniser is not called at all -- not even for the whole-buffer
     recovery exception below, which exists for chunks that decoded to nothing,
@@ -99,7 +129,13 @@ def decode_capture(
             log.info("decode cancelled after %d of %d chunks", index, len(segments))
             cancelled = True
             break
-        text = transcriber.transcribe(segment.samples, sample_rate).text
+        # Without a segmenter nothing claims the buffer holds speech, so an
+        # empty result is not retried.
+        text = (
+            transcribe_speech(transcriber, segment.samples, sample_rate)
+            if segmenter is not None
+            else transcriber.transcribe(segment.samples, sample_rate).text
+        )
         # Every chunk, with where it came from, at DEBUG. Words going missing
         # from the front of a dictation is the one report that cannot be
         # diagnosed after the fact without this: it says whether the first

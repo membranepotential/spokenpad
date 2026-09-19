@@ -19,7 +19,7 @@ import numpy as np
 from spokenpad.asr import Transcriber
 from spokenpad.audio import MonoAudio
 from spokenpad.config import Config
-from spokenpad.decode import decode_capture
+from spokenpad.decode import decode_capture, transcribe_speech
 from spokenpad.vad import SpeechSegmenter
 
 
@@ -67,9 +67,9 @@ def progressive_reference(
         remainder = samples[through:end]
         base = through
         for chunk in segmenter.split(remainder):
-            text = transcriber.transcribe(chunk.samples, sample_rate).text
             if not chunk.settled:
-                break
+                break  # the open tail is only previewed; nothing here compares it
+            text = transcribe_speech(transcriber, chunk.samples, sample_rate)
             through = base + chunk.end_frame
             commits.append(ReferenceCommit(end, through, text))
             if text.strip():
