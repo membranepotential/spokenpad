@@ -54,9 +54,14 @@ the root because both sides read it. Nothing under `core/` may import `evdev`,
   cap reached, device flags. The watchdog also repairs a dead stream while
   *idle*, so the pre-roll is full at the next press; the ring is cleared when a
   capture starts, so audio from before the previous capture cannot be spliced
-  into this one. A release waits up to 100 ms for the callback already in
-  flight, so the partial device buffer at that moment reaches both the capture
-  and the WAV. Failure-path teardown aborts the stream rather than stopping it,
+  into this one. A decode (release, latched stop, lost keyboard) keeps
+  capturing for `audio.postroll_ms` (250 ms, at most 1000) after the key
+  event, because speech was still sounding at key-up in 22 of 128 recorded
+  captures. The wait counts device frames delivered under the state lock, so
+  it also completes past the memory ceiling; it ends early on a new key press
+  or shutdown, gives up after the post-roll plus 100 ms, and reports a stream
+  that went stale as a microphone gap. A discard (tap, cancel) waits only for
+  one further device buffer, up to 100 ms. Failure-path teardown aborts the stream rather than stopping it,
   so a wedged device cannot block the event loop; orderly shutdown still stops.
   The in-memory ceiling is `MAX_UTTERANCE_SECONDS = 3600`, a compile-time
   constant, not a config key.
@@ -226,7 +231,9 @@ the short `cd home` clip (`handy-1787827474.wav`) decodes to an empty string in
 Rust while the Python reference still yields `C D home.`; the VAD segments are
 identical and the build at commit b1159ec reproduces the same empty result, so
 this is a native-runtime difference on an edge case, not a regression of the
-2026-09-11 changes. It is tracked in STATUS.md. The 102.5-second progressive passage matched
+2026-09-11 changes. On 2026-09-19 it turned out to be the empty-decode edge
+case described in [decisions.md](decisions.md#an-empty-speech-chunk-is-decoded-again-without-trailing-silence):
+with the retry, Rust and Python agree on this clip. The 102.5-second progressive passage matched
 all six commits and its final transcript; its 1.8-second release remainder
 decoded in 0.53 seconds in that run.
 

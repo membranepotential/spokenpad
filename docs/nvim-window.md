@@ -135,8 +135,10 @@ re-read or edit an earlier passage keeps their place.
 
 `spokenpad.lua` — one file since 2026-09-11, previously split in two — is
 loaded over RPC on every connection (so a reattach re-applies it) and defines
-`_G.Spokenpad`. The daemon calls exactly three things: `setup`,
-`append_once`, and `push`. Reloading is state-preserving by construction: the
+`_G.Spokenpad`. The daemon calls exactly four things: `setup`,
+`append_once`, `push`, and `copy_buffer`, which sets `+` to the whole buffer
+after every release (see
+[decisions.md](decisions.md#the-whole-buffer-is-copied-to-the-clipboard-after-a-release)). Reloading is state-preserving by construction: the
 chunk keeps the previous module's pinned buffer, indicator state, meter history
 and append de-duplication cache, so restarting the daemon neither blanks the
 indicator nor replays an append whose reply was lost.

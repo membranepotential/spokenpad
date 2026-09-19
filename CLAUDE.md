@@ -13,10 +13,13 @@ Design history is `docs/decisions.md`; add an entry when you change behaviour.
 
 - `/dev/input` is opened read-only: `File::open` + `Device::from_fd`. Never
   `Device::open`, `EVIOCGRAB`, uinput, or any input synthesis (`xdotool type`,
-  enigo, XTest). The clipboard is never touched.
+  enigo, XTest). Nothing is ever pasted. The only clipboard write is the
+  dictation nvim setting its own `+` register to the whole buffer after a release.
 - No window spokenpad opens may take focus. The i3 `no_focus` rule is proven
   before a graphical editor is spawned; the code contains no focus call.
 - Committed speech is decoded exactly once; the release decodes only the tail.
+  The one exception: a VAD chunk that decodes to "" is decoded once more
+  without trailing silence (`TrailingSilence::Bare`).
   The preview is extmark virtual text and can never become file content.
 - CPU provider only. `audio.sample_rate` is 16000.
 
@@ -70,15 +73,17 @@ running: they use temp dirs and never the real state dir or the daemon lock.
   imperative shell, no derived state stored, no wrapper with one caller. Every
   `unsafe` carries an accurate `SAFETY:` comment (lint is deny).
 - Keep the Python reference in step with Rust decode/VAD semantics, or the
-  differential check becomes meaningless. Known open mismatches: three of the
-  five eval clips differ at the ASR level (`cd home` decodes empty in Rust) with
-  identical segments and offsets (see STATUS.md); do not chase them as regressions.
+  differential check becomes meaningless. Known open mismatches: clip
+  `handy-1787827757` differs by one token (`z E T` vs `Z S E T`), and some
+  progressive commits differ in punctuation, with identical segments and offsets
+  (see STATUS.md); do not chase them as regressions.
 - Docs describe the system as implemented. When you change behaviour, update
   `README.md` ("While you dictate"), the relevant `docs/*.md`, and
   `config.example.toml` comments in the same change.
 - Commits: signed, on `main`, message written to a file and passed with `-F`.
-  Only commit or restart the service (`systemctl --user restart spokenpad`)
-  when asked; restarting closes the user's dictation window.
+  Only commit when asked. Restarting the service (`systemctl --user restart
+  spokenpad`) to deploy a verified build is always allowed; it closes the
+  user's dictation window, so say that you did it.
 - `.agents/` and `.codex/` are untracked directories used by other tools.
   Leave them alone even when empty.
 - `models/` (~630 MB) and `eval-samples/*.wav` (the user's voice) are local

@@ -195,6 +195,61 @@ did one-time work); reattach to a running nvim 430 ms; append 19-62 ms. All
 of it off the user's latency path — the window is opened on key-down, on its
 own thread, while the utterance is still being spoken.
 
+## An empty speech chunk is decoded again without trailing silence
+
+**2026-09-19.** The user reported words lost at the head or tail of a
+dictation. The daemon log showed one cause directly: a preview displayed "What's
+your alternative for that?", and the release decode of the same window
+returned `""`. The user said it three times before it landed. Replaying the 18
+recorded captures with under 3 s of speech, 4 decoded to nothing in the live
+presentation, and all 4 decoded correctly without the 1 s of zeros the
+recogniser appends. The result is on a knife edge (the Rust CLI and the Python
+reference disagreed on the same window), and no presentation is safe on every
+clip, so the fix is a retry rather than a new default.
+
+`Recognizer::transcribe` takes a `TrailingSilence` (`Padded` or `Bare`). A
+chunk from the segmenter that decodes empty with `Padded` is decoded once more
+with `Bare`, in the release decode and in settled progressive commits. Previews
+are not retried (they are redrawn every tick), and neither is the no-VAD
+path, where nothing claims the audio is speech. The Python reference mirrors
+it; with it, the long-standing `cd home` Rust/Python mismatch is gone.
+
+## A post-roll after the key-up
+
+**2026-09-19.** The capture keeps recording for `audio.postroll_ms` (250 ms)
+after a decode-ending key event. Replaying the user's 128 recovery WAVs, the
+VAD's last speech span ended within 0.1 s of the buffer end in 22 of them:
+the key was released mid-word, and the release waited only for the one device
+buffer in flight. The wait blocks the event loop, which is simpler than a
+draining state, and is bounded three ways: a new key press ends it (so a quick
+re-press does not lose its first word into the previous capture), shutdown
+ends it, and it gives up after the post-roll plus 100 ms. The key-up that
+follows a latched stop does not end it. Whether 250 ms is enough is a live
+question; the statistic shows the cut, not its length.
+
+## The whole buffer is copied to the clipboard after a release
+
+**2026-09-19.** After every release the dictation nvim sets its own `+`
+register to the whole buffer: every press in the window and any edits made by
+hand, trailing blank lines stripped. The daemon sends one `EditorWork::Copy`
+per `Finished` result; every `Append` of that utterance is already ahead of it
+in the editor queue, so the copy always includes the text just released.
+
+The use that asked for it: a passage is dictated over several presses, read
+over in the window, then pasted into another program. Copying by hand meant
+focusing a window that is built never to take focus.
+
+This relaxes the 2026-09-07 rule that the clipboard is never touched, and only
+this far: the clipboard is a copy, not a delivery path. Nothing is pasted, no
+key is sent, and no other window is written to, so none of the failures in
+[constraints.md](constraints.md) come back. The register is set through nvim's
+own clipboard provider, so the daemon spawns no clipboard process. An empty
+buffer leaves the clipboard alone, and a missing provider is a log warning.
+
+**Rejected: copying only the capture just released.** A dictation file is one
+message composed over several presses; copying one paragraph would make the
+user reassemble it by hand.
+
 ## What a capture tells the user, and what a cancel means
 
 **2026-09-11.** Everything the user has to know about the capture they just

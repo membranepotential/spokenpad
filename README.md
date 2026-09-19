@@ -42,6 +42,10 @@ capture incomplete > microphone unavailable > microphone gap > nearly silent >
 held too briefly > preview paused. The daemon log always has the whole
 sentence, and the full paths in it.
 
+- **Recording continues for a quarter second after you let go**
+  (`audio.postroll_ms`), so a word still sounding at key-up is not cut off.
+  The winbar switches to transcribing at once; pressing the key again ends the
+  wait early and starts the next capture straight away.
 - **Escape cancels, but only while recording.** After the key is released the
   audio is captured and the final decode is already running, so the cancel key
   is ignored from there on: it is read from every keyboard regardless of focus,
@@ -61,6 +65,10 @@ sentence, and the full paths in it.
   asked to transcribe silence invents words — an empty half-second press once
   produced "Thank you." — so when the VAD hears nothing, nothing is appended.
   Without a VAD model the whole capture is still decoded.
+- **Speech the VAD heard is never silently dropped by the recogniser.**
+  Parakeet sometimes returns nothing for a short sentence; such a chunk is
+  decoded once more without its trailing silence, which recovered every such
+  loss found in your recordings.
 - **Previews pause on a long uncommitted tail** (`preview.max_seconds`, 30 s)
   and resume by themselves once it settles. Without a VAD model no preview is
   issued at all — decoding the whole growing capture is the one thing this
@@ -68,6 +76,11 @@ sentence, and the full paths in it.
 - **Past the 60-minute in-memory ceiling** the capture is released for decoding
   and the winbar names the recovery WAV, which keeps recording — by file name,
   since it has a window's width; the log names the directory it is in.
+- **After every release the whole buffer is on the clipboard**: every press
+  in the window plus anything you edited by hand, ready to paste wherever you
+  want it. The dictation nvim sets its own `+` register through its clipboard
+  provider (xclip/xsel); nothing is pasted for you, and an empty buffer leaves
+  the clipboard alone.
 
 ## Status
 
@@ -86,7 +99,7 @@ this project's hard constraints:
   destroy per-device `setxkbmap` configuration.
 - Never synthesise characters (`xdotool type` / enigo). It rewrites the *core*
   X keymap. The transcript goes over neovim's msgpack-RPC socket instead — no
-  keystrokes, no clipboard, and the text crosses no shell or argv boundary.
+  keystrokes, no paste, and the text crosses no shell or argv boundary.
 - Every committed sample is decoded exactly once, never from a growing
   buffer. Streaming models re-decode as audio arrives and silently drop long
   utterances. Here a chunk is decoded and appended the moment no later audio

@@ -51,7 +51,7 @@ clipboard + `ctrl+v` versus **3.3 s** via character synthesis for the same
 
 **Rule:** spokenpad never synthesises characters.
 
-Since 2026-09-07 it does not touch the clipboard either. The transcript is
+Since 2026-09-07 it does not paste either. The transcript is
 appended to a neovim buffer over that editor's msgpack-RPC socket
 ([`shell/nvim/mod.rs`](../src/shell/nvim/mod.rs)), which is strictly stronger
 than the clipboard sink it replaced: no keystroke is sent anywhere, no global
@@ -59,6 +59,13 @@ X state is read or written, and the transcript never crosses a shell or an
 argv boundary — it is a msgpack string argument, so a dictated `$(rm -rf ~)`
 is just text. The clipboard round trip (`inject.py`) is deleted; see
 [decisions.md](decisions.md#the-sink-is-neovim-not-the-clipboard).
+
+Since 2026-09-19 the clipboard is written again, but only as a copy, never as
+a delivery path: after every release the dictation nvim sets its own `+`
+register to the whole buffer, through nvim's clipboard provider. Nothing is
+pasted, no key is sent, and no other window is written to, so every failure
+above stays impossible. See
+[decisions.md](decisions.md#the-whole-buffer-is-copied-to-the-clipboard-after-a-release).
 
 ## Every committed sample is decoded exactly once, never streamed
 
@@ -69,7 +76,9 @@ and it silently dropped audio past a 30 s cap, with no error surfaced to the
 user (STATUS.md). A 37 s dictation was discarded outright.
 
 **Rule:** every captured sample that reaches the buffer is decoded **exactly
-once**, and no committed text ever comes from re-decoding audio that is still
+once** (two exceptions, both only after a decode produced nothing: a speech
+chunk is decoded again without trailing silence, and when every chunk of a
+release is still empty the whole remainder is decoded once), and no committed text ever comes from re-decoding audio that is still
 growing. Cost is therefore linear in the audio, and nothing is capped or
 discarded at any length.
 
@@ -113,6 +122,16 @@ the file. So since 2026-09-11, with a VAD model loaded, a capture it finds no
 speech in is not decoded at all. Only the detector may make that call — with
 no VAD model the whole capture is still decoded, because nothing else knows
 better.
+
+The same knife edge has a third face: a short sentence the VAD *did* detect
+can come back empty. Replaying the user's recordings, 4 of 18 captures with
+under 3 s of speech decoded to `""` in their padded window (0.5 s pad plus the
+1 s of zeros the recogniser appends), and every one decoded correctly from the
+same window without the appended zeros. No single presentation is safe on
+every clip, so since 2026-09-19 a VAD chunk that decodes empty is decoded once
+more without the trailing silence. That second decode happens only after the
+first produced nothing, so no text is ever produced twice from the same audio;
+previews and the no-VAD path are not retried.
 
 Throughput is unchanged — 12.3-12.6x real-time whole-buffer against 11.0-11.7x
 segmented, slightly *worse*, because per-chunk overhead costs about what the
