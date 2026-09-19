@@ -55,6 +55,14 @@ sample_rate = 16000
 # opened lazily on keypress instead, at the cost of clipping quick starts.
 preroll_ms = 250
 
+# Audio still captured after the key comes up, because the last syllable is
+# often still sounding at that moment: without it the final word is clipped.
+# The release waits this long (plus up to 100 ms for the device) before it
+# decodes; pressing the key again ends the wait at once, so a quick re-press
+# never loses its first word to the previous capture. Discards (a tap held too
+# briefly, the cancel key) take no post-roll. 0 to disable; at most 1000.
+postroll_ms = 250
+
 # PortAudio device-name query: case-insensitive, ordered words matched against
 # the device name and host API. Omit to use the default input device.
 # device = "USB ALSA"

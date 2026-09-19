@@ -4,11 +4,15 @@ use serde::Deserialize;
 use std::{
     env,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 /// Both models are 16kHz: Silero's window is 512 samples at that rate and
 /// Parakeet's feature extractor assumes it. Nothing resamples in between.
 pub const REQUIRED_SAMPLE_RATE: u32 = 16_000;
+/// Upper bound for `audio.postroll_ms`: every release blocks the event loop
+/// this long at most, and a key pressed meanwhile ends it early.
+pub const MAX_POSTROLL_MS: u32 = 1_000;
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -68,6 +72,9 @@ impl Default for Hotkey {
 pub struct Audio {
     pub sample_rate: u32,
     pub preroll_ms: u32,
+    /// Audio still captured after a release, because speech is often still
+    /// sounding when the key comes up.
+    pub postroll_ms: u32,
     pub device: Option<String>,
 }
 impl Default for Audio {
@@ -75,13 +82,23 @@ impl Default for Audio {
         Self {
             sample_rate: 16000,
             preroll_ms: 250,
+            postroll_ms: 250,
             device: None,
         }
     }
 }
 impl Audio {
     pub fn preroll_frames(&self) -> usize {
-        (u64::from(self.sample_rate) * u64::from(self.preroll_ms) / 1000) as usize
+        self.frames_in(self.preroll_ms)
+    }
+    pub fn postroll_frames(&self) -> usize {
+        self.frames_in(self.postroll_ms)
+    }
+    pub fn postroll(&self) -> Duration {
+        Duration::from_millis(u64::from(self.postroll_ms))
+    }
+    fn frames_in(&self, milliseconds: u32) -> usize {
+        (u64::from(self.sample_rate) * u64::from(milliseconds) / 1000) as usize
     }
 }
 
@@ -378,6 +395,10 @@ impl Config {
             self.audio.preroll_ms <= 60_000,
             "audio.preroll_ms must be <= 60000"
         );
+        ensure!(
+            self.audio.postroll_ms <= MAX_POSTROLL_MS,
+            "audio.postroll_ms must be <= {MAX_POSTROLL_MS}: the release waits this long before decoding"
+        );
         ensure!(self.asr.num_threads > 0, "asr.num_threads must be positive");
         ensure!(
             self.asr.hotwords_score.is_finite(),
@@ -570,6 +591,8 @@ mod tests {
             "[nvim]\ncolorscheme='ha ha; !'",
             "[nvim]\ncolorscheme=''",
             "[audio]\npreroll_ms=-1",
+            "[audio]\npostroll_ms=-1",
+            "[audio]\npostroll_ms=1001",
             "[preview]\ninterval_ms=199",
             "[preview]\nmax_seconds=nan",
             "[vad]\nthreshold=nan",

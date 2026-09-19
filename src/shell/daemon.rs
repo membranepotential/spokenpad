@@ -16,7 +16,7 @@ use crate::{
         text::Processor,
     },
     shell::{
-        audio::{AudioCapture, CaptureEvent, InputBackend},
+        audio::{AudioCapture, CaptureEvent, InputBackend, PostRoll},
         hotkey::HotkeyWatcher,
         inference::{Transcriber, load_segmenter},
         nvim::{CopyOutcome, IndicatorState, NvimSession},
@@ -24,6 +24,7 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use std::{
+    collections::VecDeque,
     fmt,
     fs::{self, File, OpenOptions},
     os::{
@@ -68,6 +69,51 @@ pub struct Devices<B: InputBackend, R, S> {
     /// Key events. The sender being dropped means the input source ended.
     pub keys: Receiver<Event>,
     pub worker: Worker<R, S>,
+}
+
+/// Key events in arrival order. A release's post-roll ends as soon as another
+/// key event is waiting; it looks by moving that event into `early`, which the
+/// loop drains before receiving anything newer, so nothing is lost or reordered.
+struct Keys {
+    receiver: Receiver<Event>,
+    early: VecDeque<Event>,
+    /// False once the sender is gone: the input source ended.
+    alive: bool,
+}
+
+impl Keys {
+    fn new(receiver: Receiver<Event>) -> Self {
+        Self {
+            receiver,
+            early: VecDeque::new(),
+            alive: true,
+        }
+    }
+
+    fn next(&mut self) -> Option<Event> {
+        self.early.pop_front().or_else(|| self.receive())
+    }
+
+    /// Whether a key event is waiting, or none can ever arrive again.
+    fn waiting(&mut self) -> bool {
+        if self.early.is_empty()
+            && let Some(event) = self.receive()
+        {
+            self.early.push_back(event);
+        }
+        !self.early.is_empty() || !self.alive
+    }
+
+    fn receive(&mut self) -> Option<Event> {
+        match self.receiver.try_recv() {
+            Ok(event) => Some(event),
+            Err(mpsc::TryRecvError::Empty) => None,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.alive = false;
+                None
+            }
+        }
+    }
 }
 
 enum Work {
@@ -316,6 +362,7 @@ where
         keys,
         mut worker,
     } = devices;
+    let mut keys = Keys::new(keys);
     let rate = config.audio.sample_rate;
     // Without a segmenter nothing ever settles, so a preview would re-decode
     // the whole growing capture. That is the one thing this project refuses.
@@ -339,18 +386,12 @@ where
         .spawn(move || editor_thread(editor_config, editor_rx))?;
 
     let mut next_device_poll = Instant::now();
-    let mut input_alive = true;
     let result = (|| -> Result<()> {
         while !stopping.load(Ordering::Acquire) {
             // Give key release/cancel priority over delivery of inference results.
             for _ in 0..128 {
-                let event = match keys.try_recv() {
-                    Ok(event) => event,
-                    Err(mpsc::TryRecvError::Empty) => break,
-                    Err(mpsc::TryRecvError::Disconnected) => {
-                        input_alive = false;
-                        break;
-                    }
+                let Some(event) = keys.next() else {
+                    break;
                 };
                 match session.event(event) {
                     Command::Start => {
@@ -368,7 +409,15 @@ where
                         send(&editor_tx, EditorWork::Ensure)?;
                     }
                     Command::Decode => {
-                        let samples = capture.stop_capture();
+                        // The winbar says "transcribing" from the key-up on,
+                        // not only once the post-roll has arrived.
+                        send(
+                            &editor_tx,
+                            EditorWork::Indicator(indicator_of(&session, 0.)),
+                        )?;
+                        let (samples, postroll) = capture
+                            .finish_capture(|| stopping.load(Ordering::Acquire) || keys.waiting());
+                        note_postroll(postroll, &mut session);
                         for event in capture.poll() {
                             apply_capture_event(event, &mut session);
                         }
@@ -509,7 +558,7 @@ where
                 EditorWork::Indicator(indicator_of(&session, level)),
             )?;
             ensure!(
-                input_alive && !engine.is_finished() && !editor.is_finished(),
+                keys.alive && !engine.is_finished() && !editor.is_finished(),
                 "a required worker stopped unexpectedly"
             );
             thread::sleep(LOOP_INTERVAL);
@@ -680,6 +729,28 @@ fn release<B: InputBackend>(
             utterance,
         },
     )
+}
+
+fn note_postroll(postroll: PostRoll, session: &mut Session) {
+    match postroll {
+        PostRoll::Complete => {}
+        PostRoll::Interrupted => {
+            log::debug!("post-roll ended early by a key event or shutdown")
+        }
+        PostRoll::TimedOut => {
+            log::debug!(
+                "the device delivered less than the post-roll in time; decoding what arrived"
+            )
+        }
+        // The watchdog's own report comes after the capture has ended, when
+        // it can no longer tell that this capture lost audio; this can.
+        PostRoll::StreamStale => {
+            log::warn!(
+                "input stream stopped delivering before the post-roll arrived; the end of this capture may be missing"
+            );
+            session.notify(Notice::MicrophoneGap);
+        }
+    }
 }
 
 fn apply_capture_event(event: CaptureEvent, session: &mut Session) {

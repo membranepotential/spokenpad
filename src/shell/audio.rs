@@ -26,9 +26,12 @@ use std::{
 pub const MAX_UTTERANCE_SECONDS: usize = 3_600;
 const FIRST_CALLBACK_TIMEOUT: Duration = Duration::from_millis(500);
 const STALE_STREAM: Duration = Duration::from_secs(1);
-/// How long a release waits for the callback that is already in flight, so the
-/// partial device buffer at the moment of release reaches capture and WAV.
+/// How long a stop waits, beyond its post-roll, for the device to deliver: at
+/// least the callback already in flight, so the partial device buffer at the
+/// moment of the key event reaches capture and WAV.
 const FINAL_CALLBACK_WAIT: Duration = Duration::from_millis(100);
+/// How often a stop re-checks delivery, liveness and its interrupt.
+const STOP_POLL_INTERVAL: Duration = Duration::from_millis(2);
 /// A device that will not reopen must not be retried on every poll.
 const REOPEN_BACKOFF: Duration = Duration::from_secs(2);
 /// Chunk vector capacity reserved up front, in seconds of audio.
@@ -144,6 +147,22 @@ pub enum CaptureEvent {
     Flags(StreamFlags),
 }
 
+/// How the wait for audio after a release ended. The capture is taken
+/// whatever the outcome; only [`PostRoll::StreamStale`] means audio is missing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PostRoll {
+    /// Every post-roll frame arrived, or no capture was running to owe any.
+    Complete,
+    /// The caller's interrupt ended the wait early: a key event is waiting,
+    /// or the daemon is stopping.
+    Interrupted,
+    /// The device delivered too little before the deadline.
+    TimedOut,
+    /// The stream was dead, or died, before the post-roll arrived. The stream
+    /// is not reopened here; the next [`AudioCapture::poll`] does that.
+    StreamStale,
+}
+
 #[derive(Debug)]
 struct Chunk {
     samples: Arc<[f32]>,
@@ -159,6 +178,11 @@ enum CaptureState {
         chunks: Vec<Chunk>,
         /// Sum of `kept` over `chunks`, cached because the callback needs it.
         frames: Frames,
+        /// Device frames delivered since the capture started, counted after
+        /// they were recorded and whether or not the memory ceiling let them
+        /// into `chunks`. A stop measures its post-roll with this: `frames`
+        /// stops growing at the ceiling.
+        delivered: Frames,
         /// Samples were dropped because the memory ceiling was reached.
         capped: bool,
     },
@@ -187,7 +211,8 @@ pub struct CallbackCore {
     maximum_frames: usize,
     clock_origin: Instant,
     // Monotone, single-location counters: Relaxed is sufficient, no data is
-    // published through them.
+    // published through them. `callback_count` only tells a fresh stream's
+    // first callback apart; capture progress is `CaptureState`'s `delivered`.
     last_callback_nanos: AtomicU64,
     callback_count: AtomicU64,
     callback_frames: AtomicUsize,
@@ -216,6 +241,7 @@ impl CallbackCore {
             CaptureState::Capturing {
                 chunks,
                 frames,
+                delivered,
                 capped,
             } => {
                 // One copy of the device's reused buffer, shared by the disk
@@ -223,6 +249,7 @@ impl CallbackCore {
                 // is consulted, so the one-hour cap cannot truncate recovery.
                 let captured: Arc<[f32]> = Arc::from(samples);
                 self.recorder.write_shared(Arc::clone(&captured));
+                *delivered += captured.len();
                 let remaining = self.maximum_frames.saturating_sub(frames.get());
                 let kept = captured.len().min(remaining);
                 *capped |= kept < captured.len();
@@ -366,15 +393,42 @@ impl<B: InputBackend> AudioCapture<B> {
         *state = CaptureState::Capturing {
             chunks,
             frames,
+            delivered: Frames::ZERO,
             capped: false,
         };
         Ok(())
     }
 
+    /// Ends a capture that is being thrown away: no post-roll, only the
+    /// buffer in flight at the key event, which the recovery WAV still owes.
     pub fn stop_capture(&mut self) -> Vec<f32> {
-        // The buffer in flight at the moment of release still belongs to this
-        // capture; give the device one callback to hand it over.
-        self.await_final_callback();
+        match self.await_delivery(1, FINAL_CALLBACK_WAIT, &mut || false) {
+            PostRoll::TimedOut => {
+                log::debug!("no further callback arrived within the release window")
+            }
+            PostRoll::Complete | PostRoll::Interrupted | PostRoll::StreamStale => {}
+        }
+        self.take_capture()
+    }
+
+    /// Ends a capture that is going to be decoded, after its post-roll: the
+    /// speech still sounding when the key came up. Blocks for at most
+    /// `postroll_ms` plus [`FINAL_CALLBACK_WAIT`], and returns as soon as
+    /// `interrupted` is true, which it is asked between polls of the device.
+    /// The state lock is never held while waiting.
+    pub fn finish_capture(
+        &mut self,
+        mut interrupted: impl FnMut() -> bool,
+    ) -> (Vec<f32>, PostRoll) {
+        let postroll = self.await_delivery(
+            self.config.postroll_frames().max(1),
+            self.config.postroll() + FINAL_CALLBACK_WAIT,
+            &mut interrupted,
+        );
+        (self.take_capture(), postroll)
+    }
+
+    fn take_capture(&mut self) -> Vec<f32> {
         let (chunks, capped) = {
             let mut state = lock(&self.core.state);
             match &mut *state {
@@ -585,19 +639,44 @@ impl<B: InputBackend> AudioCapture<B> {
         }
     }
 
-    fn await_final_callback(&self) {
-        if !self.stream_is_live() {
-            return;
+    /// Frames the device has delivered to the current capture; `None` while
+    /// idle.
+    fn delivered(&self) -> Option<Frames> {
+        match &*lock(&self.core.state) {
+            CaptureState::Capturing { delivered, .. } => Some(*delivered),
+            CaptureState::Idle { .. } => None,
         }
-        let seen = self.core.callback_count.load(Ordering::Relaxed);
-        let deadline = Instant::now() + FINAL_CALLBACK_WAIT;
-        while Instant::now() < deadline {
-            if self.core.callback_count.load(Ordering::Relaxed) > seen {
-                return;
+    }
+
+    /// Waits until the device has delivered `wanted` more frames to the
+    /// current capture, the stream is found dead, `interrupted` says to stop,
+    /// or `limit` passes, whichever comes first. Sleeps without the lock.
+    fn await_delivery(
+        &self,
+        wanted: usize,
+        limit: Duration,
+        interrupted: &mut dyn FnMut() -> bool,
+    ) -> PostRoll {
+        let Some(start) = self.delivered() else {
+            return PostRoll::Complete;
+        };
+        let target = start + wanted;
+        let deadline = Instant::now() + limit;
+        loop {
+            if self.delivered().is_none_or(|delivered| delivered >= target) {
+                return PostRoll::Complete;
             }
-            thread::sleep(Duration::from_millis(2));
+            if !self.stream_is_live() {
+                return PostRoll::StreamStale;
+            }
+            if interrupted() {
+                return PostRoll::Interrupted;
+            }
+            if Instant::now() >= deadline {
+                return PostRoll::TimedOut;
+            }
+            thread::sleep(STOP_POLL_INTERVAL);
         }
-        log::debug!("no further callback arrived within the release window");
     }
 }
 
@@ -851,6 +930,43 @@ mod tests {
         }
     }
 
+    /// 250 frames at the tests' 1 kHz.
+    const TEST_POSTROLL_MS: u32 = 250;
+
+    /// A device on its own thread: delivers ten frames of `1.0` every two
+    /// milliseconds until dropped.
+    struct Feeder {
+        stop: Arc<AtomicBool>,
+        thread: Option<thread::JoinHandle<()>>,
+    }
+
+    impl Feeder {
+        fn start(backend: &TestBackend) -> Self {
+            let stop = Arc::new(AtomicBool::new(false));
+            let flag = Arc::clone(&stop);
+            let backend = backend.clone();
+            let thread = thread::spawn(move || {
+                while !flag.load(Ordering::Relaxed) {
+                    backend.feed(&[1.0; 10]);
+                    thread::sleep(Duration::from_millis(2));
+                }
+            });
+            Self {
+                stop,
+                thread: Some(thread),
+            }
+        }
+    }
+
+    impl Drop for Feeder {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Relaxed);
+            if let Some(thread) = self.thread.take() {
+                thread.join().expect("feeder thread");
+            }
+        }
+    }
+
     fn capture(preroll_ms: u32) -> (TestBackend, AudioCapture<TestBackend>) {
         capped_capture(preroll_ms, usize::MAX)
     }
@@ -865,6 +981,7 @@ mod tests {
             Audio {
                 sample_rate: 1_000,
                 preroll_ms,
+                postroll_ms: TEST_POSTROLL_MS,
                 device: None,
             },
             Recording {
@@ -951,6 +1068,7 @@ mod tests {
             Audio {
                 sample_rate: 1_000,
                 preroll_ms: 0,
+                postroll_ms: TEST_POSTROLL_MS,
                 device: None,
             },
             Recording {
@@ -1133,6 +1251,98 @@ mod tests {
             backend.opens.load(Ordering::Relaxed),
             opens + 1,
             "the device is not hammered once per poll"
+        );
+    }
+
+    #[test]
+    fn the_postroll_collects_the_configured_frames_after_the_release() {
+        let (backend, mut capture) = capture(0);
+        capture.start_capture().unwrap();
+        backend.feed(&[0.5; 3]);
+        let _device = Feeder::start(&backend);
+        let (samples, postroll) = capture.finish_capture(|| false);
+        assert_eq!(postroll, PostRoll::Complete);
+        assert_eq!(samples[..3], [0.5; 3], "audio before the release is kept");
+        assert!(
+            samples.len() >= 3 + 250,
+            "the post-roll holds at least postroll_ms of audio: {} frames",
+            samples.len()
+        );
+    }
+
+    #[test]
+    fn a_postroll_without_audio_ends_at_its_deadline() {
+        let (backend, mut capture) = capture(0);
+        capture.start_capture().unwrap();
+        backend.feed(&[0.5; 3]);
+        let started = Instant::now();
+        let (samples, postroll) = capture.finish_capture(|| false);
+        let waited = started.elapsed();
+        assert_eq!(postroll, PostRoll::TimedOut);
+        assert_eq!(samples, [0.5; 3], "what arrived is still returned");
+        let deadline = Duration::from_millis(u64::from(TEST_POSTROLL_MS)) + FINAL_CALLBACK_WAIT;
+        assert!(
+            waited >= deadline && waited < deadline + Duration::from_millis(200),
+            "waited {waited:?}, deadline {deadline:?}"
+        );
+    }
+
+    #[test]
+    fn an_interrupt_ends_the_postroll_at_once() {
+        let (backend, mut capture) = capture(0);
+        capture.start_capture().unwrap();
+        backend.feed(&[0.5; 3]);
+        let started = Instant::now();
+        let mut asked = 0;
+        let (samples, postroll) = capture.finish_capture(|| {
+            asked += 1;
+            asked > 2
+        });
+        assert_eq!(postroll, PostRoll::Interrupted);
+        assert_eq!(asked, 3, "the interrupt is asked between polls");
+        assert_eq!(samples, [0.5; 3]);
+        assert!(
+            started.elapsed() < Duration::from_millis(100),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_capped_capture_completes_its_postroll_on_delivery() {
+        let (backend, mut capture) = capped_capture(0, 5);
+        capture.start_capture().unwrap();
+        backend.feed(&[0.5; 10]);
+        let _device = Feeder::start(&backend);
+        let started = Instant::now();
+        let (samples, postroll) = capture.finish_capture(|| false);
+        assert_eq!(
+            postroll,
+            PostRoll::Complete,
+            "past the memory ceiling, delivery still counts"
+        );
+        assert_eq!(samples, [0.5; 5]);
+        assert!(
+            started.elapsed()
+                < Duration::from_millis(u64::from(TEST_POSTROLL_MS)) + FINAL_CALLBACK_WAIT,
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_dead_stream_ends_the_postroll_and_says_so() {
+        let (backend, mut capture) = capture(5);
+        backend.feed(&[0.25; 5]);
+        capture.start_capture().unwrap();
+        backend.feed(&[0.5; 3]);
+        backend.kill();
+        let (samples, postroll) = capture.finish_capture(|| false);
+        assert_eq!(postroll, PostRoll::StreamStale);
+        assert_eq!(
+            samples,
+            [0.25, 0.25, 0.25, 0.25, 0.25, 0.5, 0.5, 0.5],
+            "pre-roll and speech are kept"
         );
     }
 }

@@ -235,6 +235,7 @@ struct Harness {
 
 struct Settings {
     preroll_ms: u32,
+    postroll_ms: u32,
     interval_ms: u64,
     chunk: Option<usize>,
     words: bool,
@@ -245,6 +246,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             preroll_ms: 250,
+            postroll_ms: 250,
             interval_ms: 200,
             chunk: None,
             words: true,
@@ -259,6 +261,7 @@ impl Harness {
         let root = directory.path();
         let mut config = Config::default();
         config.audio.preroll_ms = settings.preroll_ms;
+        config.audio.postroll_ms = settings.postroll_ms;
         config.recording.dir = root.join("audio");
         config.nvim.terminal = Vec::new();
         config.nvim.editor = [
@@ -795,6 +798,68 @@ fn cancel_during_recording_keeps_committed_text_and_the_wav() {
         counted(&after) < loud_samples(&wav),
         "cancelling stopped the tail decode"
     );
+    h.finish();
+}
+
+/// The last syllable is often still sounding when the key comes up; the
+/// post-roll keeps it in the capture, the decode and the recovery WAV.
+#[test]
+fn speech_still_sounding_at_key_up_is_decoded() {
+    if !nvim_available() {
+        return;
+    }
+    let h = Harness::start(Settings {
+        words: false,
+        ..Settings::default()
+    });
+    thread::sleep(Duration::from_millis(300));
+    h.press(false);
+    h.say(&tone(1.0));
+    h.release();
+    // 150 ms of speech after the key-up, well inside the 250 ms post-roll.
+    let tail = tone(0.15);
+    h.microphone.speak(&tail);
+    wait_until("the transcript reaches the file", || !h.text().is_empty());
+    let spoken = RATE as usize + tail.len();
+    assert_eq!(
+        counted(&h.text()),
+        spoken,
+        "speech after the key-up is part of the capture: {:?}",
+        h.text()
+    );
+    wait_until("the recovery WAV holds the tail too", || {
+        loud_samples(&h.recovery_wav().0) == spoken
+    });
+    h.finish();
+}
+
+/// A press during the previous release's post-roll ends it at once: the new
+/// capture starts without waiting it out, so its first word is its own.
+#[test]
+fn a_quick_re_press_does_not_wait_for_the_postroll() {
+    if !nvim_available() {
+        return;
+    }
+    let h = Harness::start(Settings {
+        postroll_ms: 1_000,
+        ..Settings::default()
+    });
+    h.press(false);
+    h.say(&tone(1.0));
+    h.release();
+    let pressed = Instant::now();
+    h.press(false);
+    let waited = pressed.elapsed();
+    assert!(
+        waited < Duration::from_millis(500),
+        "the second capture waited {waited:?} for a 1 s post-roll"
+    );
+    h.say(&tone(1.0));
+    h.release();
+    wait_until("both paragraphs land", || {
+        h.text().matches("word word").count() == 2
+    });
+    assert_eq!(h.text(), "word word\n\nword word\n");
     h.finish();
 }
 
