@@ -15,6 +15,7 @@ never takes focus. Fully local, CPU-only. Next milestone: public release.
   = sherpa-onnx #3267: "" / "Yeah."; 19 vs 4 empty chunks on 170 captures).
   shell-commands reference corrected. Deployed (b6939db): control socket,
   i3 M4 bindings in keybindings.conf, clipboard on for the user.
+  User confirmed live: M4 hold, Shift+M4 latch, Ctrl+M4 cancel work.
 - 09-21: Control socket + `spokenpad start|stop|toggle|cancel` (no /dev/input);
   built-in model download; clipboard copy opt-in. 177 lib + 22 e2e green.
 - 09-21: Review fixes: no spawn on an empty workspace, only loaded WM config
@@ -34,15 +35,13 @@ never takes focus. Fully local, CPU-only. Next milestone: public release.
   post-roll), found by replaying 128 recovery WAVs. WER 17.6% unchanged.
 
 ## Next
-1. Live check of the deploy: M4 hold, Shift+M4 latch, Ctrl+M4 cancel,
-   clipboard, tail no longer lost.
-2. Best of both decoders: beam search, and a greedy re-decode only for a
+1. Best of both decoders: beam search, and a greedy re-decode only for a
    chunk beam returns empty or bare "Yeah." (a second exception to decode-
    once). Needs a bigger WER set than 5 clips first; greedy's 3-point loss
    there is a few words. Upstream fix (#3267) is the long route.
-3. Measure removing the 1 s zero padding (hurt greedy 2/9 on the lost tail;
+2. Measure removing the 1 s zero padding (hurt greedy 2/9 on the lost tail;
    0.5 s once made `cd home` empty) with a corpus replay.
-4. Decide whether a "no speech detected" notice is wanted.
+3. Decide whether a "no speech detected" notice is wanted.
 
 ## Known issues / open questions
 - Post-roll length (250 ms) is unproven live; a mic stalling at key-up only logs.
