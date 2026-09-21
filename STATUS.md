@@ -7,8 +7,11 @@ Hold a key (or latch with shift), speak, and text appears in an nvim that
 never takes focus. Fully local, CPU-only. Next milestone: public release.
 
 ## Now
-- E-mail history rewritten locally (Gmail -> felix@peppert.de); force push —
-  needs the user's word. Service runs 113db5f from ~/.local/bin (managed).
+- control-cli — replace the evdev watcher with a control socket + `spokenpad
+  start|stop|toggle|cancel` bound in the WM — agent (worktree) — merge.
+- model-fetch — built-in model download (command + first launch), clipboard
+  copy configurable, default off — agent (worktree) — merge.
+- Window without WM rules (own X11 window / layer-shell): awaiting the user.
 
 ## Done
 - 09-21: Review fixes: no spawn on an empty workspace, only loaded WM config
