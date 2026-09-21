@@ -81,7 +81,8 @@ those belongs in `src/shell/`.
   segments and progressive commits), `examples/pane.rs` (opens the pane on a
   given display, and can write a screenshot).
 - `tests/pane_window.rs` opens the pane window on an Xvfb and i3 it starts
-  itself and proves it never takes focus.
+  itself and proves it never takes focus; `tests/pane_render.rs` runs a real
+  embedded nvim in it and checks the drawing against nvim's own screen.
 - `scripts/install.sh` (binary to `~/.local/bin`, user unit; `--uninstall`).
   Models (`$XDG_DATA_HOME/spokenpad/models`, pinned sha256) come from
   `spokenpad fetch-models` or the first launch. `packaging/` holds the unit,

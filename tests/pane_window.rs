@@ -15,327 +15,19 @@
 //! evidence in
 //! `docs/experiments/2026-09-21-own-window-p0-properties.md`.
 
-use anyhow::{Context, Result};
-use serde_json::Value;
-use spokenpad::{
-    core::{
-        geometry::Rect,
-        wm::{HEADER_LEN, Message, encode, reply_length},
-    },
-    shell::pane::x11::Window as Pane,
-};
-use std::{
-    io::{Read, Write},
-    net::Shutdown,
-    os::unix::net::UnixStream,
-    path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
-    thread::sleep,
-    time::{Duration, Instant},
-};
+mod harness;
+
+use harness::{I3, SETTLE, XServer, click, find_key, move_pointer, press_key};
+use spokenpad::{core::geometry::Rect, shell::pane::x11::Window as Pane};
+use std::{thread::sleep, time::Duration};
 use x11rb::{
     connection::Connection,
     protocol::{
         Event,
-        xproto::{
-            AtomEnum, BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT, ClientMessageEvent,
-            ConnectionExt as _, CreateWindowAux, EventMask, KEY_PRESS_EVENT, KEY_RELEASE_EVENT,
-            MOTION_NOTIFY_EVENT, PropMode, Window, WindowClass,
-        },
-        xtest::ConnectionExt as _,
+        xproto::{AtomEnum, ClientMessageEvent, ConnectionExt as _, EventMask, PropMode, Window},
     },
-    rust_connection::RustConnection,
     wrapper::ConnectionExt as _,
 };
-
-/// How long the window manager may take to settle after a map before the test
-/// believes what the tree says. The research spike used 0.8 s; the tree is
-/// polled first, so this is only the margin on top of that.
-const SETTLE: Duration = Duration::from_millis(500);
-const START_TIMEOUT: Duration = Duration::from_secs(15);
-
-// ---------------------------------------------------------------- environment
-
-fn on_path(program: &str) -> bool {
-    let Some(path) = std::env::var_os("PATH") else {
-        return false;
-    };
-    std::env::split_paths(&path).any(|directory| directory.join(program).is_file())
-}
-
-/// This test exercises a real X server and a real window manager. A missing
-/// one is a broken environment, not a reason to report a green suite, so it
-/// fails unless the operator says otherwise.
-fn tools_or_skip() -> bool {
-    let missing: Vec<&str> = ["Xvfb", "i3"]
-        .into_iter()
-        .filter(|program| !on_path(program))
-        .collect();
-    if missing.is_empty() {
-        return true;
-    }
-    assert!(
-        std::env::var_os("SPOKENPAD_ALLOW_MISSING_X11").is_some(),
-        "{} not installed; this test needs a headless X server and i3 \
-         (pacman: xorg-server-xvfb i3-wm). \
-         Set SPOKENPAD_ALLOW_MISSING_X11=1 to skip it deliberately.",
-        missing.join(" and ")
-    );
-    false
-}
-
-/// A child process that is stopped when the test leaves its scope, whether it
-/// passed or panicked. `SIGTERM` first and `SIGKILL` only as a fallback: an X
-/// server killed outright leaves `/tmp/.X<n>-lock` and its socket behind, and
-/// every leftover costs the next run a display number.
-struct Killed(Child);
-
-impl Drop for Killed {
-    fn drop(&mut self) {
-        // SAFETY: `id()` is this child's pid, and the child is not reaped
-        // until the `wait` below, so the pid cannot have been reused.
-        let _ = unsafe { libc::kill(self.0.id() as libc::pid_t, libc::SIGTERM) };
-        let deadline = Instant::now() + Duration::from_secs(3);
-        while Instant::now() < deadline {
-            if matches!(self.0.try_wait(), Ok(Some(_)) | Err(_)) {
-                return;
-            }
-            sleep(Duration::from_millis(20));
-        }
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
-impl Killed {
-    fn alive(&mut self) -> bool {
-        matches!(self.0.try_wait(), Ok(None))
-    }
-}
-
-/// The X server this test owns, and the connection it watches it over. This
-/// connection is the test's own: the pane opens a second one of its own.
-struct XServer {
-    number: u32,
-    display: String,
-    connection: RustConnection,
-    root: Window,
-    child: Killed,
-}
-
-impl XServer {
-    fn start() -> Self {
-        let number = free_display_number();
-        // The user dictates on :0. Nothing in this test may reach it.
-        assert!(
-            number >= 50,
-            "refusing to run on display :{number}; the test picks its own, above :50"
-        );
-        let display = format!(":{number}");
-        let child = Killed(
-            Command::new("Xvfb")
-                .args([&display, "-screen", "0", "1280x800x24", "-nolisten", "tcp"])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .expect("start Xvfb"),
-        );
-        let (connection, screen_index) =
-            wait_for(START_TIMEOUT, "the X server to accept connections", || {
-                x11rb::connect(Some(&display)).ok()
-            });
-        let root = connection.setup().roots[screen_index].root;
-        Self {
-            number,
-            display,
-            connection,
-            root,
-            child,
-        }
-    }
-
-    /// Every synthetic event goes through this: it refuses any display this
-    /// test did not start, and any display whose server has died.
-    fn assert_is_ours(&mut self) {
-        assert!(
-            self.number >= 50,
-            "display :{} is not one this test started",
-            self.number
-        );
-        assert!(
-            self.child.alive(),
-            "the Xvfb this test started is gone; refusing to send events anywhere else"
-        );
-    }
-
-    fn input_focus(&self) -> Window {
-        self.connection
-            .get_input_focus()
-            .expect("ask for the input focus")
-            .reply()
-            .expect("the input focus")
-            .focus
-    }
-
-    fn atom(&self, name: &str) -> u32 {
-        self.connection
-            .intern_atom(false, name.as_bytes())
-            .expect("intern an atom")
-            .reply()
-            .expect("the atom")
-            .atom
-    }
-
-    /// A plain, focusable window, so the workspace under test is not empty.
-    /// It carries none of the pane's properties.
-    fn plain_window(&self) -> Window {
-        let id = self.connection.generate_id().expect("a window id");
-        self.connection
-            .create_window(
-                x11rb::COPY_DEPTH_FROM_PARENT,
-                id,
-                self.root,
-                0,
-                0,
-                320,
-                200,
-                0,
-                WindowClass::INPUT_OUTPUT,
-                0,
-                &CreateWindowAux::new(),
-            )
-            .expect("create a plain window");
-        self.connection.map_window(id).expect("map it");
-        self.connection.flush().expect("flush");
-        id
-    }
-}
-
-/// The lowest display number above :50 that no X server holds.
-fn free_display_number() -> u32 {
-    (50..200)
-        .find(|number| {
-            !Path::new(&format!("/tmp/.X{number}-lock")).exists()
-                && !Path::new(&format!("/tmp/.X11-unix/X{number}")).exists()
-        })
-        .expect("a free X display number")
-}
-
-/// i3 with a generated config: `focus_follows_mouse no`, so only a click can
-/// move the focus, and a private IPC socket, so no client of this test can
-/// reach the i3 the user is running.
-struct I3 {
-    socket: PathBuf,
-    _directory: tempfile::TempDir,
-    _child: Killed,
-}
-
-impl I3 {
-    fn start(server: &XServer) -> Self {
-        let directory = tempfile::tempdir().expect("a temporary directory");
-        let socket = directory.path().join("i3.sock");
-        let config = directory.path().join("i3.config");
-        std::fs::write(
-            &config,
-            format!(
-                "# generated by tests/pane_window.rs; never the user's config\n\
-                 focus_follows_mouse no\n\
-                 ipc-socket {}\n",
-                socket.display()
-            ),
-        )
-        .expect("write the i3 config");
-        let child = Killed(
-            Command::new("i3")
-                .args(["-c".as_ref(), config.as_os_str()])
-                .env("DISPLAY", &server.display)
-                .env_remove("I3SOCK")
-                .env_remove("SWAYSOCK")
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .expect("start i3"),
-        );
-        let this = Self {
-            socket,
-            _directory: directory,
-            _child: child,
-        };
-        wait_for(START_TIMEOUT, "i3 to answer on its IPC socket", || {
-            this.request(Message::GetVersion, "").ok()
-        });
-        this
-    }
-
-    /// One i3 IPC request over its own socket, framed by the daemon's own
-    /// protocol code in `core::wm`.
-    fn request(&self, message: Message, payload: &str) -> Result<String> {
-        let mut stream = UnixStream::connect(&self.socket).context("connect to the i3 socket")?;
-        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-        stream.write_all(&encode(message, payload)?)?;
-        stream.shutdown(Shutdown::Write).ok();
-        let mut header = [0u8; HEADER_LEN];
-        stream.read_exact(&mut header)?;
-        let length = reply_length(&header, message)?;
-        let mut body = vec![0u8; length];
-        stream.read_exact(&mut body)?;
-        Ok(String::from_utf8(body)?)
-    }
-
-    fn tree(&self) -> Value {
-        serde_json::from_str(&self.request(Message::GetTree, "").expect("the i3 tree"))
-            .expect("the i3 tree is JSON")
-    }
-
-    fn command(&self, command: &str) {
-        let reply = self.request(Message::RunCommand, command).expect("run it");
-        spokenpad::core::wm::check_command_reply(&reply).expect("i3 accepted the command");
-    }
-
-    /// What i3 says about one X11 window, once it manages it.
-    fn node(&self, window: Window) -> Option<Node> {
-        fn walk(node: &Value, window: Window, found: &mut Option<Node>) {
-            if node.get("window").and_then(Value::as_u64) == Some(u64::from(window)) {
-                *found = Some(Node {
-                    focused: node.get("focused").and_then(Value::as_bool) == Some(true),
-                    floating: matches!(
-                        node.get("floating").and_then(Value::as_str),
-                        Some("auto_on" | "user_on")
-                    ),
-                });
-                return;
-            }
-            for key in ["nodes", "floating_nodes"] {
-                for child in node
-                    .get(key)
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                {
-                    if found.is_none() {
-                        walk(child, window, found);
-                    }
-                }
-            }
-        }
-        let mut found = None;
-        walk(&self.tree(), window, &mut found);
-        found
-    }
-
-    fn wait_until_managed(&self, window: Window) {
-        wait_for(START_TIMEOUT, "i3 to manage the window", || {
-            self.node(window)
-        });
-    }
-}
-
-/// What the i3 tree says about the window under test.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Node {
-    focused: bool,
-    floating: bool,
-}
 
 /// One map, as the window manager and the X server report it afterwards.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -507,77 +199,6 @@ fn net_moveresize(server: &XServer, window: Window, rect: Rect) {
     server.connection.flush().expect("flush");
 }
 
-// ------------------------------------------------------------ synthetic input
-
-// spokenpad itself never synthesises input: `docs/constraints.md` forbids it
-// in the program, because the tool this project replaced rewrote the core X
-// keymap that way and corrupted keystrokes system-wide. The rule is about the
-// program, not about a test. The functions below fake pointer and key events
-// through the XTEST extension, and they do it only against the Xvfb server
-// this test started, which `assert_is_ours` re-checks on every call. Nothing
-// here ever reaches the user's session.
-
-fn fake(server: &mut XServer, kind: u8, detail: u8, x: i16, y: i16) {
-    server.assert_is_ours();
-    server
-        .connection
-        .xtest_fake_input(kind, detail, 0, server.root, x, y, 0)
-        .expect("fake an input event")
-        .check()
-        .expect("the X server accepted the faked event");
-}
-
-fn move_pointer(server: &mut XServer, x: i16, y: i16) {
-    fake(server, MOTION_NOTIFY_EVENT, 0, x, y);
-    server.connection.flush().expect("flush");
-}
-
-fn click(server: &mut XServer, x: i16, y: i16) {
-    move_pointer(server, x, y);
-    fake(server, BUTTON_PRESS_EVENT, 1, 0, 0);
-    fake(server, BUTTON_RELEASE_EVENT, 1, 0, 0);
-    server.connection.flush().expect("flush");
-}
-
-/// A keycode that produces `keysym` under the layout the server loaded.
-fn keycode_for(server: &XServer, keysym: u32) -> u8 {
-    let setup = server.connection.setup();
-    let (first, last) = (setup.min_keycode, setup.max_keycode);
-    let count = last - first + 1;
-    let mapping = server
-        .connection
-        .get_keyboard_mapping(first, count)
-        .expect("ask for the keyboard mapping")
-        .reply()
-        .expect("the keyboard mapping");
-    let per_keycode = usize::from(mapping.keysyms_per_keycode);
-    mapping
-        .keysyms
-        .chunks(per_keycode)
-        .position(|symbols| symbols.contains(&keysym))
-        .map(|index| first + u8::try_from(index).expect("a keycode fits a byte"))
-        .unwrap_or_else(|| panic!("no keycode produces keysym {keysym:#x}"))
-}
-
-fn press_key(server: &mut XServer, keycode: u8) {
-    fake(server, KEY_PRESS_EVENT, keycode, 0, 0);
-    fake(server, KEY_RELEASE_EVENT, keycode, 0, 0);
-    server.connection.flush().expect("flush");
-}
-
-// ------------------------------------------------------------------ utilities
-
-fn wait_for<T>(timeout: Duration, what: &str, mut attempt: impl FnMut() -> Option<T>) -> T {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if let Some(value) = attempt() {
-            return value;
-        }
-        assert!(Instant::now() < deadline, "timed out waiting for {what}");
-        sleep(Duration::from_millis(50));
-    }
-}
-
 /// Map an unmapped window and record what the map did to the focus.
 fn map_and_watch(server: &mut XServer, i3: &I3, pane: &mut Watched) -> Observed {
     // Keep the pointer in a corner: with focus_follows_mouse off it cannot
@@ -621,7 +242,7 @@ fn ablate(
 
 #[test]
 fn the_pane_window_never_takes_focus_on_i3() {
-    if !tools_or_skip() {
+    if !harness::tools_or_skip(&["Xvfb", "i3"]) {
         return;
     }
     let mut server = XServer::start();
@@ -719,9 +340,9 @@ fn the_pane_window_never_takes_focus_on_i3() {
     assert!(pane.button_press >= 1, "the click never reached the window");
 
     // (d) typed keys arrive
-    let keycode = keycode_for(&server, u32::from(b'a'));
-    press_key(&mut server, keycode);
-    press_key(&mut server, keycode);
+    let key = find_key(&server, u32::from(b'a')).expect("the layout has an `a`");
+    press_key(&mut server, key);
+    press_key(&mut server, key);
     sleep(Duration::from_millis(300));
     pane.pump();
     assert_eq!(
@@ -840,7 +461,7 @@ fn the_pane_window_never_takes_focus_on_i3() {
     report.push(observed.row("as shipped, empty workspace"));
     drop(empty);
 
-    println!("\ni3 {}, display {}", i3_version(&i3), server.display);
+    println!("\ni3 {}, display {}", i3.version(), server.display);
     println!("| window properties | focused on map | floating | X input focus |");
     println!("|---|---|---|---|");
     for line in report {
@@ -858,17 +479,4 @@ fn read_user_time(server: &XServer, window: Window) -> Option<u32> {
         .expect("the property")
         .value32()
         .and_then(|mut values| values.next())
-}
-
-fn i3_version(i3: &I3) -> String {
-    let reply = i3.request(Message::GetVersion, "").unwrap_or_default();
-    serde_json::from_str::<Value>(&reply)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("human_readable")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        })
-        .unwrap_or_else(|| "unknown".to_owned())
 }
