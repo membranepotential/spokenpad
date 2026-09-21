@@ -135,11 +135,14 @@ only needed for hotword biasing (next section), and on Parakeet TDT it is
 unreliable: it returns `""` or an invented "Yeah." for clear speech in about
 one request in five (upstream
 [k2-fsa/sherpa-onnx#3267](https://github.com/k2-fsa/sherpa-onnx/issues/3267),
-open). Replaying the author's 170 recovery captures through the daemon's VAD
-path, beam search left 19 speech chunks empty (2 still empty after the
-retry without trailing silence) and greedy 4 (all recovered by the retry).
-Setting a non-empty `vocabulary` switches to beam search and accepts that
-cost.
+open). Replaying the author's whole local corpus — 181 captures, 75 minutes —
+through the daemon's VAD path, beam search left 19 speech chunks empty (2 still
+empty after the retry without trailing silence) and greedy 5 (all recovered by
+the retry); beam lost 57 reference words off the ends of captures against
+greedy's 5, and invented three "Yeah." commits against none. Word error rate
+alone cannot tell the two apart there, which is why those counts decide it; see
+[the experiment](experiments/2026-09-21-greedy-vs-beam-corpus.md). Setting a
+non-empty `vocabulary` switches to beam search and accepts that cost.
 
 The defect is **TDT-only**, and spokenpad cannot detect that for you.
 sherpa-onnx builds its NeMo beam-search decoder with a TDT flag it takes from

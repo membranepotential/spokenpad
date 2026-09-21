@@ -206,9 +206,16 @@ num_threads = 6
 # against 11.0-11.7x segmented. What it changes is WHEN text appears: the first
 # chunk lands after ~1s instead of after the whole recording, so a five-minute
 # latched passage starts arriving immediately rather than all at once at the
-# end. On the five reference clips it scores 18.7% aggregate WER against
-# 14.3% whole-buffer, measured with Parakeet (`cargo run --release
-# --example=eval`, and `-- --whole` for the whole-buffer path).
+# end.
+#
+# It is also MORE ACCURATE on real dictation, which the five reference clips
+# get backwards: there it scores 18.7% aggregate WER against 14.3% whole-buffer
+# (`cargo run --release --example=eval`, and `-- --whole`), but over 181 real
+# captures it wins on all eight model and decoder settings tried, by 0.2 to 9.3
+# WER points, and loses 5 reference words off the ends of captures against 95.
+# A chunk bounds what one bad decode can destroy; a whole five-minute dictation
+# on one decode does not
+# (docs/experiments/2026-09-21-live-path-against-whole-file.md).
 #
 # It also decides what NOT to decode: a capture this finds no speech in is not
 # handed to the recogniser at all. Silence does not decode to an empty string,

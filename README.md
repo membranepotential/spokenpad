@@ -375,12 +375,23 @@ the service after `2`.
 
 ## Accuracy and speed
 
-On five local test clips of one speaker, the default model scores 18.7% word
-error rate through the same VAD path the daemon uses. On one laptop CPU
-(i7-9850H, 6 threads) it decodes clips of 5 s and longer 13–17× faster than
-real time. Five clips are
-a regression check, not a benchmark; see [docs/evaluation.md](docs/evaluation.md)
-and [docs/asr.md](docs/asr.md).
+Over 75 minutes of the author's own dictation — 181 recordings, replayed
+through the same path the daemon uses — the default model scores **9.6% word
+error rate on the English recordings and 17.3% on the German ones**. On one
+laptop CPU (i7-9850H, 6 threads) it decodes clips of 5 s and longer 13–17×
+faster than real time.
+
+Read those figures with two caveats. They are one speaker on one microphone,
+so they say what this setup does, not what the model does. And the reference
+transcripts come from another speech recogniser rather than from a person: on
+the five hand-checked clips that reference is itself 17.0% wrong, almost
+entirely on technical words (`udev` as `udef`, `rm -rf` as one word), so the
+true error rate on such material is lower than the number above and the number
+flatters any system that writes what that reference writes.
+
+The five committed clips in `eval-samples/` are a regression check for changes,
+not a benchmark: `cargo run --release --example=eval` scores 18.7% there. See
+[docs/evaluation.md](docs/evaluation.md) and [docs/asr.md](docs/asr.md).
 
 ## Development
 

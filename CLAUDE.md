@@ -85,20 +85,25 @@ those belongs in `src/shell/`.
   `nvim --headless`); `tests/cli.rs`; `tests/e2e.rs` drives
   `shell::daemon::serve` with a synthetic microphone, a scripted request
   channel or the real control socket and CLI, and a real headless nvim.
-- `examples/eval.rs` (WER harness), `examples/verify_window.rs` (manual
-  i3/sway window smoke check), `examples/verify_native.rs` (JSON dump of
-  segments and progressive commits), `examples/pane.rs` (opens the pane on a
-  given display, and can write a screenshot).
+- `examples/eval.rs` (WER on the five committed clips),
+  `examples/corpus.rs` (the whole local corpus through either decode path,
+  with the counts WER hides: empty chunks, lost endings, chunk seams that
+  wrote a word twice), `examples/verify_window.rs` (manual i3/sway window
+  smoke check), `examples/verify_native.rs` (JSON dump of segments and
+  progressive commits), `examples/pane.rs` (opens the pane on a given
+  display, and can write a screenshot).
 - `tests/harness/mod.rs` is the headless desktop the pane tests share (its own
   Xvfb above `:50`, its own i3, XTEST input that refuses any other display).
   `tests/pane_window.rs` proves the window never takes focus;
   `tests/pane_render.rs` runs a real embedded nvim in it and checks the
   drawing against nvim's own screen; `tests/pane_daemon.rs` drives the real
   `shell::daemon::serve` in pane mode.
-- `scripts/install.sh` (binary to `~/.local/bin`, user unit; `--uninstall`).
-  Models (`$XDG_DATA_HOME/spokenpad/models`, pinned sha256) come from
-  `spokenpad fetch-models` or the first launch. `packaging/` holds the unit,
-  and the i3/sway window rules with example key bindings.
+- `scripts/install.sh` (binary to `~/.local/bin`, user unit; `--uninstall`),
+  `scripts/gladia-references.sh` (a development tool that **uploads the
+  recordings to Gladia** to build `eval-samples/local/references.json`; never
+  run by the program). Models (`$XDG_DATA_HOME/spokenpad/models`, pinned
+  sha256) come from `spokenpad fetch-models` or the first launch. `packaging/`
+  holds the unit, and the i3/sway window rules with example key bindings.
 
 ## Commands
 
@@ -107,7 +112,8 @@ cargo build --locked --release
 cargo test --locked --all-targets              # no mic, user display, lock or service socket is touched
 cargo test --locked --test e2e -- --ignored    # real-model e2e; needs `spokenpad fetch-models` first
 cargo clippy --locked --all-targets -- -D warnings && cargo fmt --check
-cargo run --release --example=eval             # WER on the local eval clips (--whole: no VAD)
+cargo run --release --example=eval             # WER on the five eval clips (--whole: no VAD)
+cargo run --release --example=corpus -- --config C.toml   # the whole local corpus, both paths
 scripts/install.sh                             # deploy: the service runs ~/.local/bin/spokenpad
 ```
 

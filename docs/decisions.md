@@ -706,13 +706,24 @@ This is upstream [k2-fsa/sherpa-onnx#3267](https://github.com/k2-fsa/sherpa-onnx
 five, while greedy works. Replaying all 170 recovery captures through the
 VAD path, beam search left 19 speech chunks empty (17 rescued by the retry,
 2 lost) and greedy 4 (all rescued), and greedy produced 121 more words.
+Confirmed the same day over the whole local corpus with references (181
+captures, 75 minutes, 6832 reference words): 19 empty chunks against 5, 2
+lost against 0, 57 reference words lost off the ends of captures against 5,
+three "Yeah." commits against none, and 114 more words — while the word error
+rate cannot tell the two apart (−0.32 points, 95% bootstrap interval [−1.22,
++0.47]). See
+[the experiment](experiments/2026-09-21-greedy-vs-beam-corpus.md).
 
 So Parakeet decodes greedily unless hotwords are asked for: a non-empty
 `vocabulary` (or a `hotwords_score`) with no explicit `decoding` still
 selects beam search, since sherpa-onnx has hotwords only there. The
 "knife edge" of 2026-09-19 (entry above) was mostly this bug; the retry stays
-as a cheap guard. The 1 s of zero padding also hurt greedy on the sweep; it
-stays until a corpus replay shows removing it loses no final words.
+as a cheap guard. The 1 s of zero padding also hurt greedy on the sweep, and
+the corpus replay it was left open for has since settled it the other way: the
+padding stays, because without it `Padded` and `Bare` are the same input, so
+the retry is the same decode and every chunk that decodes empty is lost —
+3 of 3 for greedy, 15 of 15 for beam, against 0 of 5 and 2 of 19 with it
+([the experiment](experiments/2026-09-21-trailing-silence-padding.md)).
 
 The same investigation found that the `shell-commands` eval clip does not
 contain its reference's first sentence ("So, this is a test."): Parakeet,

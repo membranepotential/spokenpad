@@ -50,6 +50,15 @@ these five clips do not show — see
 Figures before 2026-09-21 were measured with beam search and the old
 reference, and are not comparable.
 
+**Both of those comparisons come out the other way on real captures.** Over
+the local corpus below — 181 captures against five clips — the daemon's path
+beats `--whole` on every configuration tried, and greedy beats beam on
+everything except word error rate. Five clips of short, clean, deliberate
+speech cannot hold the failure that decides either question: a chunk that
+decodes to nothing, or a capture whose last sentence never arrives. Read the
+figures above as a regression proxy for these five clips, and
+[the experiments](#what-it-has-decided-so-far) for what is actually better.
+
 WER needs normalisation to mean anything; `examples/eval.rs` does, exactly:
 
 1. Casefold.
