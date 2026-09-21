@@ -26,7 +26,6 @@ without taking focus. Fully local, CPU-only; the GTX 1650 stays free.
   phase, ranked and width-fitted; silence not decoded when the VAD finds no
   speech (Python reference in step); ownership-probe retry that ends a 1-in-10
   test flake (traced with strace to a fork-window race); CLAUDE.md added.
-- 09-11: Review pass c039aaa fixed nine live bugs, added the headless e2e suite.
 - 09-08/09: progressive commit, recovery WAV, Rust rewrite deployed.
 - Checks: 143 lib + 1 bin + 4 CLI + 16 e2e (+1 real-model), 72 Python; WER
   17.6% VAD / 13.9% whole vs Handy 48.7% on five clips.
