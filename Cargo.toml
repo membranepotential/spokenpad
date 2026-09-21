@@ -30,17 +30,17 @@ signal-hook = "0.4"
 swash = "0.2"
 tempfile = "3.27"
 toml = { version = "0.8", features = ["preserve_order"] }
-# The pane's window. `allow-unsafe-code` is what provides `XCBConnection`, the
-# one x11rb connection type `xkbcommon`'s X11 half can read a keymap from.
-# Unlike the model runtime above, these two are not static: a binary that opens
-# a pane needs libxcb, libxcb-xkb, libxkbcommon and libxkbcommon-x11 beside it,
-# and `fc-match` on PATH to find a font. Today nothing in the daemon opens one,
-# so the shipped binary still links none of them; wiring `nvim.mode = "pane"`
-# in is what adds them, and what has to say so in the install notes.
-x11rb = { version = "0.14", features = ["allow-unsafe-code"] }
+# The pane's window. `allow-unsafe-code` provides `XCBConnection`, the one
+# x11rb connection type xkbcommon's X11 half can read a keymap from, and
+# `dl-libxcb` loads libxcb at run time instead of linking it.
+x11rb = { version = "0.14", features = ["allow-unsafe-code", "dl-libxcb"] }
 # The keyboard layout the X server actually loaded, with dead keys and
-# Compose. The `x11` feature is the half that reads it over the connection.
-xkbcommon = { version = "0.9", features = ["x11"] }
+# Compose, also loaded at run time. Both of these are `dl`/`dlopen` variants
+# on purpose: dictation's default mode opens no window, and a binary that
+# listed these libraries as needed would refuse to *start* on a machine
+# without them. `shell/pane/xkb.rs` wraps them, and names the missing package
+# when `nvim.mode = "pane"` asks for one that is not installed.
+xkbcommon-dl = { version = "0.4", features = ["x11"] }
 # The only network access anywhere in spokenpad: downloading the pinned
 # default model files. rustls, not native-tls/OpenSSL, so the static binary
 # links no system TLS library; gzip is off, the default models are already

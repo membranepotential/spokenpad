@@ -1,8 +1,8 @@
 //! The keyboard, as the user's own layout defines it.
 //!
 //! A key press from X11 is a keycode and a modifier mask, which mean nothing
-//! without the layout. `xkbcommon` reads the layout from the X server itself
-//! — the same one `setxkbmap` set, per device — and turns a keycode into a
+//! without the layout. xkbcommon reads the layout from the X server itself —
+//! the same one `setxkbmap` set, per device — and turns a keycode into a
 //! keysym and the text it types. It also does dead keys and Compose, so
 //! `<dead-acute> e` reaches Neovim as `é` rather than as two presses.
 //!
@@ -14,63 +14,47 @@
 //!
 //! What this hands on is [`core::keys::notation`](crate::core::keys::notation)
 //! — the decision about how to spell a key is a pure function, and it is over
-//! there.
+//! there. The library itself is opened at run time; see [`xkb`](super::xkb).
+use super::xkb;
 use crate::core::keys::{self, Keysym, Modifiers};
-use anyhow::{Result, bail, ensure};
+use anyhow::Result;
 use x11rb::{protocol::xproto::KeyButMask, xcb_ffi::XCBConnection};
-use xkbcommon::xkb;
 
-/// Where in the X11 modifier mask the keyboard group lives (`XKB` puts it in
+/// Where in the X11 modifier mask the keyboard group lives (XKB puts it in
 /// bits 13 and 14 of the `state` field of a key event).
 const GROUP_SHIFT: u32 = 13;
 const GROUP_MASK: u32 = 0b11;
+/// The low byte of that mask is Shift, Lock, Control and Mod1 to Mod5, which
+/// are the real modifiers xkbcommon numbers the same way.
+const REAL_MODIFIERS: u32 = 0xff;
 
 pub struct Keyboard {
     context: xkb::Context,
+    /// The state borrows the keymap in C; holding both keeps them in step and
+    /// releases them in the right order.
+    _keymap: xkb::Keymap,
     state: xkb::State,
-    compose: Option<xkb::compose::State>,
+    compose: Option<xkb::ComposeState>,
     device: i32,
 }
 
 impl Keyboard {
     /// Read the layout the X server has loaded for the core keyboard.
     pub fn new(connection: &XCBConnection) -> Result<Self> {
-        let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
-        let (mut major, mut minor, mut event, mut error) = (0, 0, 0, 0);
-        let ready = xkb::x11::setup_xkb_extension(
-            connection,
-            xkb::x11::MIN_MAJOR_XKB_VERSION,
-            xkb::x11::MIN_MINOR_XKB_VERSION,
-            xkb::x11::SetupXkbExtensionFlags::NoFlags,
-            &mut major,
-            &mut minor,
-            &mut event,
-            &mut error,
-        );
-        ensure!(
-            ready,
-            "this X server has no usable XKB extension, so the pane cannot read the layout"
-        );
-        let device = xkb::x11::get_core_keyboard_device_id(connection);
-        ensure!(device >= 0, "the X server named no core keyboard device");
-        let state = layout(&context, connection, device)?;
+        let context = xkb::Context::new()?;
+        xkb::x11_device::setup(connection)?;
+        let device = xkb::x11_device::core_keyboard(connection)?;
+        let (keymap, state) = xkb::x11_device::layout(&context, connection, device)?;
         // Compose is optional: a locale with no Compose file is normal, and
         // then dead keys simply do not compose.
-        let compose = xkb::compose::Table::new_from_locale(
-            &context,
-            std::ffi::OsStr::new(&locale()),
-            xkb::compose::COMPILE_NO_FLAGS,
-        )
-        .ok()
-        .map(|table| xkb::compose::State::new(&table, xkb::compose::STATE_NO_FLAGS));
+        let locale = xkb::locale();
+        let compose = xkb::ComposeTable::new(&context, &locale).and_then(xkb::ComposeState::new);
         if compose.is_none() {
-            log::debug!(
-                "no Compose table for locale {:?}; dead keys will not compose",
-                locale()
-            );
+            log::debug!("no Compose table for locale {locale:?}; dead keys will not compose");
         }
         Ok(Self {
             context,
+            _keymap: keymap,
             state,
             compose,
             device,
@@ -79,7 +63,9 @@ impl Keyboard {
 
     /// Re-read the layout, after the X server said it changed.
     pub fn refresh(&mut self, connection: &XCBConnection) -> Result<()> {
-        self.state = layout(&self.context, connection, self.device)?;
+        let (keymap, state) = xkb::x11_device::layout(&self.context, connection, self.device)?;
+        self._keymap = keymap;
+        self.state = state;
         if let Some(compose) = self.compose.as_mut() {
             compose.reset();
         }
@@ -90,26 +76,25 @@ impl Keyboard {
     /// nothing: a modifier, a dead key, or a key still mid-compose.
     pub fn press(&mut self, keycode: u8, mask: KeyButMask) -> Option<String> {
         let raw = u32::from(u16::from(mask));
-        self.state
-            .update_mask(raw & 0xff, 0, 0, 0, 0, (raw >> GROUP_SHIFT) & GROUP_MASK);
-        let code = xkb::Keycode::from(u32::from(keycode));
-        let keysym = self.state.key_get_one_sym(code);
+        self.state.update_mask(
+            raw & REAL_MODIFIERS,
+            0,
+            0,
+            (raw >> GROUP_SHIFT) & GROUP_MASK,
+        );
+        let keycode = u32::from(keycode);
+        let keysym = self.state.keysym(keycode);
         let modifiers = Modifiers {
-            alt: self.active(xkb::MOD_NAME_ALT),
-            control: self.active(xkb::MOD_NAME_CTRL),
-            shift: self.active(xkb::MOD_NAME_SHIFT),
-            logo: self.active(xkb::MOD_NAME_LOGO),
+            alt: self.state.modifier_is_active(xkb::MOD_ALT),
+            control: self.state.modifier_is_active(xkb::MOD_CONTROL),
+            shift: self.state.modifier_is_active(xkb::MOD_SHIFT),
+            logo: self.state.modifier_is_active(xkb::MOD_LOGO),
         };
         // Read the text before the Compose machine is borrowed: it is the
         // answer for every press that is not part of a sequence.
-        let typed = self.state.key_get_utf8(code);
+        let typed = self.state.text(keycode);
         let (keysym, text) = self.compose(keysym, typed)?;
         keys::notation(Keysym(keysym), &text, modifiers)
-    }
-
-    fn active(&self, name: &str) -> bool {
-        self.state
-            .mod_name_is_active(name, xkb::STATE_MODS_EFFECTIVE)
     }
 
     /// Feed the keysym to the Compose machine, if there is one.
@@ -117,48 +102,22 @@ impl Keyboard {
     /// `None` means the press was swallowed: it started or continued a
     /// sequence, or cancelled one. Otherwise this is the keysym and text to
     /// spell, which for a finished sequence is the composed result.
-    fn compose(&mut self, keysym: xkb::Keysym, typed: String) -> Option<(u32, String)> {
+    fn compose(&mut self, keysym: u32, typed: String) -> Option<(u32, String)> {
         let Some(compose) = self.compose.as_mut() else {
-            return Some((keysym.raw(), typed));
+            return Some((keysym, typed));
         };
-        compose.feed(keysym);
-        match compose.status() {
-            xkb::compose::Status::Composing => None,
-            xkb::compose::Status::Cancelled => {
+        match compose.feed(keysym) {
+            xkb::Compose::Composing => None,
+            xkb::Compose::Cancelled => {
                 compose.reset();
                 None
             }
-            xkb::compose::Status::Composed => {
-                let composed = (
-                    compose.keysym().map_or(keysym.raw(), |sym| sym.raw()),
-                    compose.utf8().unwrap_or_default(),
-                );
+            xkb::Compose::Composed => {
+                let (composed, text) = compose.result();
                 compose.reset();
-                Some(composed)
+                Some((composed, text))
             }
-            xkb::compose::Status::Nothing => Some((keysym.raw(), typed)),
+            xkb::Compose::Nothing => Some((keysym, typed)),
         }
     }
-}
-
-fn layout(context: &xkb::Context, connection: &XCBConnection, device: i32) -> Result<xkb::State> {
-    let keymap =
-        xkb::x11::keymap_new_from_device(context, connection, device, xkb::KEYMAP_COMPILE_NO_FLAGS);
-    // The crate wraps whatever the C call returned, including nothing.
-    if keymap.get_raw_ptr().is_null() {
-        bail!("the X server would not give its keyboard layout");
-    }
-    let state = xkb::x11::state_new_from_device(&keymap, connection, device);
-    if state.get_raw_ptr().is_null() {
-        bail!("the keyboard layout loaded but its state would not");
-    }
-    Ok(state)
-}
-
-/// The locale Compose tables are named by, as every X client reads it.
-fn locale() -> String {
-    ["LC_ALL", "LC_CTYPE", "LANG"]
-        .into_iter()
-        .find_map(|name| std::env::var(name).ok().filter(|value| !value.is_empty()))
-        .unwrap_or_else(|| "C".to_owned())
 }

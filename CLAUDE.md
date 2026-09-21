@@ -69,7 +69,9 @@ those belongs in `src/shell/`.
   and `editor_command`), `x11.rs` (the window, the properties that keep a
   window manager from focusing it, `PutImage`), `ui.rs` (`nvim --embed` over
   stdio, `nvim_ui_attach`), `font.rs` (`fc-match` plus swash glyphs),
-  `keyboard.rs` (xkbcommon: the user's real layout, dead keys, Compose).
+  `keyboard.rs` (the user's real layout, dead keys, Compose), `xkb.rs`
+  (libxcb and libxkbcommon opened with `dlopen` when a pane opens, so the
+  binary starts without them in the other modes).
 - Editor UI: `src/lua/spokenpad.lua` (winbar, preview extmark, transactional
   `append_once`) and `src/lua/dictation_init.lua` (bundled init).
 - Tests: unit tests in-module; `src/shell/nvim/tests.rs` (real

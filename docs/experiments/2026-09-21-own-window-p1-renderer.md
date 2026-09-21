@@ -134,22 +134,21 @@ Two decisions changed from the plan.
   and a per-device `setxkbmap` work. This was already flagged in the P0
   experiment.
 
-**The pane is the first part of spokenpad that is not self-contained.** The
-model runtime is linked statically so an installed binary needs nothing beside
-it; the pane needs four system libraries and one program:
+**The pane's system libraries are opened on demand, not linked.** The pane
+needs libxcb, libxkbcommon and libxkbcommon-x11, and `fc-match` on `PATH`.
+Listing those libraries as needed would have meant that a binary built with
+the pane refuses to *start* on a machine without them — a minimal Wayland
+install, a server — for a mode that user never selected, and the default mode
+opens no window at all. So x11rb runs with `dl-libxcb` and the keyboard goes
+through `xkbcommon-dl`; both `dlopen` their library the first time a pane is
+opened, and a missing one is an error naming the package
+(`shell/pane/xkb.rs`). Measured with `ldd`: neither the `spokenpad` binary nor
+`examples/pane`, which opens a pane, lists any of them.
 
-| what | why |
+| what | when it is needed |
 |---|---|
-| `libxcb`, `libxcb-xkb` | the X11 connection, and XKB over it |
-| `libxkbcommon`, `libxkbcommon-x11` | the keyboard layout |
-| `fc-match` on `PATH` | which file "monospace" is |
-
-All of them are on any Linux desktop that can show a window, so this is not a
-new burden in practice — but it is a change to what "no library beside it"
-means, and the install notes have to say so when P2 lands. Measured with
-`ldd`: today's `spokenpad` binary links none of them, because nothing in the
-daemon opens a pane yet and the linker drops what nothing calls; the
-`examples/pane` binary links all four.
+| `libxcb.so.1`, `libxkbcommon.so.0`, `libxkbcommon-x11.so.0` | opened when a pane opens; `spokenpad check` reports them |
+| `fc-match` on `PATH` | the same |
 
 One real bug was found by the test rather than by reading. **The thread that
 waits for X events did not stop when the pane was dropped**: the pane woke it

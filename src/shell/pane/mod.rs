@@ -29,6 +29,7 @@ pub mod font;
 pub mod keyboard;
 pub mod ui;
 pub mod x11;
+pub mod xkb;
 
 use crate::core::{
     geometry::Rect,
