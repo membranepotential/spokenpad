@@ -299,6 +299,15 @@ impl Window {
             && event.data.as_data32()[0] == self.atoms.WM_DELETE_WINDOW
     }
 
+    /// A handle another thread can use to make this window deliver an event.
+    pub fn waker(&self) -> Waker {
+        Waker {
+            connection: Arc::clone(&self.connection),
+            window: self.id,
+            atom: self.atoms.SPOKENPAD_PANE_WAKE,
+        }
+    }
+
     /// Send that wake-up, so a thread blocked in `wait_for_event` returns.
     pub fn wake(&self) -> Result<()> {
         let message = ClientMessageEvent::new(32, self.id, self.atoms.SPOKENPAD_PANE_WAKE, [0; 5]);
@@ -393,6 +402,31 @@ fn check_visual(connection: &XCBConnection, screen: usize) -> Result<()> {
         visual.blue_mask
     );
     Ok(())
+}
+
+/// Wakes a pane's event loop from another thread.
+///
+/// It sends the window a client message of a type nothing else uses, which is
+/// enough to make a thread blocked in `wait_for_event` return. That is what
+/// lets the pane's loop block with no deadline at all and still answer a
+/// close or a shutdown at once: the thread that asks also knocks.
+///
+/// libxcb is thread-safe, so this needs no lock of its own.
+pub struct Waker {
+    connection: Arc<XCBConnection>,
+    window: x11rb::protocol::xproto::Window,
+    atom: u32,
+}
+
+impl Waker {
+    pub fn wake(&self) -> Result<()> {
+        let message = ClientMessageEvent::new(32, self.window, self.atom, [0; 5]);
+        self.connection
+            .send_event(false, self.window, EventMask::NO_EVENT, message)?
+            .check()?;
+        self.connection.flush()?;
+        Ok(())
+    }
 }
 
 /// X11 speaks `i16` positions and `u16` sizes, and refuses a zero extent.

@@ -23,8 +23,8 @@
 //! buffer, and it holds no clipboard code — the editor's own provider does
 //! that, as in every other mode.
 //!
-//! Nothing in the daemon uses this yet: wiring `nvim.mode = "pane"` is the
-//! next phase.
+//! The daemon reaches this through `nvim.mode = "pane"`, and drives it from a
+//! thread of its own ([`host`]).
 pub mod font;
 pub mod host;
 pub mod keyboard;
@@ -87,6 +87,10 @@ pub struct Options {
     /// Font size in pixels.
     pub size: f32,
     pub sizing: Sizing,
+    /// How long the editor inside it has to answer `nvim_ui_attach`. The
+    /// daemon passes what is left of the one deadline it gave the whole
+    /// open, so this cannot outlive it.
+    pub attach_timeout: Duration,
     /// Where the top-left corner should go, or `None` to let the window
     /// manager decide.
     pub position: Option<(i32, i32)>,
@@ -103,6 +107,7 @@ impl Default for Options {
                 columns: 72,
                 rows: 12,
             },
+            attach_timeout: Duration::from_secs(20),
             position: None,
             title: "spokenpad dictation".to_owned(),
         }
@@ -218,10 +223,15 @@ impl Pane {
             editor_gone: false,
         };
         let attach = pane.editor.attach(columns, rows)?;
-        pane.await_response(attach, Duration::from_secs(20))
+        pane.await_response(attach, options.attach_timeout)
             .context("attach to the embedded nvim as a UI")?;
         pane.watcher = Some(watch(&pane.window, sender, Arc::clone(&pane.stopping))?);
         Ok(pane)
+    }
+
+    /// A handle another thread can use to make [`Self::step`] return.
+    pub fn waker(&self) -> x11::Waker {
+        self.window.waker()
     }
 
     /// Map the window. It will not take the focus; see [`x11`].

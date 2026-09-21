@@ -33,7 +33,7 @@ imperative shell, and `config.rs` sits at the root because both sides read it.
 | `core/keys.rs` | A keysym, its modifiers and the text a layout produced, as the notation `nvim_input` reads | none |
 | `shell/nvim/mod.rs` | Editor lifecycle in all three modes (attach, managed spawn, pane), ownership proof, transactional appends, indicator, `spokenpad editor` | Unix socket, window manager |
 | `shell/pane/mod.rs` | The pane: its loop, the renderer, and what `spokenpad check` looks for | X11 |
-| `shell/pane/host.rs` | The pane's thread, and the two things the daemon tells it | internal channels |
+| `shell/pane/host.rs` | The pane's thread: the two things the daemon tells it, whether a pane is open, and restarting after a panic | internal channels |
 | `shell/pane/x11.rs` | The window, the properties that keep a window manager from focusing it, and `PutImage` | X11 |
 | `shell/pane/ui.rs` | `nvim --embed` over stdio, `nvim_ui_attach`, and the thread that decodes its redraw stream | a child process |
 | `shell/pane/font.rs` | `fc-match` for the face, swash for hinted glyphs, per-grapheme caching and per-character fallback | fontconfig, filesystem |
@@ -188,7 +188,16 @@ say, and nothing is drawn until the pane applies it — and the editor thread is
 busy blocking on transcripts. Two more threads sit under it, one waiting for X
 events and one decoding the editor's redraw stream; both feed the pane's
 single channel, so its loop blocks in one place and costs nothing while
-nothing happens.
+nothing happens. It blocks with no deadline: a thread that sends it a command
+also sends the window a client message, which is what makes the blocked wait
+return. A panic there costs one window, not the mode — the next open starts a
+new thread.
+
+One deadline covers opening a pane and the editor answering inside it, and one
+owner enforces it: a window that opens after the daemon stopped waiting is
+closed by the thread rather than left standing, and every failing path closes
+the pane. An abandoned one would be a live editor on the dictation socket that
+no session owns, which every later key-down would refuse rather than replace.
 
 The daemon tells that thread two things, open and stop, and is never told a
 window closed. It does not need to be: the editor dies with the window, its

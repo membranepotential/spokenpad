@@ -7,6 +7,8 @@
 //!
 //! - with no `DISPLAY` the daemon says so and the transcript goes to the
 //!   pending passage, which is what happens when a terminal is missing too;
+//! - an editor that dies on startup is noticed at once rather than waited
+//!   out, and its text goes to the pending passage too;
 //! - with one, a dictation opens a window that i3 does not focus, and the
 //!   text lands in the dictation file;
 //! - closing that window ends the passage: the next dictation opens a new
@@ -46,6 +48,9 @@ use std::{
 /// What the stand-in recogniser says for every capture.
 const SPOKEN: &str = "Der Pane hoert zu";
 const PATIENCE: Duration = Duration::from_secs(20);
+/// What the daemon under test allows an editor to start in. A dead one must
+/// cost a fraction of this, not all of it.
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[test]
 fn the_daemon_opens_a_pane_dictates_into_it_and_cleans_up() {
@@ -75,6 +80,65 @@ fn the_daemon_opens_a_pane_dictates_into_it_and_cleans_up() {
     // ---------------------------------------- with one
     let server = XServer::start();
     let i3 = I3::start(&server);
+
+    // ------------------------- an editor that answers and then dies
+    // Neovim attaches as a UI and *then* raises sourcing its init, so the
+    // window opens and the editor is gone a moment later. Nothing on the
+    // socket can tell that from a slow start, which is why the pane says so
+    // itself — without that this waits out the whole startup timeout on
+    // every key-down, with the editor thread blocked for all of it.
+    let broken = Daemon::broken_init(&server.display);
+    let started = Instant::now();
+    let _ = broken.dictate();
+    let kept = wait_for(
+        PATIENCE,
+        "the transcript to survive a broken editor",
+        || {
+            broken
+                .dictation_files()
+                .into_iter()
+                .find(|path| contains(path, SPOKEN))
+        },
+    );
+    let waited = started.elapsed();
+    assert!(
+        std::fs::read_to_string(&kept).is_ok_and(|text| text.contains(SPOKEN)),
+        "a broken editor must not cost the transcript"
+    );
+    assert!(
+        waited < STARTUP_TIMEOUT,
+        "a dead editor cost {waited:?}, which is the whole {STARTUP_TIMEOUT:?} startup budget: \
+         the pane is not reporting that it is gone"
+    );
+    println!(
+        "an editor that died on startup was noticed in {} ms",
+        waited.as_millis()
+    );
+    broken.stop();
+
+    // ------------------------- a window that opens after the wait gave up
+    // A budget too small to open anything in. Whether the window loses the
+    // race or wins it a moment too late, it must not be left standing: an
+    // abandoned one is a live editor on the dictation socket that no session
+    // owns, and every later key-down would refuse it rather than replace it.
+    let impatient = Daemon::with(Some(server.display.clone()), |config| {
+        config.nvim.startup_timeout_s = 0.25;
+    });
+    let _ = impatient.dictate();
+    std::thread::sleep(SETTLE * 4);
+    assert!(
+        pane_window(&i3).is_none(),
+        "a pane that opened after the daemon stopped waiting was left behind"
+    );
+    let kept = wait_for(PATIENCE, "the transcript to survive the hurry", || {
+        impatient
+            .dictation_files()
+            .into_iter()
+            .find(|path| contains(path, SPOKEN))
+    });
+    assert!(contains(&kept, SPOKEN));
+    println!("a window that could not open in time left nothing behind");
+    impatient.stop();
     let base = server.plain_window();
     i3.wait_until_managed(base);
     std::thread::sleep(SETTLE);
@@ -256,7 +320,30 @@ struct Daemon {
 }
 
 impl Daemon {
+    /// A daemon whose editor attaches as a UI and then raises while sourcing
+    /// its configuration, which is what a broken `init.lua` looks like.
+    fn broken_init(display: &str) -> Self {
+        Self::with(Some(display.to_owned()), |config| {
+            config.nvim.init = None;
+            config.nvim.editor = [
+                "nvim",
+                "-u",
+                "NONE",
+                "-i",
+                "NONE",
+                "--cmd",
+                "autocmd VimEnter * ++once qall!",
+            ]
+            .map(str::to_owned)
+            .into();
+        })
+    }
+
     fn start(display: Option<String>) -> Self {
+        Self::with(display, |_| {})
+    }
+
+    fn with(display: Option<String>, adjust: impl FnOnce(&mut Config)) -> Self {
         let directory = tempfile::tempdir().expect("a temporary directory");
         let root = directory.path();
         let mut config = Config::default();
@@ -269,7 +356,7 @@ impl Daemon {
         config.nvim.copy_to_clipboard = true;
         config.nvim.socket_path = root.join("nvim.sock");
         config.nvim.dictation_dir = root.join("dictation");
-        config.nvim.startup_timeout_s = 15.0;
+        config.nvim.startup_timeout_s = STARTUP_TIMEOUT.as_secs_f64();
         // The bundled configuration, read from the repository rather than
         // materialised into the user's state directory.
         config.nvim.init = Some(PathBuf::from(concat!(
@@ -279,6 +366,7 @@ impl Daemon {
         config.recording.dir = root.join("audio");
         config.recording.enabled = false;
         config.preview.enabled = false;
+        adjust(&mut config);
         config.validate().expect("the test configuration is valid");
 
         let microphone = Microphone::default();

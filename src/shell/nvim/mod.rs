@@ -698,18 +698,34 @@ impl NvimSession {
     /// is the whole error path — with none, the text goes to the pending
     /// passage exactly as it does when a terminal is missing.
     fn open_pane_and_attach(&mut self) -> Result<bool> {
+        let opened = self.try_open_pane();
+        if !matches!(opened, Ok(true)) {
+            // Whatever went wrong, no window may be left behind. One that
+            // outlived its attach would be a live editor on the dictation
+            // socket that this session does not own — and every later
+            // key-down would refuse that socket rather than replace it, so
+            // the pane would look alive while every utterance went to a file.
+            self.pane_close();
+        }
+        opened
+    }
+
+    fn try_open_pane(&mut self) -> Result<bool> {
         use crate::shell::pane::{Options, Sizing, host::Opening};
 
+        // One deadline for the whole thing: the window, and the editor
+        // answering inside it. Two would let a slow window spend the
+        // editor's budget as well as its own.
+        let deadline = Instant::now() + Duration::from_secs_f64(self.config.startup_timeout_s);
+        let (rect, display) = pane_geometry(&self.config)?;
         let mut fresh = NewFileGuard::claim(&self.config)?;
         let (command, marker) = pane_launch(&self.config, fresh.path())?;
         let value = marker.value().to_owned();
 
-        let host = match self.pane.as_ref() {
+        let host = match self.pane.as_mut() {
             Some(host) => host,
             None => self.pane.insert(PaneHost::start()?),
         };
-        let deadline = Instant::now() + Duration::from_secs_f64(self.config.startup_timeout_s);
-        let (rect, display) = pane_geometry(&self.config)?;
         host.open(
             Opening {
                 command,
@@ -721,18 +737,24 @@ impl NvimSession {
                         width: rect.width,
                         height: rect.height,
                     },
+                    attach_timeout: deadline.saturating_duration_since(Instant::now()),
                     position: Some((rect.x, rect.y)),
                     title: "spokenpad dictation".to_owned(),
                 },
                 correct_to: Some((rect.x, rect.y)),
             },
-            Duration::from_secs_f64(self.config.startup_timeout_s),
+            deadline,
         )?;
-        let attached = self.await_editor(&mut fresh, &value, deadline, || false)?;
+        // The editor is waited for on its own socket, which cannot tell a
+        // slow start from one that died sourcing a broken configuration. The
+        // pane can: it drops a pane whose editor is gone, and this flag goes
+        // with it.
+        let alive = host.alive();
+        let attached = self.await_editor(&mut fresh, &value, deadline, || {
+            !alive.load(std::sync::atomic::Ordering::Acquire)
+        })?;
         if attached {
             marker.keep();
-        } else {
-            self.pane_close();
         }
         Ok(attached)
     }

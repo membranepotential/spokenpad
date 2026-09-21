@@ -142,7 +142,7 @@ it, and say what you find.
 
 | | |
 |---|---|
-| processor time while the window is open and nothing happens | none: the loop blocks on one channel fed by two threads, with no timer and no polling |
+| processor time while the window is open and nothing happens | none: the loop blocks on one channel fed by two threads, with no timer and nothing to poll — a close or a shutdown is not waited for either, because whoever asks also knocks on the window |
 | resident memory the window adds | about 5.5 MB, for the framebuffer, the rasterised glyphs and the editor's client |
 | key-up to the transcript in the file, opening the window on the way | about 300 ms |
 | system libraries | `libxcb`, `libxkbcommon`, `libxkbcommon-x11`, opened when a pane opens rather than linked, so the binary starts without them in the other modes |

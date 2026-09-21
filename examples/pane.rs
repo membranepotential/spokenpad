@@ -94,6 +94,7 @@ fn main() -> Result<()> {
             columns: args.columns,
             rows: args.rows,
         },
+        attach_timeout: Duration::from_secs_f64(config.startup_timeout_s),
         position: None,
         title: "spokenpad dictation".to_owned(),
     };
