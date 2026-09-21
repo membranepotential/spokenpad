@@ -4,7 +4,7 @@ version = "0.2.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
-description = "Local push-to-talk dictation for Linux/X11"
+description = "Local push-to-talk dictation for Linux"
 
 [dependencies]
 anyhow = "1.0"
