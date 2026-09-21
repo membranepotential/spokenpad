@@ -306,7 +306,7 @@ window_fraction = 0.33
 # directory below if that variable is unset. Both ~ and $VAR are expanded
 # here -- but a $VAR that is not actually set is a hard error rather than a
 # literal directory named "$XDG_RUNTIME_DIR" in your home.
-socket_path = "/run/user/1000/spokenpad-nvim.sock"
+# socket_path = "$XDG_RUNTIME_DIR/spokenpad-nvim.sock"
 
 # Directory holding the dictation files, and the strftime template for their
 # names -- one file per WINDOW, saved after every single utterance.

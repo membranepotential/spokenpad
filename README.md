@@ -215,25 +215,6 @@ else — including "another daemon already holds
 `$XDG_STATE_HOME/spokenpad/daemon.lock`", which is why systemd retries `1` and
 refuses to retry `2` and `3`.
 
-For an existing Python installation, finish the current dictation, build Rust,
-then run `systemctl --user daemon-reload && systemctl --user restart spokenpad`.
-Keep only one daemon running. The service restart closes its child windows;
-their saved transcripts remain on disk. A surviving dedicated editor can be
-reattached without starting a new file.
-
-### Migrating from voice-kb
-
-Rename the checkout to `~/Documents/spokenpad`, build Rust, then install the
-new unit and rules. Before enabling it, stop the old daemon so two processes do
-not read the same hotkey:
-
-```sh
-systemctl --user disable --now voice-kb
-uv run scripts/install.py
-systemctl --user daemon-reload && systemctl --user enable --now spokenpad
-i3-msg reload
-```
-
 ## Recovering a dictation
 
 Every capture is also written to a wav in
