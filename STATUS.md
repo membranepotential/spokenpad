@@ -1,6 +1,6 @@
 # spokenpad — local push-to-talk dictation for Linux
 
-_reconciled: 2026-09-19 @ b3ee6b3_
+_reconciled: 2026-09-21 @ 7bc7ed8_
 
 ## Goal
 Hold a key (or latch with shift), speak, and text appears in an nvim that
@@ -50,9 +50,9 @@ never takes focus. Fully local, CPU-only. Next milestone: public release.
 - LLM cleanup / technical vocabulary still open; no fuzzy replacements.
 
 ## Decided
-- Hard constraints: docs/constraints.md. Default hotkey evdev 186 (KEY_F16).
-  Rust-only since 09-21; Parakeet/Silero, TOML, nvim Lua UI and the tested
+- Hard constraints: docs/constraints.md. No input device is read: keys are
+  bound in the WM to the control socket CLI. Rust-only since 09-21; Parakeet/Silero, TOML, nvim Lua UI and the tested
   progressive-commit policy stay. No overlay, no paste path.
 - Cancel only while recording; a tap under 120ms is discarded with a notice;
-  losing the hotkey keyboard ends the recording by decoding; silence is not
+  silence is not
   decoded; notices are ranked and shown in the winbar. See docs/decisions.md.
