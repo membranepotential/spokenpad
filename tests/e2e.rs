@@ -1163,15 +1163,15 @@ fn attach_mode_without_an_editor_keeps_the_text_for_the_next_one() {
 }
 
 #[test]
-#[ignore = "loads the real CPU models; needs models/ and about ten seconds"]
+#[ignore = "loads the real CPU models from the default model directory; about ten seconds"]
 fn real_models_transcribe_the_kennedy_sample() {
     if !nvim_available() {
         return;
     }
-    let models = Path::new("models");
-    let sample = models.join("parakeet-tdt-0.6b-v3-int8/test_en.wav");
-    if !sample.is_file() || !models.join("silero_vad.onnx").is_file() {
-        eprintln!("skipping: models/ is not present in this checkout");
+    let mut config = Config::default();
+    let sample = config.asr.model_dir.join("test_en.wav");
+    if !sample.is_file() || !config.vad.model.is_file() {
+        eprintln!("skipping: scripts/fetch-models.sh has not been run");
         return;
     }
     let (source, rate) = read_capture(&sample).expect("read the bundled sample");
@@ -1179,7 +1179,6 @@ fn real_models_transcribe_the_kennedy_sample() {
 
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
-    let mut config = Config::default();
     config.recording.dir = root.join("audio");
     config.nvim.mode = Mode::Managed;
     config.nvim.terminal = Terminal::Headless;

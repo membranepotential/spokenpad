@@ -192,10 +192,9 @@ fn main() -> Result<()> {
     let args = Args::parse();
     let mut config = Config::load(args.config.as_deref())?;
     if let Some(p) = args.model_dir {
-        config.asr.model_dir = Some(spokenpad::config::expand_path(&p)?);
+        config.asr.model_dir = spokenpad::config::expand_path(&p)?;
     }
     config.validate()?;
-    config.asr.check_files()?;
 
     let references: References = serde_json::from_str(
         &std::fs::read_to_string(args.samples_dir.join("references.json"))

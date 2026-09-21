@@ -45,6 +45,9 @@ fetch "$parakeet/joiner.int8.onnx" "$dir/parakeet-tdt-0.6b-v3-int8/joiner.int8.o
     6355277 3164c13fc2821009440d20fcb5fdc78bff28b4db2f8d0f0b329101719c0948b3
 fetch "$parakeet/tokens.txt" "$dir/parakeet-tdt-0.6b-v3-int8/tokens.txt" \
     93939 d58544679ea4bc6ac563d1f545eb7d474bd6cfa467f0a6e2c1dc1c7d37e3c35d
+# A 12-second English sample; the real-model e2e test decodes it.
+fetch "$parakeet/test_wavs/en.wav" "$dir/parakeet-tdt-0.6b-v3-int8/test_en.wav" \
+    184608 148b936b43ce7c546a866e64da059f0458aee2d65e617f16e9d94f06e8d99ed6
 fetch "$silero/silero_vad.onnx" "$dir/silero_vad.onnx" \
     643854 9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6
 echo "done"

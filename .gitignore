@@ -1,12 +1,8 @@
-# Python bytecode cache: scripts/fetch_model.py and scripts/install.py are
-# still plain Python.
-__pycache__/
-*.py[cod]
-
 target/
 nvim.log
 
-# ASR model weights (~630 MB) - fetched by scripts/fetch_model.py
+# ASR model weights, when kept in the checkout; scripts/fetch-models.sh
+# downloads them to $XDG_DATA_HOME/spokenpad/models.
 models/
 
 # Voice recordings: biometric data, kept local only.
