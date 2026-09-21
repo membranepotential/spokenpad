@@ -1431,3 +1431,88 @@ fn a_disconnected_session_accepts_indicator_pushes_silently() {
     session.close();
     assert!(!session.connected());
 }
+
+/// Replays a dictation of several paragraphs, each committed in progressive
+/// chunks under a growing preview, and checks after every step that the newest
+/// word is on screen. The preview hangs below EOF, where neovim will not
+/// scroll by itself; a view that missed it once also stopped following for
+/// the rest of the preview. Runs under the bundled init and a global
+/// `scrolloff`, which would otherwise pull the view back.
+#[test]
+fn the_newest_text_stays_visible_across_paragraphs() {
+    if !nvim_or_skip() {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let mut config = headless(directory.path());
+    config.editor.push("--cmd".to_owned());
+    config.editor.push(format!(
+        "luafile {}/src/lua/dictation_init.lua",
+        env!("CARGO_MANIFEST_DIR")
+    ));
+    let mut session = NvimSession::new(config);
+    session.ensure().unwrap();
+    let _guard = ProcessGroupGuard::for_session(&session);
+    attach_ui(&mut session);
+    lua(
+        &mut session,
+        r#"
+vim.go.scrolloff = 3
+_G.check = function(needle, step) -- "" when visible, else a report
+  vim.cmd("redraw!")
+  local rows = {}
+  for row = 1, 10 do
+    local line = ""
+    for col = 1, 40 do line = line .. vim.fn.screenstring(row, col) end
+    rows[#rows + 1] = line
+    if line:find(needle, 1, true) then return "" end
+  end
+  return step .. ": " .. needle .. " missing; view=" .. vim.inspect(vim.fn.winsaveview()) .. " pv=" .. vim.inspect(Spokenpad.preview_views) .. "\n" .. table.concat(rows, "\n") .. "\n"
+end
+_G.failures = ""
+return true"#,
+    );
+    let mut step = 0;
+    for utterance in 0..6 {
+        let mut continued = false;
+        for chunk in 0..3 {
+            for grow in 1..5 {
+                step += 1;
+                let preview = (0..grow * 3)
+                    .map(|i| format!("p{utterance}c{chunk}w{i}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    + &format!(" mark{step}");
+                session.set_indicator(&recording(&preview)).unwrap();
+                lua(
+                    &mut session,
+                    &format!(
+                        "_G.failures = _G.failures .. check('mark{step}', {step}) return true"
+                    ),
+                );
+            }
+            step += 1;
+            let text = (0..12)
+                .map(|i| format!("u{utterance}c{chunk}w{i}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+                + &format!(" commit{step}");
+            session.append(&text, continued).unwrap();
+            continued = true;
+            lua(
+                &mut session,
+                &format!("_G.failures = _G.failures .. check('commit{step}', {step}) return true"),
+            );
+        }
+        let mut idle = recording("");
+        idle.phase = IndicatorPhase::Idle;
+        session.set_indicator(&idle).unwrap();
+    }
+    let failures = lua(&mut session, "return _G.failures");
+    assert_eq!(
+        failures.as_str(),
+        Some(""),
+        "{}",
+        failures.as_str().unwrap()
+    );
+}

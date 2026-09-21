@@ -388,7 +388,16 @@ local function follows_preview(win, lines, last_text)
   return text_end_is_visible(win, lines, last_text)
 end
 
-local function position_at_end(win, last_text, center, rows_below)
+--- Scroll `win` so the end of the text, and the `rows_below` preview rows
+--- hanging under it, end at the bottom of the window.
+---
+--- Neovim will not scroll past EOF merely because virtual lines hang below
+--- it: `zb`, `zz` and CTRL-E all stop with the real final row at the bottom,
+--- and `nvim_win_text_height()` does not count virtual lines below the last
+--- buffer line. So the view is computed here: walk up from the last line until
+--- the text and the preview fill the window, then let smoothscroll's `skipcol`
+--- hide the surplus rows of that top line.
+local function position_at_end(win, last_text, rows_below)
   local row = math.max(last_text, 1)
   vim.api.nvim_win_call(win, function()
     -- Let normal-mode `$` perform the wrapped-line scroll. Setting the byte
@@ -396,27 +405,24 @@ local function position_at_end(win, last_text, center, rows_below)
     -- when one buffer line is taller than the window, even with smoothscroll.
     vim.api.nvim_win_set_cursor(win, { row, 0 })
     vim.cmd("normal! $")
-    vim.cmd(center and "normal! zz" or "normal! zb")
-    if rows_below > 0 then
-      -- Neovim will not scroll past EOF merely because virtual lines hang
-      -- below it: both `zz` and CTRL-E stop with the real final row at the
-      -- bottom. With smoothscroll, skip exactly enough wrapped display rows
-      -- to make room for the bounded virtual tail.
-      local view = vim.fn.winsaveview()
-      local text_rows = vim.api.nvim_win_text_height(win, {
-        start_row = row - 1,
-        end_row = row - 1,
-      }).all
-      -- Leave one real screen row below the decoration. Neovim reserves the
-      -- final window row at EOF instead of drawing the last virtual line in
-      -- it, even though `nvim_win_text_height()` reports an exact fit.
-      local skipped_rows = math.max(
-        0,
-        text_rows + rows_below - vim.api.nvim_win_get_height(win) + 1
-      )
-      view.skipcol = skipped_rows * vim.api.nvim_win_get_width(win)
-      vim.fn.winrestview(view)
+    -- Leave one real screen row below a preview. Neovim reserves the final
+    -- window row at EOF instead of drawing the last virtual line in it, even
+    -- though the arithmetic says it fits.
+    local below = rows_below > 0 and rows_below + 1 or 0
+    local height = vim.api.nvim_win_get_height(win)
+    local function rows_from(top)
+      return vim.api.nvim_win_text_height(win, { start_row = top - 1, end_row = row - 1 }).all
+        + below
     end
+    local top = row
+    while top > 1 and rows_from(top) < height do
+      top = top - 1
+    end
+    local view = vim.fn.winsaveview()
+    view.topline = top
+    view.topfill = 0
+    view.skipcol = math.max(0, rows_from(top) - height) * vim.api.nvim_win_get_width(win)
+    vim.fn.winrestview(view)
   end)
 end
 
@@ -484,7 +490,7 @@ local function render_preview()
   M.preview_views = {}
   for _, win in ipairs(wins) do
     if followers[win] then
-      position_at_end(win, last_text, true, last_text == 0 and 0 or #wrapped)
+      position_at_end(win, last_text, last_text == 0 and 0 or #wrapped)
       M.preview_views[win] = view_signature(win)
     else
       -- A deliberate move remains sticky for the rest of this preview. The
@@ -521,6 +527,9 @@ local function apply_chrome()
     vim.api.nvim_set_option_value("wrap", true, opts)
     vim.api.nvim_set_option_value("linebreak", true, opts)
     vim.api.nvim_set_option_value("smoothscroll", true, opts)
+    -- `position_at_end` scrolls the text's last line up to make room for the
+    -- preview hanging below it; a `scrolloff` would scroll it straight back.
+    vim.api.nvim_set_option_value("scrolloff", 0, opts)
     vim.api.nvim_set_option_value("number", false, opts)
     vim.api.nvim_set_option_value("relativenumber", false, opts)
     vim.api.nvim_set_option_value("cursorline", false, opts)
@@ -656,7 +665,7 @@ local function transactional_append(text, continued)
   local last = vim.api.nvim_buf_line_count(M.buf)
   for _, win in ipairs(windows()) do
     if followers[win] then
-      position_at_end(win, last, false, 0)
+      position_at_end(win, last, 0)
     end
   end
   M.state.preview = ""

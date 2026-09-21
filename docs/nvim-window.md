@@ -196,6 +196,14 @@ byte counting would break `längeren` several columns early. It keeps the last
 eight lines; the newest words are the ones being checked against what was
 just said.
 
+The preview hangs below EOF, where nvim will not scroll by itself: `zb`,
+`zz` and CTRL-E all stop with the last real line at the bottom. So a reader
+at the end is kept there by computing the view directly: walk up from the
+last line until the text plus the preview rows fill the window, then hide the
+surplus rows of that top line with smoothscroll's `skipcol`. The window's
+`scrolloff` is set to 0, because a `scrolloff` would scroll the view straight
+back.
+
 When previews stop, the winbar says so instead of freezing. Past
 `preview.max_seconds` (30 s of uncommitted tail) they **pause and resume by
 themselves** once the tail settles; past the in-memory ceiling they stop for

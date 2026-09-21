@@ -250,6 +250,19 @@ buffer leaves the clipboard alone, and a missing provider is a log warning.
 message composed over several presses; copying one paragraph would make the
 user reassemble it by hand.
 
+## The view is computed to keep the preview on screen (2026-09-21)
+
+The preview hung below the window from the second paragraph on. The old
+positioning ran `zz` and then set `skipcol` as if the last paragraph started
+at the top of the window, which holds only for the first one. The next update
+then mistook the displaced view for a reader who had scrolled away and
+stopped following for the rest of the preview. `position_at_end` now walks up
+from the last line until the text and the preview fill the window, and sets
+`topline` and `skipcol` from that. The dictation window's `scrolloff` is 0,
+because a user init with `scrolloff` scrolled the view back. A reader who
+scrolls away on purpose still keeps their place
+([nvim-window.md](nvim-window.md)).
+
 ## What a capture tells the user, and what a cancel means
 
 **2026-09-11.** Everything the user has to know about the capture they just
