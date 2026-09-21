@@ -464,3 +464,18 @@ historical figure exactly, and neither behaviour is unique to
 Whoever next touches `src/shell/inference.rs` or `src/core/decode.rs`
 should treat 18.7% as the current `--whole` baseline, not 13.9%, and may
 want to open an issue for the reproduced first-words-lost case above.
+
+## One static binary, a model family per config, models under XDG (2026-09-21)
+
+Preparing a public release meant removing three assumptions about the
+author's machine.
+
+**sherpa-onnx is linked statically.** The crates' `static` feature links
+sherpa-onnx and onnxruntime into the executable, so `spokenpad` is one file
+that runs from any directory; `build.rs` and its `$ORIGIN` rpath are gone.
+The binary needs only system libraries (libstdc++, libc, PortAudio). Measured
+on one machine: 39 MB for the binary against 5.3 MB plus 36 MB of shared
+libraries before; the same transcripts on every eval clip, and no slower
+(5.2 s against 5.7 s median for the 37 s clip, model load included).
+**Rejected: keeping `shared`.** It saves nothing on disk, and every install
+path would have to carry two libraries beside the binary.
