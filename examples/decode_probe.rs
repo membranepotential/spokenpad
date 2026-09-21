@@ -7,13 +7,18 @@
 //!   bare retry only when the first decode is empty) and counts the losses.
 //! - *windows* (`--range`): decodes the named sample ranges of the given WAV
 //!   twice, padded and bare, and prints both texts.
+//! - *whole* (`--whole`): decodes every given WAV end to end, padded and
+//!   bare, and prints both texts. One model load for the whole list, which is
+//!   what makes a grid of constructed clips cheap to sweep.
 //!
-//! It never prints the text of a replayed capture, only counts; `--range`
-//! prints text, so point it at your own recordings.
+//! Replay prints counts only, never the text of a private recording;
+//! `--range` and `--whole` print text, so point them at recordings you may
+//! read out loud.
 //!
 //! ```sh
 //! cargo run --release --example decode_probe -- --decoding beam ~/.local/state/spokenpad/audio/*.wav
 //! cargo run --release --example decode_probe -- --decoding greedy --range 28.0:38.6 one.wav
+//! cargo run --release --example decode_probe -- --decoding beam --whole clips/*.wav
 //! ```
 use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
@@ -82,9 +87,33 @@ struct Args {
     /// replaying it through the VAD; repeatable
     #[arg(long, value_name = "START:END")]
     range: Vec<Range>,
+    /// Decode every given WAV end to end and print its text, instead of
+    /// replaying it through the VAD
+    #[arg(long, conflicts_with = "range")]
+    whole: bool,
     /// WAV files to read
     #[arg(required = true)]
     files: Vec<PathBuf>,
+}
+
+/// What the run does with the files it was given.
+enum Mode {
+    /// Named second ranges of the one file, printing text.
+    Ranges(Vec<Range>),
+    /// Every file end to end, printing text.
+    Whole,
+    /// Every file split by the VAD, printing counts only.
+    Replay,
+}
+impl Args {
+    fn mode(&self) -> Result<Mode> {
+        match (self.range.as_slice(), self.whole) {
+            ([], false) => Ok(Mode::Replay),
+            ([], true) => Ok(Mode::Whole),
+            (ranges, false) if self.files.len() == 1 => Ok(Mode::Ranges(ranges.to_vec())),
+            _ => bail!("--range takes exactly one WAV and cannot be combined with --whole"),
+        }
+    }
 }
 
 /// What a decoded window is counted as.
@@ -117,30 +146,46 @@ fn main() -> Result<()> {
         },
     };
     config.asr = Asr {
-        model_dir: args.model_dir.unwrap_or(config.asr.model_dir),
+        model_dir: args.model_dir.clone().unwrap_or(config.asr.model_dir),
         num_threads: config.asr.num_threads,
         model: Model::Parakeet { decoding },
     };
+    let mode = args.mode()?;
     let mut recognizer = Transcriber::new(&config.asr, REQUIRED_SAMPLE_RATE)?;
     recognizer.warm_up()?;
 
-    if !args.range.is_empty() {
-        let [file] = args.files.as_slice() else {
-            bail!("--range takes exactly one WAV");
-        };
-        let (samples, _) = read_capture(file)?;
-        let mut rows = vec![];
-        for range in &args.range {
-            let window = &samples[range.samples(samples.len())];
-            let padded = recognizer.transcribe(window, TrailingSilence::Padded)?;
-            let bare = recognizer.transcribe(window, TrailingSilence::Bare)?;
-            rows.push(json!({
-                "start": range.start, "end": range.end,
-                "padded": padded, "bare": bare,
-            }));
+    match mode {
+        Mode::Ranges(ranges) => {
+            let [file] = args.files.as_slice() else {
+                bail!("--range takes exactly one WAV");
+            };
+            let (samples, _) = read_capture(file)?;
+            let mut rows = vec![];
+            for range in &ranges {
+                let window = &samples[range.samples(samples.len())];
+                rows.push(json!({
+                    "start": range.start, "end": range.end,
+                    "padded": recognizer.transcribe(window, TrailingSilence::Padded)?,
+                    "bare": recognizer.transcribe(window, TrailingSilence::Bare)?,
+                }));
+            }
+            println!("{}", json!({"ranges": rows}));
+            return Ok(());
         }
-        println!("{}", json!({"ranges": rows}));
-        return Ok(());
+        Mode::Whole => {
+            let mut rows = vec![];
+            for file in &args.files {
+                let (samples, _) = read_capture(file)?;
+                rows.push(json!({
+                    "file": file.file_name().context("filename")?.to_string_lossy(),
+                    "padded": recognizer.transcribe(&samples, TrailingSilence::Padded)?,
+                    "bare": recognizer.transcribe(&samples, TrailingSilence::Bare)?,
+                }));
+            }
+            println!("{}", json!({"clips": rows}));
+            return Ok(());
+        }
+        Mode::Replay => {}
     }
 
     let mut segmenter = SpeechSegmenter::new(&config.vad, REQUIRED_SAMPLE_RATE)?;
@@ -155,8 +200,9 @@ fn main() -> Result<()> {
     for file in &args.files {
         let (samples, _) = read_capture(file)?;
         let segments = segmenter.split(&samples)?.segments;
-        let mut lost = 0;
+        let mut lost_windows = vec![];
         let mut rescued = 0;
+        let mut yeah_windows = vec![];
         for segment in &segments {
             let window = &samples[segment.window.clone()];
             let padded = recognizer.transcribe(window, TrailingSilence::Padded)?;
@@ -166,7 +212,7 @@ fn main() -> Result<()> {
                 let bare = recognizer.transcribe(window, TrailingSilence::Bare)?;
                 if bare.trim().is_empty() {
                     counts.empty_after_retry += 1;
-                    lost += 1;
+                    lost_windows.push(json!([segment.window.start, segment.window.end]));
                 } else {
                     rescued += 1;
                 }
@@ -177,13 +223,15 @@ fn main() -> Result<()> {
             let normal = normalise(&text);
             if normal == "yeah" {
                 counts.yeah += 1;
+                yeah_windows.push(json!([segment.window.start, segment.window.end]));
             }
             counts.words += normal.split_whitespace().count();
         }
-        if lost > 0 || rescued > 0 {
+        if !lost_windows.is_empty() || rescued > 0 || !yeah_windows.is_empty() {
             per_file.push(json!({
                 "file": file.file_name().context("filename")?.to_string_lossy(),
-                "windows": segments.len(), "lost": lost, "rescued": rescued,
+                "windows": segments.len(), "rescued": rescued,
+                "lost": lost_windows, "yeah": yeah_windows,
             }));
         }
     }

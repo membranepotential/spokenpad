@@ -112,9 +112,14 @@ loading the model — see [decisions.md](decisions.md#model-download-moves-into-
 ### Speed on a CPU
 
 Int8 weights on 6 CPU threads are fast enough that a GPU buys nothing for a
-decode fired once per utterance. On the example machine (i7-9850H, idle, warm
-model, `modified_beam_search`, best of 3; measured before the Rust port with
-the same model, thread count and provider):
+decode fired once per utterance. The table below was taken with
+`modified_beam_search`, before `greedy_search` became the default. Greedy is
+10–15 % faster than beam search on the same machine
+([1.13.6](experiments/2026-09-21-beam-search-upstream-fix.md#cost),
+[1.13.8](experiments/2026-09-21-beam-search-public-repro.md#cost)), so read
+these figures as an upper bound for what the default costs. On the
+example machine (i7-9850H, idle, warm model, best of 3; measured before the
+Rust port with the same model, thread count and provider):
 
 | audio | decode | real-time factor |
 |---|---|---|

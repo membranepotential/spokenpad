@@ -402,13 +402,16 @@ belongs to the reference-transcript harness.
 
 ### Open questions
 
-- A reproducer the maintainer can use. The failure is easy to show on the
-  user's own recordings, which cannot leave this machine; a clip we may share
-  still has to be found.
+All four are answered or closed in
+[the public reproduction](2026-09-21-beam-search-public-repro.md):
+
+- ~~A reproducer that uses no private audio.~~ Found: the model's own test
+  wav, cut and padded with `sox`, fails under the released
+  `sherpa-onnx-offline` binary.
 - Whether the remaining "Yeah." windows have the same cause or a second one.
-  The same instrumentation would answer it.
-- Whether a fix that keeps the duration skip for blank but charges the path
-  for every frame it skips would be both correct and as fast as stock. It was
-  not tried.
-- [asr.md](../asr.md) still calls `modified_beam_search` the default and
-  reports its timings; that text predates the greedy switch and is stale.
+  **Still open**: locating them needed a corpus replay that had to be killed.
+- ~~Whether a fix that keeps the duration skip for blank but charges the path
+  for every frame it skips would be both correct and as fast as stock.~~
+  Tried as `v13frames`: nearly as reliable, and much cheaper.
+- ~~[asr.md](../asr.md) still calls `modified_beam_search` the default and
+  reports its timings.~~ Fixed.
