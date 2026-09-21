@@ -1,34 +1,32 @@
 # spokenpad — local push-to-talk dictation for Linux
 
-_reconciled: 2026-09-22 @ 59428f1 (handoff, session paused by the user)_
+_reconciled: 2026-09-22 @ 1869902 (handoff, session paused by the user)_
 
 ## Goal
 Hold a key (or latch with shift), speak, and text appears in an nvim that
 never takes focus. Fully local, CPU-only. Next milestone: public release.
 
-## Now (handoff: the corpus agent branch is NOT merged yet)
-- corpus — branch `worktree-agent-ada6370eda939c1a8` (.claude/worktrees/):
-  told to wrap up: dataset in eval-samples/local/ (audio copies, relative
-  paths, README; full reproduction run skipped), harness `--corpus` relative
-  paths, clamp decisions entry. Verify it committed, then rebase + checks +
-  ff-merge. Until merged, references.json may still hold absolute paths.
+## Now (handoff: every agent branch is merged; nothing is running)
 - own-window — P0-P2 merged and deployed; the user's config is on
   `mode = "pane"` since 09-22 00:22 (backup: config.toml.bak-2026-09-22).
-- beam-fix — merged (1443aac): public repro of the beam loss, two patch
-  variants; builds in ~/.cache/spokenpad-dev/beam-fix/. Audio for the corpus
-  is already copied to eval-samples/local/audio/ (181 WAVs, 138 MB).
+- Dataset frozen in eval-samples/local/ (git-ignored, 144 MB: audio/, gladia/,
+  probes/, runs/, references.json, README.md); tracked eval-samples/README.md
+  links it. Full reproduction run from the copy not done (sha256 verified).
+- beam-fix merged (1443aac): public repro, two patch variants; builds in
+  ~/.cache/spokenpad-dev/beam-fix/.
 
 ## Next
-1. Merge the corpus branch above (or salvage: uncommitted work is in its
-   worktree). Remove merged worktrees; ~/.cache/spokenpad-dev is ~4 GB.
+1. Clean up: remove the merged worktrees under .claude/worktrees/ and their
+   branches; ~/.cache/spokenpad-dev is ~4 GB (keep beam-fix/ if wanted).
 2. User: P4 live check of `nvim.mode = "pane"` on i3 (steps: set the mode,
    `spokenpad check`, restart; dictate while typing elsewhere; click, type
    `Grüße @ € { }`; colours/font with tokyonight; close window, dictate again).
 3. User decides: P3 other WMs (pacman: sway xorg-xwayland openbox bspwm
    awesome xfwm4) or skip; push (56+ commits unpushed); make the repo public.
-4. Open, not isolated: new main loses 1 chunk of 333 the Bare retry used to
-   rescue (e2 0 -> 1); candidates: sherpa 1.13.8, end-of-slice close, the
-   30 s tick bound. See docs/experiments/2026-09-21-lead-padding-clamp-corpus.md.
+4. Lost chunk isolated (1 of 333): the end-of-slice close + silence advance
+   split off a 1.6 s window with 0.6 s of speech that decodes to "" (that
+   capture still scores better: 4.8% vs 7.0%). Open: count empty/non-empty
+   flips over the corpus; see experiments/…-lead-padding-clamp-corpus.md.
 5. Small: pane font log prints the path twice, `FontFamily("…")` Debug text
    in `spokenpad check`; trailing-pad overlap (4 seams / 6 words) cost
    unmeasured; beam + a real vocabulary never measured.
