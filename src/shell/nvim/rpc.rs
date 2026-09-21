@@ -124,6 +124,20 @@ impl RpcClient {
         arguments: Vec<Value>,
         deadline: Instant,
     ) -> Result<Value, RpcFailure> {
+        let id = self.send_request(method, arguments, deadline)?;
+        self.reply(id, method, deadline)
+    }
+
+    /// The first half of [`request`](Self::request): writes the request and
+    /// returns its id. A failure here means the editor never received the
+    /// whole message, so it cannot have acted on it — unlike a failure while
+    /// waiting for the reply, whose outcome is unknown.
+    pub(super) fn send_request(
+        &mut self,
+        method: &str,
+        arguments: Vec<Value>,
+        deadline: Instant,
+    ) -> Result<u64, RpcFailure> {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
         self.send(
@@ -135,6 +149,17 @@ impl RpcClient {
             ]),
             deadline,
         )?;
+        Ok(id)
+    }
+
+    /// The second half of [`request`](Self::request): waits for the reply to
+    /// request `id`.
+    pub(super) fn reply(
+        &mut self,
+        id: u64,
+        method: &str,
+        deadline: Instant,
+    ) -> Result<Value, RpcFailure> {
         loop {
             let mut reader = DeadlineRead::new(&mut self.reader, deadline, RPC_MAX_BYTES);
             let message = rmpv::decode::read_value_with_max_depth(&mut reader, RPC_MAX_DEPTH)

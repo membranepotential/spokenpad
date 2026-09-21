@@ -19,7 +19,7 @@ use crate::{
         audio::{AudioCapture, CaptureEvent, InputBackend, PostRoll},
         hotkey::HotkeyWatcher,
         inference::{Transcriber, load_segmenter},
-        nvim::{CopyOutcome, IndicatorState, NvimSession},
+        nvim::{AppendFailure, CopyOutcome, IndicatorState, NvimSession},
     },
 };
 use anyhow::{Context, Result, ensure};
@@ -243,45 +243,53 @@ fn editor_thread(config: crate::config::Nvim, rx: Receiver<EditorWork>) {
                     {
                         log::warn!("could not reattach to the dictation window: {e:#}");
                     }
-                    let continued = paragraph == Some(utterance);
-                    // With no editor at all, the text goes to the file the
-                    // next editor will open on, rather than nowhere.
-                    if !nvim.connected() {
-                        match nvim.append_detached(&text, continued) {
-                            Ok(write) => {
+                    let mut continued = paragraph == Some(utterance);
+                    if nvim.connected() {
+                        let now = Instant::now();
+                        match nvim.append(&text, continued) {
+                            Ok(line) => {
                                 paragraph = Some(utterance);
+                                shown = None;
                                 log::info!(
-                                    "no dictation editor: appended to {}",
-                                    write.path.display()
+                                    "appended in {:.0}ms (line {line})",
+                                    now.elapsed().as_secs_f64() * 1000.
                                 );
-                                if write.started {
-                                    nvim.notify_detached(&write.path);
-                                }
+                                continue;
                             }
-                            Err(e) => {
+                            // The editor went away before it got the text —
+                            // closed while the tail was decoding — so the
+                            // text is certainly not there and goes to the
+                            // file below. A new file, so a new paragraph.
+                            Err(AppendFailure::NotSent(e)) => {
+                                log::warn!("the dictation editor did not receive the text: {e:#}");
+                                continued = false;
+                            }
+                            // The editor may hold the text already; writing
+                            // it anywhere else could write it twice.
+                            Err(AppendFailure::Unconfirmed(e)) => {
                                 paragraph = None;
                                 log::error!(
-                                    "could not write the transcript to a dictation file: {e:#}; recover from the capture WAV if available"
+                                    "append failed: {e:#}; transcript retained in diagnostic log; recover from the capture WAV if available"
                                 );
                                 log::debug!("undelivered text: {text:?}");
+                                continue;
                             }
                         }
-                        continue;
                     }
-                    let now = Instant::now();
-                    match nvim.append(&text, continued) {
-                        Ok(line) => {
+                    // With no editor at all, the text goes to the file the
+                    // next editor will open on, rather than nowhere.
+                    match nvim.append_detached(&text, continued) {
+                        Ok(write) => {
                             paragraph = Some(utterance);
-                            shown = None;
-                            log::info!(
-                                "appended in {:.0}ms (line {line})",
-                                now.elapsed().as_secs_f64() * 1000.
-                            );
+                            log::info!("no dictation editor: appended to {}", write.path.display());
+                            if write.started {
+                                nvim.notify_detached(&write.path);
+                            }
                         }
                         Err(e) => {
                             paragraph = None;
                             log::error!(
-                                "append failed: {e:#}; transcript retained in diagnostic log; recover from the capture WAV if available"
+                                "could not write the transcript to a dictation file: {e:#}; recover from the capture WAV if available"
                             );
                             log::debug!("undelivered text: {text:?}");
                         }

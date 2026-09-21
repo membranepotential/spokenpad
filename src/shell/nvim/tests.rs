@@ -1027,10 +1027,12 @@ fn a_retry_that_cannot_reconnect_leaves_the_session_disconnected() {
     // has nowhere to go. Whatever happens, no half-used client may survive.
     stall_the_next_append(&mut session, "vim.fn.serverstop(vim.fn.serverlist()[1])");
 
-    let error = session
-        .append("landed once", false)
-        .unwrap_err()
-        .to_string();
+    // The request was sent, so it may have landed: never "not sent".
+    let AppendFailure::Unconfirmed(error) = session.append("landed once", false).unwrap_err()
+    else {
+        panic!("a sent append was reported as not sent");
+    };
+    let error = format!("{error:#}");
     assert!(
         error.contains("outcome is unknown after timeout"),
         "{error}"
@@ -1061,10 +1063,11 @@ fn a_retry_that_would_repin_another_file_refuses_to_append_twice() {
         "vim.api.nvim_buf_delete(Spokenpad.buf, { force = true })",
     );
 
-    let error = session
-        .append("exactly once", false)
-        .unwrap_err()
-        .to_string();
+    let AppendFailure::Unconfirmed(error) = session.append("exactly once", false).unwrap_err()
+    else {
+        panic!("a sent append was reported as not sent");
+    };
+    let error = format!("{error:#}");
     assert!(
         error.contains("the dictation file changed during reconnect"),
         "{error}"
@@ -1082,6 +1085,26 @@ fn a_retry_that_would_repin_another_file_refuses_to_append_twice() {
             );
         }
     }
+}
+
+/// A write to an editor that has exited fails before the editor could read
+/// anything, so the text is certainly not in it: that is the one failure
+/// the caller may deliver elsewhere without risking a second copy.
+#[test]
+fn an_append_to_an_editor_that_exited_is_reported_as_not_sent() {
+    if !nvim_or_skip() {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let mut session = NvimSession::new(headless(directory.path()));
+    let path = session.ensure().unwrap().expect("an editor");
+    drop(ProcessGroupGuard::for_session(&session));
+    session.process.as_mut().unwrap().wait().unwrap();
+
+    let failure = session.append("never sent", false).unwrap_err();
+    assert!(matches!(failure, AppendFailure::NotSent(_)), "{failure}");
+    assert!(!session.connected());
+    assert_eq!(fs::read_to_string(path).unwrap(), "");
 }
 
 #[test]

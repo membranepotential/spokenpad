@@ -1162,6 +1162,54 @@ fn attach_mode_without_an_editor_keeps_the_text_for_the_next_one() {
     h.finish();
 }
 
+/// The user closes the editor while the release is still decoding. The
+/// append then fails to reach it, which means the text is certainly not
+/// there, so it goes to the pending passage, once, rather than only to the
+/// log.
+#[test]
+fn text_for_an_editor_that_exited_during_the_decode_goes_to_the_pending_passage() {
+    if !nvim_available() {
+        return;
+    }
+    let mut h = Harness::start(Settings {
+        mode: Mode::Attach,
+        delay: Duration::from_secs(2),
+        ..Settings::default()
+    });
+    h.open_editor();
+    thread::sleep(Duration::from_millis(300));
+    h.press(false);
+    h.say(&tone(1.0));
+    h.release();
+    // Once the editor shows the decode, the indicator stays the same until
+    // the text arrives, so the append is the next thing sent to the editor.
+    wait_until("the editor shows the decode", || {
+        h.indicator("phase").trim() == "transcribing"
+    });
+    kill_editor(&h.socket);
+    let pointer = PathBuf::from(format!("{}.pending", h.socket.display()));
+    wait_until("the text reaches the pending passage", || {
+        fs::read_to_string(&pointer)
+            .ok()
+            .and_then(|path| fs::read_to_string(path.trim_end()).ok())
+            .as_deref()
+            == Some("word word\n")
+    });
+    let mut texts: Vec<String> = fs::read_dir(&h.dictation)
+        .unwrap()
+        .flatten()
+        .map(|entry| fs::read_to_string(entry.path()).unwrap())
+        .collect();
+    texts.sort();
+    assert_eq!(
+        texts,
+        ["", "word word\n"],
+        "the editor's own file stays empty and the text is written once"
+    );
+    assert_eq!(h.calls().len(), 1, "decoded once: {:?}", h.calls());
+    h.finish();
+}
+
 #[test]
 #[ignore = "loads the real CPU models from the default model directory; about ten seconds"]
 fn real_models_transcribe_the_kennedy_sample() {

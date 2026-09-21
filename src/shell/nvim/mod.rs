@@ -238,8 +238,38 @@ impl NvimSession {
     }
 
     /// Appends literal text and does not return until Neovim confirms its save.
-    pub fn append(&mut self, text: &str, continued: bool) -> Result<usize> {
-        ensure!(self.connection.is_some(), "not connected to nvim");
+    ///
+    /// A failure says whether the text can have landed: see
+    /// [`AppendFailure`].
+    pub fn append(&mut self, text: &str, continued: bool) -> Result<usize, AppendFailure> {
+        let arguments = self
+            .append_arguments(text, continued)
+            .map_err(AppendFailure::NotSent)?;
+        let open = self
+            .connection
+            .as_mut()
+            .ok_or_else(|| AppendFailure::NotSent(anyhow!("not connected to nvim")))?;
+        let sent = open.client.send_request(
+            "nvim_exec_lua",
+            append_call(arguments.clone()),
+            deadline(APPEND_TIMEOUT),
+        );
+        let id = match sent {
+            Ok(id) => id,
+            Err(error) => {
+                // The editor never received the whole request — typically it
+                // has exited and the write hit a closed socket — so it cannot
+                // have appended anything.
+                self.drop_connection();
+                return Err(AppendFailure::NotSent(error.into()));
+            }
+        };
+        self.confirm_append(id, arguments)
+            .map_err(AppendFailure::Unconfirmed)
+    }
+
+    /// The operation id and arguments of the next append.
+    fn append_arguments(&mut self, text: &str, continued: bool) -> Result<Vec<Value>> {
         self.append_sequence = self
             .append_sequence
             .checked_add(1)
@@ -252,13 +282,21 @@ impl NvimSession {
             self.session_nonce.as_deref().expect("initialized above"),
             self.append_sequence
         );
-        let arguments = vec![
+        Ok(vec![
             Value::from(operation),
             Value::from(text),
             Value::from(continued),
-        ];
+        ])
+    }
 
-        let value = match self.request_append(arguments.clone()) {
+    /// Waits for the reply to append request `id`, which was sent whole, and
+    /// handles a lost reply by repeating the same operation once.
+    fn confirm_append(&mut self, id: u64, arguments: Vec<Value>) -> Result<usize> {
+        let open = self.connection.as_mut().context("not connected to nvim")?;
+        let value = match open
+            .client
+            .reply(id, "nvim_exec_lua", deadline(APPEND_TIMEOUT))
+        {
             Ok(value) => value,
             Err(RpcFailure::Timeout(reason)) => {
                 // The request may have completed after its reply was lost.
@@ -379,10 +417,7 @@ impl NvimSession {
             .ok_or_else(|| RpcFailure::Other(anyhow!("not connected to nvim")))?;
         open.client.request(
             "nvim_exec_lua",
-            vec![
-                Value::from("return Spokenpad.append_once(...)"),
-                Value::Array(arguments),
-            ],
+            append_call(arguments),
             deadline(APPEND_TIMEOUT),
         )
     }
@@ -769,6 +804,29 @@ struct Pinned {
     name: String,
 }
 
+/// Why [`NvimSession::append`] did not confirm the text, split by the one
+/// question the caller must answer next: can the text be in the editor?
+#[derive(Debug)]
+pub enum AppendFailure {
+    /// The editor never received the whole request, so the text is certainly
+    /// not in its buffer and may be written elsewhere without doubling it.
+    NotSent(anyhow::Error),
+    /// The request was sent and its outcome is unknown: the editor may have
+    /// appended the text. Writing it anywhere else risks writing it twice.
+    Unconfirmed(anyhow::Error),
+}
+
+impl std::fmt::Display for AppendFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotSent(error) => write!(f, "not sent: {error:#}"),
+            Self::Unconfirmed(error) => write!(f, "{error:#}"),
+        }
+    }
+}
+
+impl std::error::Error for AppendFailure {}
+
 /// What `Spokenpad.copy_buffer` did, as it reported it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CopyOutcome {
@@ -936,6 +994,13 @@ fn indicator_fields(state: &IndicatorState) -> Vec<(Value, Value)> {
         ),
         (Value::from("latched"), Value::from(state.latched)),
         (Value::from("previewing"), Value::from(state.previewing)),
+    ]
+}
+
+fn append_call(arguments: Vec<Value>) -> Vec<Value> {
+    vec![
+        Value::from("return Spokenpad.append_once(...)"),
+        Value::Array(arguments),
     ]
 }
 
