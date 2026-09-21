@@ -63,7 +63,7 @@ pub fn model_config(asr: &Asr) -> Result<OfflineModelConfig> {
         .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
         .collect();
     let hint = match asr.model {
-        Model::Parakeet { .. } => " (run scripts/fetch-models.sh)",
+        Model::Parakeet { .. } => " (run `spokenpad fetch-models`)",
         _ => "",
     };
     let find = |role: &str, extensions: &[&str]| -> Result<Option<String>> {

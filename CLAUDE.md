@@ -21,6 +21,11 @@ Design history is `docs/decisions.md`; add an entry when you change behaviour.
   uinput, or any input synthesis (`xdotool type`, enigo, XTest). Nothing is
   ever pasted. The only clipboard write is the dictation nvim setting its own
   `+` register to the whole buffer after a release.
+- The only network access anywhere in the program is the pinned default
+  model download (`spokenpad fetch-models`, or automatically on first launch;
+  `core/models.rs`, `shell/models.rs`): fixed URLs, verified against a pinned
+  size and sha256. A user-configured `model_dir`/`asr.family` is never
+  downloaded.
 - No window spokenpad opens may take focus. Attach mode opens no window;
   managed mode proves the i3/sway `no_focus` rule over IPC before it spawns a
   graphical editor. The code contains no focus call.
@@ -44,14 +49,15 @@ those belongs in `src/shell/`.
   notices), `core/decode.rs` (progressive commits over
   `Recognizer`/`Segmenter` traits), `core/segments.rs` (`merge_spans`: VAD
   spans to padded, settled windows), `core/wm.rs` (i3/sway IPC protocol,
-  `no_focus` proof), `core/terminal.rs` (the terminal table), `core/frames.rs`, `core/geometry.rs`,
+  `no_focus` proof), `core/terminal.rs` (the terminal table), `core/models.rs` (the pinned
+  default model manifest), `core/frames.rs`, `core/geometry.rs`,
   `core/text.rs`; plus the `shell/nvim/rpc.rs` codec, `parse_ownership` and
   `passage::append_paragraph`, still inside their modules.
 - Imperative shell: `shell/daemon.rs` (`run` = lock/signals/devices, `serve` =
   the generic loop), `shell/audio.rs` (`InputBackend` seam; PortAudio impl),
   `shell/recorder.rs` (recovery WAV), `shell/control.rs` (control socket
   server and the CLI's client), `shell/inference.rs` (sherpa/Silero, model
-  families),
+  families), `shell/models.rs` (downloads and verifies the default models),
   `shell/nvim/mod.rs` (editor lifecycle, both modes, `spokenpad editor`),
   `shell/nvim/passage.rs` (text dictated with no editor open), `shell/wm.rs`
   (i3/sway IPC socket), `shell/logging.rs`.
@@ -64,17 +70,17 @@ those belongs in `src/shell/`.
 - `examples/eval.rs` (WER harness), `examples/verify_window.rs` (manual
   i3/sway window smoke check), `examples/verify_native.rs` (JSON dump of
   segments and progressive commits).
-- `scripts/install.sh` (binary to `~/.local/bin`, user unit; `--uninstall`),
-  `scripts/fetch-models.sh` (models to `$XDG_DATA_HOME/spokenpad/models`,
-  pinned sha256). `packaging/` holds the unit, and the i3/sway window rules
-  with example key bindings.
+- `scripts/install.sh` (binary to `~/.local/bin`, user unit; `--uninstall`).
+  Models (`$XDG_DATA_HOME/spokenpad/models`, pinned sha256) come from
+  `spokenpad fetch-models` or the first launch. `packaging/` holds the unit,
+  and the i3/sway window rules with example key bindings.
 
 ## Commands
 
 ```sh
 cargo build --locked --release
 cargo test --locked --all-targets              # no mic, display, lock or service socket is touched
-cargo test --locked --test e2e -- --ignored    # real-model e2e; needs scripts/fetch-models.sh
+cargo test --locked --test e2e -- --ignored    # real-model e2e; needs `spokenpad fetch-models` first
 cargo clippy --locked --all-targets -- -D warnings && cargo fmt --check
 cargo run --release --example=eval             # WER on the local eval clips (--whole: no VAD)
 scripts/install.sh                             # deploy: the service runs ~/.local/bin/spokenpad

@@ -70,7 +70,7 @@ impl Audio {
     }
 }
 
-/// Where `scripts/fetch-models.sh` puts the default models:
+/// Where `spokenpad fetch-models` puts the default models:
 /// `$XDG_DATA_HOME/spokenpad/models`, or `~/.local/share/spokenpad/models`.
 pub fn models_dir() -> PathBuf {
     env::var_os("XDG_DATA_HOME")

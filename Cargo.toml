@@ -19,6 +19,7 @@ regex = "1.12"
 rmpv = "=1.3.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+sha2 = "0.11"
 # Static: sherpa-onnx and onnxruntime are linked into the one executable, so an
 # installed binary needs no library beside it.
 sherpa-onnx = { version = "=1.13.6", default-features = false, features = ["static"] }
@@ -27,6 +28,11 @@ sherpa-onnx-sys = { version = "=1.13.6", default-features = false, features = ["
 signal-hook = "0.4"
 tempfile = "3.27"
 toml = { version = "0.8", features = ["preserve_order"] }
+# The only network access anywhere in spokenpad: downloading the pinned
+# default model files. rustls, not native-tls/OpenSSL, so the static binary
+# links no system TLS library; gzip is off, the default models are already
+# compressed binary weights.
+ureq = { version = "3.4", default-features = false, features = ["rustls"] }
 
 [dev-dependencies]
 # Already a runtime dependency; integration tests need it to reap the editor

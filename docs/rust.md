@@ -1,12 +1,13 @@
 # Rust implementation
 
-spokenpad is one Rust binary: the daemon and the `editor`, `transcribe` and
-`check` commands. There is no other implementation — the Python reference
-used during the port is retired, see
+spokenpad is one Rust binary: the daemon and the `editor`, `transcribe`,
+`check` and `fetch-models` commands. There is no other implementation — the
+Python reference used during the port is retired, see
 [decisions.md](decisions.md#the-python-reference-implementation-is-dropped).
-Setup is two POSIX shell scripts, `scripts/install.sh` and
-`scripts/fetch-models.sh`; evaluation is `examples/eval.rs` (see
-[evaluation.md](evaluation.md)).
+Setup is one POSIX shell script, `scripts/install.sh`; the binary downloads
+its own default models (`fetch-models` subcommand, `core::models` and
+`shell::models`, see [decisions.md](decisions.md#model-download-moves-into-the-binary)).
+Evaluation is `examples/eval.rs` (see [evaluation.md](evaluation.md)).
 
 ## Ownership and ordering
 
@@ -118,8 +119,11 @@ finalizes feature extraction on that call.
 All sections reject unknown fields, wrong types, non-finite durations, and
 invalid ranges. A model path set in a config resolves against that config's
 directory; leaving the key out keeps the default under
-`$XDG_DATA_HOME/spokenpad/models` (`~/.local/share` if unset), where
-`scripts/fetch-models.sh` puts the files. `[asr]` is parsed into a typed
+`$XDG_DATA_HOME/spokenpad/models` (`~/.local/share` if unset), which
+`spokenpad fetch-models` fills, and which the daemon, `check` and
+`transcribe` fill on their own before loading a still-default Parakeet or
+Silero model (never for a configured `model_dir` or another `asr.family`,
+whose absence stays the plain "missing model" error). `[asr]` is parsed into a typed
 `Model` per `asr.family`, and a key the family cannot use is rejected.
 `audio.sample_rate` must be **16000** — the Silero window is 512 samples at
 that rate and every supported model family reads it, and nothing resamples in
@@ -137,7 +141,7 @@ Command-line flags: `-c/--config PATH`, `--model-dir PATH`, `-v/--verbose`,
 `--log-file PATH` (the literal `none` disables the file), and, on the daemon
 only, `--dump-audio DIR`, which writes each capture exactly as decoded for
 debugging. Subcommands are `start`, `stop`, `toggle`, `cancel`, `editor`,
-`transcribe <WAV> [--out PATH]` and `check`.
+`transcribe <WAV> [--out PATH]`, `check` and `fetch-models [--dir DIR]`.
 
 Exit codes are selected by error *type*, never by matching a message, so a
 reworded error cannot silently turn into a restart loop: `2` model files
@@ -193,7 +197,7 @@ committed text and the WAV, a second press during transcription starting a new
 paragraph, the preview staying virtual text, and a microphone restart marking
 the gap while keeping the audio. One further test loads the real CPU models and
 is `#[ignore]`d; it needs the default model directory filled by
-`scripts/fetch-models.sh`:
+`spokenpad fetch-models`:
 
 ```sh
 cargo test --locked --test e2e -- --ignored

@@ -46,14 +46,12 @@ applications.
    ```
    This puts `spokenpad` in `~/.local/bin` (make sure it is on your `PATH`)
    and the unit in `~/.config/systemd/user`.
-2. Download the models (about 670 MB) to `~/.local/share/spokenpad/models`.
-   Every file is checked against a pinned sha256.
-   ```sh
-   scripts/fetch-models.sh
-   ```
-3. Check that the models load: `spokenpad check`. It prints
-   `Configuration valid; CPU recognizer ready; VAD ready.`
-4. Enable the service:
+2. Check that the models load: `spokenpad check`. The first run downloads
+   the default models (about 670 MB) to `~/.local/share/spokenpad/models`,
+   verifying every file against a pinned sha256, then prints
+   `Configuration valid; CPU recognizer ready; VAD ready.` To fetch them
+   ahead of time instead, run `spokenpad fetch-models`.
+3. Enable the service:
    ```sh
    systemctl --user enable --now spokenpad
    ```
@@ -67,8 +65,8 @@ applications.
    On sway, import `SWAYSOCK WAYLAND_DISPLAY DISPLAY` instead. The import only
    matters for the [managed window](#managed-window-on-i3-and-sway); the
    default mode needs no environment from your session.
-5. [Bind your keys](#bind-your-keys).
-6. Open the dictation editor in any terminal: `spokenpad editor`. Then hold
+4. [Bind your keys](#bind-your-keys).
+5. Open the dictation editor in any terminal: `spokenpad editor`. Then hold
    your push-to-talk key and speak.
 
 To update, pull and run `scripts/install.sh` again, then
@@ -290,6 +288,8 @@ spokenpad editor                  open the dictation editor in this terminal
 spokenpad transcribe WAV [--out PATH]
                                   decode a recording
 spokenpad check                   validate the config and load the models
+spokenpad fetch-models [--dir DIR]
+                                  download the default models ahead of time
 ```
 
 Global options: `-c/--config PATH`, `--model-dir DIR`, `-v/--verbose` (debug
@@ -315,7 +315,7 @@ and [docs/asr.md](docs/asr.md).
 ```sh
 cargo build --locked --release
 cargo test --locked --all-targets                  # no keyboard, microphone or display needed
-cargo test --locked --test e2e -- --ignored        # loads the real models (fetch-models.sh first)
+cargo test --locked --test e2e -- --ignored        # loads the real models (spokenpad fetch-models first)
 cargo clippy --locked --all-targets -- -D warnings
 cargo fmt --check
 cargo run --release --example=eval                 # WER on local clips in eval-samples/

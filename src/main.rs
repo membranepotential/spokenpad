@@ -1,9 +1,12 @@
 use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand};
 use spokenpad::{
-    config::Config,
-    core::{control::Request, decode::Pipeline, text::Processor},
-    shell::inference::{Transcriber, load_segmenter, model_config},
+    config::{self, Config},
+    core::{control::Request, decode::Pipeline, models::files_to_ensure, text::Processor},
+    shell::{
+        inference::{Transcriber, load_segmenter, model_config},
+        models::{FetchEvent, all_present, fetch_models},
+    },
 };
 use std::{io::Write, os::unix::fs::OpenOptionsExt, path::PathBuf, process::ExitCode};
 
@@ -73,6 +76,21 @@ enum Action {
     /// Runs nvim on the dictation socket, on the file holding anything
     /// dictated while no editor was open, or on a new dictation file.
     Editor,
+    /// Download spokenpad's default models: Parakeet TDT 0.6B v3 (int8,
+    /// ~670 MB) and the Silero VAD (~0.6 MB).
+    ///
+    /// Verifies every file against its pinned size and sha256, downloading
+    /// only what is missing or does not match; a file that already
+    /// verifies is left untouched. The daemon, `check` and `transcribe` do
+    /// this on their own before loading a default model that is missing,
+    /// so running this ahead of time is optional -- useful mainly to see
+    /// the download happen, or to warm a fresh install without starting
+    /// the service.
+    FetchModels {
+        /// Destination directory [default: $XDG_DATA_HOME/spokenpad/models]
+        #[arg(long, value_name = "DIR")]
+        dir: Option<PathBuf>,
+    },
 }
 fn write_transcript(text: &str, out: Option<&std::path::Path>) -> Result<()> {
     if let Some(path) = out {
@@ -110,6 +128,16 @@ fn run(args: Args) -> Result<u8> {
     config.validate()?;
     match command {
         Some(Action::Editor) => match spokenpad::shell::nvim::open_editor(&config.nvim)? {},
+        Some(Action::FetchModels { dir }) => {
+            let dest = match dir {
+                Some(d) => config::expand_path(&d)?,
+                None => config::models_dir(),
+            };
+            let files: Vec<_> = spokenpad::core::models::DEFAULT_MODEL_FILES
+                .iter()
+                .collect();
+            fetch_models(&dest, &files, report_fetch_event_stderr)?;
+        }
         Some(Action::Transcribe { wav, out }) => {
             let (samples, rate) = match spokenpad::shell::recorder::read_capture(&wav) {
                 Ok(audio) => audio,
@@ -125,6 +153,7 @@ fn run(args: Args) -> Result<u8> {
                 );
                 return Ok(4);
             }
+            ensure_default_models(&config);
             if let Err(e) = model_config(&config.asr) {
                 log::error!("{e:#}");
                 return Ok(2);
@@ -147,6 +176,7 @@ fn run(args: Args) -> Result<u8> {
             write_transcript(&text, out.as_deref())?;
         }
         Some(Action::Check) => {
+            ensure_default_models(&config);
             if let Err(e) = model_config(&config.asr) {
                 log::error!("{e:#}");
                 return Ok(2);
@@ -168,6 +198,7 @@ fn run(args: Args) -> Result<u8> {
             );
         }
         None => {
+            ensure_default_models(&config);
             if let Err(e) = model_config(&config.asr) {
                 log::error!("{e:#}");
                 return Ok(2);
@@ -179,6 +210,75 @@ fn run(args: Args) -> Result<u8> {
         }
     }
     Ok(0)
+}
+/// Downloads whichever default model files this configuration would load
+/// but does not have yet: only the default Parakeet weights and/or the
+/// default Silero VAD, and only when `asr`/`vad` are still pointed at them
+/// (see `core::models::files_to_ensure`). A user-configured `model_dir` or
+/// another `asr.family` is never touched, so its absence stays the plain
+/// "missing ASR model" error `model_config` raises next.
+///
+/// Never fails the caller: a download that cannot complete (offline, DNS, a
+/// corrupted mirror) is logged and left for that same "missing model" error
+/// to report clearly with its own exit code, rather than adding a second
+/// error path for the same underlying problem.
+fn ensure_default_models(config: &Config) {
+    let files = files_to_ensure(&config.asr, &config.vad);
+    if files.is_empty() {
+        return;
+    }
+    let dest = config::models_dir();
+    match all_present(&dest, &files) {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(e) => {
+            log::warn!(
+                "could not check default models in {}: {e:#}",
+                dest.display()
+            );
+            return;
+        }
+    }
+    log::info!("downloading missing default models into {}", dest.display());
+    if let Err(e) = fetch_models(&dest, &files, report_fetch_event_log) {
+        log::error!("could not download default models: {e:#}");
+    }
+}
+/// Progress for the daemon's own automatic download: `Info` for what
+/// changed, `Debug` for the download bytes so `-v`/the log file can show it
+/// without either flooding the journal by default.
+fn report_fetch_event_log(event: FetchEvent<'_>) {
+    match event {
+        FetchEvent::Present(f) => log::debug!("model {} already present", f.relative_path),
+        FetchEvent::Downloading(f) => {
+            log::info!("downloading {} ({} bytes)", f.relative_path, f.size);
+        }
+        FetchEvent::Progress { file, downloaded } => {
+            log::debug!("{}: {downloaded}/{} bytes", file.relative_path, file.size);
+        }
+        FetchEvent::Verified(f) => log::info!("verified {}", f.relative_path),
+    }
+}
+/// Progress for `spokenpad fetch-models`: one line per file, plus an
+/// in-place percentage while it downloads.
+fn report_fetch_event_stderr(event: FetchEvent<'_>) {
+    let mut err = std::io::stderr();
+    match event {
+        FetchEvent::Present(f) => eprintln!("  {}: present", f.relative_path),
+        FetchEvent::Downloading(f) => {
+            eprint!("  {}: downloading ({} bytes)", f.relative_path, f.size);
+            let _ = err.flush();
+        }
+        FetchEvent::Progress { file, downloaded } => {
+            eprint!(
+                "\r  {}: downloading {:3}%",
+                file.relative_path,
+                downloaded.saturating_mul(100) / file.size.max(1)
+            );
+            let _ = err.flush();
+        }
+        FetchEvent::Verified(f) => eprintln!("\r  {}: done              ", f.relative_path),
+    }
 }
 fn main() -> ExitCode {
     match run(Args::parse()) {

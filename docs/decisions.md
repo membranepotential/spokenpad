@@ -633,3 +633,46 @@ processes of a pair race for the CPU before they can read the clock, so it
 orders them no better than arrival does. Rejected: queueing requests while
 the model loads; the socket is bound last, and until then the CLI says no
 daemon is listening.
+
+## Model download moves into the binary (2026-09-21)
+
+**Downloading the default models is now `spokenpad fetch-models`, not
+`scripts/fetch-models.sh`.** The shell script duplicated logic the binary
+already needed to state precisely (where a role's files live, what the
+default `model_dir` is) and could drift from it silently; the pinned
+manifest — six files' URLs, sizes and sha256, unchanged from the script's
+own values — now lives once, as data, in `core/models.rs`, with the
+download and verification in `shell/models.rs` (network and files) kept
+apart from that data on purpose: the manifest and the pure comparisons
+(`files_to_ensure`, `matches`) are usable, and unit-tested, without a
+network. A file is written to `<name>.part` and renamed into place only
+after its size and sha256 match the pin, so a killed download or a
+corrupted mirror never leaves behind a file spokenpad would go on to load.
+
+**The daemon, `check` and `transcribe` download automatically instead of
+refusing with a pointer to a command.** The user asked for automatic setup
+on first launch, and it can be made safe rather than merely convenient: the
+only files ever downloaded this way are the default Parakeet weights and
+the default Silero VAD, only when `asr`/`vad` are still pointed at their
+defaults (`core::models::files_to_ensure`), from URLs that are fixed
+literals never built from configuration. A user-configured `model_dir` or
+another `asr.family` is never touched — its absence stays the same "missing
+ASR model" error as before, exit code 2. A download that cannot complete
+(offline, DNS, a corrupted mirror) is logged and falls through to that same
+error rather than a new failure path: one tested message for "the model
+isn't there," however it got that way. This is also now the *only* network
+access anywhere in spokenpad; see
+[constraints.md](constraints.md#the-only-network-access-is-the-pinned-model-download).
+
+**HTTP client: `ureq` 3.4 with `rustls`, not `native-tls`/OpenSSL.**
+Verified on crates.io/docs.rs rather than assumed: `ureq` 3.4.2 is a small,
+maintained, pure-Rust client whose `rustls` feature (the default TLS
+backend for its top-level convenience calls) links no system TLS library,
+keeping the static binary's `ldd` output unchanged. `gzip` is off
+(`default-features = false`) since the default model files are already
+compressed binary weights, not compressible text. Hashing is `sha2` 0.11,
+the same RustCrypto crate family already vetted for this project's
+dependency tree.
+
+**`scripts/fetch-models.sh` is deleted**, and `scripts/install.sh`'s closing
+hints point at the subcommand instead.

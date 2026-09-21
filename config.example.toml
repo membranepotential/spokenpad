@@ -89,9 +89,10 @@ family = "parakeet"
 # The directory holding the model's files. spokenpad finds each file by its
 # role (encoder.int8.onnx before encoder.onnx, tiny.en-encoder.onnx too).
 # Required for every family but "parakeet", whose default is where
-# scripts/fetch-models.sh puts it, under $XDG_DATA_HOME (~/.local/share if
-# unset). A relative path resolves against this file's directory; ~ and $VARS
-# expand.
+# `spokenpad fetch-models` puts it (and where the daemon/check/transcribe
+# put it themselves, the first time they find it missing), under
+# $XDG_DATA_HOME (~/.local/share if unset). A relative path resolves against
+# this file's directory; ~ and $VARS expand.
 model_dir = "~/.local/share/spokenpad/models/parakeet-tdt-0.6b-v3-int8"
 
 # CPU threads for decoding.
@@ -149,9 +150,11 @@ vocabulary = []
 # decoded whole, silence included.
 enabled = true
 
-# Silero VAD weights, ~0.6 MB, fetched by scripts/fetch-models.sh. Resolved like
-# asr.model_dir. If the file is missing, spokenpad logs a warning and decodes
-# whole captures rather than refusing to start.
+# Silero VAD weights, ~0.6 MB, fetched by `spokenpad fetch-models` (and by
+# the daemon/check/transcribe themselves, at this default path). Resolved
+# like asr.model_dir. If the file is missing and cannot be downloaded,
+# spokenpad logs a warning and decodes whole captures rather than refusing
+# to start.
 model = "~/.local/share/spokenpad/models/silero_vad.onnx"
 
 # Speech probability above which a frame counts as speech. This is also the

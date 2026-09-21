@@ -212,6 +212,20 @@ the recognizer and the VAD.
 No code path in this project selects a GPU provider, and nothing auto-detects
 one.
 
+## The only network access is the pinned model download
+
+Since 2026-09-21, `spokenpad fetch-models` and the daemon/`check`/
+`transcribe`'s own automatic download before loading a still-default model
+are the only code in this project that opens a network connection — see
+[decisions.md](decisions.md#model-download-moves-into-the-binary). Every URL
+fetched is a literal constant in
+[`core/models.rs`](../src/core/models.rs), never built from configuration,
+an argument, or anything read from a file, and every download is verified
+against a pinned size and sha256 before it is written to its final path.
+This is deliberately narrower than "the daemon may reach the network": it
+never does, once its models are in place, and nothing else in spokenpad
+ever makes a request at all.
+
 ## Bias vocabulary at decode time, never fuzzy replacement
 
 An earlier approach corrected ASR output with fuzzy/edit-distance string

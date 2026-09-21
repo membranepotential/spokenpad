@@ -84,10 +84,13 @@ match arm in `shell/inference.rs`.
 
 Run as a NeMo transducer (`model_type = "nemo_transducer"`). The files
 (`encoder.int8.onnx`, `decoder.int8.onnx`, `joiner.int8.onnx`, `tokens.txt`,
-~670 MB) are not committed. `scripts/fetch-models.sh` downloads them from a
-pinned Hugging Face revision, checks size and sha256, and puts them in
+~670 MB) are not committed. `spokenpad fetch-models` downloads them from a
+pinned Hugging Face revision, verifying the pinned size and sha256 of every
+file, and puts them in
 `$XDG_DATA_HOME/spokenpad/models/parakeet-tdt-0.6b-v3-int8/`, the default
-`asr.model_dir`.
+`asr.model_dir`. The daemon, `check` and `transcribe` do this on their own
+the first time they find the default directory missing or incomplete, before
+loading the model — see [decisions.md](decisions.md#model-download-moves-into-the-binary).
 
 ### Speed on a CPU
 

@@ -76,7 +76,10 @@ systemctl --user daemon-reload || echo "install: run 'systemctl --user daemon-re
 cat <<EOF
 
 Next:
-  scripts/fetch-models.sh                          # once, ~670 MB
+  $bin fetch-models                # optional: fetches ~670 MB ahead of time
   systemctl --user enable --now spokenpad          # first install
   systemctl --user restart spokenpad               # after an update
+
+The daemon, 'spokenpad check' and 'spokenpad transcribe' download the
+default models themselves the first time they find them missing.
 EOF
