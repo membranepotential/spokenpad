@@ -11,14 +11,15 @@ never takes focus. Fully local, CPU-only. Next milestone: public release.
   local/) + corpus WER harness; greedy vs beam vs zero padding — agent, wt
 - beam-fix — build sherpa-onnx with upstream PR #3657, test the lost tail and
   the empty-chunk replay — agent, scratch build
-- models — sherpa-onnx 1.13.8; try parakeet-unified-en (RNNT: beam + hotwords
-  may work) and a Qwen3-ASR family (prompt hotwords) — agent, wt. Research
-  (.claude/plans/gpu-models-research.md): GPU not worth it on a GTX 1650.
 - own-window P2 — `nvim.mode = "pane"` in the daemon (plan: .claude/plans/
   own-window.md) — agent, wt. P0+P1 passed headless on i3 (63ed094: grid ==
   nvim screen, umlauts, no focus); P1 code review running. Then P3.
 
 ## Done
+- 09-21: sherpa-onnx 1.13.8 (same WER; TDT beam bug NOT fixed by it). Tried
+  parakeet-unified-en (8.2% on 5 clips, beam+hotwords work, but English only:
+  16 empty chunks on the corpus) and Qwen3-ASR (loses nothing, reads German,
+  0.4-0.7x real time, unmerged). GPU research: not worth it on a GTX 1650.
 - 09-21: Constant RAM while recording (1e2631f): only the uncommitted tail is
   held (1.7 MiB vs 116 MiB per 30 min); lead padding stops at committed
   speech; a tick sees at most preview.max_seconds. Reviewed. NOT deployed:
@@ -40,11 +41,10 @@ never takes focus. Fully local, CPU-only. Next milestone: public release.
   whisper / sense_voice; models in $XDG_DATA_HOME; install.sh/fetch-models.sh;
   attach mode (default) + managed i3/sway over native IPC, terminal table.
   169 lib + 5 CLI + 18 e2e (+1 real-model) green.
-- 09-21: Preview auto-scroll fixed; arrow Up/Down move by screen line.
 
 ## Next
-1. Decide the decoder from the corpus numbers: patched beam, another model,
-   or GPU (would lift the "CPU only" constraint on purpose).
+1. Decide the decoder from the corpus numbers. Open question to the user:
+   German too, or English only (then parakeet-unified-en is a candidate)?
 2. own-window P4: live checks by the user.
 
 ## Known issues / open questions

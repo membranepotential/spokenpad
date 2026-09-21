@@ -1464,6 +1464,7 @@ fn a_capture_that_runs_through_a_long_pause_is_still_committed_whole() {
 #[test]
 #[ignore = "measures process RSS over half an hour of simulated capture"]
 fn ram_over_a_long_latched_capture() {
+    let _alone = one_heavy_test_at_a_time();
     let minutes = 30;
     let keeping = replay_into_capture(minutes, false);
     let dropping = replay_into_capture(minutes, true);
@@ -1481,6 +1482,15 @@ fn ram_over_a_long_latched_capture() {
         keeping > 4 * dropping,
         "the run that keeps everything is the one that grows: {keeping} vs {dropping}"
     );
+}
+
+/// The ignored tests load real models, and one of them measures the RSS of
+/// this whole process: `-- --ignored` runs them on parallel threads, so a
+/// model loading next door would land in that measurement. They take turns.
+fn one_heavy_test_at_a_time() -> std::sync::MutexGuard<'static, ()> {
+    static TURN: Mutex<()> = Mutex::new(());
+    TURN.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Peak RSS above the baseline, in bytes, while `minutes` of speech and
@@ -1616,6 +1626,7 @@ impl DirectMicrophone {
 #[test]
 #[ignore = "loads the real Silero model from the default model directory"]
 fn silero_split_time_over_a_long_tail() {
+    let _alone = one_heavy_test_at_a_time();
     let config = Config::default();
     let sample = config.asr.model_dir.join("test_en.wav");
     if !sample.is_file() || !config.vad.model.is_file() {
@@ -1659,6 +1670,7 @@ fn silero_split_time_over_a_long_tail() {
 #[test]
 #[ignore = "loads the real Silero model from the default model directory"]
 fn dropping_settled_silence_does_not_move_the_detector_spans() {
+    let _alone = one_heavy_test_at_a_time();
     let config = Config::default();
     let sample = config.asr.model_dir.join("test_en.wav");
     if !sample.is_file() || !config.vad.model.is_file() {
@@ -1714,6 +1726,7 @@ fn dropping_settled_silence_does_not_move_the_detector_spans() {
 #[test]
 #[ignore = "loads the real CPU models from the default model directory; about ten seconds"]
 fn real_models_transcribe_the_kennedy_sample() {
+    let _alone = one_heavy_test_at_a_time();
     if !nvim_available() {
         return;
     }
