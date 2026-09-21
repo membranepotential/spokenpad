@@ -6,20 +6,21 @@ _reconciled: 2026-09-22 @ 59428f1 (handoff, session paused by the user)_
 Hold a key (or latch with shift), speak, and text appears in an nvim that
 never takes focus. Fully local, CPU-only. Next milestone: public release.
 
-## Now (handoff: two agent branches are NOT merged yet)
+## Now (handoff: the corpus agent branch is NOT merged yet)
 - corpus — branch `worktree-agent-ada6370eda939c1a8` (.claude/worktrees/):
   told to wrap up: dataset in eval-samples/local/ (audio copies, relative
   paths, README; full reproduction run skipped), harness `--corpus` relative
   paths, clamp decisions entry. Verify it committed, then rebase + checks +
   ff-merge. Until merged, references.json may still hold absolute paths.
-- beam-fix — branch `worktree-agent-a653789adfe1c0a59`: told to commit its
-  write-up (frame-cost variant, public repro, docs/asr.md fix). Same: verify,
-  rebase, checks, ff-merge. Builds live in ~/.cache/spokenpad-dev/beam-fix/.
-- own-window — P0-P2 merged and deployed; config still `mode = "managed"`.
+- own-window — P0-P2 merged and deployed; the user's config is on
+  `mode = "pane"` since 09-22 00:22 (backup: config.toml.bak-2026-09-22).
+- beam-fix — merged (1443aac): public repro of the beam loss, two patch
+  variants; builds in ~/.cache/spokenpad-dev/beam-fix/. Audio for the corpus
+  is already copied to eval-samples/local/audio/ (181 WAVs, 138 MB).
 
 ## Next
-1. Merge the two branches above (or salvage: uncommitted work is in their
-   worktrees). Remove merged worktrees; ~/.cache/spokenpad-dev is ~4 GB.
+1. Merge the corpus branch above (or salvage: uncommitted work is in its
+   worktree). Remove merged worktrees; ~/.cache/spokenpad-dev is ~4 GB.
 2. User: P4 live check of `nvim.mode = "pane"` on i3 (steps: set the mode,
    `spokenpad check`, restart; dictate while typing elsewhere; click, type
    `Grüße @ € { }`; colours/font with tokyonight; close window, dictate again).
@@ -28,9 +29,9 @@ never takes focus. Fully local, CPU-only. Next milestone: public release.
 4. Open, not isolated: new main loses 1 chunk of 333 the Bare retry used to
    rescue (e2 0 -> 1); candidates: sherpa 1.13.8, end-of-slice close, the
    30 s tick bound. See docs/experiments/2026-09-21-lead-padding-clamp-corpus.md.
-5. Small: pane font log line prints the path twice; trailing-pad overlap
-   (4 seams / 6 words on the corpus) unmeasured cost; beam + real vocabulary
-   never measured (the user has no `[asr]` vocabulary).
+5. Small: pane font log prints the path twice, `FontFamily("…")` Debug text
+   in `spokenpad check`; trailing-pad overlap (4 seams / 6 words) cost
+   unmeasured; beam + a real vocabulary never measured.
 
 ## Done (2026-09-21, all on main, deployed as d5d7418 at 23:51)
 - Constant RAM while recording (1.7 vs 116 MiB per 30 min), lead padding
