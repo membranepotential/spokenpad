@@ -228,6 +228,8 @@ the words.
 | [trailing silence](experiments/2026-09-21-trailing-silence-padding.md) | how long should the zero padding be? | one second; without it the bare retry is the same decode and every empty chunk is lost |
 | [model families](experiments/2026-09-21-model-families-corpus.md) | is Whisper tiny.en or SenseVoice a serious alternative? | no; and both invent words from silence |
 | [live against whole](experiments/2026-09-21-live-path-against-whole-file.md) | does progressive commit cost accuracy? | no; it wins on all eight configurations tried |
+| [the lead-padding clamp](experiments/2026-09-21-lead-padding-clamp-corpus.md) | keep the clamp, and is the constant-RAM main safe to deploy? | keep it — it costs nothing at all here; and yes, main is 0.35 points better |
+| [parakeet-unified-en](experiments/2026-09-21-parakeet-unified-en-corpus.md) | what would an English-only user gain from the candidate model? | about 1.5 WER points and half the decode time, but no German |
 | [the references](experiments/2026-09-21-gladia-reference-transcripts.md) | what is an ASR reference worth? | enough to compare, not enough to quote |
 
 The runs behind those files are kept beside the corpus, in the git-ignored
