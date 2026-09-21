@@ -11,9 +11,9 @@ never takes focus. Fully local, CPU-only. Next milestone: public release.
   local/) + corpus WER harness; greedy vs beam vs zero padding — agent, wt
 - beam-fix — build sherpa-onnx with upstream PR #3657, test the lost tail and
   the empty-chunk replay — agent, scratch build
-- own-window P2 — `nvim.mode = "pane"` in the daemon (plan: .claude/plans/
-  own-window.md) — agent, wt. P0+P1 passed headless on i3 (63ed094: grid ==
-  nvim screen, umlauts, no focus); P1 code review running. Then P3.
+- own-window — P0-P2 merged (e8c161e): `nvim.mode = "pane"`, own X11 window,
+  X libs loaded at run time, verified headless on i3 only. P2 code review
+  running. P3 (other WMs) waits for packages; P4 = the user's live check.
 
 ## Done
 - 09-21: sherpa-onnx 1.13.8 (same WER; TDT beam bug NOT fixed by it). Tried
@@ -36,11 +36,8 @@ never takes focus. Fully local, CPU-only. Next milestone: public release.
   passage, no writes behind an editor, greedy+hotwords rejected. README
   rewritten, docs current. Own setup migrated: models in ~/.local/share,
   `mode = "managed"`, unit on graphical-session.target. 172 lib + 19 e2e.
-- 09-21: Portability for the public release merged (13 commits): Python removed,
-  eval is examples/eval.rs; static sherpa binary; `[asr] family` parakeet /
-  whisper / sense_voice; models in $XDG_DATA_HOME; install.sh/fetch-models.sh;
-  attach mode (default) + managed i3/sway over native IPC, terminal table.
-  169 lib + 5 CLI + 18 e2e (+1 real-model) green.
+- 09-21: Portability merged: Python removed, static binary, `[asr] family`,
+  XDG model dir, install.sh, attach (default) + managed i3/sway mode.
 
 ## Next
 1. Decide the decoder from the corpus numbers. Open question to the user:
