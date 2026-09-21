@@ -7,10 +7,13 @@ Hold M4 (or latch with shift), speak, and text appears in a floating nvim
 without taking focus. Fully local, CPU-only; the GTX 1650 stays free.
 
 ## Now
-- Nothing in flight. main pushed at b3ee6b3 (+ this reconcile) and the service
-  restarted on it 09-19 — next: the user's live check (Next 1).
+- Nothing in flight. Service runs 8f24ce7 (09-21); 4 commits on main not
+  pushed — next: the user's live check (Next 1).
 
 ## Done
+- 09-21: Preview auto-scroll fixed (it hung below the window from the second
+  paragraph on); arrow Up/Down move by screen line like j/k. CLAUDE.md now
+  commits verified work unasked. 144 lib + 16 e2e green.
 - 09-19: Lost words fixed at two causes found by replaying 128 recovery WAVs:
   Parakeet returned "" for 4/18 short speech chunks (now retried without
   trailing silence; also ends the `cd home` Rust/Python mismatch), and speech
