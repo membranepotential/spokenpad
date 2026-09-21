@@ -1,18 +1,22 @@
-# spokenpad — local push-to-talk dictation for Linux/X11
+# spokenpad — local push-to-talk dictation for Linux
 
 _reconciled: 2026-09-19 @ b3ee6b3_
 
 ## Goal
-Hold M4 (or latch with shift), speak, and text appears in a floating nvim
-without taking focus. Fully local, CPU-only; the GTX 1650 stays free.
+Hold a key (or latch with shift), speak, and text appears in an nvim that
+never takes focus. Fully local, CPU-only. Next milestone: public release.
 
 ## Now
-- rust-only — drop Python, Rust eval example, generic eval-samples — agent (worktree) — merge.
-- model-install — static sherpa, model families, XDG model dir, service w/o checkout — agent (worktree) — merge.
-- window-portability — attach mode, terminal table, i3+sway IPC — agent (worktree) — merge.
-- Then: README rewrite, e-mail history rewrite, force push (needs the user's word).
+- review — code review of the merged portability work — agent — fix findings.
+- docs — README rewrite, stale docs/CLAUDE.md after the portability merge — agent (worktree) — merge.
+- Then: e-mail rewrite (Gmail -> felix@peppert.de), migrate own setup, force push (needs the user's word).
 
 ## Done
+- 09-21: Portability for the public release merged (13 commits): Python removed,
+  eval is examples/eval.rs; static sherpa binary; `[asr] family` parakeet /
+  whisper / sense_voice; models in $XDG_DATA_HOME; install.sh/fetch-models.sh;
+  attach mode (default) + managed i3/sway over native IPC, terminal table.
+  169 lib + 5 CLI + 18 e2e (+1 real-model) green.
 - 09-21: Preview auto-scroll fixed (it hung below the window from the second
   paragraph on); arrow Up/Down move by screen line like j/k. CLAUDE.md now
   commits verified work unasked. 144 lib + 16 e2e green.
@@ -23,14 +27,9 @@ without taking focus. Fully local, CPU-only; the GTX 1650 stays free.
   to `+` after every release. Astra audited, critiqued and reviewed; its
   review found 4 bugs, fixed. 143 lib + 16 e2e (+1 real-model) green, WER
   17.6% unchanged.
-- 09-11: Astra review applied and pushed as six logical commits: core/shell
-  layout (core imports nothing from shell), notices shown in the winbar in every
-  phase, ranked and width-fitted; silence not decoded when the VAD finds no
-  speech (Python reference in step); ownership-probe retry that ends a 1-in-10
-  test flake (traced with strace to a fork-window race); CLAUDE.md added.
+- 09-11: Astra review: core/shell layout, ranked winbar notices, silence not
+  decoded, ownership-probe retry (ended a 1-in-10 flake), CLAUDE.md added.
 - 09-08/09: progressive commit, recovery WAV, Rust rewrite deployed.
-- Checks: 143 lib + 1 bin + 4 CLI + 16 e2e (+1 real-model), 72 Python; WER
-  17.6% VAD / 13.9% whole vs Handy 48.7% on five clips.
 
 ## Next
 1. Live check after restart: short sentences land first time, word endings
@@ -38,23 +37,21 @@ without taking focus. Fully local, CPU-only; the GTX 1650 stays free.
    and a latched stop behave; plus the 09-11 checks (tap notice, Escape).
 2. Decide whether a "no speech detected" notice is wanted for a press the VAD
    judged silent (needs the release result to carry a reason).
-3. Investigate the Rust/Python ASR divergence (Known issues) by comparing the
-   onnxruntime linked by the Python wheel with the sherpa prebuilt libs.
-4. `ruff format` on the three pre-existing unformatted Python files.
+3. Whole-buffer path (VAD off) loses words: `cd-home` decodes to "" (the
+   empty-chunk retry is VAD-only) and `shell-commands` loses its first
+   sentence; WER 18.7% whole vs 17.6% VAD (was documented as 13.9%).
 
 ## Known issues / open questions
-- Rust/Python ASR divergence: `um z E T` vs `um Z S E T` on one clip, and
-  punctuation/one token in some progressive commits. Segments and offsets match.
 - Post-roll length (250 ms) is unproven live; a mic stalling at key-up only logs.
-- First words lost on long dictations: historical (Python runtime), never
-  reproduced; the idle-stream repair is the addressed candidate cause.
+- First words lost on long dictations: reproduced 09-21 only on the
+  whole-buffer path (Next 3); never seen with the VAD on.
 - Dying input stream: root cause unknown; the watchdog recovers it and a gap
   is now shown to the user. Latched capture ~230 MB RAM/hour, capped at 3600s.
 - LLM cleanup / technical vocabulary still open; no fuzzy replacements.
 
 ## Decided
-- Hard constraints: docs/constraints.md. M4 = evdev 186 (KEY_F16). Rust runtime
-  authorized 2026-09-09; Parakeet/Silero, TOML, nvim Lua UI and the tested
+- Hard constraints: docs/constraints.md. Default hotkey evdev 186 (KEY_F16).
+  Rust-only since 09-21; Parakeet/Silero, TOML, nvim Lua UI and the tested
   progressive-commit policy stay. No overlay, no paste path.
 - Cancel only while recording; a tap under 120ms is discarded with a notice;
   losing the hotkey keyboard ends the recording by decoding; silence is not
