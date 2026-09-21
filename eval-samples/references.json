@@ -1,55 +1,30 @@
 {
   "_comment": [
-    "Ground truth for the eval harness: what was ACTUALLY said in each recording.",
+    "Regression corpus for examples/eval.rs: five short recordings of one speaker,",
+    "one microphone, with hand-verified ground truth (\"reference\") for each.",
     "",
-    "transcripts.json sits alongside this file and holds what Handy 0.9.6 produced,",
-    "errors included. That is the baseline to beat, not the target. Do not conflate them.",
-    "",
-    "STATUS: all five references were confirmed against the audio by the speaker on",
-    "2026-08-27 using `uv run scripts/verify_references.py`, so every entry is now",
-    "\"verified\": true. Four of the five reconstructions were confirmed unchanged; the",
-    "fifth (handy-1787827757) had no reference at all and now has one.",
-    "",
-    "'exercises' names the specific failure each sample probes, so a regression can be",
-    "attributed rather than merely observed. 'long_clip_check' marks a sample that must",
-    "additionally decode to non-empty text well inside its own duration.",
-    "",
-    "ON THE 'handy WER' BASELINE COLUMN -- history, and the one caveat that remains.",
-    "",
-    "  Two biases used to make that column unquotable. Verification discharged both:",
-    "",
-    "  1. handy-1787828395's reference was originally Handy's own output with one word",
-    "     corrected, i.e. Handy was scored against a reference derived from itself.",
-    "     The speaker has since confirmed the text against the audio, so it is now",
-    "     independent ground truth rather than a copy of the hypothesis.",
-    "  2. handy-1787827757 had reference: null and was excluded from the aggregate --",
-    "     and that is the 37s clip Handy discarded entirely, i.e. its single worst",
-    "     failure was the one sample not counted. It now has a verified reference and",
-    "     is scored like any other, so the aggregate finally includes it.",
-    "",
-    "  Remaining caveat, in our own disfavour to state but state it anyway: the",
-    "  handy-1787827757 reference was drafted from THIS project's model output and then",
-    "  corrected by the speaker. The correction was substantial (it fixed set/sed,",
-    "  reset/rust and recovered a whole trailing passage), so it is not circular -- but",
-    "  a residual bias toward our model on that one sample cannot be fully excluded.",
-    "  A from-scratch transcription would settle it if the number ever matters that much."
+    "This is a regression proxy, not an accuracy benchmark -- see docs/evaluation.md.",
+    "'exercises' names the specific wording each clip is known to be sensitive to,",
+    "for a human reading a WER change; it is documentation, not something the eval",
+    "checks programmatically. 'long_clip_check' marks the one clip that must",
+    "additionally decode to non-empty text well inside its own duration."
   ],
   "samples": [
     {
-      "file": "handy-1787827422.wav",
+      "file": "shell-commands.wav",
       "duration_s": 20.4,
       "verified": true,
       "reference": "So, this is a test. Let's try some commands here. Let's make a dir with the command mkdir named test and touch a new file test_file and then rm -rf this whole folder again.",
       "exercises": [
         "commands -> comments: technical word lost to a common English neighbour",
         "a dir -> there: context error, hotword biasing cannot fix this",
-        "mkdir -> MK D I R / mkir: fixed by hotwords at score 1.5",
+        "mkdir -> MK D I R / mkir",
         "rm -rf -> RMRF: command name run together",
         "test_file -> test underscore file: spoken punctuation not symbolised"
       ]
     },
     {
-      "file": "handy-1787827474.wav",
+      "file": "cd-home.wav",
       "duration_s": 1.3,
       "verified": true,
       "reference": "cd home",
@@ -59,29 +34,25 @@
       ]
     },
     {
-      "file": "handy-1787827701.wav",
+      "file": "keyboard-layout-reset.wav",
       "duration_s": 13.8,
       "verified": true,
       "reference": "I have udev rules, udev rules to set the keyboard layout, but I think something you did reset it.",
       "exercises": [
-        "set -> sed and reset -> rust: the fuzzy-replacement regression this project bans.",
-        "The speaker confirmed both intended words in writing.",
-        "MUST still decode 'set' and 'reset' correctly even with 'sed' in the vocabulary.",
-        "This is the guard test for text.replacements staying exact-match."
+        "set -> sed and reset -> rust: a fuzzy-replacement failure this project bans",
+        "(see docs/constraints.md#bias-vocabulary-at-decode-time-never-fuzzy-replacement).",
+        "MUST still decode 'set' and 'reset' correctly."
       ]
     },
     {
-      "file": "handy-1787827757.wav",
+      "file": "replacements-critique.wav",
       "duration_s": 37.0,
       "verified": true,
       "reference": "The replacements are too stringent, for example set S E T you corrected to sed S E D, which doesn't really make sense. Also reset R E S E T you fix to Rust R U S T. So I think it's too stringent. Also can you fix the overlay? What we have right now is okay. There's the window is too small. So maybe that needs some I3 rules, I'm not sure.",
       "exercises": [
-        "THE REGRESSION SAMPLE. Handy produced an empty transcript for this clip:",
-        "'Timed out waiting 30s for live transcription to finalize'. 37s of speech,",
-        "silently discarded. A one-shot decode MUST return non-empty text well",
-        "inside the clip's own duration -- see 'long_clip_check' above.",
+        "The longest clip: a one-shot decode must return non-empty text comfortably",
+        "inside its own duration -- see 'long_clip_check' below.",
         "",
-        "Now that it has a verified reference it is also the hardest accuracy sample:",
         "set/sed and reset/rust are each spoken TOGETHER, in the same sentence, plus",
         "spelled out letter by letter. Any fuzzy replacement collapses one onto the",
         "other and loses the meaning entirely; exact whole-word matching must not.",
@@ -90,15 +61,15 @@
       "long_clip_check": true
     },
     {
-      "file": "handy-1787828395.wav",
+      "file": "new-model-review.wav",
       "duration_s": 27.2,
       "verified": true,
       "reference": "Okay, we are now at the new model. The overlay is there but not wide enough. And okay, let's see the text quality. But I think the whole system is not great, so maybe before we build our own we should uninstall and reset everything and then try a structured approach to write a plan and then build it.",
       "exercises": [
-        "Near-clean prose: the speaker rated this decode's quality good.",
-        "Only known error is 'system' -> 'systemd'. Useful as an upper baseline --",
-        "if hotword biasing degrades this sample, hotwords_score is too high.",
-        "Also over 25s, so it is a second guard against any streaming-style time cap."
+        "Near-clean prose; only known error is 'system' -> 'systemd'.",
+        "Useful as an upper baseline -- if hotword biasing degrades this sample,",
+        "hotwords_score is too high.",
+        "Also over 25s, so it is a second guard against any decode time-out."
       ]
     }
   ]
