@@ -572,3 +572,64 @@ fixed with a test that failed before.
   Reloading at adopt was rejected: `:checktime` resets nvim's change check,
   and unsaved edits could then silently overwrite the direct write.
 - `hotwords_score` with `greedy_search` is now an error instead of ignored.
+
+## Control by socket, not by reading the keyboard
+
+2026-09-21. spokenpad no longer reads `/dev/input`. It watched every keyboard
+through evdev, read-only, for its hotkey (F16), Shift as the latch modifier
+and Escape as the cancel key. That needed the `input` group, which can read
+every keystroke on the machine, and it made spokenpad look like it owned a
+key it only observed.
+
+Now the daemon listens on a control socket (`$XDG_RUNTIME_DIR/spokenpad.sock`,
+mode 0600) and the CLI talks to it: `spokenpad start`, `stop`, `toggle` and
+`cancel` each send one line and wait for `ok`. The user binds keys to them in
+the window manager or desktop, which owns the key. Removed with it: the
+`evdev` crate, `[hotkey]` (an old config naming it is rejected with a message
+pointing to the bindings), device scanning and hotplug, the rule that losing
+the hotkey keyboard ends a recording by decoding it, and exit code 3. Nothing
+else changed: pre-roll, post-roll, progressive commit, the 120 ms tap
+discard, notices, latch, and cancel only while recording.
+
+A binding cannot tell the daemon whether the key is really held, so the state
+machine infers it from the requests and their arrival times:
+
+- **Auto-repeat.** A held key re-fires its binding. i3 enables X11's
+  detectable auto-repeat, so it re-sends only `start`; other X11 clients see
+  `stop`, `start` pairs every ~40 ms, and the two processes of a pair reach
+  the daemon in either order. A `start` while held is ignored. A `stop` does
+  not end a held capture at once: a `start` within 150 ms means the key never
+  came up, and only the clock passing that window ends the capture, released
+  at the `stop`. 150 ms covers three intervals at X11's default 25 Hz rate
+  plus process-spawn jitter; the post-roll counts from the `stop`, so with the
+  default 250 ms post-roll the window delays nothing.
+- **Latch.** `toggle` starts a latched capture; the next `start` or `toggle`
+  ends it, released at that press. Every `stop` is ignored while latched,
+  because Shift and the key come up in either order (i3 matches
+  `--release F16` only if the press matched it too, or Shift came up first).
+  A press within 150 ms of the previous one is that key's auto-repeat.
+  `toggle` while held latches the running capture.
+- **After the end.** A capture that is decoding does not block a new one: a
+  `start` or `toggle` begins the next capture and cuts the post-roll short,
+  as a quick re-press did before. A `stop` or `cancel` then does nothing.
+
+Requests are stamped by the daemon when it reads them, never by the client,
+and the loop feeds the state machine the clock at each request's stamp
+before the request itself, so a window that closed before a request arrived
+is closed before it is read.
+
+**Known limit.** The first auto-repeat of a held latch key comes after the
+repeat delay (660 ms by default on X11) and looks exactly like a second
+press, so holding Shift+F16 that long ends the latched capture; holding the
+key that ends a latched capture that long starts a new push-to-talk capture.
+The README therefore says to turn repeat off for the key (`xset -r 194` on
+X11, `--no-repeat` on sway; Hyprland binds do not repeat) or to tap it.
+
+Rejected: tracking the key as down from each press until its `stop`, which
+would make repeats exact on i3. Desktops such as GNOME and KDE run a shortcut
+only on press, so the `stop` may never come, and the next real press would be
+swallowed as a repeat. Rejected: a client-supplied timestamp; the two
+processes of a pair race for the CPU before they can read the clock, so it
+orders them no better than arrival does. Rejected: queueing requests while
+the model loads; the socket is bound last, and until then the CLI says no
+daemon is listening.

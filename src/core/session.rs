@@ -188,7 +188,7 @@ impl Session {
                 self.pending = None;
                 self.due = self.enabled.then(|| Instant::now() + self.interval);
             }
-            Command::Decode => {
+            Command::Decode { .. } => {
                 if let Some(u) = &self.current {
                     u.release();
                 }
@@ -338,11 +338,22 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::control::{Received, Request};
+    fn request(s: &mut Session, request: Request, at: Instant) -> Command {
+        s.event(Event::Request(Received { request, at }))
+    }
     fn start(s: &mut Session) {
-        s.event(Event::Down {
-            at: Instant::now(),
-            latch: false,
-        });
+        request(s, Request::Start, Instant::now());
+    }
+    fn cancel(s: &mut Session) {
+        request(s, Request::Cancel, Instant::now());
+    }
+    /// A `stop` at `at`, and the clock closing its repeat window.
+    fn release(s: &mut Session, at: Instant) -> Command {
+        request(s, Request::Stop, at);
+        s.event(Event::Clock {
+            now: at + state::REPEAT_WINDOW + Duration::from_millis(1),
+        })
     }
     fn preview(text: &str, through: usize) -> Option<Preview> {
         Some(Preview {
@@ -376,9 +387,7 @@ mod tests {
         let mut s = Session::new(true, Duration::from_secs(1));
         start(&mut s);
         let old = s.current.clone().unwrap();
-        s.event(Event::Up {
-            at: Instant::now() + Duration::from_secs(1),
-        });
+        release(&mut s, Instant::now() + Duration::from_secs(1));
         start(&mut s);
         s.finish(old.id);
         assert!(s.state.recording());
@@ -394,7 +403,7 @@ mod tests {
         let mut s = Session::new(true, Duration::from_secs(1));
         start(&mut s);
         let u = s.current.clone().unwrap();
-        s.event(Event::Cancel);
+        cancel(&mut s);
         assert!(u.cancelled(), "cancelling stops further decoding");
         // The commit was produced before the cancel became visible; the hint
         // still moves, because this is the utterance the session owns.
@@ -436,7 +445,7 @@ mod tests {
             s.tick_due(Instant::now() + Duration::from_secs(2)),
             "a notice must not silently stop preview work"
         );
-        s.event(Event::Cancel);
+        cancel(&mut s);
         assert!(
             s.notice().is_some(),
             "a cancel does not hide what went wrong"
@@ -448,10 +457,8 @@ mod tests {
     fn a_too_short_tap_tells_the_user_why_nothing_appeared() {
         let mut s = Session::new(true, Duration::from_secs(1));
         let at = Instant::now();
-        s.event(Event::Down { at, latch: false });
-        let command = s.event(Event::Up {
-            at: at + Duration::from_millis(50),
-        });
+        request(&mut s, Request::Start, at);
+        let command = release(&mut s, at + Duration::from_millis(50));
         assert_eq!(command, Command::Discard(DiscardReason::TooShort));
         assert_eq!(s.notice(), Some(&Notice::HeldTooBriefly));
         assert_eq!(s.preview(), "", "a discarded capture has no live tail");
@@ -551,9 +558,7 @@ mod tests {
             assert_eq!(s.notice(), Some(&capped), "{later:?} displaced the ceiling");
         }
         // Through the release and its decode, and only then the next press.
-        s.event(Event::Up {
-            at: Instant::now() + Duration::from_secs(1),
-        });
+        release(&mut s, Instant::now() + Duration::from_secs(1));
         assert_eq!(s.notice(), Some(&capped), "the release cleared it");
         start(&mut s);
         assert!(s.notice().is_none(), "the next press clears it");
@@ -610,7 +615,7 @@ mod tests {
         assert!(!s.should_warn_tick_failure(), "warn once per capture");
         s.tick_finished(id, None, Instant::now());
         assert!(s.tick_due(Instant::now() + Duration::from_secs(2)));
-        s.event(Event::Cancel);
+        cancel(&mut s);
         s.tick_finished(id, None, Instant::now());
         assert!(!s.tick_due(Instant::now() + Duration::from_secs(2)));
         start(&mut s);

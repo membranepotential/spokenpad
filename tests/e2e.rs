@@ -1,15 +1,18 @@
 //! Headless end-to-end tests of the real daemon loop.
 //!
-//! [`spokenpad::shell::daemon::serve`] runs with three substitutions and nothing
-//! else: a synthetic microphone in place of PortAudio, an ordinary channel in
-//! place of evdev, and (outside the ignored real-model test) a counting
-//! recognizer. Session policy, capture arithmetic, the recovery WAV, the
-//! decode worker, the editor thread and a genuine `nvim --headless` over
-//! msgpack-RPC are the production code paths.
+//! [`spokenpad::shell::daemon::serve`] runs with two substitutions and nothing
+//! else: a synthetic microphone in place of PortAudio, and (outside the
+//! ignored real-model test) a counting recognizer. Control requests reach it
+//! either on the request channel the control socket feeds, sent directly so a
+//! test can script their order and timing, or through the real control
+//! socket from the real `spokenpad start|stop|toggle` commands
+//! ([`Settings::socket`]). Session policy, capture arithmetic, the recovery
+//! WAV, the decode worker, the editor thread and a genuine `nvim --headless`
+//! over msgpack-RPC are the production code paths.
 //!
-//! Nothing here touches `/dev/input`, PortAudio, the per-user daemon lock or
-//! the real state directory, so the tests pass while the user's own service is
-//! running. Each test owns a temporary directory and kills the editor it
+//! Nothing here touches PortAudio, the per-user daemon lock, the service's
+//! control socket or the real state directory, so the tests pass while the
+//! user's own service is running. Each test owns a temporary directory and kills the editor it
 //! spawned: the editor's socket path is unique to that directory, so the
 //! process is found by scanning `/proc/*/cmdline` for it and its process group
 //! — `nvim` calls `setsid`, so its pid is its process-group id — is signalled.
@@ -22,12 +25,14 @@ use anyhow::Result;
 use spokenpad::{
     config::{Audio, Config, Mode},
     core::{
+        control::{Received, Request},
         decode::{Pipeline, Recognizer, Segment, Segmenter, TrailingSilence, Worker},
-        state::Event,
+        state::REPEAT_WINDOW,
         terminal::Terminal,
     },
     shell::{
         audio::{AudioCapture, CallbackCore, InputBackend, InputStream, Teardown},
+        control::ControlServer,
         daemon::{Devices, serve},
         inference::{Transcriber, load_segmenter},
         recorder::read_capture,
@@ -228,7 +233,10 @@ impl Segmenter for Fixed {
 struct Harness {
     directory: TempDir,
     microphone: FakeMicrophone,
-    keys: Sender<Event>,
+    requests: Sender<Received>,
+    /// The control socket, listening in the harness's directory, when
+    /// [`Settings::socket`] asked for one.
+    control: Option<ControlServer>,
     stopping: Arc<AtomicBool>,
     calls: Arc<Mutex<Vec<usize>>>,
     socket: PathBuf,
@@ -249,6 +257,8 @@ struct Settings {
     chunk: Option<usize>,
     words: bool,
     delay: Duration,
+    /// Also listen on a control socket, for [`Harness::cli`].
+    socket: bool,
 }
 
 impl Default for Settings {
@@ -261,6 +271,7 @@ impl Default for Settings {
             chunk: None,
             words: true,
             delay: Duration::ZERO,
+            socket: false,
         }
     }
 }
@@ -309,7 +320,12 @@ impl Harness {
             },
             segmenter: settings.chunk.map(Fixed),
         });
-        let (keys, key_rx) = mpsc::channel();
+        let (requests, received) = mpsc::channel();
+        // Where `spokenpad start` looks, given the harness's runtime dir.
+        let control = settings.socket.then(|| {
+            ControlServer::bind(&root.join("spokenpad.sock"), requests.clone())
+                .expect("listen on the test control socket")
+        });
         let stopping = Arc::new(AtomicBool::new(false));
         let stop = Arc::clone(&stopping);
         let socket = config.nvim.socket_path.clone();
@@ -320,7 +336,7 @@ impl Harness {
                 &config,
                 Devices {
                     capture,
-                    keys: key_rx,
+                    requests: received,
                     worker,
                 },
                 stop,
@@ -330,7 +346,8 @@ impl Harness {
         Self {
             directory,
             microphone,
-            keys,
+            requests,
+            control,
             stopping,
             calls,
             socket,
@@ -341,8 +358,25 @@ impl Harness {
         }
     }
 
-    fn send(&self, event: Event) {
-        self.keys.send(event).expect("serve is running");
+    fn send(&self, request: Request) {
+        self.send_at(request, Instant::now());
+    }
+    fn send_at(&self, request: Request, at: Instant) {
+        self.requests
+            .send(Received { request, at })
+            .expect("serve is running");
+    }
+    /// Runs `spokenpad <request>` against this harness's control socket, as
+    /// a key binding would, and returns once it exited successfully.
+    #[track_caller]
+    fn cli(&self, request: &str) {
+        assert!(self.control.is_some(), "the harness has no control socket");
+        let status = Command::new(env!("CARGO_BIN_EXE_spokenpad"))
+            .env("XDG_RUNTIME_DIR", self.directory.path())
+            .arg(request)
+            .status()
+            .expect("run spokenpad");
+        assert!(status.success(), "spokenpad {request}: {status}");
     }
     /// Press, and do not return until the capture is actually running: every
     /// capture opens its recovery WAV the moment it starts, so counting those
@@ -352,11 +386,13 @@ impl Harness {
         self.press_only(latch);
         wait_until("the capture starts", || self.captures() > before);
     }
-    /// A press that ends a latched recording rather than starting one.
+    /// `toggle` when `latch`, else `start`: a press that may end a latched
+    /// recording rather than start one.
     fn press_only(&self, latch: bool) {
-        self.send(Event::Down {
-            at: Instant::now(),
-            latch,
+        self.send(if latch {
+            Request::Toggle
+        } else {
+            Request::Start
         });
     }
     fn captures(&self) -> usize {
@@ -365,18 +401,22 @@ impl Harness {
             .unwrap_or(0)
     }
     fn release(&self) {
-        self.send(Event::Up { at: Instant::now() });
+        self.send(Request::Stop);
+    }
+    /// Release, and wait until a new `start` can no longer be taken for the
+    /// key's auto-repeat.
+    fn release_for_good(&self) {
+        self.release();
+        thread::sleep(REPEAT_WINDOW + Duration::from_millis(50));
     }
     fn cancel(&self) {
-        self.send(Event::Cancel);
+        self.send(Request::Cancel);
     }
     /// Press and release inside the minimum hold, without waiting for it.
     fn tap(&self) {
         let at = Instant::now();
-        self.send(Event::Down { at, latch: false });
-        self.send(Event::Up {
-            at: at + Duration::from_millis(50),
-        });
+        self.send_at(Request::Start, at);
+        self.send_at(Request::Stop, at + Duration::from_millis(50));
     }
     fn say(&self, samples: &[f32]) {
         self.microphone.speak(samples);
@@ -813,20 +853,92 @@ fn latched_recording_ends_on_the_second_press() {
     h.finish();
 }
 
-/// The keyboard that would end a latched recording is unplugged: its key is
-/// already up and its cancel key left with it, so nothing else could stop it.
+/// A held key's auto-repeat, as X11 delivers it to most window managers: a
+/// stop/start pair every 40 ms, each pair's processes arriving in either
+/// order. It is one capture, one paragraph, and one decode.
 #[test]
-fn losing_the_hotkey_ends_a_latched_recording() {
+fn auto_repeat_while_held_is_one_capture() {
     if !nvim_available() {
         return;
     }
     let h = Harness::start(Settings::default());
-    h.press(true);
+    h.press(false);
+    h.microphone.speak(&tone(1.0));
+    // Alternating, ending stop-first: after a start-first pair the stop has
+    // the last word, and the key counts as released once its window closes.
+    for i in 0..12 {
+        let at = Instant::now();
+        let (first, second) = if i % 2 == 1 {
+            (Request::Stop, Request::Start)
+        } else {
+            (Request::Start, Request::Stop)
+        };
+        h.send_at(first, at);
+        h.send_at(second, at + Duration::from_millis(1));
+        thread::sleep(Duration::from_millis(40));
+    }
+    wait_until("the microphone delivered everything", || {
+        h.microphone.spoken()
+    });
+    thread::sleep(Duration::from_millis(40));
     h.release();
+    wait_until("the transcript reaches the file", || !h.text().is_empty());
+    assert_eq!(h.text(), "word word\n", "one capture, one paragraph");
+    assert_eq!(h.captures(), 1, "auto-repeat started a second capture");
+    assert_eq!(h.calls().len(), 1, "decoded once: {:?}", h.calls());
+    h.finish();
+}
+
+/// Push-to-talk through the real control socket and the real commands a key
+/// binding runs.
+#[test]
+fn held_capture_through_the_control_socket() {
+    if !nvim_available() {
+        return;
+    }
+    let h = Harness::start(Settings {
+        socket: true,
+        ..Settings::default()
+    });
+    thread::sleep(Duration::from_millis(300));
+    h.cli("start");
+    wait_until("the capture starts", || h.captures() == 1);
     h.say(&tone(1.0));
-    h.send(Event::HotkeyLost { at: Instant::now() });
-    wait_until("the lost keyboard ends the latch", || !h.text().is_empty());
+    h.cli("stop");
+    wait_until("the transcript reaches the file", || !h.text().is_empty());
     assert_eq!(h.text(), "word word\n");
+    // The binding for the key-up fires again with nothing running.
+    h.cli("stop");
+    h.cli("cancel");
+    thread::sleep(Duration::from_millis(300));
+    assert_eq!(h.captures(), 1, "a stray stop or cancel starts nothing");
+    assert_eq!(h.text(), "word word\n");
+    h.finish();
+}
+
+/// Latch with `toggle`; the key-up's `stop` arrives or not, depending on
+/// which of Shift and the key came up first, and changes nothing; the next
+/// `start` ends it, and its own `stop` begins nothing.
+#[test]
+fn latched_capture_through_the_control_socket() {
+    if !nvim_available() {
+        return;
+    }
+    let h = Harness::start(Settings {
+        socket: true,
+        ..Settings::default()
+    });
+    h.cli("toggle");
+    wait_until("the capture starts", || h.captures() == 1);
+    h.cli("stop");
+    h.say(&tone(1.0));
+    assert_eq!(h.text(), "", "a latched recording ignores the key-up");
+    h.cli("start");
+    h.cli("stop");
+    wait_until("the second press ends the latch", || !h.text().is_empty());
+    assert_eq!(h.text(), "word word\n");
+    thread::sleep(Duration::from_millis(300));
+    assert_eq!(h.captures(), 1, "the ending press's stop started nothing");
     h.finish();
 }
 
@@ -943,7 +1055,7 @@ fn a_quick_re_press_does_not_wait_for_the_postroll() {
     });
     h.press(false);
     h.say(&tone(1.0));
-    h.release();
+    h.release_for_good();
     let pressed = Instant::now();
     h.press(false);
     let waited = pressed.elapsed();
@@ -971,8 +1083,8 @@ fn a_second_press_while_transcribing_starts_a_new_paragraph() {
     });
     h.press(false);
     h.say(&tone(1.0));
-    h.release();
-    // Still transcribing: press again immediately.
+    h.release_for_good();
+    // Still transcribing: press again.
     h.press(false);
     h.say(&tone(1.0));
     h.release();
@@ -1259,7 +1371,7 @@ fn real_models_transcribe_the_kennedy_sample() {
         config.recording.clone(),
     )
     .unwrap();
-    let (keys, key_rx) = mpsc::channel();
+    let (requests, received) = mpsc::channel();
     let stopping = Arc::new(AtomicBool::new(false));
     let stop = Arc::clone(&stopping);
     let socket = config.nvim.socket_path.clone();
@@ -1269,7 +1381,7 @@ fn real_models_transcribe_the_kennedy_sample() {
             &config,
             Devices {
                 capture,
-                keys: key_rx,
+                requests: received,
                 worker,
             },
             stop,
@@ -1277,15 +1389,21 @@ fn real_models_transcribe_the_kennedy_sample() {
         )
     });
 
-    keys.send(Event::Down {
-        at: Instant::now(),
-        latch: false,
-    })
-    .unwrap();
+    requests
+        .send(Received {
+            request: Request::Start,
+            at: Instant::now(),
+        })
+        .unwrap();
     microphone.speak(&speech);
     wait_until("the sample is delivered", || microphone.spoken());
     thread::sleep(Duration::from_millis(100));
-    keys.send(Event::Up { at: Instant::now() }).unwrap();
+    requests
+        .send(Received {
+            request: Request::Stop,
+            at: Instant::now(),
+        })
+        .unwrap();
 
     let text = || {
         let mut files: Vec<_> = fs::read_dir(&dictation)

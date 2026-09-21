@@ -1,7 +1,10 @@
 # spokenpad — agent notes
 
-Local push-to-talk dictation for Linux. Hold the hotkey (evdev 186, KEY_F16),
-speak, release; the transcript lands in a dictation Neovim over msgpack-RPC.
+Local push-to-talk dictation for Linux. The user binds keys in their window
+manager to `spokenpad start`/`stop` (push-to-talk), `toggle` (latch) and
+`cancel`, which talk to the daemon over its control socket
+(`$XDG_RUNTIME_DIR/spokenpad.sock`); the transcript lands in a dictation
+Neovim over msgpack-RPC.
 `nvim.mode = "attach"` (default): the user runs `spokenpad editor` in any
 terminal; `"managed"`: the daemon opens a floating window on i3 or sway. Rust
 only, CPU only (sherpa-onnx linked statically: Parakeet TDT by default, Whisper
@@ -13,10 +16,11 @@ Design history is `docs/decisions.md`; add an entry when you change behaviour.
 
 ## Hard constraints (never negotiate these)
 
-- `/dev/input` is opened read-only: `File::open` + `Device::from_fd`. Never
-  `Device::open`, `EVIOCGRAB`, uinput, or any input synthesis (`xdotool type`,
-  enigo, XTest). Nothing is ever pasted. The only clipboard write is the
-  dictation nvim setting its own `+` register to the whole buffer after a release.
+- spokenpad reads no input device: nothing opens `/dev/input`, and the
+  daemon is controlled only through its control socket. Never `EVIOCGRAB`,
+  uinput, or any input synthesis (`xdotool type`, enigo, XTest). Nothing is
+  ever pasted. The only clipboard write is the dictation nvim setting its own
+  `+` register to the whole buffer after a release.
 - No window spokenpad opens may take focus. Attach mode opens no window;
   managed mode proves the i3/sway `no_focus` rule over IPC before it spawns a
   graphical editor. The code contains no focus call.
@@ -30,22 +34,24 @@ Design history is `docs/decisions.md`; add an entry when you change behaviour.
 
 `src/` is the split: `src/core/` is the functional core, `src/shell/` the
 imperative shell, `src/config.rs` the root both sides read, `src/main.rs` the
-CLI. Nothing under `src/core/` may import `evdev`, `libc`, PortAudio, sherpa,
+CLI. Nothing under `src/core/` may import `libc`, PortAudio, sherpa,
 `std::fs`, `std::process`, `std::net` or `std::thread` — code that needs one of
 those belongs in `src/shell/`.
 
-- Functional core: `core/state.rs` (total transition table), `core/session.rs`
-  (per-capture policy, notices), `core/decode.rs` (progressive commits over
-  `Recognizer`/`Segmenter` traits), `core/segments.rs` (`merge_spans`:
-  VAD spans to padded, settled windows), `core/hotkey.rs` (`WatcherState`,
-  `verdict`), `core/wm.rs` (i3/sway IPC protocol, `no_focus` proof),
-  `core/terminal.rs` (the terminal table), `core/frames.rs`, `core/geometry.rs`,
+- Functional core: `core/state.rs` (total transition table over control
+  requests and the clock; the repeat window), `core/control.rs` (the
+  one-line control protocol), `core/session.rs` (per-capture policy,
+  notices), `core/decode.rs` (progressive commits over
+  `Recognizer`/`Segmenter` traits), `core/segments.rs` (`merge_spans`: VAD
+  spans to padded, settled windows), `core/wm.rs` (i3/sway IPC protocol,
+  `no_focus` proof), `core/terminal.rs` (the terminal table), `core/frames.rs`, `core/geometry.rs`,
   `core/text.rs`; plus the `shell/nvim/rpc.rs` codec, `parse_ownership` and
   `passage::append_paragraph`, still inside their modules.
 - Imperative shell: `shell/daemon.rs` (`run` = lock/signals/devices, `serve` =
   the generic loop), `shell/audio.rs` (`InputBackend` seam; PortAudio impl),
-  `shell/recorder.rs` (recovery WAV), `shell/hotkey.rs` (evdev scan/open/poll
-  and the run loop), `shell/inference.rs` (sherpa/Silero, model families),
+  `shell/recorder.rs` (recovery WAV), `shell/control.rs` (control socket
+  server and the CLI's client), `shell/inference.rs` (sherpa/Silero, model
+  families),
   `shell/nvim/mod.rs` (editor lifecycle, both modes, `spokenpad editor`),
   `shell/nvim/passage.rs` (text dictated with no editor open), `shell/wm.rs`
   (i3/sway IPC socket), `shell/logging.rs`.
@@ -53,20 +59,21 @@ those belongs in `src/shell/`.
   `append_once`) and `src/lua/dictation_init.lua` (bundled init).
 - Tests: unit tests in-module; `src/shell/nvim/tests.rs` (real
   `nvim --headless`); `tests/cli.rs`; `tests/e2e.rs` drives
-  `shell::daemon::serve` with a synthetic microphone, a scripted key channel
-  and a real headless nvim.
+  `shell::daemon::serve` with a synthetic microphone, a scripted request
+  channel or the real control socket and CLI, and a real headless nvim.
 - `examples/eval.rs` (WER harness), `examples/verify_window.rs` (manual
   i3/sway window smoke check), `examples/verify_native.rs` (JSON dump of
   segments and progressive commits).
 - `scripts/install.sh` (binary to `~/.local/bin`, user unit; `--uninstall`),
   `scripts/fetch-models.sh` (models to `$XDG_DATA_HOME/spokenpad/models`,
-  pinned sha256). `packaging/` holds the unit and the i3/sway rules.
+  pinned sha256). `packaging/` holds the unit, and the i3/sway window rules
+  with example key bindings.
 
 ## Commands
 
 ```sh
 cargo build --locked --release
-cargo test --locked --all-targets              # no keyboard, mic, display or lock is touched
+cargo test --locked --all-targets              # no mic, display, lock or service socket is touched
 cargo test --locked --test e2e -- --ignored    # real-model e2e; needs scripts/fetch-models.sh
 cargo clippy --locked --all-targets -- -D warnings && cargo fmt --check
 cargo run --release --example=eval             # WER on the local eval clips (--whole: no VAD)

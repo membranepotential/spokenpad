@@ -412,17 +412,20 @@ impl<B: InputBackend> AudioCapture<B> {
     }
 
     /// Ends a capture that is going to be decoded, after its post-roll: the
-    /// speech still sounding when the key came up. Blocks for at most
-    /// `postroll_ms` plus [`FINAL_CALLBACK_WAIT`], and returns as soon as
-    /// `interrupted` is true, which it is asked between polls of the device.
-    /// The state lock is never held while waiting.
+    /// speech still sounding when the key came up at `released`. Audio
+    /// captured since then counts towards it, so this blocks for at most what
+    /// is left of `postroll_ms` plus [`FINAL_CALLBACK_WAIT`], and returns as
+    /// soon as `interrupted` is true, which it is asked between polls of the
+    /// device. The state lock is never held while waiting.
     pub fn finish_capture(
         &mut self,
+        released: Instant,
         mut interrupted: impl FnMut() -> bool,
     ) -> (Vec<f32>, PostRoll) {
+        let remaining = self.config.postroll().saturating_sub(released.elapsed());
         let postroll = self.await_delivery(
-            self.config.postroll_frames().max(1),
-            self.config.postroll() + FINAL_CALLBACK_WAIT,
+            self.config.frames_in(remaining).max(1),
+            remaining + FINAL_CALLBACK_WAIT,
             &mut interrupted,
         );
         (self.take_capture(), postroll)
@@ -1260,7 +1263,7 @@ mod tests {
         capture.start_capture().unwrap();
         backend.feed(&[0.5; 3]);
         let _device = Feeder::start(&backend);
-        let (samples, postroll) = capture.finish_capture(|| false);
+        let (samples, postroll) = capture.finish_capture(Instant::now(), || false);
         assert_eq!(postroll, PostRoll::Complete);
         assert_eq!(samples[..3], [0.5; 3], "audio before the release is kept");
         assert!(
@@ -1276,7 +1279,7 @@ mod tests {
         capture.start_capture().unwrap();
         backend.feed(&[0.5; 3]);
         let started = Instant::now();
-        let (samples, postroll) = capture.finish_capture(|| false);
+        let (samples, postroll) = capture.finish_capture(Instant::now(), || false);
         let waited = started.elapsed();
         assert_eq!(postroll, PostRoll::TimedOut);
         assert_eq!(samples, [0.5; 3], "what arrived is still returned");
@@ -1294,7 +1297,7 @@ mod tests {
         backend.feed(&[0.5; 3]);
         let started = Instant::now();
         let mut asked = 0;
-        let (samples, postroll) = capture.finish_capture(|| {
+        let (samples, postroll) = capture.finish_capture(Instant::now(), || {
             asked += 1;
             asked > 2
         });
@@ -1315,7 +1318,7 @@ mod tests {
         backend.feed(&[0.5; 10]);
         let _device = Feeder::start(&backend);
         let started = Instant::now();
-        let (samples, postroll) = capture.finish_capture(|| false);
+        let (samples, postroll) = capture.finish_capture(Instant::now(), || false);
         assert_eq!(
             postroll,
             PostRoll::Complete,
@@ -1337,7 +1340,7 @@ mod tests {
         capture.start_capture().unwrap();
         backend.feed(&[0.5; 3]);
         backend.kill();
-        let (samples, postroll) = capture.finish_capture(|| false);
+        let (samples, postroll) = capture.finish_capture(Instant::now(), || false);
         assert_eq!(postroll, PostRoll::StreamStale);
         assert_eq!(
             samples,

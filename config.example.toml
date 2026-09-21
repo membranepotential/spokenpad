@@ -6,44 +6,10 @@
 # *unknown* section or key is a hard error (config.rs rejects typos loudly
 # rather than silently ignoring them).
 
-[hotkey]
-# evdev key code for push-to-talk. 186 is KEY_F16: no application binds it,
-# and keyboard firmware (QMK, VIA) or a remapper such as keyd can send it from
-# any key. This is the evdev code, not the X11 keycode (which is this + 8);
-# find a key's code with `evtest` or `libinput debug-events --show-keycodes`.
-key_code = 186
-
-# evdev key code that discards a recording in progress. 1 is KEY_ESC. Set to a
-# bare integer to change it, or comment out / omit for the default. TOML has no
-# null value, so this option cannot be disabled from the configuration file.
-#
-# It cancels ONLY while recording. Once the key is released the audio is already
-# captured and the final decode is about to land, so a cancel is ignored from
-# there on -- this key is read from every keyboard regardless of focus, and
-# honouring it then would destroy a finished dictation. Cancelling never unwrites
-# text that already reached the file: it stops further decoding, and the
-# recovery WAV is kept.
-#
-# A press held for less than 120 ms is a stray tap, not dictation: the capture is
-# discarded and the winbar says "held too briefly". That threshold is a property
-# of how a key feels rather than of a deployment, so it is a constant in
-# state.rs, not a setting. Losing the keyboard that holds the hotkey (or the last
-# hotkey-capable keyboard during a latched recording) ends the recording by
-# decoding what was said rather than throwing it away.
-cancel_key_code = 1
-
-# Modifier that turns a press into a LATCHED recording: hold it together with
-# the hotkey and recording runs until the hotkey is pressed again, instead of
-# ending when you let go. For a long passage, holding a key for two minutes is
-# its own kind of friction.
-#
-# The press that STOPS a latched recording does not need the modifier -- so you
-# never have to remember which hand you started with. The nvim winbar shows a
-# lock while latched, since the way to stop it differs from push-to-talk.
-#
-# One of "shift", "ctrl", "alt", "super", or "none". Use "none" to disable
-# latching; omitting the line retains the default "shift".
-latch_modifier = "shift"
+# There is no [hotkey] section: spokenpad reads no keyboard. Bind keys in
+# your window manager or desktop to `spokenpad start`, `stop`, `toggle` and
+# `cancel` (README, "Bind your keys"). A config that still has [hotkey] is
+# rejected with a message saying so.
 
 [audio]
 # Must be 16000. Silero's VAD window is 512 samples at 16 kHz and every
@@ -59,10 +25,12 @@ preroll_ms = 250
 
 # Audio still captured after the key comes up, because the last syllable is
 # often still sounding at that moment: without it the final word is clipped.
-# The release waits this long (plus up to 100 ms for the device) before it
-# decodes; pressing the key again ends the wait at once, so a quick re-press
-# never loses its first word to the previous capture. Discards (a tap held too
-# briefly, the cancel key) take no post-roll. 0 to disable; at most 1000.
+# It runs from the `stop`: the decode waits this long (plus up to 100 ms for
+# the device), and never less than the 150 ms in which a `start` still counts
+# as the key's auto-repeat. A `start` after that ends the wait at once, so a
+# quick re-press never loses its first word to the previous capture. Discards
+# (a tap held too briefly, `spokenpad cancel`) take no post-roll. 0 to
+# disable; at most 1000.
 postroll_ms = 250
 
 # PortAudio device-name query: case-insensitive, ordered words matched against

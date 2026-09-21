@@ -12,12 +12,15 @@ Setup is two POSIX shell scripts, `scripts/install.sh` and
 
 `src/` is split in two: `core/` holds the pure modules, `shell/` everything
 that touches a device, a file, a process or a thread, and `config.rs` sits at
-the root because both sides read it. Nothing under `core/` may import `evdev`,
+the root because both sides read it. Nothing under `core/` may import
 `libc`, PortAudio, sherpa, `std::fs`, `std::process`, `std::net` or
 `std::thread`.
 
-- `core/state.rs` contains the pure state machine, including the 120 ms minimum
-  hold and the rule that a cancel after release is a no-op; `core/session.rs`
+- `core/state.rs` contains the pure state machine over the four control
+  requests and the clock, including the 120 ms minimum hold, the 150 ms
+  repeat window that tells a held key's auto-repeat from a new press, and the
+  rule that a cancel after release is a no-op. `core/control.rs` is the
+  one-line wire protocol. `core/session.rs`
   handles utterance identity, cancellation, preview scheduling, and the single
   user-visible notice, which the next key press clears — `Notice::priority`
   ranks them and `notify` replaces only upwards, so the worst thing that
@@ -26,10 +29,13 @@ the root because both sides read it. Nothing under `core/` may import `evdev`,
   and the notice in the winbar, in every phase, as a headline plus a detail it
   appends only when the window is wide enough.
 - `shell/daemon.rs` splits into `run` and `serve`. `run` is the shell: the
-  per-user lock, signal handlers, PortAudio, evdev, and the models. `serve` is
-  the event loop, generic over the audio backend, recognizer and segmenter and
-  taking its key events from a plain channel, which is what the headless
-  end-to-end tests drive. It drains input before inference results and moves
+  per-user lock, signal handlers, PortAudio, the models, and last the control
+  socket. `serve` is the event loop, generic over the audio backend,
+  recognizer and segmenter and taking its control requests from a plain
+  channel, which is what the headless end-to-end tests drive. Each request
+  reaches the state machine after the clock at its own stamp, so a repeat
+  window that closed before the request arrived is closed first. It drains
+  requests before inference results and moves
   blocking inference and editor RPC to separate threads; the editor thread runs
   until its own channel says to stop, so text queued before a cancel or a
   shutdown is still written (bounded at three seconds, with anything
@@ -54,12 +60,13 @@ the root because both sides read it. Nothing under `core/` may import `evdev`,
   cap reached, device flags. The watchdog also repairs a dead stream while
   *idle*, so the pre-roll is full at the next press; the ring is cleared when a
   capture starts, so audio from before the previous capture cannot be spliced
-  into this one. A decode (release, latched stop, lost keyboard) keeps
-  capturing for `audio.postroll_ms` (250 ms, at most 1000) after the key
-  event, because speech was still sounding at key-up in 22 of 128 recorded
-  captures. The wait counts device frames delivered under the state lock, so
-  it also completes past the memory ceiling; it ends early on a new key press
-  or shutdown, gives up after the post-roll plus 100 ms, and reports a stream
+  into this one. A decode (release, latched stop) keeps capturing for
+  `audio.postroll_ms` (250 ms, at most 1000) after the `stop` or the ending
+  press, because speech was still sounding at key-up in 22 of 128 recorded
+  captures; audio captured during the repeat window counts towards it. The
+  wait counts device frames delivered under the state lock, so it also
+  completes past the memory ceiling; it ends early on a waiting `start` or
+  `toggle`, or shutdown, gives up after the rest of the post-roll plus 100 ms, and reports a stream
   that went stale as a microphone gap. A discard (tap, cancel) waits only for
   one further device buffer, up to 100 ms. Failure-path teardown aborts the stream rather than stopping it,
   so a wedged device cannot block the event loop; orderly shutdown still stops.
@@ -71,17 +78,12 @@ the root because both sides read it. Nothing under `core/` may import `evdev`,
 - `core/frames.rs` gives capture-absolute sample offsets their own type,
   `Frames`, distinct from indices into a snapshot, which may begin after the
   capture did.
-- `shell/hotkey.rs` opens every evdev descriptor with `File::open`
-  (read-only), scans, polls and reads; it owns no policy. `core/hotkey.rs` has
-  the other half: `WatcherState` is a pure fold over the event stream — which
-  devices hold the hotkey, and which latch modifiers each reports — and
-  auto-repeat is discarded there. Kernel state seeds a device when it is
-  registered, and the latch is evaluated in event order thereafter. Devices are
-  identified by `(rdev, ino)`, read off the node by the shell and judged by the
-  pure `verdict`, so a replug that reuses a path is seen. Hotplug uses a 500 ms
-  scan. Losing the keyboard that holds the hotkey, or the last hotkey-capable
-  keyboard while a latched recording runs, sends `Event::HotkeyLost`: the
-  recording ends by decoding what was said, never by cancelling.
+- `shell/control.rs` listens on `$XDG_RUNTIME_DIR/spokenpad.sock` (mode
+  0600), serves one connection at a time in arrival order, stamps each
+  request when it is read, queues it for the loop and answers `ok`. A socket
+  file nobody answers on is replaced; a live one or a non-socket is refused.
+  The same module is the client `spokenpad start|stop|toggle|cancel` use; that
+  path reads no config and loads no model.
 - `shell/nvim/mod.rs` owns the socket and pinned dictation buffer in both
   `nvim.mode`s, and `shell/nvim/rpc.rs` the msgpack transport, where every
   call carries an absolute deadline. `shell/nvim/passage.rs` writes commits
@@ -134,15 +136,14 @@ nowhere is how a user loses their settings.
 Command-line flags: `-c/--config PATH`, `--model-dir PATH`, `-v/--verbose`,
 `--log-file PATH` (the literal `none` disables the file), and, on the daemon
 only, `--dump-audio DIR`, which writes each capture exactly as decoded for
-debugging. Subcommands are `editor`, `transcribe <WAV> [--out PATH]` and
-`check`.
+debugging. Subcommands are `start`, `stop`, `toggle`, `cancel`, `editor`,
+`transcribe <WAV> [--out PATH]` and `check`.
 
 Exit codes are selected by error *type*, never by matching a message, so a
 reworded error cannot silently turn into a restart loop: `2` model files
-missing, `3` the hotkey watcher could not start
-(`shell::daemon::HotkeyUnavailable`), `4` an unreadable or wrong-rate WAV
-handed to `transcribe`, `1` everything else.
-The systemd unit refuses to retry 2 and 3 and does retry 1 — which is what a
+missing, `4` an unreadable or wrong-rate WAV handed to `transcribe`, `1`
+everything else, including a control command that finds no daemon.
+The systemd unit refuses to retry 2 and does retry 1 — which is what a
 second daemon losing the race for
 `$XDG_STATE_HOME/spokenpad/daemon.lock` (an `flock`, held for the process
 lifetime, never unlinked) reports.
@@ -174,17 +175,20 @@ response alone is not proof of startup completion.
 `cargo test --locked --all-targets` covers pure transitions and worker
 ordering, capture arithmetic against a synthetic input backend, recording
 recovery and pruning with temporary files, and real headless nvim RPC tests. No
-test uses the actual keyboard or microphone, takes the daemon lock, or touches
-the real state directory, so the suite runs while the user's own service does.
+test uses the actual microphone, takes the daemon lock, binds the service's
+control socket, or touches the real state directory, so the suite runs while
+the user's own service does.
 
-`tests/e2e.rs` drives `shell::daemon::serve` end to end with three
-substitutions and nothing else — a synthetic microphone, a channel in place of
-evdev, and a
-counting recognizer — against a real `nvim --headless` over msgpack-RPC. It
+`tests/e2e.rs` drives `shell::daemon::serve` end to end with two
+substitutions and nothing else — a synthetic microphone and a counting
+recognizer — against a real `nvim --headless` over msgpack-RPC. Requests
+arrive on the channel the control socket feeds, or through a real control
+socket from the real `spokenpad start|stop|toggle` commands. It
 asserts the things only the whole loop can show: text landing in the file,
 progressive commits appending before release, a too-short tap discarded with a
 notice the idle winbar really renders, a latched recording ending on the second
-press, a cancel keeping
+press, auto-repeat stop/start pairs in either order staying one capture, a
+cancel keeping
 committed text and the WAV, a second press during transcription starting a new
 paragraph, the preview staying virtual text, and a microphone restart marking
 the gap while keeping the audio. One further test loads the real CPU models and
@@ -241,9 +245,9 @@ focus is unchanged after opening and appending, and closes its temporary
 editor. Run this manual check only when no other dictation editor is open.
 
 The Rust daemon has been the live service since 2026-09-09. Startup completed
-on the actual microphone/keyboards without a callback-timeout warning; live
-evdev descriptor flags were read-only, with no service restarts or watchdog
-warnings during the post-switch check.
+on the actual microphone without a callback-timeout warning, with no service
+restarts or watchdog warnings during the post-switch check. (Until 2026-09-21
+it also read the keyboard through evdev, read-only.)
 
 The first live Rust dictation captured 89.3s of audio for an 89.2s hold;
 release decoded the remaining 2.6s in 0.27s, followed by a 33ms editor append.
@@ -255,5 +259,4 @@ saved recordings cannot establish live microphone reliability; that requires
 dictation through the running Rust service.
 
 Native API sources: [sherpa Rust wrapper](https://docs.rs/sherpa-onnx/1.13.6/sherpa_onnx/),
-[evdev](https://docs.rs/evdev/0.13.2/evdev/struct.Device.html),
 [i3 IPC](https://i3wm.org/docs/ipc.html).

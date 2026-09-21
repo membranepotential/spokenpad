@@ -1,53 +1,35 @@
 # Hardware
 
-← [docs index](README.md) | The keycode chain below is why
-`shell/hotkey.rs` (see [architecture.md](architecture.md)) reads evdev
-directly instead of using a keysym-based hotkey library — reinforced by
-[constraints.md](constraints.md#read-evdev-read-only). The dictation
-window's per-output placement is `pick_output`/`placement` in
-[`core/geometry.rs`](../src/core/geometry.rs).
+← [docs index](README.md) | The dictation window's per-output placement is
+`pick_output`/`placement` in [`core/geometry.rs`](../src/core/geometry.rs).
 
-spokenpad needs Linux with evdev, a microphone PortAudio can open, and an
-x86-64 or aarch64 CPU. Any desktop works, X11 or Wayland; only managed mode
-needs i3 or sway. Figures below come from one example machine and are
-labelled as such.
+spokenpad needs Linux, a microphone PortAudio can open, and an x86-64 or
+aarch64 CPU. Any desktop works, X11 or Wayland; only managed mode needs i3 or
+sway. Figures below come from one example machine and are labelled as such.
 
-## Hotkey: an evdev key code
+## Keys
 
-`hotkey.key_code` is the Linux evdev code of the push-to-talk key, not the
-X11 keycode (which is the evdev code + 8, the standard XKB offset) and not a
-keysym. The default, `186`, is `KEY_F16`: no application binds it, so holding
-it collides with nothing. Most keyboards lack the key, but keyboard firmware
-(QMK, VIA) or a remapper such as keyd can send F13–F24 from any key. The
-chain for the default:
+spokenpad reads no input device, so it has no key of its own: the window
+manager or desktop runs `spokenpad start|stop|toggle|cancel` from the user's
+bindings ([README](../README.md#bind-your-keys),
+[constraints.md](constraints.md#read-no-input-device)). The README's
+examples use F16, which keyboard firmware (QMK, VIA) or a remapper such as
+keyd can send from any key. Its chain on a standard XKB layout:
 
 ```
 evdev 186 (KEY_F16)  →  X11 keycode 194  →  keysym XF86Launch7
 ```
 
-To use another key, find its code with `evtest` (pick the keyboard, press
-the key, read `code NNN`) or `libinput debug-events --show-keycodes`, and set
-`hotkey.key_code`. On X11, `xev` prints the X11 keycode; subtract 8. The
-daemon exits with code 3 when no readable input device advertises that code;
-reading `/dev/input` needs membership in the `input` group.
-
-**Why evdev and not a keysym.** A keysym-based hotkey library resolves the
-binding through the X keymap, and X11 keycodes and their layout mapping are
-per-device and fragile. `shell/hotkey.rs` binds the raw evdev code upstream
-of any X11 layout translation, and opens the device read-only
-([constraints.md](constraints.md#read-evdev-read-only)).
-
-`hotkey.cancel_key_code` defaults to evdev `1` (`KEY_ESC`); an omitted value
-keeps that default. The current TOML surface cannot disable cancelling
-([`config.rs`](../src/config.rs)).
+So a binding names it as keycode `194` or keysym `XF86Launch7`, not `F16`.
+`xev` (X11) or `wev` (Wayland) prints both for any key.
 
 ### Per-device keyboard layouts
 
 A keyboard can carry its own XKB layout, set with `setxkbmap -device`, for
 example an external keyboard with a different layout from the laptop's. A
-uinput clone of the keyboard would lose that layout, which is one
-reason spokenpad never grabs or clones a device
-([constraints.md](constraints.md#read-evdev-read-only)).
+uinput clone of the keyboard would lose that layout, which is one reason
+spokenpad never touches an input device
+([constraints.md](constraints.md#read-no-input-device)).
 
 ## Displays
 

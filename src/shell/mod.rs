@@ -4,8 +4,9 @@
 //! Each module keeps the I/O and hands the decisions to [`core`](crate::core);
 //! logic that needs none of those belongs on that side instead.
 pub mod audio;
+pub mod control;
 pub mod daemon;
-pub mod hotkey;
+
 pub mod inference;
 pub mod logging;
 pub mod nvim;

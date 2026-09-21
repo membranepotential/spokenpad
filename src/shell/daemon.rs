@@ -1,12 +1,14 @@
-//! Four owners: main/session, input, inference, and editor; recorder owns disk I/O.
+//! Four owners: main/session, control socket, inference, and editor; recorder
+//! owns disk I/O.
 //!
 //! [`run`] is the imperative shell: it takes the per-user lock, registers
-//! signals, opens PortAudio and evdev, and loads the models. [`serve`] is the
-//! event loop over whatever devices it is handed, which is what the headless
-//! end-to-end tests drive.
+//! signals, opens PortAudio, loads the models and listens on the control
+//! socket. [`serve`] is the event loop over whatever devices it is handed,
+//! which is what the headless end-to-end tests drive.
 use crate::{
     config::Config,
     core::{
+        control::{Received, Request},
         decode::{
             Commit, Pipeline, Preview, Recognizer, Segmenter, Utterance, UtteranceId, Worker,
         },
@@ -17,7 +19,7 @@ use crate::{
     },
     shell::{
         audio::{AudioCapture, CaptureEvent, InputBackend, PostRoll},
-        hotkey::HotkeyWatcher,
+        control::ControlServer,
         inference::{Transcriber, load_segmenter},
         nvim::{AppendFailure, CopyOutcome, IndicatorState, NvimSession},
     },
@@ -25,7 +27,6 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use std::{
     collections::VecDeque,
-    fmt,
     fs::{self, File, OpenOptions},
     os::{
         fd::AsRawFd,
@@ -50,75 +51,103 @@ const DEVICE_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const INCOMPLETE_HOLD: Duration = Duration::from_secs(1);
 const NEARLY_SILENT_PEAK: f32 = 0.01;
 
-/// The hotkey device could not be opened. systemd treats exit code 3 as a
-/// permanent failure, so this is matched by type, never by message.
-#[derive(Debug)]
-pub struct HotkeyUnavailable;
-
-impl fmt::Display for HotkeyUnavailable {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("hotkey watcher could not start")
-    }
-}
-
-impl std::error::Error for HotkeyUnavailable {}
-
 /// Everything the event loop reads from the outside world.
 pub struct Devices<B: InputBackend, R, S> {
     pub capture: AudioCapture<B>,
-    /// Key events. The sender being dropped means the input source ended.
-    pub keys: Receiver<Event>,
+    /// Control requests. The sender being dropped means the socket closed.
+    pub requests: Receiver<Received>,
     pub worker: Worker<R, S>,
 }
 
-/// Key events in arrival order. A release's post-roll ends as soon as a key
-/// press is waiting; it looks by moving every received event into `early`,
-/// which the loop drains before receiving anything newer, so nothing is lost
-/// or reordered.
-struct Keys {
-    receiver: Receiver<Event>,
-    early: VecDeque<Event>,
-    /// False once the sender is gone: the input source ended.
+/// Control requests in arrival order, each preceded by the clock at its own
+/// stamp, so a repeat window that closed before a request arrived is closed
+/// before the request is read (see [`crate::core::state`]).
+///
+/// A release's post-roll ends as soon as a request that would start a
+/// capture is waiting; it looks by moving every received request into
+/// `early`, which is drained before anything newer, so nothing is lost or
+/// reordered.
+struct Requests {
+    receiver: Receiver<Received>,
+    early: VecDeque<Received>,
+    /// The clock at the head request's stamp was already handed out.
+    head_clocked: bool,
+    /// This drain already ended with the clock at the current time.
+    drained: bool,
+    /// False once the sender is gone: the control socket closed.
     alive: bool,
 }
 
-impl Keys {
-    fn new(receiver: Receiver<Event>) -> Self {
+impl Requests {
+    fn new(receiver: Receiver<Received>) -> Self {
         Self {
             receiver,
             early: VecDeque::new(),
+            head_clocked: false,
+            drained: false,
             alive: true,
         }
     }
 
+    /// The next event of one drain: the clock and then the request, for each
+    /// waiting request; then the clock at the current time, once; then
+    /// `None`, and the next call begins a new drain.
     fn next(&mut self) -> Option<Event> {
-        self.early.pop_front().or_else(|| self.receive())
+        if self.early.is_empty()
+            && let Some(request) = self.receive()
+        {
+            self.early.push_back(request);
+        }
+        if let Some(&head) = self.early.front() {
+            self.drained = false;
+            if std::mem::replace(&mut self.head_clocked, true) {
+                self.head_clocked = false;
+                self.early.pop_front();
+                return Some(Event::Request(head));
+            }
+            return Some(Event::Clock { now: head.at });
+        }
+        if std::mem::replace(&mut self.drained, true) {
+            self.drained = false;
+            return None;
+        }
+        let now = Instant::now();
+        // A request stamped before `now` may have arrived meanwhile; it goes
+        // first, or the clock could close a window that it continues.
+        match self.receive() {
+            Some(request) => {
+                self.drained = false;
+                self.early.push_back(request);
+                self.next()
+            }
+            None => Some(Event::Clock { now }),
+        }
     }
 
-    /// Whether a key press is waiting, or no event can ever arrive again.
-    /// Only a press would start a new capture: the key-up of the press that
-    /// stopped a latched recording, a cancel, or a lost keyboard must not
-    /// shorten the post-roll of the capture that is ending.
-    fn press_waiting(&mut self) -> bool {
-        while let Some(event) = self.receive() {
-            self.early.push_back(event);
+    /// Whether a request that would start a capture is waiting, or no request
+    /// can ever arrive again. A `stop` or a `cancel` must not shorten the
+    /// post-roll of the capture that is ending: the `stop` of the press that
+    /// ended a latched capture follows it within the post-roll.
+    fn start_waiting(&mut self) -> bool {
+        while let Some(request) = self.receive() {
+            self.early.push_back(request);
         }
         self.early
             .iter()
-            .any(|event| matches!(event, Event::Down { .. }))
+            .any(|r| matches!(r.request, Request::Start | Request::Toggle))
             || !self.alive
     }
 
-    /// No event is queued and none can arrive again. Disconnection alone is
-    /// not enough: `press_waiting` may have seen it while events it moved into
-    /// `early` are still owed to the loop.
+    /// No request is queued and none can arrive again. Disconnection alone is
+    /// not enough: `start_waiting` may have seen it while requests it moved
+    /// into `early` are still owed to the loop.
     fn exhausted(&self) -> bool {
         !self.alive && self.early.is_empty()
     }
 
-    fn receive(&mut self) -> Option<Event> {
+    fn receive(&mut self) -> Option<Received> {
         match self.receiver.try_recv() {
-            Ok(event) => Some(event),
+            Ok(request) => Some(request),
             Err(mpsc::TryRecvError::Empty) => None,
             Err(mpsc::TryRecvError::Disconnected) => {
                 self.alive = false;
@@ -389,25 +418,23 @@ pub fn run(config: Config, dump_dir: Option<&Path>) -> Result<()> {
         segmenter: load_segmenter(&config.vad, config.audio.sample_rate),
     });
     let capture = AudioCapture::new(config.audio.clone(), config.recording.clone())?;
-    let (keys_tx, keys) = mpsc::channel();
-    let mut watcher =
-        HotkeyWatcher::start(config.hotkey.clone(), keys_tx).context(HotkeyUnavailable)?;
-    log::info!(
-        "model ready; listening for key code {}",
-        config.hotkey.key_code
-    );
-    let result = serve(
+    let (requests_tx, requests) = mpsc::channel();
+    // Bound last: a request is accepted only once it can be acted on, and
+    // the CLI says "no daemon" rather than queueing presses behind a model
+    // that is still loading.
+    let socket = crate::config::control_socket();
+    let _control = ControlServer::bind(&socket, requests_tx)?;
+    log::info!("model ready; listening on {}", socket.display());
+    serve(
         &config,
         Devices {
             capture,
-            keys,
+            requests,
             worker,
         },
         stopping,
         dump_dir,
-    );
-    watcher.stop();
-    result
+    )
 }
 
 /// The event loop. Touches no process-global state: no lock, no signals, no
@@ -425,10 +452,10 @@ where
 {
     let Devices {
         mut capture,
-        keys,
+        requests,
         mut worker,
     } = devices;
-    let mut keys = Keys::new(keys);
+    let mut requests = Requests::new(requests);
     let rate = config.audio.sample_rate;
     // Without a segmenter nothing ever settles, so a preview would re-decode
     // the whole growing capture. That is the one thing this project refuses.
@@ -454,9 +481,10 @@ where
     let mut next_device_poll = Instant::now();
     let result = (|| -> Result<()> {
         while !stopping.load(Ordering::Acquire) {
-            // Give key release/cancel priority over delivery of inference results.
-            for _ in 0..128 {
-                let Some(event) = keys.next() else {
+            // Give requests and the clock priority over delivery of
+            // inference results.
+            for _ in 0..256 {
+                let Some(event) = requests.next() else {
                     break;
                 };
                 match session.event(event) {
@@ -464,7 +492,10 @@ where
                         if let Err(e) = capture.start_capture() {
                             // The press cleared the previous notice; cancel
                             // first, then say why nothing is being recorded.
-                            session.event(Event::Cancel);
+                            session.event(Event::Request(Received {
+                                request: Request::Cancel,
+                                at: Instant::now(),
+                            }));
                             session.notify(Notice::MicrophoneUnavailable);
                             log::error!("capture could not start: {e:#}");
                         }
@@ -474,15 +505,15 @@ where
                         // no explanation anywhere.
                         send(&editor_tx, EditorWork::Ensure)?;
                     }
-                    Command::Decode => {
-                        // The winbar says "transcribing" from the key-up on,
-                        // not only once the post-roll has arrived.
+                    Command::Decode { released } => {
+                        // The winbar says "transcribing" from here on, not
+                        // only once the post-roll has arrived.
                         send(
                             &editor_tx,
                             EditorWork::Indicator(indicator_of(&session, 0.)),
                         )?;
-                        let (samples, postroll) = capture.finish_capture(|| {
-                            stopping.load(Ordering::Acquire) || keys.press_waiting()
+                        let (samples, postroll) = capture.finish_capture(released, || {
+                            stopping.load(Ordering::Acquire) || requests.start_waiting()
                         });
                         note_postroll(postroll, &mut session);
                         for event in capture.poll() {
@@ -625,7 +656,7 @@ where
                 EditorWork::Indicator(indicator_of(&session, level)),
             )?;
             ensure!(
-                !keys.exhausted() && !engine.is_finished() && !editor.is_finished(),
+                !requests.exhausted() && !engine.is_finished() && !editor.is_finished(),
                 "a required worker stopped unexpectedly"
             );
             thread::sleep(LOOP_INTERVAL);
@@ -802,7 +833,7 @@ fn note_postroll(postroll: PostRoll, session: &mut Session) {
     match postroll {
         PostRoll::Complete => {}
         PostRoll::Interrupted => {
-            log::debug!("post-roll ended early by a key event or shutdown")
+            log::debug!("post-roll ended early by a new capture or shutdown")
         }
         PostRoll::TimedOut => {
             log::warn!(
@@ -864,5 +895,45 @@ fn log_recording(status: RecordingStatus) {
         RecordingStatus::Recorded(p) => log::info!("recorded to {}", p.display()),
         RecordingStatus::Truncated(p) => log::error!("recording {} is INCOMPLETE", p.display()),
         RecordingStatus::NotRecorded => log::warn!("no recovery WAV for this capture"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every request is preceded by the clock at its own stamp, and a drain
+    /// ends with the clock at the current time, once.
+    #[test]
+    fn requests_are_clocked_at_their_stamps() {
+        let (sender, receiver) = mpsc::channel();
+        let mut requests = Requests::new(receiver);
+        let t = Instant::now();
+        let stop = Received {
+            request: Request::Stop,
+            at: t,
+        };
+        let start = Received {
+            request: Request::Start,
+            at: t + Duration::from_millis(40),
+        };
+        sender.send(stop).unwrap();
+        sender.send(start).unwrap();
+        assert_eq!(requests.next(), Some(Event::Clock { now: t }));
+        assert!(requests.start_waiting(), "the start is waiting behind it");
+        assert_eq!(requests.next(), Some(Event::Request(stop)));
+        assert_eq!(requests.next(), Some(Event::Clock { now: start.at }));
+        assert_eq!(requests.next(), Some(Event::Request(start)));
+        let before = Instant::now();
+        assert!(matches!(
+            requests.next(),
+            Some(Event::Clock { now }) if now >= before
+        ));
+        assert_eq!(requests.next(), None, "the drain is over");
+        assert!(matches!(requests.next(), Some(Event::Clock { .. })));
+        assert!(!requests.exhausted());
+        drop(sender);
+        assert_eq!(requests.next(), None);
+        assert!(requests.exhausted());
     }
 }

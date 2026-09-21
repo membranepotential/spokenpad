@@ -20,6 +20,7 @@ fn help_and_version_do_not_initialize_devices_or_models() {
     assert_eq!(code(&help), 0);
     assert!(String::from_utf8_lossy(&help.stdout).contains("transcribe"));
     assert!(String::from_utf8_lossy(&help.stdout).contains("editor"));
+    assert!(String::from_utf8_lossy(&help.stdout).contains("toggle"));
     let version = command(&dir).arg("--version").output().unwrap();
     assert_eq!(code(&version), 0);
     assert!(String::from_utf8_lossy(&version.stdout).contains(env!("CARGO_PKG_VERSION")));
@@ -150,4 +151,39 @@ fn invalid_config_fails_before_devices_and_missing_model_is_exit_two() {
         .unwrap();
     assert_eq!(code(&output), 2);
     assert!(output.stdout.is_empty());
+}
+/// A key binding with no daemon behind it: a clear message, a nonzero exit,
+/// and nothing created, not even the config it never reads.
+#[test]
+fn a_control_command_without_a_daemon_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("spokenpad.sock");
+    for request in ["start", "stop", "toggle", "cancel"] {
+        let output = command(&dir).arg(request).output().unwrap();
+        assert_eq!(code(&output), 1, "{request}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("no spokenpad daemon is listening")
+                && stderr.contains(&socket.display().to_string()),
+            "{request}: {stderr}"
+        );
+        assert!(output.stdout.is_empty());
+    }
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+}
+/// A config from before the control socket names what replaced `[hotkey]`.
+#[test]
+fn a_hotkey_table_in_the_config_points_to_the_bindings() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("old.toml");
+    std::fs::write(&path, "[hotkey]\nkey_code = 186\n").unwrap();
+    let output = command(&dir)
+        .arg("-c")
+        .arg(path)
+        .arg("check")
+        .output()
+        .unwrap();
+    assert_eq!(code(&output), 1);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("spokenpad start"), "{stderr}");
 }

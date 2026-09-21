@@ -12,7 +12,7 @@ they are constraints earned by breaking a running system.
 
 | Rule | Observed failure it prevents | Damaged the system? |
 |---|---|---|
-| Read `/dev/input/event*` **read-only** | uinput clone inherited the default XKB layout | yes |
+| **Read no input device**; control only through the socket | uinput clone inherited the default XKB layout | yes |
 | **Never** synthesise characters (`xdotool type` / enigo) | rewrote the core X keymap | yes |
 | **Never write to a window the user did not open for this** | text pasted into whatever had focus | no |
 | **Every committed sample decoded exactly once**, never from a growing buffer | growing-buffer re-decode dropped long utterances | no (functional, silent) |
@@ -20,7 +20,7 @@ they are constraints earned by breaking a running system.
 | **Bias vocabulary at decode time**, never fuzzy replacement | edit-distance rewrite turned real words into wrong ones | no |
 | **No window spokenpad opens may take focus** | focus steal aborted transcription mid-utterance | no |
 
-## Read evdev read-only
+## Read no input device
 
 The replaced tool grabbed its hotkey by cloning the keyboard through a uinput
 virtual device (the standard way to intercept a key system-wide on Linux: grab
@@ -32,9 +32,17 @@ X11's default layout is. The result: keyboard layout for that input path
 silently reverted, corrupting keystrokes system-wide until the physical
 device was replugged.
 
-**Rule:** spokenpad reads `/dev/input/event*` for the hotkey only, never calls
-`EVIOCGRAB`, and never creates a uinput clone. It observes key state; it does
-not intercept or re-emit it.
+**Rule:** spokenpad opens no input device at all. It never calls
+`EVIOCGRAB`, never creates a uinput clone, and never reads `/dev/input`. The
+daemon is controlled only through its control socket
+([`shell/control.rs`](../src/shell/control.rs)): the user binds keys in the
+window manager or desktop to `spokenpad start`, `stop`, `toggle` and
+`cancel`, and the window manager owns the key.
+
+Until 2026-09-21 the rule was weaker: spokenpad read `/dev/input/event*`
+read-only for its hotkey. That needed the `input` group, which can read
+every keystroke on the machine, and it made spokenpad look like it owned the
+key. See [decisions.md](decisions.md#control-by-socket-not-by-reading-the-keyboard).
 
 ## Never synthesise characters
 
@@ -154,8 +162,7 @@ One property is weaker than a single decode at release, and it is stated
 rather than hidden: a cancel no longer means the text never existed. While
 recording it means "stop adding" — what is already in the buffer stays,
 because it is the user's file. After the key is released it means nothing at
-all: the cancel key is read from every keyboard regardless of focus, the audio
-is already captured, and the final decode is about to land, so
+all: the audio is already captured, and the final decode is about to land, so
 `(Transcribing, Cancel)` is a no-op rather than a way to destroy a finished
 dictation.
 

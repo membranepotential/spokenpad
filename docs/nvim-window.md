@@ -212,30 +212,22 @@ they wanted it. Reattaching to a running editor moves nothing.
 
 ## Latched recording
 
-Holding the latch modifier (`hotkey.latch_modifier`, shift by default) with
-the hotkey starts a recording that outlives the key release: let go, keep
-talking, press the hotkey again to stop. Push-to-talk is unchanged without it.
+`spokenpad toggle` (bound to Shift and the push-to-talk key) starts a
+recording that outlives the key release: let go, keep talking, press the key
+again to stop. Push-to-talk is unchanged without it.
 
-The mode lives in the state machine — `Recording { latched: true }` — rather than
-being read off whichever event ends the recording, because the ending event
-differs between the modes: a `KeyUp` for push-to-talk, a `KeyDown` for a
-latch. The stopping press does *not* need the modifier, so there is nothing to
-remember about which hand started it. The winbar shows a lock while latched.
+The mode lives in the state machine — `Recording { hold: Hold::Latched }` —
+rather than being read off whichever request ends the recording, because the
+ending request differs between the modes: a `stop` for push-to-talk, a
+`start` or `toggle` for a latch. The stopping press does *not* need Shift, so
+there is nothing to remember about which hand started it. Every `stop` is
+ignored while latched, because Shift and the key come up in either order and
+the window manager may or may not send one. A `toggle` while the key is held
+latches the running recording. The winbar shows a lock while latched.
 
-The latch is decided from the **event stream**: the watcher folds every key
-event in as it reads it, per device, and a hotkey press latches if a latch
-modifier is held on *any* watched keyboard — a modifier-only keyboard is watched
-precisely so shift on one can latch the hotkey on another. Each device's
-modifier set is seeded from the kernel (`active_keys()`) when the device is
-registered, which is what makes a modifier already held at plug-in time visible;
-after that, querying the kernel again would answer for the wrong moment, since a
-batch of events is read at once and the press has to be judged in event order.
-
-Devices are identified by `(rdev, ino)`, not by path: a replug within one 500 ms
-rescan reuses `/dev/input/eventN` for a freshly created node, and the path alone
-would hide it. Losing the keyboard that holds the hotkey — or the last
-hotkey-capable keyboard during a latched recording — sends `HotkeyLost`, not
-`Cancel`: what was said is decoded rather than thrown away.
+The full transition table, including how auto-repeat is told apart from a
+second press, is in [`core/state.rs`](../src/core/state.rs) and
+[decisions.md](decisions.md#control-by-socket-not-by-reading-the-keyboard).
 
 ## The file
 

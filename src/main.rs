@@ -2,7 +2,7 @@ use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand};
 use spokenpad::{
     config::Config,
-    core::{decode::Pipeline, text::Processor},
+    core::{control::Request, decode::Pipeline, text::Processor},
     shell::inference::{Transcriber, load_segmenter, model_config},
 };
 use std::{io::Write, os::unix::fs::OpenOptionsExt, path::PathBuf, process::ExitCode};
@@ -26,7 +26,37 @@ struct Args {
     #[arg(long, value_name = "DIR")]
     dump_audio: Option<PathBuf>,
     #[command(subcommand)]
-    command: Option<Action>,
+    command: Option<Command>,
+}
+#[derive(Subcommand)]
+enum Command {
+    #[command(flatten)]
+    Control(Control),
+    #[command(flatten)]
+    Action(Action),
+}
+/// Requests to the running daemon, for key bindings. Each sends one request
+/// over the control socket and exits: no config is read, no model loaded.
+#[derive(Subcommand, Clone, Copy)]
+enum Control {
+    /// Begin a push-to-talk capture. Bind it to the key going down.
+    Start,
+    /// End a push-to-talk capture. Bind it to the key coming up.
+    Stop,
+    /// Begin a latched capture, or end the capture that is running.
+    Toggle,
+    /// Discard the capture being recorded. Text already in the file stays.
+    Cancel,
+}
+impl From<Control> for Request {
+    fn from(control: Control) -> Self {
+        match control {
+            Control::Start => Self::Start,
+            Control::Stop => Self::Stop,
+            Control::Toggle => Self::Toggle,
+            Control::Cancel => Self::Cancel,
+        }
+    }
 }
 #[derive(Subcommand)]
 enum Action {
@@ -62,13 +92,23 @@ fn write_transcript(text: &str, out: Option<&std::path::Path>) -> Result<()> {
     Ok(())
 }
 fn run(args: Args) -> Result<u8> {
+    // First, and alone: a key binding spawns this on every press and release.
+    let command = match args.command {
+        Some(Command::Control(control)) => {
+            let socket = spokenpad::config::control_socket();
+            spokenpad::shell::control::send(&socket, control.into())?;
+            return Ok(0);
+        }
+        Some(Command::Action(action)) => Some(action),
+        None => None,
+    };
     spokenpad::shell::logging::init(args.verbose, args.log_file.as_deref())?;
     let mut config = Config::load(args.config.as_deref())?;
     if let Some(p) = args.model_dir {
         config.asr.model_dir = spokenpad::config::expand_path(&p)?;
     }
     config.validate()?;
-    match args.command {
+    match command {
         Some(Action::Editor) => match spokenpad::shell::nvim::open_editor(&config.nvim)? {},
         Some(Action::Transcribe { wav, out }) => {
             let (samples, rate) = match spokenpad::shell::recorder::read_capture(&wav) {
@@ -135,23 +175,10 @@ fn run(args: Args) -> Result<u8> {
             if let Some(p) = &args.dump_audio {
                 std::fs::create_dir_all(p)?;
             }
-            if let Err(e) = spokenpad::shell::daemon::run(config, args.dump_audio.as_deref()) {
-                let Some(code) = permanent_failure(&e) else {
-                    return Err(e);
-                };
-                log::error!("{e:#}");
-                return Ok(code);
-            }
+            spokenpad::shell::daemon::run(config, args.dump_audio.as_deref())?;
         }
     }
     Ok(0)
-}
-/// Exit codes systemd must treat as permanent, selected by error type so a
-/// reworded message can never silently turn into a restart loop.
-fn permanent_failure(error: &anyhow::Error) -> Option<u8> {
-    error
-        .downcast_ref::<spokenpad::shell::daemon::HotkeyUnavailable>()
-        .map(|_| 3)
 }
 fn main() -> ExitCode {
     match run(Args::parse()) {
@@ -160,35 +187,5 @@ fn main() -> ExitCode {
             eprintln!("spokenpad: {e:#}");
             ExitCode::FAILURE
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use anyhow::anyhow;
-    use spokenpad::shell::daemon::HotkeyUnavailable;
-
-    #[test]
-    fn only_the_typed_hotkey_failure_maps_to_exit_code_three() {
-        let wrapped: anyhow::Error = Err::<(), _>(anyhow!("no permission on /dev/input/event3"))
-            .context(HotkeyUnavailable)
-            .unwrap_err();
-        assert_eq!(permanent_failure(&wrapped), Some(3));
-        assert!(
-            wrapped
-                .to_string()
-                .contains("hotkey watcher could not start"),
-            "{wrapped}"
-        );
-        assert!(
-            format!("{wrapped:#}").contains("/dev/input/event3"),
-            "the cause must stay in the message"
-        );
-
-        // A message that merely reads like it is not a permanent failure.
-        let lookalike = anyhow!("hotkey watcher could not start");
-        assert_eq!(permanent_failure(&lookalike), None);
-        assert_eq!(permanent_failure(&anyhow!("editor died")), None);
     }
 }

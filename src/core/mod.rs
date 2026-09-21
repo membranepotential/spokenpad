@@ -5,10 +5,10 @@
 //! hands them, so every rule they encode is unit-testable without hardware.
 //! Code that needs an input device, a sound card, a model, the filesystem, a
 //! process, a socket or a thread belongs on the other side.
+pub mod control;
 pub mod decode;
 pub mod frames;
 pub mod geometry;
-pub mod hotkey;
 pub mod segments;
 pub mod session;
 pub mod state;

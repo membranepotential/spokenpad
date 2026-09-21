@@ -37,44 +37,6 @@ impl Decoding {
     }
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Modifier {
-    Shift,
-    Ctrl,
-    Alt,
-    Super,
-    None,
-}
-impl Modifier {
-    pub fn codes(self) -> &'static [u16] {
-        match self {
-            Self::Shift => &[42, 54],
-            Self::Ctrl => &[29, 97],
-            Self::Alt => &[56, 100],
-            Self::Super => &[125, 126],
-            Self::None => &[],
-        }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct Hotkey {
-    pub key_code: u16,
-    pub cancel_key_code: Option<u16>,
-    pub latch_modifier: Modifier,
-}
-impl Default for Hotkey {
-    fn default() -> Self {
-        Self {
-            key_code: 186,
-            cancel_key_code: Some(1),
-            latch_modifier: Modifier::Shift,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Audio {
@@ -97,16 +59,14 @@ impl Default for Audio {
 }
 impl Audio {
     pub fn preroll_frames(&self) -> usize {
-        self.frames_in(self.preroll_ms)
-    }
-    pub fn postroll_frames(&self) -> usize {
-        self.frames_in(self.postroll_ms)
+        self.frames_in(Duration::from_millis(u64::from(self.preroll_ms)))
     }
     pub fn postroll(&self) -> Duration {
         Duration::from_millis(u64::from(self.postroll_ms))
     }
-    fn frames_in(&self, milliseconds: u32) -> usize {
-        (u64::from(self.sample_rate) * u64::from(milliseconds) / 1000) as usize
+    /// Whole frames in `span` at the sample rate.
+    pub fn frames_in(&self, span: Duration) -> usize {
+        (u128::from(self.sample_rate) * span.as_millis() / 1000) as usize
     }
 }
 
@@ -338,6 +298,17 @@ fn home() -> PathBuf {
 pub fn state_dir() -> PathBuf {
     state_home().join("spokenpad")
 }
+/// The daemon's control socket, which `spokenpad start|stop|toggle|cancel`
+/// connect to: `$XDG_RUNTIME_DIR/spokenpad.sock`, or the private state
+/// directory when there is no runtime directory. Deliberately not a config
+/// key, so the CLI a key binding spawns reads no file to find it.
+pub fn control_socket() -> PathBuf {
+    env::var_os("XDG_RUNTIME_DIR")
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(state_dir)
+        .join("spokenpad.sock")
+}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -432,7 +403,6 @@ impl Default for Preview {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
-    pub hotkey: Hotkey,
     pub audio: Audio,
     pub recording: Recording,
     pub asr: Asr,
@@ -469,6 +439,16 @@ impl Config {
         )
     }
     pub fn parse(input: &str, base: Option<&Path>) -> Result<Self> {
+        // Removed rather than unknown: say what replaced it. Input that is
+        // not TOML at all is reported by the typed parse below.
+        if input
+            .parse::<toml::Table>()
+            .is_ok_and(|table| table.contains_key("hotkey"))
+        {
+            bail!(
+                "[hotkey] was removed: spokenpad no longer reads the keyboard. Delete the [hotkey] table and bind keys in your window manager to `spokenpad start`, `spokenpad stop`, `spokenpad toggle` and `spokenpad cancel` (see \"Bind your keys\" in the README)"
+            );
+        }
         let mut c: Self = toml::from_str(input).context("invalid configuration")?;
         // A relative model path is relative to the config file. The defaults
         // are absolute, so joining leaves them alone.
@@ -494,16 +474,6 @@ impl Config {
         Ok(c)
     }
     pub fn validate(&self) -> Result<()> {
-        ensure!(
-            (1..0x300).contains(&self.hotkey.key_code),
-            "hotkey.key_code out of range"
-        );
-        if let Some(k) = self.hotkey.cancel_key_code {
-            ensure!(
-                (1..0x300).contains(&k) && k != self.hotkey.key_code,
-                "invalid or conflicting cancel key"
-            );
-        }
         ensure!(
             self.audio.sample_rate == REQUIRED_SAMPLE_RATE,
             "audio.sample_rate must be {REQUIRED_SAMPLE_RATE}: the Silero VAD window is 512 samples at 16kHz and the ASR models expect 16kHz input"
@@ -737,6 +707,16 @@ mod tests {
             "[text]\nfillers=['']",
         ] {
             assert!(Config::parse(bad, None).is_err(), "accepted {bad}");
+        }
+    }
+    #[test]
+    fn a_hotkey_table_says_what_replaced_it() {
+        for old in ["[hotkey]\nkey_code = 186", "[hotkey]", "hotkey = {}"] {
+            let error = format!("{:#}", Config::parse(old, None).unwrap_err());
+            assert!(
+                error.contains("[hotkey] was removed") && error.contains("spokenpad start"),
+                "{error}"
+            );
         }
     }
     #[test]

@@ -25,7 +25,7 @@ and verification. Historical measurements are labelled where retained.
 6. **[evaluation.md](evaluation.md)** — the regression harness
    (`examples/eval.rs`): WER on the local clips and what it is worth.
 7. **[hardware.md](hardware.md)** — what spokenpad needs from the machine:
-   the hotkey's evdev code, CPU, audio, displays and window manager.
+   the keys' codes, CPU, audio, displays and window manager.
 8. **[decisions.md](decisions.md)** — an ADR-style log of what was chosen,
    what was rejected, and why.
 
