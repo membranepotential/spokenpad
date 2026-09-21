@@ -273,7 +273,8 @@ colourscheme's own.
 Neither of the fast rows is a default this project can pick, because the
 colourscheme name is the user's. `config.example.toml` documents the recipe.
 
-The bundled config also maps `j`/`k` to move by **screen** line. An utterance
+The bundled config also maps `j`/`k` and the `<Down>`/`<Up>` arrows to move
+by **screen** line. An utterance
 is one buffer line wrapped over many screen rows, so plain `j` leaps a whole
 paragraph and reading a transcript by keyboard is unusable. It is an
 expression mapping that checks `v:count`, so `5j` still means five buffer

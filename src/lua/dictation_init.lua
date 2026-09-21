@@ -189,9 +189,10 @@ vim.keymap.set("n", "q", "<Cmd>quit<CR>", { desc = "close the dictation window" 
 -- paragraph and reading a long transcript by keyboard is unusable. `gg`, `G`
 -- and a counted `5j` keep meaning exactly what they always did -- the count
 -- check is what preserves that, and it is why this is an expression mapping
--- rather than a plain one.
-for _, key in ipairs({ "j", "k" }) do
+-- rather than a plain one. The arrow keys get the same treatment; `<Left>`
+-- and `<Right>` already behave like `h` and `l`.
+for key, motion in pairs({ j = "j", k = "k", ["<Down>"] = "j", ["<Up>"] = "k" }) do
   vim.keymap.set({ "n", "x" }, key, function()
-    return vim.v.count == 0 and ("g" .. key) or key
+    return vim.v.count == 0 and ("g" .. motion) or motion
   end, { expr = true, desc = "move by screen line in wrapped prose" })
 end
