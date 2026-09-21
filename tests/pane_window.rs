@@ -1,43 +1,51 @@
-//! P0 of the own-window plan: does an X11 window with the proposed properties
-//! stay unfocused when it appears, and still accept a click and keystrokes?
+//! P0 of the own-window plan: does [`shell::pane::x11::Window`] stay unfocused
+//! when it appears, and still accept a click and keystrokes?
 //!
 //! The check runs against an X server and a window manager this test starts
 //! itself: an `Xvfb` on a free display number and an `i3` with a generated
 //! config and its own IPC socket. It never opens anything on the user's
-//! display, never reads the user's i3 config, and kills every process it
+//! display, never reads the user's i3 config, and stops every process it
 //! started, also when an assertion fails.
 //!
-//! The window under test is made by [`examples/pane_spike.rs`](../examples/pane_spike.rs),
-//! which this test drives over stdin/stdout.
-//!
-//! Beside the pass criteria the test records an ablation: the same window with
-//! one property dropped at a time. Those rows are printed (run with
-//! `-- --nocapture`) and are the evidence in
+//! The window under test is the one the pane ships, created by the library in
+//! this process. Beside the pass criteria the test records an ablation: the
+//! same window with one property rewritten before the map, over a second X
+//! connection, since a window manager only ever reads what is on the window at
+//! map time. Those rows are printed (run with `-- --nocapture`) and are the
+//! evidence in
 //! `docs/experiments/2026-09-21-own-window-p0-properties.md`.
 
 use anyhow::{Context, Result};
 use serde_json::Value;
-use spokenpad::core::wm::{HEADER_LEN, Message, encode, reply_length};
+use spokenpad::{
+    core::{
+        geometry::Rect,
+        wm::{HEADER_LEN, Message, encode, reply_length},
+    },
+    shell::pane::x11::Window as Pane,
+};
 use std::{
-    io::{BufRead, BufReader, Read, Write},
+    io::{Read, Write},
     net::Shutdown,
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
-    process::{Child, ChildStdin, Command, Stdio},
-    sync::mpsc::{Receiver, channel},
+    process::{Child, Command, Stdio},
     thread::sleep,
     time::{Duration, Instant},
 };
 use x11rb::{
     connection::Connection,
     protocol::{
+        Event,
         xproto::{
-            BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT, ConnectionExt as _, KEY_PRESS_EVENT,
-            KEY_RELEASE_EVENT, MOTION_NOTIFY_EVENT, Window,
+            AtomEnum, BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT, ClientMessageEvent,
+            ConnectionExt as _, CreateWindowAux, EventMask, KEY_PRESS_EVENT, KEY_RELEASE_EVENT,
+            MOTION_NOTIFY_EVENT, PropMode, Window, WindowClass,
         },
         xtest::ConnectionExt as _,
     },
     rust_connection::RustConnection,
+    wrapper::ConnectionExt as _,
 };
 
 /// How long the window manager may take to settle after a map before the test
@@ -105,7 +113,8 @@ impl Killed {
     }
 }
 
-/// The X server this test owns, and the connection it talks to it over.
+/// The X server this test owns, and the connection it watches it over. This
+/// connection is the test's own: the pane opens a second one of its own.
 struct XServer {
     number: u32,
     display: String,
@@ -131,10 +140,10 @@ impl XServer {
                 .spawn()
                 .expect("start Xvfb"),
         );
-        let connection = wait_for(START_TIMEOUT, "the X server to accept connections", || {
-            x11rb::connect(Some(&display)).ok()
-        });
-        let (connection, screen_index) = connection;
+        let (connection, screen_index) =
+            wait_for(START_TIMEOUT, "the X server to accept connections", || {
+                x11rb::connect(Some(&display)).ok()
+            });
         let root = connection.setup().roots[screen_index].root;
         Self {
             number,
@@ -166,6 +175,39 @@ impl XServer {
             .reply()
             .expect("the input focus")
             .focus
+    }
+
+    fn atom(&self, name: &str) -> u32 {
+        self.connection
+            .intern_atom(false, name.as_bytes())
+            .expect("intern an atom")
+            .reply()
+            .expect("the atom")
+            .atom
+    }
+
+    /// A plain, focusable window, so the workspace under test is not empty.
+    /// It carries none of the pane's properties.
+    fn plain_window(&self) -> Window {
+        let id = self.connection.generate_id().expect("a window id");
+        self.connection
+            .create_window(
+                x11rb::COPY_DEPTH_FROM_PARENT,
+                id,
+                self.root,
+                0,
+                0,
+                320,
+                200,
+                0,
+                WindowClass::INPUT_OUTPUT,
+                0,
+                &CreateWindowAux::new(),
+            )
+            .expect("create a plain window");
+        self.connection.map_window(id).expect("map it");
+        self.connection.flush().expect("flush");
+        id
     }
 }
 
@@ -322,126 +364,147 @@ fn yes_no(value: bool) -> &'static str {
     if value { "yes" } else { "no" }
 }
 
-// -------------------------------------------------------------- the spike
+// -------------------------------------------------- the window under test
 
-/// One running `examples/pane_spike`, driven over its stdin and stdout.
-struct Spike {
-    stdin: ChildStdin,
-    lines: Receiver<String>,
-    seen: Vec<String>,
-    child: Killed,
+/// The pane's window plus the events it has reported so far. The pane selects
+/// its own events on its own connection, so this is what the real window sees.
+struct Watched {
+    window: Pane,
+    key_press: usize,
+    button_press: usize,
+    focus_in: usize,
 }
 
-impl Spike {
-    fn start(server: &XServer, arguments: &[&str]) -> Self {
-        let mut child = Command::new(spike_binary())
-            .arg("--display")
-            .arg(&server.display)
-            .args(arguments)
-            .env("DISPLAY", &server.display)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .expect("start the pane spike");
-        let stdin = child.stdin.take().expect("the spike's stdin");
-        let stdout = child.stdout.take().expect("the spike's stdout");
-        let (sender, lines) = channel();
-        std::thread::spawn(move || {
-            for line in BufReader::new(stdout).lines() {
-                let Ok(line) = line else { return };
-                if sender.send(line).is_err() {
-                    return;
-                }
-            }
-        });
-        Self {
-            stdin,
-            lines,
-            seen: Vec::new(),
-            child: Killed(child),
-        }
+impl Watched {
+    fn open(server: &XServer) -> Self {
+        Self::at(
+            server,
+            Rect {
+                x: 0,
+                y: 0,
+                width: 480,
+                height: 240,
+            },
+        )
     }
 
-    fn send(&mut self, command: &str) {
-        writeln!(self.stdin, "{command}").expect("write a command to the spike");
-        self.stdin.flush().expect("flush the command");
+    fn at(server: &XServer, rect: Rect) -> Self {
+        let window = Pane::open(Some(&server.display), rect, "spokenpad dictation")
+            .expect("open the pane window");
+        Self {
+            window,
+            key_press: 0,
+            button_press: 0,
+            focus_in: 0,
+        }
     }
 
     fn pump(&mut self) {
-        while let Ok(line) = self.lines.try_recv() {
-            self.seen.push(line);
-        }
-    }
-
-    /// The first line starting with `prefix` that has not been taken yet.
-    fn expect(&mut self, prefix: &str) -> String {
-        let deadline = Instant::now() + START_TIMEOUT;
-        loop {
-            self.pump();
-            if let Some(index) = self
-                .seen
-                .iter()
-                .position(|line| line.starts_with(prefix) || line == prefix)
-            {
-                return self.seen.remove(index);
+        while let Some(event) = self.window.poll().expect("poll the pane's events") {
+            match event {
+                Event::KeyPress(_) => self.key_press += 1,
+                Event::ButtonPress(_) => self.button_press += 1,
+                Event::FocusIn(_) => self.focus_in += 1,
+                _ => {}
             }
-            assert!(
-                Instant::now() < deadline,
-                "the spike never said {prefix:?}; it said {:?}",
-                self.seen
-            );
-            assert!(
-                self.child.alive(),
-                "the spike exited before saying {prefix:?}"
-            );
-            sleep(Duration::from_millis(20));
         }
     }
 
-    fn count(&mut self, prefix: &str) -> usize {
-        self.pump();
-        self.seen
-            .iter()
-            .filter(|line| line.starts_with(prefix))
-            .count()
-    }
-
-    fn window(&mut self) -> Window {
-        let line = self.expect("window ");
-        line["window ".len()..].parse().expect("a window id")
-    }
-
-    /// Position and size in root coordinates, read from the X server.
-    fn geometry(&mut self) -> (i32, i32, u32, u32) {
-        self.send("geometry");
-        let line = self.expect("geometry ");
-        let values: Vec<i64> = line["geometry ".len()..]
-            .split_whitespace()
-            .map(|word| word.parse().expect("a number"))
-            .collect();
-        let [x, y, width, height] = values[..] else {
-            panic!("geometry needs four numbers, got {line:?}");
-        };
-        (x as i32, y as i32, width as u32, height as u32)
+    fn id(&self) -> Window {
+        self.window.id()
     }
 }
 
-/// `examples/pane_spike`, next to the test binary cargo just built.
-fn spike_binary() -> PathBuf {
-    let test = std::env::current_exe().expect("the test binary's path");
-    let binary = test
-        .parent()
-        .and_then(Path::parent)
-        .expect("target/<profile>")
-        .join("examples")
-        .join("pane_spike");
-    assert!(
-        binary.is_file(),
-        "{} is missing; build it with `cargo build --example pane_spike`",
-        binary.display()
+// ----------------------------------------------- rewriting properties to ablate
+
+/// The ablation rewrites a property on the pane's window over the *test's*
+/// connection, before the window is mapped. A window manager reads what is on
+/// the window at map time and does not care which client put it there, so this
+/// measures the shipped window with one property changed, rather than a
+/// second, similar window the test built itself.
+fn set_user_time(server: &XServer, window: Window, value: Option<u32>) {
+    let atom = server.atom("_NET_WM_USER_TIME");
+    match value {
+        Some(time) => server
+            .connection
+            .change_property32(PropMode::REPLACE, window, atom, AtomEnum::CARDINAL, &[time])
+            .expect("write _NET_WM_USER_TIME"),
+        None => server
+            .connection
+            .delete_property(window, atom)
+            .expect("delete _NET_WM_USER_TIME"),
+    };
+    server.connection.flush().expect("flush");
+}
+
+fn set_window_type(server: &XServer, window: Window, name: &str) {
+    let property = server.atom("_NET_WM_WINDOW_TYPE");
+    let value = server.atom(name);
+    server
+        .connection
+        .change_property32(
+            PropMode::REPLACE,
+            window,
+            property,
+            AtomEnum::ATOM,
+            &[value],
+        )
+        .expect("write _NET_WM_WINDOW_TYPE");
+    server.connection.flush().expect("flush");
+}
+
+fn set_input_hint(server: &XServer, window: Window, input: bool) {
+    x11rb::properties::WmHints {
+        input: Some(input),
+        initial_state: Some(x11rb::properties::WmHintsState::Normal),
+        ..x11rb::properties::WmHints::new()
+    }
+    .set(&server.connection, window)
+    .expect("write WM_HINTS");
+    server.connection.flush().expect("flush");
+}
+
+fn announce_take_focus(server: &XServer, window: Window) {
+    let protocols = server.atom("WM_PROTOCOLS");
+    let delete = server.atom("WM_DELETE_WINDOW");
+    let take_focus = server.atom("WM_TAKE_FOCUS");
+    server
+        .connection
+        .change_property32(
+            PropMode::REPLACE,
+            window,
+            protocols,
+            AtomEnum::ATOM,
+            &[delete, take_focus],
+        )
+        .expect("write WM_PROTOCOLS");
+    server.connection.flush().expect("flush");
+}
+
+/// The EWMH way to move a window, as a client message to the root. The pane
+/// itself uses `ConfigureWindow` ([`Pane::place`]); this is here to record
+/// whether a window manager honours the other mechanism too.
+fn net_moveresize(server: &XServer, window: Window, rect: Rect) {
+    // Flags: window gravity in the low byte (0 = the gravity from
+    // WM_NORMAL_HINTS), one bit each for x, y, width and height, then the
+    // source indication (1 = a normal application).
+    const FLAGS: u32 = (1 << 8) | (1 << 9) | (1 << 10) | (1 << 11) | (1 << 12);
+    let message = ClientMessageEvent::new(
+        32,
+        window,
+        server.atom("_NET_MOVERESIZE_WINDOW"),
+        [FLAGS, rect.x as u32, rect.y as u32, rect.width, rect.height],
     );
-    binary
+    server
+        .connection
+        .send_event(
+            false,
+            server.root,
+            EventMask::SUBSTRUCTURE_NOTIFY | EventMask::SUBSTRUCTURE_REDIRECT,
+            message,
+        )
+        .expect("send _NET_MOVERESIZE_WINDOW");
+    server.connection.flush().expect("flush");
 }
 
 // ------------------------------------------------------------ synthetic input
@@ -449,10 +512,10 @@ fn spike_binary() -> PathBuf {
 // spokenpad itself never synthesises input: `docs/constraints.md` forbids it
 // in the program, because the tool this project replaced rewrote the core X
 // keymap that way and corrupted keystrokes system-wide. The rule is about the
-// program, not about a test. The three functions below fake pointer and key
-// events through the XTEST extension, and they do it only against the Xvfb
-// server this test started, which `assert_is_ours` re-checks on every call.
-// Nothing here ever reaches the user's session.
+// program, not about a test. The functions below fake pointer and key events
+// through the XTEST extension, and they do it only against the Xvfb server
+// this test started, which `assert_is_ours` re-checks on every call. Nothing
+// here ever reaches the user's session.
 
 fn fake(server: &mut XServer, kind: u8, detail: u8, x: i16, y: i16) {
     server.assert_is_ours();
@@ -515,44 +578,17 @@ fn wait_for<T>(timeout: Duration, what: &str, mut attempt: impl FnMut() -> Optio
     }
 }
 
-/// A window made with the given properties, mapped once.
-struct Mapped {
-    spike: Spike,
-    window: Window,
-    observed: Observed,
-}
-
-fn map_window(server: &mut XServer, i3: &I3, arguments: &[&str]) -> Mapped {
-    let mut spike = Spike::start(server, arguments);
-    let window = spike.window();
-    let observed = map_and_watch(server, i3, &mut spike, window);
-    Mapped {
-        spike,
-        window,
-        observed,
-    }
-}
-
-/// Unmap a window that is already managed, then map it again. The focus is
-/// read after the unmap, since the unmap itself hands the focus back.
-fn remap(server: &mut XServer, i3: &I3, mapped: &mut Mapped) -> Observed {
-    mapped.spike.send("unmap");
-    mapped.spike.expect("unmapped");
-    sleep(SETTLE);
-    map_and_watch(server, i3, &mut mapped.spike, mapped.window)
-}
-
 /// Map an unmapped window and record what the map did to the focus.
-fn map_and_watch(server: &mut XServer, i3: &I3, spike: &mut Spike, window: Window) -> Observed {
+fn map_and_watch(server: &mut XServer, i3: &I3, pane: &mut Watched) -> Observed {
     // Keep the pointer in a corner: with focus_follows_mouse off it cannot
     // move the focus, but a window mapped under it would muddy the reading.
     move_pointer(server, 5, 5);
     let before = server.input_focus();
-    spike.send("map");
-    spike.expect("mapped");
-    i3.wait_until_managed(window);
+    pane.window.map().expect("map the pane");
+    i3.wait_until_managed(pane.id());
     sleep(SETTLE);
-    let node = i3.node(window).expect("i3 still manages the window");
+    let node = i3.node(pane.id()).expect("i3 still manages the window");
+    pane.pump();
     Observed {
         focused: node.focused,
         floating: node.floating,
@@ -560,21 +596,31 @@ fn map_and_watch(server: &mut XServer, i3: &I3, spike: &mut Spike, window: Windo
     }
 }
 
-/// The properties the plan proposes. `WM_CLASS` is not on the list because
-/// the spike always sets it.
-const PROPOSED: &[&str] = &[
-    "--user-time",
-    "0",
-    "--window-type",
-    "utility",
-    "--input-hint",
-    "true",
-];
+/// Unmap a window that is already managed, then map it again. The focus is
+/// read after the unmap, since the unmap itself hands the focus back.
+fn remap(server: &mut XServer, i3: &I3, pane: &mut Watched) -> Observed {
+    pane.window.unmap().expect("unmap the pane");
+    sleep(SETTLE);
+    map_and_watch(server, i3, pane)
+}
+
+/// Open a fresh pane, let `ablate` rewrite its properties before the map, and
+/// map it.
+fn ablate(
+    server: &mut XServer,
+    i3: &I3,
+    ablate: impl FnOnce(&XServer, Window),
+) -> (Watched, Observed) {
+    let mut pane = Watched::open(server);
+    ablate(server, pane.id());
+    let observed = map_and_watch(server, i3, &mut pane);
+    (pane, observed)
+}
 
 // ----------------------------------------------------------------- the check
 
 #[test]
-fn pane_window_never_takes_focus_on_i3() {
+fn the_pane_window_never_takes_focus_on_i3() {
     if !tools_or_skip() {
         return;
     }
@@ -582,111 +628,113 @@ fn pane_window_never_takes_focus_on_i3() {
     let i3 = I3::start(&server);
     let mut report: Vec<String> = Vec::new();
 
-    // A normal window, so the workspace under test is never empty and the
-    // focus has somewhere to be before each map.
-    let mut base = Spike::start(
-        &server,
-        &[
-            "--window-type",
-            "normal",
-            "--user-time",
-            "none",
-            "--instance",
-            "pane-spike-base",
-            "--map",
-        ],
-    );
-    let base_window = base.window();
-    base.expect("mapped");
-    i3.wait_until_managed(base_window);
+    // A plain window, so the workspace under test is never empty and the focus
+    // has somewhere to be before each map.
+    let base = server.plain_window();
+    i3.wait_until_managed(base);
     sleep(SETTLE);
     assert!(
-        i3.node(base_window).expect("base window").focused,
+        i3.node(base).expect("base window").focused,
         "the plain window should hold the focus before each case"
     );
 
     // (a) not focused on map, on a workspace that already has a focused window
-    let mut pane = map_window(&mut server, &i3, PROPOSED);
+    let mut pane = Watched::open(&server);
+    let observed = map_and_watch(&mut server, &i3, &mut pane);
+    assert!(!observed.focused, "i3 focused the pane on map (tree)");
     assert!(
-        !pane.observed.focused,
-        "i3 focused the proposed window on map (tree)"
+        !observed.stole_focus,
+        "the X input focus moved when the pane was mapped"
     );
-    assert!(
-        !pane.observed.stole_focus,
-        "the X input focus moved when the proposed window was mapped"
-    );
-    assert_eq!(
-        pane.spike.count("event focus-in"),
-        0,
-        "the window itself saw a FocusIn on map"
-    );
+    assert_eq!(pane.focus_in, 0, "the window itself saw a FocusIn on map");
     // (b) floating
-    assert!(
-        pane.observed.floating,
-        "i3 did not float the utility window"
-    );
-    report.push(pane.observed.row("the proposed set"));
+    assert!(observed.floating, "i3 did not float the pane");
+    report.push(observed.row("the properties the pane ships"));
 
     // Placement: P2 must be able to put the pane where the pointer is.
-    let (created_x, created_y, _, _) = pane.spike.geometry();
-    pane.spike.send("configure 40 60 320 200");
-    pane.spike.expect("ok configure");
+    let created = pane.window.geometry().expect("geometry");
+    pane.window
+        .place(Rect {
+            x: 40,
+            y: 60,
+            width: 320,
+            height: 200,
+        })
+        .expect("place the pane");
     sleep(Duration::from_millis(300));
-    let configured = pane.spike.geometry();
-    pane.spike.send("net-moveresize 700 420 300 180");
-    pane.spike.expect("ok net-moveresize");
+    let configured = pane.window.geometry().expect("geometry");
+    net_moveresize(
+        &server,
+        pane.id(),
+        Rect {
+            x: 700,
+            y: 420,
+            width: 300,
+            height: 180,
+        },
+    );
     sleep(Duration::from_millis(300));
-    let moveresized = pane.spike.geometry();
+    let moveresized = pane.window.geometry().expect("geometry");
     report.push(format!(
-        "| placement | created at {created_x},{created_y} | ConfigureWindow -> {:?} | _NET_MOVERESIZE_WINDOW -> {:?} |",
-        configured, moveresized
+        "| placement | created at {},{} | `Window::place` -> {:?} | `_NET_MOVERESIZE_WINDOW` -> {:?} |",
+        created.x,
+        created.y,
+        (configured.x, configured.y, configured.width, configured.height),
+        (
+            moveresized.x,
+            moveresized.y,
+            moveresized.width,
+            moveresized.height
+        )
     ));
-    assert!(
-        configured.0 == 40 && configured.1 == 60 || moveresized.0 == 700 && moveresized.1 == 420,
-        "neither ConfigureWindow nor _NET_MOVERESIZE_WINDOW placed the floating window; \
-         got {configured:?} and {moveresized:?}"
+    assert_eq!(
+        (
+            configured.x,
+            configured.y,
+            configured.width,
+            configured.height
+        ),
+        (40, 60, 320, 200),
+        "`Window::place` did not place the floating pane where it was told"
     );
 
     // (c) focused after a click inside it
-    let (x, y, width, height) = pane.spike.geometry();
+    let rect = pane.window.geometry().expect("geometry");
     let centre = (
-        i16::try_from(x + width as i32 / 2).expect("on screen"),
-        i16::try_from(y + height as i32 / 2).expect("on screen"),
+        i16::try_from(rect.x + rect.width as i32 / 2).expect("on screen"),
+        i16::try_from(rect.y + rect.height as i32 / 2).expect("on screen"),
     );
     click(&mut server, centre.0, centre.1);
     sleep(SETTLE);
+    pane.pump();
     assert!(
-        i3.node(pane.window).expect("the pane").focused,
+        i3.node(pane.id()).expect("the pane").focused,
         "a click did not focus the pane"
     );
     assert_eq!(
         server.input_focus(),
-        pane.window,
+        pane.id(),
         "the X input focus is not on the pane after a click"
     );
-    assert!(
-        pane.spike.count("event button-press") >= 1,
-        "the click never reached the window"
-    );
+    assert!(pane.button_press >= 1, "the click never reached the window");
 
     // (d) typed keys arrive
     let keycode = keycode_for(&server, u32::from(b'a'));
     press_key(&mut server, keycode);
     press_key(&mut server, keycode);
     sleep(Duration::from_millis(300));
+    pane.pump();
     assert_eq!(
-        pane.spike.count("event key-press"),
-        2,
+        pane.key_press, 2,
         "typed keys did not reach the focused pane"
     );
 
     // (e) re-map after unmap is unfocused again, and the property that makes
-    // that true is still 0 after the user has clicked and typed: the spike
+    // that true is still 0 after the user has clicked and typed: the pane
     // never rewrites it, so no interaction can turn it into a real timestamp.
-    pane.spike.send("read-user-time");
     assert_eq!(
-        pane.spike.expect("user-time "),
-        "user-time 0",
+        read_user_time(&server, pane.id()),
+        Some(0),
         "_NET_WM_USER_TIME changed while the window was used"
     );
     let again = remap(&mut server, &i3, &mut pane);
@@ -698,123 +746,99 @@ fn pane_window_never_takes_focus_on_i3() {
         !again.stole_focus,
         "the X input focus moved on the second map"
     );
-    report.push(again.row("the proposed set, re-mapped after a click and two keys"));
+    report.push(again.row("as shipped, re-mapped after a click and two keys"));
+    drop(pane);
+    sleep(SETTLE);
 
     // Ablation: a real timestamp in the same property is enough to lose it.
-    // A toolkit would write one on every keystroke; spokenpad must not.
-    pane.spike.send("user-time 1");
-    pane.spike.expect("ok user-time");
-    let with_timestamp = remap(&mut server, &i3, &mut pane);
-    report.push(
-        with_timestamp
-            .row("the proposed set, `_NET_WM_USER_TIME` rewritten to 1 before the re-map"),
-    );
-    drop(pane.spike);
+    // A toolkit would write one on every keystroke; the pane must not.
+    let (timestamped, observed) = ablate(&mut server, &i3, |server, window| {
+        set_user_time(server, window, Some(1))
+    });
+    report.push(observed.row("`_NET_WM_USER_TIME` rewritten to 1 before the map"));
+    drop(timestamped);
     sleep(SETTLE);
 
     // Ablation, and the positive control for every check above: without the
     // user time, i3 focuses the same window on map. If this ever stops being
     // true, the test is measuring nothing.
-    let ablation = map_window(
-        &mut server,
-        &i3,
-        &["--user-time", "none", "--window-type", "utility"],
-    );
+    let (control, observed) = ablate(&mut server, &i3, |server, window| {
+        set_user_time(server, window, None)
+    });
     assert!(
-        ablation.observed.focused && ablation.observed.stole_focus,
+        observed.focused && observed.stole_focus,
         "without _NET_WM_USER_TIME the window was still not focused: the test \
          cannot tell focus from no focus, so the other rows prove nothing"
     );
-    report.push(ablation.observed.row("no `_NET_WM_USER_TIME`"));
-    drop(ablation.spike);
+    report.push(observed.row("no `_NET_WM_USER_TIME`"));
+    drop(control);
     sleep(SETTLE);
 
     // Ablation: the type only decides floating on i3.
-    let normal = map_window(
-        &mut server,
-        &i3,
-        &["--user-time", "0", "--window-type", "normal"],
-    );
-    report.push(
-        normal
-            .observed
-            .row("`_NET_WM_WINDOW_TYPE_NORMAL` instead of `_UTILITY`"),
-    );
+    let (normal, observed) = ablate(&mut server, &i3, |server, window| {
+        set_window_type(server, window, "_NET_WM_WINDOW_TYPE_NORMAL")
+    });
+    assert!(!observed.focused, "user time 0 needs no window type on i3");
     assert!(
-        !normal.observed.focused,
-        "user time 0 needs no window type on i3"
-    );
-    assert!(
-        !normal.observed.floating,
+        !observed.floating,
         "a normal window floated without being asked to"
     );
-    drop(normal.spike);
+    report.push(observed.row("`_NET_WM_WINDOW_TYPE_NORMAL` instead of `_UTILITY`"));
+    drop(normal);
     sleep(SETTLE);
 
-    // Ablation: `WM_TAKE_FOCUS` beside the proposed set.
-    let mut take_focus_arguments = PROPOSED.to_vec();
-    take_focus_arguments.push("--take-focus");
-    let take_focus = map_window(&mut server, &i3, &take_focus_arguments);
-    report.push(
-        take_focus
-            .observed
-            .row("the proposed set plus `WM_TAKE_FOCUS`"),
-    );
-    drop(take_focus.spike);
+    // Ablation: `WM_TAKE_FOCUS` beside the shipped set.
+    let (take_focus, observed) = ablate(&mut server, &i3, announce_take_focus);
+    report.push(observed.row("as shipped, plus `WM_TAKE_FOCUS`"));
+    drop(take_focus);
     sleep(SETTLE);
 
     // Ablation: the ICCCM "No Input" model, with no user time.
-    let no_input = map_window(
-        &mut server,
-        &i3,
-        &[
-            "--user-time",
-            "none",
-            "--window-type",
-            "utility",
-            "--input-hint",
-            "false",
-        ],
-    );
-    report.push(
-        no_input
-            .observed
-            .row("`WM_HINTS input = False`, no user time"),
-    );
-    drop(no_input.spike);
+    let (no_input, observed) = ablate(&mut server, &i3, |server, window| {
+        set_user_time(server, window, None);
+        set_input_hint(server, window, false);
+    });
+    report.push(observed.row("`WM_HINTS input = False`, no user time"));
+    drop(no_input);
     sleep(SETTLE);
 
-    // Placement before the map: P2 wants the pane to appear where the pointer
-    // is, not to jump there a frame later.
-    let mut requested = PROPOSED.to_vec();
-    requested.extend_from_slice(&[
-        "--x", "220", "--y", "140", "--width", "400", "--height", "200",
-    ]);
-    let mut placed = map_window(&mut server, &i3, &requested);
-    assert!(!placed.observed.focused, "the placed pane took focus");
-    let at_map = placed.spike.geometry();
+    // Placement asked for before the map: P2 wants the pane to appear where
+    // the pointer is, not to jump there a frame later.
+    let mut placed = Watched::at(
+        &server,
+        Rect {
+            x: 220,
+            y: 140,
+            width: 400,
+            height: 200,
+        },
+    );
+    let observed = map_and_watch(&mut server, &i3, &mut placed);
+    assert!(!observed.focused, "the placed pane took focus");
+    let landed = placed.window.geometry().expect("geometry");
     report.push(format!(
         "| placement asked for before the map (`WM_NORMAL_HINTS` position 220,140, size 400x200) | landed at {:?} | | |",
-        at_map
+        (landed.x, landed.y, landed.width, landed.height)
     ));
-    drop(placed.spike);
+    drop(placed);
     sleep(SETTLE);
 
     // (a, second half) not focused on map on an empty workspace, where i3's
     // `no_focus` rule does not apply.
-    i3.command("workspace pane-spike-empty");
+    i3.command("workspace pane-empty");
     sleep(SETTLE);
-    let empty = map_window(&mut server, &i3, PROPOSED);
+    let mut empty = Watched::open(&server);
+    let observed = map_and_watch(&mut server, &i3, &mut empty);
     assert!(
-        !empty.observed.focused,
+        !observed.focused,
         "the pane took focus as the first window on an empty workspace (tree)"
     );
     assert!(
-        !empty.observed.stole_focus,
+        !observed.stole_focus,
         "the X input focus moved when the pane was mapped on an empty workspace"
     );
-    report.push(empty.observed.row("the proposed set, empty workspace"));
-    drop(empty.spike);
+    report.push(observed.row("as shipped, empty workspace"));
+    drop(empty);
 
     println!("\ni3 {}, display {}", i3_version(&i3), server.display);
     println!("| window properties | focused on map | floating | X input focus |");
@@ -822,6 +846,18 @@ fn pane_window_never_takes_focus_on_i3() {
     for line in report {
         println!("{line}");
     }
+}
+
+fn read_user_time(server: &XServer, window: Window) -> Option<u32> {
+    let atom = server.atom("_NET_WM_USER_TIME");
+    server
+        .connection
+        .get_property(false, window, atom, AtomEnum::CARDINAL, 0, 1)
+        .expect("ask for _NET_WM_USER_TIME")
+        .reply()
+        .expect("the property")
+        .value32()
+        .and_then(|mut values| values.next())
 }
 
 fn i3_version(i3: &I3) -> String {

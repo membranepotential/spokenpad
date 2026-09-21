@@ -61,7 +61,9 @@ those belongs in `src/shell/`.
   families), `shell/models.rs` (downloads and verifies the default models),
   `shell/nvim/mod.rs` (editor lifecycle, both modes, `spokenpad editor`),
   `shell/nvim/passage.rs` (text dictated with no editor open), `shell/wm.rs`
-  (i3/sway IPC socket), `shell/logging.rs`.
+  (i3/sway IPC socket), `shell/pane/x11.rs` (the dictation window spokenpad
+  draws itself: the properties that keep a window manager from focusing it;
+  nothing uses it yet), `shell/logging.rs`.
 - Editor UI: `src/lua/spokenpad.lua` (winbar, preview extmark, transactional
   `append_once`) and `src/lua/dictation_init.lua` (bundled init).
 - Tests: unit tests in-module; `src/shell/nvim/tests.rs` (real
@@ -71,6 +73,8 @@ those belongs in `src/shell/`.
 - `examples/eval.rs` (WER harness), `examples/verify_window.rs` (manual
   i3/sway window smoke check), `examples/verify_native.rs` (JSON dump of
   segments and progressive commits).
+- `tests/pane_window.rs` opens the pane window on an Xvfb and i3 it starts
+  itself and proves it never takes focus.
 - `scripts/install.sh` (binary to `~/.local/bin`, user unit; `--uninstall`).
   Models (`$XDG_DATA_HOME/spokenpad/models`, pinned sha256) come from
   `spokenpad fetch-models` or the first launch. `packaging/` holds the unit,

@@ -30,25 +30,28 @@ P2 wants the pane near the pointer.
 
 Two new files, neither wired into the daemon:
 
-- [`examples/pane_spike.rs`](../../examples/pane_spike.rs) creates one X11
-  window with x11rb and sets, **before the first `MapWindow`**:
-  `_NET_WM_USER_TIME`, `_NET_WM_WINDOW_TYPE`, `WM_HINTS` with the `input`
-  flag, `WM_CLASS` (instance and class `spokenpad-pane`, a name no existing
-  user rule can match), `WM_NAME` and `_NET_WM_NAME`, `WM_PROTOCOLS` with
-  `WM_DELETE_WINDOW`, and `WM_NORMAL_HINTS`. Each property can be changed or
-  dropped from the command line. It then reports every `KeyPress`,
-  `ButtonPress`, `FocusIn` and `FocusOut` on stdout and takes commands
-  (`map`, `unmap`, `user-time`, `configure`, `net-moveresize`, `geometry`) on
-  stdin.
+- [`src/shell/pane/x11.rs`](../../src/shell/pane/x11.rs) creates one X11 window
+  with x11rb and sets, **before the first `MapWindow`**:
+  `_NET_WM_USER_TIME = 0`, `_NET_WM_WINDOW_TYPE = _NET_WM_WINDOW_TYPE_UTILITY`,
+  `WM_HINTS` with `input = True`, `WM_CLASS` (instance and class
+  `spokenpad-pane`, a name no existing user rule can match), `WM_NAME` and
+  `_NET_WM_NAME`, `WM_PROTOCOLS` with `WM_DELETE_WINDOW`, and
+  `WM_NORMAL_HINTS`. This is the window the pane ships; it has no knobs.
 - [`tests/pane_window.rs`](../../tests/pane_window.rs) starts **its own**
   Xvfb on the first free display number above `:50` and **its own** i3 with a
   generated two-line config (`focus_follows_mouse no`, a private
-  `ipc-socket`), maps the spike's window in several property combinations, and
-  reads the result from two independent places: the i3 tree over the IPC
-  socket (framed by the daemon's own `core::wm` code) and the X server's
-  `GetInputFocus`. It runs in `cargo test` and fails loudly when Xvfb or i3 is
-  missing, unless `SPOKENPAD_ALLOW_MISSING_X11=1` is set — the same rule the
-  nvim tests use for a missing `nvim`.
+  `ipc-socket`), opens that window in this process, maps it, and reads the
+  result from two independent places: the i3 tree over the IPC socket (framed
+  by the daemon's own `core::wm` code) and the X server's `GetInputFocus`. It
+  runs in `cargo test` and fails loudly when Xvfb or i3 is missing, unless
+  `SPOKENPAD_ALLOW_MISSING_X11=1` is set — the same rule the nvim tests use
+  for a missing `nvim`.
+
+The ablation rows rewrite one property on that same window over a **second X
+connection**, between creating it and mapping it. A window manager reads what
+is on the window at map time and does not care which client put it there, so
+each row measures the shipped window with one property changed, rather than a
+similar window the test built for itself.
 
 The click and the keystrokes are faked through the XTEST extension. spokenpad
 itself must never synthesise input, for the reason in
@@ -70,22 +73,23 @@ identical results.
 ## Results
 
 "Focused on map" is i3's `focused: true` in the tree. "X input focus" compares
-`GetInputFocus` before and after the map. The proposed set is
-`_NET_WM_USER_TIME = 0`, `_NET_WM_WINDOW_TYPE = _NET_WM_WINDOW_TYPE_UTILITY`,
-`WM_HINTS input = True`, `WM_CLASS = spokenpad-pane`.
+`GetInputFocus` before and after the map. "As shipped" is what
+`shell::pane::x11::Window` always sets: `_NET_WM_USER_TIME = 0`,
+`_NET_WM_WINDOW_TYPE = _NET_WM_WINDOW_TYPE_UTILITY`, `WM_HINTS input = True`,
+`WM_CLASS = spokenpad-pane`.
 
 | window properties | focused on map | floating | X input focus |
 |---|---|---|---|
-| the proposed set | no | yes | unchanged |
-| the proposed set, re-mapped after a click and two keys | no | yes | unchanged |
-| the proposed set, `_NET_WM_USER_TIME` rewritten to 1 before the re-map | **yes** | yes | **moved** |
+| as shipped | no | yes | unchanged |
+| as shipped, re-mapped after a click and two keys | no | yes | unchanged |
+| `_NET_WM_USER_TIME` rewritten to 1 before the map | **yes** | yes | **moved** |
 | no `_NET_WM_USER_TIME` | **yes** | yes | **moved** |
 | `_NET_WM_WINDOW_TYPE_NORMAL` instead of `_UTILITY` | no | **no** | unchanged |
-| the proposed set plus `WM_TAKE_FOCUS` | no | yes | unchanged |
+| as shipped, plus `WM_TAKE_FOCUS` | no | yes | unchanged |
 | `WM_HINTS input = False`, no user time | no | yes | unchanged |
-| the proposed set, empty workspace | no | yes | unchanged |
+| as shipped, empty workspace | no | yes | unchanged |
 
-Click and keys, with the proposed set:
+Click and keys, with the shipped set:
 
 | step | result |
 |---|---|
@@ -94,18 +98,18 @@ Click and keys, with the proposed set:
 | two faked key presses after that click | 2 `KeyPress` events in the window |
 | `_NET_WM_USER_TIME` read back after the click and the keys | still `0` |
 
-Placement, with the proposed set on a 1280x800 screen:
+Placement, with the shipped set on a 1280x800 screen:
 
 | how the position was asked for | window ended up at (root coordinates) |
 |---|---|
 | nothing asked (no position in `WM_NORMAL_HINTS`) | 400,287 — i3 centres it |
 | `WM_NORMAL_HINTS` position 220,140, size 400x200, before the map | 224,158 with size 400x200 |
-| `ConfigureWindow` x=40 y=60 w=320 h=200, after the map | exactly 40,60 with size 320x200 |
+| `Window::place` (a `ConfigureWindow`) x=40 y=60 w=320 h=200, after the map | exactly 40,60 with size 320x200 |
 | `_NET_MOVERESIZE_WINDOW` 700,420 300x180, after the map | exactly 700,420 with size 300x180 |
 
 ## Conclusion
 
-**All five P0 criteria pass on i3, and the proposed property set is the right
+**All five P0 criteria pass on i3, and the shipped property set is the right
 one.** What each property does, on i3:
 
 - **`_NET_WM_USER_TIME = 0` is the whole of the focus guarantee.** Dropping it
@@ -142,8 +146,8 @@ that property after the initial 0.** The test asserts both halves: the value is
 still 0 after a click and two keystrokes, and a rewritten value focuses the
 window.
 
-**Consequences for P1.** The window part of the plan is confirmed; P1 can build
-on `examples/pane_spike.rs`'s property code as-is. One finding changes the
+**Consequences for P1.** The window part of the plan is confirmed, and the
+window it is confirmed for is already the library's (`shell::pane::x11`). One finding changes the
 crate list: `xkbcommon`'s `x11` feature (`xkb_x11_keymap_new_from_device`,
 which is how a client gets the user's real layout, dead keys and all) takes a
 connection that implements `AsRawXcbConnection`. x11rb's default pure-Rust
