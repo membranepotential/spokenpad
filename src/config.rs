@@ -226,6 +226,11 @@ impl TryFrom<RawAsr> for Asr {
                             raw.vocabulary.is_none_or(|v| v.is_empty()),
                             "asr.vocabulary requires decoding = \"modified_beam_search\""
                         );
+                        ensure!(
+                            raw.hotwords_score.is_none(),
+                            "asr.hotwords_score requires decoding = \"modified_beam_search\": \
+                             greedy_search applies no hotwords"
+                        );
                         Decoding::GreedySearch
                     }
                     Some(SearchMethod::ModifiedBeamSearch) | None => {
@@ -719,6 +724,7 @@ mod tests {
             "[recording]\nmax_total_bytes=0",
             "[asr]\ndecoding='typo'",
             "[asr]\ndecoding='greedy_search'\nvocabulary=['rust']",
+            "[asr]\ndecoding='greedy_search'\nhotwords_score=3.0",
             "[asr]\nvocabulary=['']",
             "[asr]\nhotwords_score=nan",
             "[asr]\nnum_threads=0",
@@ -778,7 +784,7 @@ mod tests {
         );
         let c = Config::parse("[asr]\nfamily='sense_voice'\nmodel_dir='s'", None).unwrap();
         assert_eq!(c.asr.model, Model::SenseVoice { language: None });
-        let c = Config::parse("[asr]\ndecoding='greedy_search'\nhotwords_score=3.0", None).unwrap();
+        let c = Config::parse("[asr]\ndecoding='greedy_search'", None).unwrap();
         assert_eq!(
             c.asr.model,
             Model::Parakeet {
