@@ -105,16 +105,34 @@ pub struct XServer {
 }
 
 impl XServer {
+    /// Start an X server of this test's own, above `:50`.
+    ///
+    /// The number is claimed by *starting* a server on it rather than by
+    /// looking for a free one: an X server takes its lock atomically, so two
+    /// test binaries asking at the same moment cannot both get it — one wins
+    /// and the other's server exits, and this moves on to the next number.
+    /// Looking first and starting afterwards is the race.
+    ///
+    /// `-displayfd` is the readiness signal: the server writes the number it
+    /// took once it is listening, so there is nothing to poll. It does not
+    /// choose the number, because a number given on the command line fixes
+    /// it — which is what keeps this above the `:50` the user's session will
+    /// never be on.
     pub fn start() -> Self {
-        // The X server picks the number, not this test. `-displayfd` makes it
-        // search upwards from `:50` and report what it took, on the file
-        // descriptor named — here its stdout. Choosing a free number here
-        // instead would be a race: two test binaries looking at the same
-        // moment would both see the same number free and both try to take it.
+        for number in 50..200 {
+            if let Some(server) = Self::try_start(number) {
+                return server;
+            }
+        }
+        panic!("no free X display number between :50 and :200");
+    }
+
+    fn try_start(number: u32) -> Option<Self> {
+        let display = format!(":{number}");
         let mut child = Killed(
             Command::new("Xvfb")
                 .args([
-                    ":50",
+                    &display,
                     "-displayfd",
                     "1",
                     "-screen",
@@ -128,25 +146,21 @@ impl XServer {
                 .spawn()
                 .expect("start Xvfb"),
         );
-        let number = read_display_number(&mut child);
-        // The user dictates on :0. Nothing in this test may reach it.
-        assert!(
-            number >= 50,
-            "Xvfb took display :{number}; the test starts its search at :50"
-        );
-        let display = format!(":{number}");
+        // The server says it is listening by writing its number; one that
+        // could not take the display closes its stdout instead.
+        read_display_number(&mut child).filter(|taken| *taken == number)?;
         let (connection, screen_index) =
             wait_for(START_TIMEOUT, "the X server to accept connections", || {
                 x11rb::connect(Some(&display)).ok()
             });
         let root = connection.setup().roots[screen_index].root;
-        Self {
+        Some(Self {
             number,
             display,
             connection,
             root,
             child,
-        }
+        })
     }
 
     /// Load a keyboard layout into this server, the way a user would.
@@ -215,8 +229,10 @@ impl XServer {
     }
 }
 
-/// The display number Xvfb wrote to its stdout once it was ready.
-fn read_display_number(child: &mut Killed) -> u32 {
+/// The display number Xvfb wrote to its stdout once it was ready, or `None`
+/// when it gave up on that display — which is how a number already taken by
+/// somebody else announces itself.
+fn read_display_number(child: &mut Killed) -> Option<u32> {
     let stdout = child.0.stdout.take().expect("Xvfb's stdout");
     let mut reader = std::io::BufReader::new(stdout);
     let mut line = String::new();
@@ -224,11 +240,13 @@ fn read_display_number(child: &mut Killed) -> u32 {
     loop {
         // One `read_line` is normally enough; the loop is for the case where
         // the pipe hands over the digits and the newline separately.
-        let read = reader.read_line(&mut line).expect("read Xvfb's stdout");
+        let read = reader.read_line(&mut line).ok()?;
         if let Some(number) = line.trim().parse().ok().filter(|_| line.contains('\n')) {
-            return number;
+            return Some(number);
         }
-        assert!(read > 0, "Xvfb closed its stdout without naming a display");
+        if read == 0 {
+            return None;
+        }
         assert!(
             Instant::now() < deadline,
             "Xvfb did not name a display within {START_TIMEOUT:?}"

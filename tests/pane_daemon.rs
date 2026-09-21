@@ -113,6 +113,26 @@ fn the_daemon_opens_a_pane_dictates_into_it_and_cleans_up() {
         first.display()
     );
 
+    // ---------------------------------------- the clipboard copy
+    // `nvim.copy_to_clipboard` goes through Neovim's own provider, so pane
+    // mode needs nothing of its own for it. Read back from this test's X
+    // server, never the user's: the pane's editor inherited this DISPLAY.
+    match clipboard(&server.display) {
+        Some(clipboard) => {
+            assert!(
+                clipboard.contains(SPOKEN),
+                "the clipboard copy did not reach this display's selection: {clipboard:?}"
+            );
+            println!(
+                "the release copied the buffer to the clipboard on {}",
+                server.display
+            );
+        }
+        None => println!(
+            "no clipboard provider on PATH: the copy could not be read back (not a failure)"
+        ),
+    }
+
     // ---------------------------------------- closing it ends the passage
     close_window(&server, pane);
     wait_for(PATIENCE, "the pane to go away", || {
@@ -146,6 +166,29 @@ fn the_daemon_opens_a_pane_dictates_into_it_and_cleans_up() {
         pane_window(&i3).is_none().then_some(())
     });
     println!("stopping the daemon left no window and no editor behind");
+}
+
+/// What the clipboard selection holds on one display, when a tool to read it
+/// is installed. Never the user's display: the caller passes the one this
+/// test started.
+fn clipboard(display: &str) -> Option<String> {
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        let output = std::process::Command::new("xclip")
+            .args(["-display", display, "-selection", "clipboard", "-o"])
+            .output()
+            .ok()?;
+        if output.status.success()
+            && let Ok(text) = String::from_utf8(output.stdout)
+            && !text.trim().is_empty()
+        {
+            return Some(text);
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
 }
 
 fn contains(path: &Path, text: &str) -> bool {
@@ -203,6 +246,10 @@ impl Daemon {
         let mut config = Config::default();
         config.nvim.mode = Mode::Pane;
         config.nvim.notify = false;
+        // The editor's own provider does this — xclip, xsel or wl-copy,
+        // inside nvim. It writes to whichever display that nvim is on, which
+        // here is the Xvfb this test started.
+        config.nvim.copy_to_clipboard = true;
         config.nvim.socket_path = root.join("nvim.sock");
         config.nvim.dictation_dir = root.join("dictation");
         config.nvim.startup_timeout_s = 15.0;
