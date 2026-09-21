@@ -11,7 +11,8 @@ never takes focus. Fully local, CPU-only. Next milestone: public release.
   start|stop|toggle|cancel` bound in the WM — agent (worktree) — merge.
 - model-fetch — built-in model download (command + first launch), clipboard
   copy configurable, default off — agent (worktree) — merge.
-- Window without WM rules (own X11 window / layer-shell): awaiting the user.
+- own-window research — spokenpad draws nvim (--embed) in its own non-focusing
+  window, no terminal; X11/Wayland/GNOME options — agent — report to user.
 
 ## Done
 - 09-21: Review fixes: no spawn on an empty workspace, only loaded WM config
@@ -34,7 +35,6 @@ never takes focus. Fully local, CPU-only. Next milestone: public release.
   to `+` after every release. Astra audited, critiqued and reviewed; its
   review found 4 bugs, fixed. 143 lib + 16 e2e (+1 real-model) green, WER
   17.6% unchanged.
-- 09-08..11: progressive commit, recovery WAV, Rust rewrite, Astra review.
 
 ## Next
 1. Live check after restart: short sentences land first time, word endings
