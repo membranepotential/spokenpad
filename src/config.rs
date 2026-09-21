@@ -102,15 +102,22 @@ impl Audio {
     }
 }
 
-pub const DEFAULT_MODEL_DIR: &str = "models/parakeet-tdt-0.6b-v3-int8";
-pub const DEFAULT_VAD_MODEL: &str = "models/silero_vad.onnx";
+/// Where `scripts/fetch-models.sh` puts the default models:
+/// `$XDG_DATA_HOME/spokenpad/models`, or `~/.local/share/spokenpad/models`.
+pub fn models_dir() -> PathBuf {
+    env::var_os("XDG_DATA_HOME")
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home().join(".local/share"))
+        .join("spokenpad/models")
+}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Asr {
-    /// `None` keeps the working-directory-relative default; a configured path
-    /// is resolved against the config file's own directory.
-    pub model_dir: Option<PathBuf>,
+    /// A configured relative path is resolved against the config file's own
+    /// directory.
+    pub model_dir: PathBuf,
     pub num_threads: u16,
     pub decoding: Decoding,
     pub hotwords_score: f32,
@@ -119,7 +126,7 @@ pub struct Asr {
 impl Default for Asr {
     fn default() -> Self {
         Self {
-            model_dir: None,
+            model_dir: models_dir().join("parakeet-tdt-0.6b-v3-int8"),
             num_threads: 6,
             decoding: Decoding::ModifiedBeamSearch,
             hotwords_score: 1.5,
@@ -128,11 +135,6 @@ impl Default for Asr {
     }
 }
 impl Asr {
-    pub fn model_dir(&self) -> &Path {
-        self.model_dir
-            .as_deref()
-            .unwrap_or(Path::new(DEFAULT_MODEL_DIR))
-    }
     pub fn model_files(&self) -> [PathBuf; 4] {
         [
             "encoder.int8.onnx",
@@ -140,13 +142,13 @@ impl Asr {
             "joiner.int8.onnx",
             "tokens.txt",
         ]
-        .map(|s| self.model_dir().join(s))
+        .map(|s| self.model_dir.join(s))
     }
     pub fn check_files(&self) -> Result<()> {
         for p in self.model_files() {
             ensure!(
                 p.is_file(),
-                "missing ASR model: {} (run scripts/fetch_model.py)",
+                "missing ASR model: {} (run scripts/fetch-models.sh)",
                 p.display()
             );
         }
@@ -158,8 +160,8 @@ impl Asr {
 #[serde(default, deny_unknown_fields)]
 pub struct Vad {
     pub enabled: bool,
-    /// `None` keeps the working-directory-relative default.
-    pub model: Option<PathBuf>,
+    /// Resolved like `asr.model_dir`.
+    pub model: PathBuf,
     pub threshold: f64,
     pub min_silence_seconds: f64,
     pub min_speech_seconds: f64,
@@ -172,7 +174,7 @@ impl Default for Vad {
     fn default() -> Self {
         Self {
             enabled: true,
-            model: None,
+            model: models_dir().join("silero_vad.onnx"),
             threshold: 0.5,
             min_silence_seconds: 0.35,
             min_speech_seconds: 0.15,
@@ -181,14 +183,6 @@ impl Default for Vad {
             pad_seconds: 0.5,
             edge_pad_seconds: 2.,
         }
-    }
-}
-
-impl Vad {
-    pub fn model(&self) -> &Path {
-        self.model
-            .as_deref()
-            .unwrap_or(Path::new(DEFAULT_VAD_MODEL))
     }
 }
 
@@ -349,13 +343,9 @@ impl Config {
     }
     pub fn parse(input: &str, base: Option<&Path>) -> Result<Self> {
         let mut c: Self = toml::from_str(input).context("invalid configuration")?;
-        // A configured model path is relative to the config file; the built-in
-        // defaults stay relative to the working directory, which is exactly
-        // what `Option::None` means here.
-        for p in [&mut c.asr.model_dir, &mut c.vad.model]
-            .into_iter()
-            .flatten()
-        {
+        // A relative model path is relative to the config file. The defaults
+        // are absolute, so joining leaves them alone.
+        for p in [&mut c.asr.model_dir, &mut c.vad.model] {
             *p = expand_path(p)?;
             if p.is_relative()
                 && let Some(b) = base
@@ -517,8 +507,8 @@ impl Config {
         }
         // The native wrapper builds CStrings; reject interior NULs at this boundary.
         for p in [
-            self.asr.model_dir(),
-            self.vad.model(),
+            &self.asr.model_dir,
+            &self.vad.model,
             &self.nvim.socket_path,
             &self.nvim.dictation_dir,
             &self.recording.dir,
@@ -647,13 +637,17 @@ mod tests {
             Some(Path::new("/tmp/conf")),
         )
         .unwrap();
-        assert_eq!(c.asr.model_dir(), Path::new("/tmp/conf/weights"));
-        assert_eq!(c.vad.model(), Path::new("/tmp/conf/vad.onnx"));
-        // An unconfigured path keeps the working-directory-relative default,
+        assert_eq!(c.asr.model_dir, Path::new("/tmp/conf/weights"));
+        assert_eq!(c.vad.model, Path::new("/tmp/conf/vad.onnx"));
+        // An unconfigured path keeps the default under the XDG data home,
         // whatever directory the config file happens to live in.
         let c = Config::parse("", Some(Path::new("/tmp"))).unwrap();
-        assert_eq!(c.asr.model_dir(), Path::new(DEFAULT_MODEL_DIR));
-        assert_eq!(c.vad.model(), Path::new(DEFAULT_VAD_MODEL));
+        assert!(models_dir().is_absolute());
+        assert_eq!(
+            c.asr.model_dir,
+            models_dir().join("parakeet-tdt-0.6b-v3-int8")
+        );
+        assert_eq!(c.vad.model, models_dir().join("silero_vad.onnx"));
     }
     #[test]
     fn unset_environment_rejected() {

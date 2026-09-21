@@ -108,12 +108,10 @@ enabled = true
 max_total_bytes = 5368709120
 
 [asr]
-# Path to the model directory. A path set HERE resolves against the config
-# file's own directory, not the current working directory, so this file can be
-# edited from anywhere. Leaving the key out keeps the built-in default, which
-# stays relative to the working directory -- which is why the systemd unit sets
-# WorkingDirectory to the checkout.
-model_dir = "models/parakeet-tdt-0.6b-v3-int8"
+# The model directory. The default is where scripts/fetch-models.sh puts it,
+# under $XDG_DATA_HOME (~/.local/share if unset). A relative path resolves
+# against this file's directory; ~ and $VARS expand.
+model_dir = "~/.local/share/spokenpad/models/parakeet-tdt-0.6b-v3-int8"
 
 # CPU threads for decoding.
 num_threads = 6
@@ -165,10 +163,10 @@ vocabulary = []
 # decoded whole, silence included.
 enabled = true
 
-# Silero VAD weights, ~2 MB, fetched by scripts/fetch_model.py. Relative paths
-# resolve against this file's directory. If the file is missing, spokenpad logs
-# a warning and decodes whole captures rather than refusing to start.
-model = "models/silero_vad.onnx"
+# Silero VAD weights, ~2 MB, fetched by scripts/fetch-models.sh. Resolved like
+# asr.model_dir. If the file is missing, spokenpad logs a warning and decodes
+# whole captures rather than refusing to start.
+model = "~/.local/share/spokenpad/models/silero_vad.onnx"
 
 # Speech probability above which a frame counts as speech. This is also the
 # knob for the silence rule above: what the detector misses entirely is never

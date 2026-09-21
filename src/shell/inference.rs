@@ -148,13 +148,13 @@ pub struct SpeechSegmenter {
 impl SpeechSegmenter {
     pub fn new(config: &Vad, rate: u32) -> Result<Self> {
         ensure!(
-            config.model().is_file(),
+            config.model.is_file(),
             "missing VAD model {}",
-            config.model().display()
+            config.model.display()
         );
         let c = VadModelConfig {
             silero_vad: SileroVadModelConfig {
-                model: Some(path_string(config.model())?),
+                model: Some(path_string(&config.model)?),
                 threshold: config.threshold as f32,
                 min_silence_duration: config.min_silence_seconds as f32,
                 min_speech_duration: config.min_speech_seconds as f32,

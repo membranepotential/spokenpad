@@ -479,3 +479,14 @@ libraries before; the same transcripts on every eval clip, and no slower
 (5.2 s against 5.7 s median for the 37 s clip, model load included).
 **Rejected: keeping `shared`.** It saves nothing on disk, and every install
 path would have to carry two libraries beside the binary.
+
+**Models live under `$XDG_DATA_HOME/spokenpad/models`.** The defaults for
+`asr.model_dir` and `vad.model` used to be relative to the working directory,
+which tied the service to a checkout (`WorkingDirectory=`). They are now
+absolute paths under the XDG data home (`~/.local/share` if unset), which
+`scripts/fetch-models.sh` fills after checking each file's size and sha256. A
+relative path in a config file still resolves against that file's directory.
+`scripts/install.sh` copies the binary to `~/.local/bin` and the user unit to
+`~/.config/systemd/user`; the unit is `WantedBy=graphical-session.target`
+instead of the author's own `i3-session.target`. Both scripts are POSIX shell
+and replace their Python predecessors.

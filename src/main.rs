@@ -60,7 +60,7 @@ fn run(args: Args) -> Result<u8> {
     spokenpad::shell::logging::init(args.verbose, args.log_file.as_deref())?;
     let mut config = Config::load(args.config.as_deref())?;
     if let Some(p) = args.model_dir {
-        config.asr.model_dir = Some(spokenpad::config::expand_path(&p)?);
+        config.asr.model_dir = spokenpad::config::expand_path(&p)?;
     }
     config.validate()?;
     match args.command {

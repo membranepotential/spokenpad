@@ -1,3 +1,5 @@
+# spokenpad systemd user unit; scripts/install.sh installs it to
+# ~/.config/systemd/user/spokenpad.service.
 [Unit]
 Description=spokenpad push-to-talk dictation
 Documentation=https://github.com/membranepotential/spokenpad
@@ -10,12 +12,10 @@ After=graphical-session.target
 [Service]
 Type=exec
 
-# The default asr.model_dir is relative ("models/parakeet-tdt-0.6b-v3-int8"),
-# so the daemon has to run from the checkout. Set this rather than making the
-# path absolute in a config file: moving the checkout then needs one edit
-# here, not two in different places.
-WorkingDirectory=%h/Documents/spokenpad
-ExecStart=%h/Documents/spokenpad/target/release/spokenpad
+# scripts/install.sh copies the binary here. Models and settings come from
+# the XDG directories (~/.local/share/spokenpad/models,
+# ~/.config/spokenpad/config.toml), so the working directory does not matter.
+ExecStart=%h/.local/bin/spokenpad
 
 # Not -v: DEBUG still goes to the rotating file at
 # $XDG_STATE_HOME/spokenpad/spokenpad.log regardless, and duplicating it into
@@ -38,4 +38,9 @@ RestartSec=3
 RestartPreventExitStatus=2 3
 
 [Install]
-WantedBy=i3-session.target
+# Desktop sessions that integrate with systemd start graphical-session.target
+# and import DISPLAY into the user manager. A plain X session such as i3 does
+# neither on its own: start a unit that binds to graphical-session.target, and
+# run `systemctl --user import-environment DISPLAY XAUTHORITY`, from its
+# startup.
+WantedBy=graphical-session.target

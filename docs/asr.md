@@ -15,10 +15,9 @@ transducer (`model_type="nemo_transducer"` in both native and reference
 implementations), CPU only, 6 threads
 (see [constraints.md](constraints.md#cpu-only)). The model files
 (`encoder.int8.onnx`, `decoder.int8.onnx`, `joiner.int8.onnx`, `tokens.txt`)
-are fetched by `scripts/fetch_model.py` — not committed, ~630 MB — into
-`models/parakeet-tdt-0.6b-v3-int8/` by default
-(`Asr.model_dir` in [`config.rs`](../src/config.rs), mirrored by
-`AsrConfig.model_dir` in [`config.py`](../src/spokenpad/config.py)).
+are fetched by `scripts/fetch-models.sh` — not committed, ~640 MB — into
+`$XDG_DATA_HOME/spokenpad/models/parakeet-tdt-0.6b-v3-int8/` by default
+(`Asr.model_dir` in [`config.rs`](../src/config.rs)).
 
 ## Why int8 CPU, not a GPU model
 
