@@ -1,59 +1,59 @@
 # spokenpad — local push-to-talk dictation for Linux
 
-_reconciled: 2026-09-21 @ 7bc7ed8_
+_reconciled: 2026-09-22 @ 59428f1 (handoff, session paused by the user)_
 
 ## Goal
 Hold a key (or latch with shift), speak, and text appears in an nvim that
 never takes focus. Fully local, CPU-only. Next milestone: public release.
 
-## Now
-- corpus — isolating the one chunk new main loses (e2 0 -> 1) — agent, wt
-- beam-fix — wrapping up (no upstream PR, user 09-21) — agent
-- own-window — P0-P2 merged with both review rounds fixed (02b68f1):
-  `nvim.mode = "pane"`, verified headless on i3 only. Waiting for the user:
-  P4 live check on i3; P3 (other WMs) needs packages installed.
-
-## Done
-- 09-21 late: DEPLOYED main d5d7418 (const RAM, pane mode, sherpa 1.13.8,
-  auto-stop). Corpus harness merged: old -> new main 11.20% -> 10.85% WER;
-  the lead-padding clamp changes nothing on 181 captures, kept.
-- 09-21: Auto-stop (6d36c0c, reviewed): a latch with no speech for
-  `capture.silence_timeout_s` (300) and no key down ends as a normal stop;
-  every capture ends at 4 h; the memory ceiling now really ends it.
-- 09-21: sherpa-onnx 1.13.8 (same WER; TDT beam bug NOT fixed by it). Tried
-  parakeet-unified-en (8.2% on 5 clips, beam+hotwords work, but English only:
-  16 empty chunks on the corpus) and Qwen3-ASR (loses nothing, reads German,
-  0.4-0.7x real time, unmerged). GPU research: not worth it on a GTX 1650.
-- 09-21: Constant RAM while recording (1e2631f): only the uncommitted tail is
-  held (1.7 MiB vs 116 MiB per 30 min); lead padding stops at committed
-  speech; a tick sees at most preview.max_seconds. Reviewed. NOT deployed:
-  first replay the real captures before/after (corpus harness) for WER.
-- 09-21: Lost tail fixed: Parakeet now decodes greedy by default (beam search
-  = sherpa-onnx #3267: "" / "Yeah."; 19 vs 4 empty chunks on 170 captures).
-  shell-commands reference corrected. Deployed (b6939db): control socket,
-  i3 M4 bindings in keybindings.conf, clipboard on for the user.
-  User confirmed live: M4 hold, Shift+M4 latch, Ctrl+M4 cancel work.
-- 09-21: Control socket + `spokenpad start|stop|toggle|cancel` (no /dev/input);
-  built-in model download; clipboard copy opt-in. 177 lib + 22 e2e green.
-- 09-21: Review fixes: no spawn on an empty workspace, only loaded WM config
-  proves no_focus (sway: main file), unsent appends go to the pending
-  passage, no writes behind an editor, greedy+hotwords rejected. README
-  rewritten, docs current. Own setup migrated: models in ~/.local/share,
-  `mode = "managed"`, unit on graphical-session.target. 172 lib + 19 e2e.
-- 09-21: Portability merged: Python removed, static binary, `[asr] family`.
+## Now (handoff: two agent branches are NOT merged yet)
+- corpus — branch `worktree-agent-ada6370eda939c1a8` (.claude/worktrees/):
+  told to wrap up: dataset in eval-samples/local/ (audio copies, relative
+  paths, README; full reproduction run skipped), harness `--corpus` relative
+  paths, clamp decisions entry. Verify it committed, then rebase + checks +
+  ff-merge. Until merged, references.json may still hold absolute paths.
+- beam-fix — branch `worktree-agent-a653789adfe1c0a59`: told to commit its
+  write-up (frame-cost variant, public repro, docs/asr.md fix). Same: verify,
+  rebase, checks, ff-merge. Builds live in ~/.cache/spokenpad-dev/beam-fix/.
+- own-window — P0-P2 merged and deployed; config still `mode = "managed"`.
 
 ## Next
-1. User: P4 live check of `mode = "pane"` on i3; install P3 packages or skip.
-   Decoder stays greedy; no upstream sherpa PR for now (user, 09-21).
+1. Merge the two branches above (or salvage: uncommitted work is in their
+   worktrees). Remove merged worktrees; ~/.cache/spokenpad-dev is ~4 GB.
+2. User: P4 live check of `nvim.mode = "pane"` on i3 (steps: set the mode,
+   `spokenpad check`, restart; dictate while typing elsewhere; click, type
+   `Grüße @ € { }`; colours/font with tokyonight; close window, dictate again).
+3. User decides: P3 other WMs (pacman: sway xorg-xwayland openbox bspwm
+   awesome xfwm4) or skip; push (56+ commits unpushed); make the repo public.
+4. Open, not isolated: new main loses 1 chunk of 333 the Bare retry used to
+   rescue (e2 0 -> 1); candidates: sherpa 1.13.8, end-of-slice close, the
+   30 s tick bound. See docs/experiments/2026-09-21-lead-padding-clamp-corpus.md.
+5. Small: pane font log line prints the path twice; trailing-pad overlap
+   (4 seams / 6 words on the corpus) unmeasured cost; beam + real vocabulary
+   never measured (the user has no `[asr]` vocabulary).
+
+## Done (2026-09-21, all on main, deployed as d5d7418 at 23:51)
+- Constant RAM while recording (1.7 vs 116 MiB per 30 min), lead padding
+  stops at committed speech, a tick sees at most preview.max_seconds.
+- Own window `nvim.mode = "pane"`: own X11 window + embedded nvim, no focus,
+  X libs loaded at run time; two review rounds fixed; headless on i3 only.
+- Auto-stop: a latch with no speech for `capture.silence_timeout_s` (300) and
+  no key down ends as a normal stop; any capture ends at 4 h.
+- sherpa-onnx 1.13.8. Corpus: 181 captures / 75 min with Gladia references
+  (git-ignored), harness examples/corpus.rs: greedy 0 lost vs beam 2 lost,
+  WER equal; 1 s padding stays; live path beats whole-file; old -> new main
+  11.20% -> 10.85%. 21% of the words are German: parakeet-unified-en (7.9%
+  English, beam + hotwords work) is no default; Qwen3-ASR too slow; GPU not
+  worth it on the GTX 1650. Beam bug cause found (blank skips frames for
+  free); one-line patch documented, not shipped.
+- Earlier on 09-21: greedy default, control socket CLI, model download,
+  portability (Rust only, static binary, asr families), README rewrite.
 
 ## Known issues / open questions
-- Dying input stream: seen once, root cause unknown; the watchdog recovers it
-  and shows the gap.
+- Dying input stream: seen once, root cause unknown; the watchdog recovers it.
 
 ## Decided
-- Hard constraints: docs/constraints.md. No input device is read: keys are
-  bound in the WM to the control socket CLI. Rust-only. No paste path.
-- Cancel only while recording; a tap under 120ms is discarded with a notice;
-  silence is not decoded; notices are ranked, shown in the winbar.
-- 09-21 (user): post-roll 250 ms stays; no "no speech" notice; no LLM
-  transcript cleanup; every experiment is written up in docs/experiments/.
+- Hard constraints: docs/constraints.md. No input device is read. No paste.
+- 09-21 (user): post-roll stays; no "no speech" notice; no LLM cleanup; no
+  upstream sherpa PR for now; every experiment goes to docs/experiments/;
+  recordings may go to Gladia only, transcripts stay in eval-samples/local/.
