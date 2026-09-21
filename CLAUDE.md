@@ -51,7 +51,9 @@ those belongs in `src/shell/`.
   `Recognizer`/`Segmenter` traits), `core/segments.rs` (`merge_spans`: VAD
   spans to padded, settled windows), `core/wm.rs` (i3/sway IPC protocol,
   `no_focus` proof), `core/terminal.rs` (the terminal table), `core/models.rs` (the pinned
-  default model manifest), `core/frames.rs`, `core/geometry.rs`,
+  default model manifest), `core/grid.rs` (nvim's `ext_linegrid` redraw
+  events and the screen they fold into), `core/keys.rs` (keysym and modifiers
+  to nvim key notation), `core/frames.rs`, `core/geometry.rs`,
   `core/text.rs`; plus the `shell/nvim/rpc.rs` codec, `parse_ownership` and
   `passage::append_paragraph`, still inside their modules.
 - Imperative shell: `shell/daemon.rs` (`run` = lock/signals/devices, `serve` =

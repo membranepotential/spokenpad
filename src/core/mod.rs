@@ -9,6 +9,8 @@ pub mod control;
 pub mod decode;
 pub mod frames;
 pub mod geometry;
+pub mod grid;
+pub mod keys;
 pub mod models;
 pub mod segments;
 pub mod session;
