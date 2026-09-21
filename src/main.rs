@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand};
 use spokenpad::{
     config::Config,
     core::{decode::Pipeline, text::Processor},
-    shell::inference::{Transcriber, load_segmenter},
+    shell::inference::{Transcriber, load_segmenter, model_config},
 };
 use std::{io::Write, os::unix::fs::OpenOptionsExt, path::PathBuf, process::ExitCode};
 
@@ -79,7 +79,7 @@ fn run(args: Args) -> Result<u8> {
                 );
                 return Ok(4);
             }
-            if let Err(e) = config.asr.check_files() {
+            if let Err(e) = model_config(&config.asr) {
                 log::error!("{e:#}");
                 return Ok(2);
             }
@@ -101,7 +101,7 @@ fn run(args: Args) -> Result<u8> {
             write_transcript(&text, out.as_deref())?;
         }
         Some(Action::Check) => {
-            if let Err(e) = config.asr.check_files() {
+            if let Err(e) = model_config(&config.asr) {
                 log::error!("{e:#}");
                 return Ok(2);
             }
@@ -122,7 +122,7 @@ fn run(args: Args) -> Result<u8> {
             );
         }
         None => {
-            if let Err(e) = config.asr.check_files() {
+            if let Err(e) = model_config(&config.asr) {
                 log::error!("{e:#}");
                 return Ok(2);
             }

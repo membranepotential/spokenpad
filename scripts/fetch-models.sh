@@ -1,5 +1,5 @@
 #!/bin/sh
-# Download spokenpad's default models: Parakeet TDT 0.6B v3 (int8, ~640 MB)
+# Download spokenpad's default models: Parakeet TDT 0.6B v3 (int8, ~670 MB)
 # and the Silero VAD (~0.6 MB).
 #
 # Usage: scripts/fetch-models.sh [DIR]

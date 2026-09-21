@@ -8,23 +8,30 @@ use std::{
 };
 
 /// Both models are 16kHz: Silero's window is 512 samples at that rate and
-/// Parakeet's feature extractor assumes it. Nothing resamples in between.
+/// every supported ASR family's features assume it. Nothing resamples in
+/// between.
 pub const REQUIRED_SAMPLE_RATE: u32 = 16_000;
 /// Upper bound for `audio.postroll_ms`: every release blocks the event loop
 /// this long at most, and a key pressed meanwhile ends it early.
 pub const MAX_POSTROLL_MS: u32 = 1_000;
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+/// How a transducer searches. Hotwords exist only inside
+/// `ModifiedBeamSearch`, the one sherpa-onnx search that applies them.
+#[derive(Debug, Clone, PartialEq)]
 pub enum Decoding {
     GreedySearch,
-    ModifiedBeamSearch,
+    ModifiedBeamSearch {
+        /// Phrases to bias toward; empty means no biasing.
+        vocabulary: Vec<String>,
+        /// Bias added per token of a matching phrase.
+        hotwords_score: f32,
+    },
 }
 impl Decoding {
-    pub fn as_str(self) -> &'static str {
+    pub fn method(&self) -> &'static str {
         match self {
             Self::GreedySearch => "greedy_search",
-            Self::ModifiedBeamSearch => "modified_beam_search",
+            Self::ModifiedBeamSearch { .. } => "modified_beam_search",
         }
     }
 }
@@ -112,47 +119,153 @@ pub fn models_dir() -> PathBuf {
         .join("spokenpad/models")
 }
 
+/// The ASR model, one variant per model family sherpa-onnx loads offline.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Model {
+    /// A NeMo transducer such as Parakeet TDT, the default. The only family
+    /// with hotwords.
+    Parakeet { decoding: Decoding },
+    /// OpenAI Whisper. `None` detects the language.
+    Whisper { language: Option<String> },
+    /// SenseVoice. `None` detects the language.
+    SenseVoice { language: Option<String> },
+}
+
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(try_from = "RawAsr")]
 pub struct Asr {
     /// A configured relative path is resolved against the config file's own
     /// directory.
     pub model_dir: PathBuf,
     pub num_threads: u16,
-    pub decoding: Decoding,
-    pub hotwords_score: f32,
-    pub vocabulary: Vec<String>,
+    pub model: Model,
 }
 impl Default for Asr {
     fn default() -> Self {
         Self {
             model_dir: models_dir().join("parakeet-tdt-0.6b-v3-int8"),
             num_threads: 6,
-            decoding: Decoding::ModifiedBeamSearch,
-            hotwords_score: 1.5,
-            vocabulary: vec![],
+            model: Model::Parakeet {
+                decoding: Decoding::ModifiedBeamSearch {
+                    vocabulary: vec![],
+                    hotwords_score: 1.5,
+                },
+            },
         }
     }
 }
-impl Asr {
-    pub fn model_files(&self) -> [PathBuf; 4] {
-        [
-            "encoder.int8.onnx",
-            "decoder.int8.onnx",
-            "joiner.int8.onnx",
-            "tokens.txt",
-        ]
-        .map(|s| self.model_dir.join(s))
-    }
-    pub fn check_files(&self) -> Result<()> {
-        for p in self.model_files() {
+
+/// `[asr]` as written: one flat table, whose valid keys depend on `family`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAsr {
+    #[serde(default)]
+    family: Family,
+    model_dir: Option<PathBuf>,
+    num_threads: Option<u16>,
+    decoding: Option<SearchMethod>,
+    hotwords_score: Option<f32>,
+    vocabulary: Option<Vec<String>>,
+    language: Option<String>,
+}
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum Family {
+    #[default]
+    Parakeet,
+    Whisper,
+    SenseVoice,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum SearchMethod {
+    GreedySearch,
+    ModifiedBeamSearch,
+}
+
+impl TryFrom<RawAsr> for Asr {
+    type Error = anyhow::Error;
+    fn try_from(raw: RawAsr) -> Result<Self> {
+        let default = Self::default();
+        let family = raw.family;
+        let name = match family {
+            Family::Parakeet => "parakeet",
+            Family::Whisper => "whisper",
+            Family::SenseVoice => "sense_voice",
+        };
+        if family != Family::Parakeet {
             ensure!(
-                p.is_file(),
-                "missing ASR model: {} (run scripts/fetch-models.sh)",
-                p.display()
+                raw.vocabulary.is_none() && raw.hotwords_score.is_none(),
+                "asr.vocabulary and asr.hotwords_score need family = \"parakeet\": \
+                 sherpa-onnx applies hotwords only in a transducer's modified_beam_search"
+            );
+            ensure!(
+                raw.decoding.is_none(),
+                "asr.decoding applies only to family = \"parakeet\""
             );
         }
-        Ok(())
+        ensure!(
+            raw.language.is_none() || family != Family::Parakeet,
+            "asr.language does not apply to family = \"{name}\""
+        );
+        if let Some(language) = &raw.language {
+            ensure!(
+                !language.is_empty()
+                    && language
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'),
+                "asr.language must be a language code such as \"en\"; leave it out to detect"
+            );
+        }
+        let model = match family {
+            Family::Parakeet => Model::Parakeet {
+                decoding: match raw.decoding {
+                    Some(SearchMethod::GreedySearch) => {
+                        ensure!(
+                            raw.vocabulary.is_none_or(|v| v.is_empty()),
+                            "asr.vocabulary requires decoding = \"modified_beam_search\""
+                        );
+                        Decoding::GreedySearch
+                    }
+                    Some(SearchMethod::ModifiedBeamSearch) | None => {
+                        let vocabulary = raw.vocabulary.unwrap_or_default();
+                        let hotwords_score = raw.hotwords_score.unwrap_or(1.5);
+                        ensure!(
+                            hotwords_score.is_finite(),
+                            "asr.hotwords_score must be finite"
+                        );
+                        for word in &vocabulary {
+                            ensure!(
+                                !word.trim().is_empty() && !word.contains(['\n', '\r', '\0']),
+                                "invalid vocabulary phrase"
+                            );
+                        }
+                        Decoding::ModifiedBeamSearch {
+                            vocabulary,
+                            hotwords_score,
+                        }
+                    }
+                },
+            },
+            Family::Whisper => Model::Whisper {
+                language: raw.language,
+            },
+            Family::SenseVoice => Model::SenseVoice {
+                language: raw.language,
+            },
+        };
+        let model_dir = match raw.model_dir {
+            Some(dir) => dir,
+            None if family == Family::Parakeet => default.model_dir,
+            None => bail!("asr.model_dir is required for family = \"{name}\""),
+        };
+        let num_threads = raw.num_threads.unwrap_or(default.num_threads);
+        ensure!(num_threads > 0, "asr.num_threads must be positive");
+        Ok(Self {
+            model_dir,
+            num_threads,
+            model,
+        })
     }
 }
 
@@ -379,7 +492,7 @@ impl Config {
         }
         ensure!(
             self.audio.sample_rate == REQUIRED_SAMPLE_RATE,
-            "audio.sample_rate must be {REQUIRED_SAMPLE_RATE}: the Silero VAD window is 512 samples at 16kHz and Parakeet's features assume 16kHz input"
+            "audio.sample_rate must be {REQUIRED_SAMPLE_RATE}: the Silero VAD window is 512 samples at 16kHz and the ASR models expect 16kHz input"
         );
         ensure!(
             self.audio.preroll_ms <= 60_000,
@@ -389,21 +502,6 @@ impl Config {
             self.audio.postroll_ms <= MAX_POSTROLL_MS,
             "audio.postroll_ms must be <= {MAX_POSTROLL_MS}: the release waits this long before decoding"
         );
-        ensure!(self.asr.num_threads > 0, "asr.num_threads must be positive");
-        ensure!(
-            self.asr.hotwords_score.is_finite(),
-            "asr.hotwords_score must be finite"
-        );
-        ensure!(
-            self.asr.vocabulary.is_empty() || self.asr.decoding == Decoding::ModifiedBeamSearch,
-            "asr.vocabulary requires modified_beam_search"
-        );
-        for word in &self.asr.vocabulary {
-            ensure!(
-                !word.trim().is_empty() && !word.contains(['\n', '\r', '\0']),
-                "invalid vocabulary phrase"
-            );
-        }
         ensure!(
             self.vad.threshold.is_finite() && self.vad.threshold > 0. && self.vad.threshold < 1.,
             "vad.threshold must be in (0,1)"
@@ -594,6 +692,15 @@ mod tests {
             "[recording]\nmax_total_bytes=0",
             "[asr]\ndecoding='typo'",
             "[asr]\ndecoding='greedy_search'\nvocabulary=['rust']",
+            "[asr]\nvocabulary=['']",
+            "[asr]\nhotwords_score=nan",
+            "[asr]\nnum_threads=0",
+            "[asr]\nlanguage='en'",
+            "[asr]\nfamily='moonshine'\nmodel_dir='m'",
+            "[asr]\nfamily='whisper'",
+            "[asr]\nfamily='whisper'\nmodel_dir='w'\ndecoding='greedy_search'",
+            "[asr]\nfamily='sense_voice'\nmodel_dir='s'\nhotwords_score=1.5",
+            "[asr]\nfamily='whisper'\nmodel_dir='w'\nlanguage='e n'",
             "[text]\nfillers=['']",
         ] {
             assert!(Config::parse(bad, None).is_err(), "accepted {bad}");
@@ -618,10 +725,7 @@ mod tests {
         let error = Config::parse("[audio]\nsample_rate=48000", None)
             .unwrap_err()
             .to_string();
-        assert!(
-            error.contains("Silero") && error.contains("Parakeet"),
-            "{error}"
-        );
+        assert!(error.contains("Silero") && error.contains("ASR"), "{error}");
         assert_eq!(
             Config::parse("[audio]\npreroll_ms=0", None)
                 .unwrap()
@@ -629,6 +733,61 @@ mod tests {
                 .preroll_frames(),
             0
         );
+    }
+    #[test]
+    fn a_family_takes_only_its_own_keys() {
+        let c = Config::parse(
+            "[asr]\nfamily='whisper'\nmodel_dir='w'\nlanguage='de'\nnum_threads=2",
+            Some(Path::new("/tmp/conf")),
+        )
+        .unwrap();
+        assert_eq!(c.asr.model_dir, Path::new("/tmp/conf/w"));
+        assert_eq!(c.asr.num_threads, 2);
+        assert_eq!(
+            c.asr.model,
+            Model::Whisper {
+                language: Some("de".into())
+            }
+        );
+        let c = Config::parse("[asr]\nfamily='sense_voice'\nmodel_dir='s'", None).unwrap();
+        assert_eq!(c.asr.model, Model::SenseVoice { language: None });
+        let c = Config::parse("[asr]\ndecoding='greedy_search'\nhotwords_score=3.0", None).unwrap();
+        assert_eq!(
+            c.asr.model,
+            Model::Parakeet {
+                decoding: Decoding::GreedySearch
+            }
+        );
+        assert_eq!(
+            Config::parse("[asr]\nvocabulary=['mkdir']", None)
+                .unwrap()
+                .asr
+                .model,
+            Model::Parakeet {
+                decoding: Decoding::ModifiedBeamSearch {
+                    vocabulary: vec!["mkdir".into()],
+                    hotwords_score: 1.5
+                }
+            }
+        );
+
+        let error = format!(
+            "{:#}",
+            Config::parse(
+                "[asr]\nfamily='whisper'\nmodel_dir='w'\nvocabulary=['mkdir']",
+                None
+            )
+            .unwrap_err()
+        );
+        assert!(
+            error.contains("asr.vocabulary") && error.contains("family = \"parakeet\""),
+            "{error}"
+        );
+        let error = format!(
+            "{:#}",
+            Config::parse("[asr]\nfamily='whisper'", None).unwrap_err()
+        );
+        assert!(error.contains("asr.model_dir is required"), "{error}");
     }
     #[test]
     fn explicit_model_paths_use_config_directory() {

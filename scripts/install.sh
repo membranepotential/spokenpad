@@ -76,7 +76,7 @@ systemctl --user daemon-reload || echo "install: run 'systemctl --user daemon-re
 cat <<EOF
 
 Next:
-  scripts/fetch-models.sh                          # once, ~640 MB
+  scripts/fetch-models.sh                          # once, ~670 MB
   systemctl --user enable --now spokenpad          # first install
   systemctl --user restart spokenpad               # after an update
 EOF

@@ -490,3 +490,18 @@ relative path in a config file still resolves against that file's directory.
 `~/.config/systemd/user`; the unit is `WantedBy=graphical-session.target`
 instead of the author's own `i3-session.target`. Both scripts are POSIX shell
 and replace their Python predecessors.
+
+**`asr.family` selects the model family.** `parakeet` (the default, a NeMo
+transducer), `whisper` and `sense_voice` map to sherpa-onnx's offline model
+configs; each file is found in `model_dir` by its role. `[asr]` stays one flat
+table, so existing configs keep working, and is parsed into a typed
+`Model`: hotwords live inside `Decoding::ModifiedBeamSearch`, which only
+`Model::Parakeet` has, and a key another family cannot use is rejected with a
+message rather than ignored. Whisper tiny.en scored 23.0% WER and SenseVoice
+29.4% on the five eval clips, against Parakeet's 17.6% ([asr.md](asr.md)).
+Whisper reads at most 30 s and sherpa-onnx drops the rest silently, while VAD
+windows have no length limit, so the adapter cuts longer Whisper windows into
+equal pieces. **Rejected: Moonshine.** sherpa-onnx 1.13.6 fails on Moonshine
+v2 windows over about ten seconds and returns nothing.
+**Rejected: explicit file paths per model in the config.** Every sherpa-onnx
+release names its files by role, so a directory is enough.

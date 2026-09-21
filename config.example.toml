@@ -108,29 +108,45 @@ enabled = true
 max_total_bytes = 5368709120
 
 [asr]
-# The model directory. The default is where scripts/fetch-models.sh puts it,
-# under $XDG_DATA_HOME (~/.local/share if unset). A relative path resolves
-# against this file's directory; ~ and $VARS expand.
+# The model family, as sherpa-onnx loads it:
+#   "parakeet"     a NeMo transducer such as Parakeet TDT (the default, and
+#                  the only family with `vocabulary`)
+#   "whisper"      OpenAI Whisper (sherpa-onnx-whisper-* releases)
+#   "sense_voice"  SenseVoice (sherpa-onnx-sense-voice-* releases)
+# Every family reads 16 kHz audio. See docs/asr.md for how to add a model.
+family = "parakeet"
+
+# The directory holding the model's files. spokenpad finds each file by its
+# role (encoder.int8.onnx before encoder.onnx, tiny.en-encoder.onnx too).
+# Required for every family but "parakeet", whose default is where
+# scripts/fetch-models.sh puts it, under $XDG_DATA_HOME (~/.local/share if
+# unset). A relative path resolves against this file's directory; ~ and $VARS
+# expand.
 model_dir = "~/.local/share/spokenpad/models/parakeet-tdt-0.6b-v3-int8"
 
 # CPU threads for decoding.
 num_threads = 6
 
+# The next three keys apply to "parakeet" only; remove them for another
+# family, which rejects them.
+#
 # "greedy_search" (faster, no hotword biasing) or "modified_beam_search"
 # (slightly slower, required for `vocabulary` below).
 decoding = "modified_beam_search"
 
-# Per-token bias applied to each word in `vocabulary`. Measured on this
-# model: 1.5 fixes "mkir" -> "mkdir"; above ~3.0 it starts firing on
-# unrelated audio; 6.0 rewrites ordinary words. Raise with care and re-run
-# scripts/eval.py after any change.
+# Per-token bias applied to each phrase in `vocabulary`; ignored under
+# greedy_search. Measured on Parakeet: 1.5 fixes "mkir" -> "mkdir"; above
+# ~3.0 it starts firing on unrelated audio; 6.0 rewrites ordinary words.
 hotwords_score = 1.5
 
 # Words and phrases to bias the decoder toward, e.g. project names or
-# commands that are otherwise misheard. Only takes effect with
-# decoding = "modified_beam_search"; greedy decoding ignores it.
+# commands that are otherwise misheard. Needs decoding = "modified_beam_search".
 # vocabulary = ["kubectl", "spokenpad", "nginx"]
 vocabulary = []
+
+# "whisper" and "sense_voice" only: the spoken language as a code such as
+# "en" or "de". Left out, the model detects it.
+# language = "en"
 
 [vad]
 # Voice activity detection. The capture is split at silence and each speech
@@ -153,8 +169,7 @@ vocabulary = []
 # chunk lands after ~1s instead of after the whole recording, so a five-minute
 # latched passage starts arriving immediately rather than all at once at the
 # end. Accuracy costs a little on the five reference clips: 17.6% aggregate WER
-# through `uv run scripts/eval.py --vad` against 13.9% whole-buffer (Handy 0.9.6
-# scores 48.7% on the same five). See docs/rust.md.
+# with the detector against 13.9% whole-buffer, measured with Parakeet.
 #
 # It also decides what NOT to decode: a capture this finds no speech in is not
 # handed to the recogniser at all. Silence does not decode to an empty string,
@@ -163,7 +178,7 @@ vocabulary = []
 # decoded whole, silence included.
 enabled = true
 
-# Silero VAD weights, ~2 MB, fetched by scripts/fetch-models.sh. Resolved like
+# Silero VAD weights, ~0.6 MB, fetched by scripts/fetch-models.sh. Resolved like
 # asr.model_dir. If the file is missing, spokenpad logs a warning and decodes
 # whole captures rather than refusing to start.
 model = "~/.local/share/spokenpad/models/silero_vad.onnx"
@@ -192,8 +207,7 @@ max_speech_seconds = 20.0
 # are MERGED up to this, because a boundary costs accuracy -- the model sees no
 # context across one. Measured: decoding every run separately scored 37.7% WER
 # against 33.7% for the whole buffer, while merging to 10s scored 33.4%.
-# Lower it for text sooner at some cost in accuracy, and re-run
-# `uv run scripts/eval.py --vad` if you do.
+# Lower it for text sooner at some cost in accuracy.
 chunk_seconds = 10.0
 
 # Real audio kept either side of a chunk, beyond what the detector marked.
