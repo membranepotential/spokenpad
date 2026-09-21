@@ -6,7 +6,7 @@ use serde_json::json;
 use spokenpad::{
     config::Config,
     core::{
-        decode::{Pipeline, Segmenter, Utterance, Worker},
+        decode::{Pipeline, Segmenter, TickKind, Utterance, Worker},
         frames::Frames,
     },
     shell::inference::{SpeechSegmenter, Transcriber},
@@ -46,7 +46,7 @@ fn main() -> Result<()> {
             .split(&samples)?;
         let t = Instant::now();
         let text = pipeline.decode(&samples, || false, drop)?;
-        cases.push(json!({"file":Path::new(&arg).file_name().context("filename")?.to_string_lossy(),"text":text,"elapsed":t.elapsed().as_secs_f64(),"segments":segments.iter().map(|s|json!([s.window.start,s.window.end,s.speech_end,s.settled])).collect::<Vec<_>>() }));
+        cases.push(json!({"file":Path::new(&arg).file_name().context("filename")?.to_string_lossy(),"text":text,"elapsed":t.elapsed().as_secs_f64(),"segments":segments.segments.iter().map(|s|json!([s.window.start,s.window.end,s.speech_end,s.settled])).collect::<Vec<_>>() }));
         if samples.len() > 32000 {
             passage.extend(samples);
             passage.extend(vec![0.; 16000]);
@@ -59,17 +59,23 @@ fn main() -> Result<()> {
     let mut texts = vec![];
     let step = 17600;
     for end in (step..passage.len()).step_by(step) {
-        worker.tick(&passage[through.get()..end], through, &u, |c| {
-            through = c.through;
-            commits.push(json!([end, c.through.get(), c.text]));
-            if !c.text.trim().is_empty() {
-                texts.push(c.text);
-            }
-        })?;
+        worker.tick(
+            &passage[through.get()..end],
+            through,
+            &u,
+            TickKind::Preview,
+            |c| {
+                through = c.through;
+                commits.push(json!([end, c.through.get(), c.text]));
+                if !c.text.trim().is_empty() {
+                    texts.push(c.text);
+                }
+            },
+        )?;
     }
     u.release();
     let t = Instant::now();
-    let (_, tail) = worker.finish(&passage, &u, |c| {
+    let (_, tail) = worker.finish(&passage, Frames::ZERO, &u, |c| {
         if !c.text.trim().is_empty() {
             texts.push(c.text);
         }

@@ -51,12 +51,21 @@ postroll_ms = 250
 #
 # The cost is ~32 KB per second of speech (16 kHz 16-bit mono), pruned below.
 #
-# The in-memory ceiling that incident hit is 3600 seconds (MAX_UTTERANCE_SECONDS
-# in audio.rs), a compile-time constant rather than a setting: it is a bound on
-# how much a capture may occupy of this machine's RAM (~230 MB/hour at 16 kHz),
-# not a policy. Reaching it now says so in the winbar and names the WAV that
-# keeps recording past it; the recovery file is written before the ceiling is
-# consulted, so the cap can never truncate it.
+# Since 2026-09-21 the audio a capture holds in memory is only its open tail:
+# once a chunk is transcribed its audio is dropped, so a recording costs the
+# same at an hour as at ten seconds (measured: 3.6 MiB over half an hour,
+# against 116 MiB before). That incident cannot repeat with a VAD model loaded.
+#
+# The ceiling is still there for the case where nothing ever settles -- no VAD
+# model, or vad.enabled = false -- and is 3600 seconds of *held* audio
+# (MAX_UTTERANCE_SECONDS in audio.rs), a compile-time constant rather than a
+# setting: it is a bound on how much of this machine's RAM one capture may
+# occupy (~230 MB/hour at 16 kHz), not a policy. Reaching it says so in the
+# winbar and names the WAV that keeps recording past it; the recovery file is
+# written before the ceiling is consulted, so the cap can never truncate it.
+# A capture is not otherwise limited in length: the WAV is, at about 37 hours,
+# where the RIFF 32-bit size overflows, and `spokenpad transcribe` refuses a
+# recording over 4 hours rather than allocating for it.
 enabled = true
 
 # Where the recordings go. Created mode 0700, each file mode 0600 -- a capture

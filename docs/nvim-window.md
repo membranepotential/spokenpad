@@ -334,7 +334,8 @@ back.
 
 When previews stop, the winbar says so instead of freezing. Past
 `preview.max_seconds` (30 s of uncommitted tail) they **pause and resume by
-themselves** once the tail settles; past the in-memory ceiling they stop for
+themselves** once the tail settles — the tick keeps committing meanwhile, which
+is what settles it; past the in-memory ceiling they stop for
 good and the notice names the WAV that keeps recording. A daemon running
 without a VAD model issues no preview at all, and says so the same way for the
 whole capture. Without that message, a frozen preview during a long passage

@@ -215,10 +215,14 @@ too briefly > preview paused. The log always has the full sentence and paths.
   returns nothing for a short sentence; such a chunk is decoded once more
   without its trailing silence.
 - **Previews pause on a long unsettled tail** (`preview.max_seconds`, 30 s)
-  and resume by themselves. Without a VAD model there is no preview, and the
-  capture is decoded at release.
-- **Past the 60-minute in-memory limit** the capture is decoded and the winbar
-  names the recovery WAV, which keeps recording.
+  and resume by themselves; text keeps landing while they are paused. Without
+  a VAD model there is no preview, and the capture is decoded at release.
+- **A long recording costs no more memory than a short one.** Audio that has
+  been transcribed is dropped as you speak; what is held is the sentence you
+  are still in. The recovery WAV keeps the whole recording.
+- **Past the 60-minute in-memory limit** — only reachable with no VAD model,
+  because nothing settles and nothing can be dropped — the capture is decoded
+  and the winbar names the recovery WAV, which keeps recording.
 
 ## Managed window on i3 and sway
 

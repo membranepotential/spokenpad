@@ -181,11 +181,14 @@ session, decode and nvim tests:
    reads preview state.
 2. **Preview cost is bounded by the chunk, not the utterance.** Only the open
    tail is decoded, and it is at most one unclosed chunk. A preview costs the
-   same at ten minutes as at ten seconds. Without a segmenter loaded there is
-   no bounded tail, so **no preview tick is issued at all** and the capture is
-   decoded at release. `[preview].max_seconds` (30 s) is the remaining
-   backstop for a chunk that somehow never settles: past it previews pause and
-   say so, and resume by themselves once the tail is short again.
+   same at ten minutes as at ten seconds, and so does the memory: the audio
+   behind the committed offset is dropped while the capture runs
+   ([progressive-commit.md](progressive-commit.md#what-is-kept-in-memory)).
+   Without a segmenter loaded there is no bounded tail, so **no preview tick is
+   issued at all** and the capture is decoded at release. `[preview].max_seconds`
+   (30 s) is the remaining backstop for a chunk that somehow never settles:
+   past it the tick stops decoding the open tail but keeps committing what has
+   settled, so the tail shrinks and previews resume by themselves.
 3. **A preview can never make the user wait.** Previews are abandoned the
    instant a release or a cancel is due: a preview still queued on the single
    worker is skipped, and one already running stops after its current chunk

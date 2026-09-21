@@ -27,7 +27,7 @@ imperative shell, and `config.rs` sits at the root because both sides read it.
 | `core/segments.rs` | VAD merge/pad/settlement: spans in, decode windows out | none |
 | `shell/inference.rs` | CPU-only models; the sherpa recognizer and the Silero detector | ONNX Runtime |
 | `shell/control.rs` | Listen on the control socket, stamp and forward each request; the client the CLI uses | Unix socket |
-| `shell/audio.rs` | Pre-roll, immutable capture chunks, the memory ceiling, stream repair | PortAudio (behind `InputBackend`) |
+| `shell/audio.rs` | Pre-roll, immutable capture chunks, dropping committed audio, the memory ceiling, stream repair | PortAudio (behind `InputBackend`) |
 | `shell/recorder.rs` | Persist every capture independently of decode, and prune the directory | filesystem |
 | `shell/nvim/mod.rs` | Editor lifecycle in both modes (attach, managed spawn), ownership proof, transactional appends, indicator, `spokenpad editor` | Unix socket, window manager |
 | `shell/nvim/passage.rs` | With no editor open: append to the pending dictation file, and the pointer the next editor opens | filesystem |
@@ -137,11 +137,22 @@ The state transition is pure. Blocking model and editor work runs off the event
 loop. Audio recording receives chunks before the in-memory capture cap, so
 recovery does not depend on decoding succeeding.
 
+What a running capture holds in memory is the open tail, not the capture: the
+loop drops every device buffer the worker has committed past, so a latched
+capture costs the same at an hour as at ten seconds
+([progressive-commit.md](progressive-commit.md#what-is-kept-in-memory)). The
+recovery WAV is written from the callback before the drop and still holds all
+of it.
+
 ## Decode invariants
 
-- A committed sample range is decoded once.
-- Long silence can close a pending VAD chunk before the speech-size target;
+- A committed sample range is decoded once, and is dropped from memory
+  afterwards without any window ever reading it again.
+- Long silence can close a pending VAD chunk before the speech-size target,
+  whether a later span follows it or it is simply the end of the slice;
   ordinary pauses still merge for recognizer context.
+- Silence the VAD heard nothing in advances the committed offset without a
+  decode, one split threshold behind the end of the audio.
 - Release decodes only the range after the committed offset.
 - Preview may re-decode only the bounded open tail and cannot reach the file.
   With no segmenter loaded, no preview tick is issued at all.

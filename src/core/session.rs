@@ -139,6 +139,17 @@ impl fmt::Display for Notice {
     }
 }
 
+/// What the preview is doing. `Paused` only stops the cosmetic tail: ticks
+/// keep running, so settled chunks still commit and the tail still shrinks.
+/// `Capped` stops the ticks themselves, because past the in-memory ceiling
+/// there is nothing left to commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Previews {
+    Running,
+    Paused,
+    Capped,
+}
+
 pub struct Session {
     pub state: State,
     pub current: Option<Arc<Utterance>>,
@@ -151,7 +162,7 @@ pub struct Session {
     pending: Option<(UtteranceId, Instant)>,
     interval: Duration,
     enabled: bool,
-    paused: bool,
+    previews: Previews,
     warned_tick_failure: bool,
 }
 impl Session {
@@ -168,7 +179,7 @@ impl Session {
             pending: None,
             interval,
             enabled,
-            paused: false,
+            previews: Previews::Running,
             warned_tick_failure: false,
         }
     }
@@ -183,7 +194,7 @@ impl Session {
                 self.preview_epoch = Frames::ZERO;
                 self.preview.clear();
                 self.notice = None;
-                self.paused = false;
+                self.previews = Previews::Running;
                 self.warned_tick_failure = false;
                 self.pending = None;
                 self.due = self.enabled.then(|| Instant::now() + self.interval);
@@ -236,6 +247,7 @@ impl Session {
     pub fn tick_due(&self, now: Instant) -> bool {
         self.state.recording()
             && self.enabled
+            && self.previews != Previews::Capped
             && self.pending.is_none()
             && self.due.is_some_and(|d| now >= d)
     }
@@ -255,7 +267,9 @@ impl Session {
             .map(|(_, at)| now.saturating_duration_since(at))
             .unwrap_or_default();
         self.pending = None;
-        if !self.paused {
+        // Re-armed even while the cosmetic tail is paused: those ticks are
+        // what commit the settled chunks the pause is waiting for.
+        if self.previews != Previews::Capped {
             self.due = Some(now + self.interval.saturating_sub(elapsed).max(elapsed));
         }
         let Some(Preview { text, through }) = preview else {
@@ -274,20 +288,23 @@ impl Session {
             self.preview = text;
         }
     }
-    /// The open tail is too long to decode cosmetically; look again at `retry`
-    /// so previews resume by themselves once it settles.
-    pub fn defer_previews(&mut self, retry: Instant) {
-        self.paused = true;
-        self.due = Some(retry);
+    /// The open tail is too long to decode cosmetically. The tick still runs
+    /// and still commits, so the tail settles and previews resume by
+    /// themselves.
+    pub fn defer_previews(&mut self) {
+        if self.previews == Previews::Capped {
+            return;
+        }
+        self.previews = Previews::Paused;
         // The lowest-ranked notice there is: a paused preview must never push
         // aside the reason the capture itself is in trouble.
         self.notify(Notice::PreviewPaused);
     }
     pub fn resume_previews(&mut self) {
-        if !self.paused {
+        if self.previews != Previews::Paused {
             return;
         }
-        self.paused = false;
+        self.previews = Previews::Running;
         if self.notice == Some(Notice::PreviewPaused) {
             self.notice = None;
         }
@@ -295,7 +312,7 @@ impl Session {
     /// The in-memory ceiling ends this capture: nothing more can be decoded,
     /// so release what is held and stop previewing for good.
     pub fn cap(&mut self, recovery: RecordingStatus) {
-        self.paused = true;
+        self.previews = Previews::Capped;
         self.due = None;
         self.notify(Notice::MemoryCap(recovery));
         if let Some(u) = &self.current {
@@ -325,7 +342,7 @@ impl Session {
     /// Whether previews are running: false once they are paused for a long
     /// uncommitted tail or for the memory cap.
     pub fn previewing(&self) -> bool {
-        self.enabled && !self.paused
+        self.enabled && self.previews == Previews::Running
     }
     /// The live tail the indicator shows below the committed text. Never the
     /// notice: the two are rendered in different places and one must not hide
@@ -465,16 +482,19 @@ mod tests {
         assert_eq!(s.state, State::Idle);
     }
     #[test]
-    fn paused_previews_resume_once_the_tail_is_affordable_again() {
+    fn paused_previews_keep_ticking_and_resume_by_themselves() {
         let mut s = Session::new(true, Duration::from_millis(200));
         start(&mut s);
+        let id = s.current.as_ref().unwrap().id;
         let now = Instant::now();
-        s.defer_previews(now + Duration::from_millis(200));
+        s.defer_previews();
         assert!(!s.previewing());
         assert_eq!(s.notice(), Some(&Notice::PreviewPaused));
+        s.requested(now);
+        s.tick_finished(id, None, now);
         assert!(
             s.tick_due(now + Duration::from_millis(200)),
-            "a paused preview must re-check, not stop"
+            "a paused preview still commits: the tick has to be re-armed"
         );
         s.resume_previews();
         assert!(s.previewing());
@@ -488,6 +508,11 @@ mod tests {
         let id = u.id;
         s.cap(RecordingStatus::NotRecorded);
         assert!(!u.ticking(), "the capture is released for its final decode");
+        s.defer_previews();
+        assert!(
+            !s.tick_due(Instant::now() + Duration::from_secs(30)),
+            "a paused preview cannot restart a capped capture"
+        );
         s.tick_finished(id, preview("much longer cosmetic text", 0), Instant::now());
         s.tick_finished(id, None, Instant::now());
         assert_eq!(
@@ -525,9 +550,8 @@ mod tests {
     fn a_paused_preview_never_hides_what_went_wrong_with_the_capture() {
         let mut s = Session::new(true, Duration::from_millis(200));
         start(&mut s);
-        let now = Instant::now();
         s.notify(Notice::MicrophoneGap);
-        s.defer_previews(now + Duration::from_millis(200));
+        s.defer_previews();
         assert!(!s.previewing(), "the pause itself still took effect");
         assert_eq!(s.notice(), Some(&Notice::MicrophoneGap));
         s.resume_previews();

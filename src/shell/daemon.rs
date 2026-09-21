@@ -10,7 +10,8 @@ use crate::{
     core::{
         control::{Received, Request},
         decode::{
-            Commit, Pipeline, Preview, Recognizer, Segmenter, Utterance, UtteranceId, Worker,
+            Commit, Pipeline, Preview, Recognizer, Segmenter, TickKind, Utterance, UtteranceId,
+            Worker,
         },
         frames::Frames,
         session::{Notice, RecordingStatus, Session},
@@ -18,7 +19,7 @@ use crate::{
         text::Processor,
     },
     shell::{
-        audio::{AudioCapture, CaptureEvent, InputBackend, PostRoll},
+        audio::{AudioCapture, CaptureEvent, Captured, InputBackend, PostRoll},
         control::ControlServer,
         inference::{Transcriber, load_segmenter},
         nvim::{AppendFailure, CopyOutcome, IndicatorState, NvimSession},
@@ -162,9 +163,11 @@ enum Work {
         audio: Vec<f32>,
         start: Frames,
         utterance: Arc<Utterance>,
+        kind: TickKind,
     },
     Finish {
         audio: Vec<f32>,
+        start: Frames,
         utterance: Arc<Utterance>,
     },
     Quit,
@@ -512,14 +515,14 @@ where
                             &editor_tx,
                             EditorWork::Indicator(indicator_of(&session, 0.)),
                         )?;
-                        let (samples, postroll) = capture.finish_capture(released, || {
+                        let (captured, postroll) = capture.finish_capture(released, || {
                             stopping.load(Ordering::Acquire) || requests.start_waiting()
                         });
                         note_postroll(postroll, &mut session);
                         for event in capture.poll() {
                             apply_capture_event(event, &mut session);
                         }
-                        release(&mut session, &capture, &samples, config, dump_dir, &work_tx)?;
+                        release(&mut session, &capture, captured, config, dump_dir, &work_tx)?;
                     }
                     Command::Discard(reason) => {
                         capture.stop_capture();
@@ -620,36 +623,47 @@ where
             }
             if session.tick_due(now) {
                 let tail = capture.captured_frames().since(session.committed_hint);
-                if Frames(tail).seconds(rate) > config.preview.max_seconds {
-                    log::warn!(
-                        "preview paused: uncommitted audio exceeds preview.max_seconds; still recording"
-                    );
-                    session.defer_previews(now + Duration::from_millis(config.preview.interval_ms));
+                // A tail too long to redraw cheaply stops the cosmetic decode
+                // only. The tick still runs, still commits what has settled,
+                // and so still lets the shell drop the audio behind it.
+                let kind = if Frames(tail).seconds(rate) > config.preview.max_seconds {
+                    if session.previewing() {
+                        log::warn!(
+                            "preview paused: uncommitted audio exceeds preview.max_seconds; still recording and committing"
+                        );
+                    }
+                    session.defer_previews();
+                    TickKind::Commits
                 } else {
                     session.resume_previews();
-                    let utterance = session
-                        .current
-                        .as_ref()
-                        .context("recording has no utterance")?
-                        .clone();
-                    let start = session.committed_hint;
-                    let audio = capture.snapshot_capture(start);
-                    session.requested(now);
-                    log::debug!(
-                        "preview {} requested: {:.2}s audio starting at {start}",
-                        utterance.id.0,
-                        Frames(audio.len()).seconds(rate)
-                    );
-                    send(
-                        &work_tx,
-                        Work::Tick {
-                            audio,
-                            start,
-                            utterance,
-                        },
-                    )?;
-                }
+                    TickKind::Preview
+                };
+                let utterance = session
+                    .current
+                    .as_ref()
+                    .context("recording has no utterance")?
+                    .clone();
+                let audio = capture.snapshot_capture(session.committed_hint);
+                session.requested(now);
+                log::debug!(
+                    "preview {} requested: {:.2}s audio starting at {}",
+                    utterance.id.0,
+                    Frames(audio.samples.len()).seconds(rate),
+                    audio.start
+                );
+                send(
+                    &work_tx,
+                    Work::Tick {
+                        audio: audio.samples,
+                        start: audio.start,
+                        utterance,
+                        kind,
+                    },
+                )?;
             }
+            // Audio the worker has committed is never read again; the
+            // recovery WAV keeps the whole capture either way.
+            capture.discard_before(session.committed_hint);
             let level = if session.state.recording() {
                 capture.level()
             } else {
@@ -747,9 +761,10 @@ fn engine_thread<R: Recognizer, S: Segmenter>(
                 audio,
                 start,
                 utterance,
+                kind,
             } => {
                 let started = Instant::now();
-                let result = worker.tick(&audio, start, &utterance, |c| {
+                let result = worker.tick(&audio, start, &utterance, kind, |c| {
                     let _ = result_tx.send(ResultEvent::Commit(c));
                 });
                 result_tx.send(ResultEvent::Tick {
@@ -758,9 +773,13 @@ fn engine_thread<R: Recognizer, S: Segmenter>(
                     elapsed: started.elapsed(),
                 })
             }
-            Work::Finish { audio, utterance } => {
+            Work::Finish {
+                audio,
+                start,
+                utterance,
+            } => {
                 let started = Instant::now();
-                let result = worker.finish(&audio, &utterance, |c| {
+                let result = worker.finish(&audio, start, &utterance, |c| {
                     let _ = result_tx.send(ResultEvent::Commit(c));
                 });
                 result_tx.send(ResultEvent::Finished {
@@ -781,7 +800,7 @@ fn engine_thread<R: Recognizer, S: Segmenter>(
 fn release<B: InputBackend>(
     session: &mut Session,
     capture: &AudioCapture<B>,
-    samples: &[f32],
+    taken: Captured,
     config: &Config,
     dump_dir: Option<&Path>,
     work_tx: &Sender<Work>,
@@ -791,10 +810,15 @@ fn release<B: InputBackend>(
         State::Transcribing { started, released } => released.saturating_duration_since(started),
         _ => Duration::ZERO,
     };
-    let captured = Frames(samples.len()).seconds(rate);
-    let peak = samples.iter().fold(0_f32, |a, &s| a.max(s.abs()));
+    let Captured {
+        samples,
+        start,
+        frames,
+        peak,
+    } = taken;
+    let captured = frames.seconds(rate);
     log::info!(
-        "captured {:.1}s held -> {captured:.1}s audio ({} samples), peak={peak:.4}",
+        "captured {:.1}s held -> {captured:.1}s audio ({frames} samples, {} still held), peak={peak:.4}",
         held.as_secs_f64(),
         samples.len()
     );
@@ -817,7 +841,13 @@ fn release<B: InputBackend>(
             "capture-{}.wav",
             chrono::Local::now().format("%Y-%m-%d-%H%M%S-%f")
         ));
-        if let Err(e) = crate::shell::recorder::dump_capture(&path, samples, rate) {
+        if start > Frames::ZERO {
+            log::info!(
+                "dump holds the last {:.1}s only; the whole capture is in the recovery WAV",
+                Frames(samples.len()).seconds(rate)
+            );
+        }
+        if let Err(e) = crate::shell::recorder::dump_capture(&path, &samples, rate) {
             log::error!("could not dump capture: {e:#}");
         }
     }
@@ -829,7 +859,8 @@ fn release<B: InputBackend>(
     send(
         work_tx,
         Work::Finish {
-            audio: samples.to_vec(),
+            audio: samples,
+            start,
             utterance,
         },
     )

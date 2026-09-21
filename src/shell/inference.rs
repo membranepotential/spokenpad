@@ -5,8 +5,8 @@
 use crate::{
     config::{Asr, Decoding, Model, Vad},
     core::{
-        decode::{Recognizer, Segment, Segmenter, TrailingSilence},
-        segments::merge_spans,
+        decode::{Recognizer, Segmenter, Split, TrailingSilence},
+        segments::{VAD_WINDOW, merge_spans},
     },
 };
 use anyhow::{Context, Result, bail, ensure};
@@ -284,7 +284,7 @@ impl SpeechSegmenter {
                 min_silence_duration: config.min_silence_seconds as f32,
                 min_speech_duration: config.min_speech_seconds as f32,
                 max_speech_duration: config.max_speech_seconds as f32,
-                window_size: 512,
+                window_size: VAD_WINDOW as i32,
             },
             sample_rate: rate as i32,
             num_threads: 1,
@@ -313,14 +313,14 @@ impl SpeechSegmenter {
     }
 }
 impl Segmenter for SpeechSegmenter {
-    fn split(&mut self, samples: &[f32]) -> Result<Vec<Segment>> {
+    fn split(&mut self, samples: &[f32]) -> Result<Split> {
         ensure!(
             samples.len() <= i32::MAX as usize,
             "capture exceeds the VAD offset limit"
         );
         self.detector.reset();
         let mut spans = vec![];
-        for chunk in samples.chunks_exact(512) {
+        for chunk in samples.chunks_exact(VAD_WINDOW) {
             self.detector.accept_waveform(chunk);
             self.drain(&mut spans, samples.len())?;
         }

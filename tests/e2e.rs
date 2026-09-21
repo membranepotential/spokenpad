@@ -23,10 +23,15 @@
 
 use anyhow::Result;
 use spokenpad::{
-    config::{Audio, Config, Mode},
+    config::{Audio, Config, Mode, Recording, Vad},
     core::{
         control::{Received, Request},
-        decode::{Pipeline, Recognizer, Segment, Segmenter, TrailingSilence, Worker},
+        decode::{
+            Pipeline, Recognizer, Segment, Segmenter, Split, TickKind, TrailingSilence, Utterance,
+            Worker,
+        },
+        frames::Frames,
+        segments::{VAD_WINDOW, merge_spans, settling_silence},
         state::REPEAT_WINDOW,
         terminal::Terminal,
     },
@@ -41,6 +46,7 @@ use spokenpad::{
 use std::{
     collections::VecDeque,
     fs,
+    ops::Range,
     os::unix::process::CommandExt,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -204,27 +210,68 @@ impl Recognizer for Counting {
     }
 }
 
-/// Fixed-length chunks: everything but the last one has settled. Audio with
-/// no loud sample in it is silence, and a real VAD reports no speech there —
-/// which, since 2026-09-11, means no segments and therefore no decode.
-struct Fixed(usize);
+/// How a test cuts a capture into decode windows.
+enum Chunker {
+    /// Fixed-length chunks: everything but the last one has settled. Audio
+    /// with no loud sample in it is silence, and a real VAD reports no speech
+    /// there — which, since 2026-09-11, means no segments and therefore no
+    /// decode.
+    Fixed(usize),
+    /// The real merge, padding and settlement policy over spans read off the
+    /// amplitudes on Silero's window grid: everything the daemon does with a
+    /// live capture except loading Silero itself. `Fixed` can show none of
+    /// it, because it knows nothing about pauses.
+    Speech(Vad),
+}
 
-impl Segmenter for Fixed {
-    fn split(&mut self, samples: &[f32]) -> Result<Vec<Segment>> {
-        if loud_samples(samples) == 0 {
-            return Ok(vec![]);
-        }
-        Ok((0..samples.len())
-            .step_by(self.0)
-            .map(|start| {
-                let end = (start + self.0).min(samples.len());
-                Segment {
-                    window: start..end,
-                    speech_end: end,
-                    settled: start + self.0 < samples.len(),
+impl Segmenter for Chunker {
+    fn split(&mut self, samples: &[f32]) -> Result<Split> {
+        let size = match self {
+            Chunker::Fixed(size) => *size,
+            Chunker::Speech(config) => {
+                let mut spans: Vec<Range<usize>> = vec![];
+                for (i, window) in samples.chunks_exact(VAD_WINDOW).enumerate() {
+                    if !window.iter().any(|s| s.abs() > LOUD) {
+                        continue;
+                    }
+                    let (start, end) = (i * VAD_WINDOW, (i + 1) * VAD_WINDOW);
+                    match spans.last_mut() {
+                        Some(last) if last.end == start => last.end = end,
+                        _ => spans.push(start..end),
+                    }
                 }
-            })
-            .collect())
+                return Ok(merge_spans(&spans, samples.len(), config, RATE));
+            }
+        };
+        if loud_samples(samples) == 0 {
+            return Ok(Split::default());
+        }
+        Ok(Split {
+            segments: (0..samples.len())
+                .step_by(size)
+                .map(|start| {
+                    let end = (start + size).min(samples.len());
+                    Segment {
+                        window: start..end,
+                        speech_end: end,
+                        settled: start + size < samples.len(),
+                    }
+                })
+                .collect(),
+            silent_through: 0,
+        })
+    }
+}
+
+/// A short VAD policy, so a test can hold a pause long enough to settle
+/// without running for half a minute.
+fn brisk_vad() -> Vad {
+    Vad {
+        chunk_seconds: 1.0,
+        pad_seconds: 0.2,
+        edge_pad_seconds: 0.2,
+        max_speech_seconds: 5.0,
+        ..Vad::default()
     }
 }
 
@@ -255,6 +302,8 @@ struct Settings {
     postroll_ms: u32,
     interval_ms: u64,
     chunk: Option<usize>,
+    /// Chunk on the real merge policy instead of `chunk`.
+    vad: Option<Vad>,
     words: bool,
     delay: Duration,
     /// Also listen on a control socket, for [`Harness::cli`].
@@ -272,6 +321,7 @@ impl Default for Settings {
             postroll_ms: 250,
             interval_ms: 200,
             chunk: None,
+            vad: None,
             words: true,
             delay: Duration::ZERO,
             socket: false,
@@ -323,7 +373,11 @@ impl Harness {
                 delay: settings.delay,
                 calls: Arc::clone(&calls),
             },
-            segmenter: settings.chunk.map(Fixed),
+            segmenter: settings
+                .vad
+                .clone()
+                .map(Chunker::Speech)
+                .or_else(|| settings.chunk.map(Chunker::Fixed)),
         });
         let (requests, received) = mpsc::channel();
         // Where `spokenpad start` looks, given the harness's runtime dir.
@@ -1355,6 +1409,262 @@ fn text_for_an_editor_that_exited_during_the_decode_goes_to_the_pending_passage(
     );
     assert_eq!(h.calls().len(), 1, "decoded once: {:?}", h.calls());
     h.finish();
+}
+
+/// A latched capture that runs through a pause long enough to settle: the
+/// daemon drops the audio it has committed while it records, and the capture
+/// still reaches the file whole, with every sample decoded exactly once.
+#[test]
+fn a_capture_that_runs_through_a_long_pause_is_still_committed_whole() {
+    if !nvim_available() {
+        return;
+    }
+    let h = Harness::start(Settings {
+        vad: Some(brisk_vad()),
+        words: false,
+        interval_ms: 200,
+        ..Settings::default()
+    });
+    h.press(true);
+    h.say(&tone(1.5));
+    // Longer than the split threshold, so the chunk closes, the text lands
+    // and the daemon has no reason to hold any of it.
+    h.say(&vec![0.0; RATE as usize * 2]);
+    wait_until("the first chunk is committed while the latch runs", || {
+        !h.text().is_empty()
+    });
+    h.say(&tone(1.5));
+    h.say(&vec![0.0; RATE as usize * 2]);
+    h.press_only(true);
+    h.release_for_good();
+
+    let mut loud = 0;
+    wait_until("every captured sample is committed exactly once", || {
+        let previous = loud;
+        loud = loud_samples(&h.recovery_wav().0);
+        loud > 0 && loud == previous && counted(&h.text()) == loud
+    });
+    let (recorded, rate) = h.recovery_wav();
+    assert_eq!(rate, RATE);
+    assert!(
+        recorded.len() >= 7 * RATE as usize,
+        "the recovery WAV holds the whole capture, silence included: {} frames",
+        recorded.len()
+    );
+    h.finish();
+}
+
+/// What the process actually holds over a long latched capture, measured
+/// twice: dropping the committed audio, and keeping it as the daemon used
+/// to. Ignored because it replays half an hour of audio through the capture
+/// buffer and takes about a minute.
+///
+///     cargo test --locked --test e2e -- --ignored --exact \
+///         ram_over_a_long_latched_capture --nocapture
+#[test]
+#[ignore = "measures process RSS over half an hour of simulated capture"]
+fn ram_over_a_long_latched_capture() {
+    let minutes = 30;
+    let keeping = replay_into_capture(minutes, false);
+    let dropping = replay_into_capture(minutes, true);
+    println!(
+        "{minutes} minutes latched: keeping committed audio +{:.1} MiB peak RSS, \
+         dropping it +{:.1} MiB peak RSS",
+        keeping as f64 / (1 << 20) as f64,
+        dropping as f64 / (1 << 20) as f64
+    );
+    assert!(
+        dropping < 32 << 20,
+        "held {dropping} bytes above the baseline"
+    );
+    assert!(
+        keeping > 4 * dropping,
+        "the run that keeps everything is the one that grows: {keeping} vs {dropping}"
+    );
+}
+
+/// Peak RSS above the baseline, in bytes, while `minutes` of speech and
+/// silence run through a real [`AudioCapture`] and the real decode worker.
+fn replay_into_capture(minutes: usize, dropping: bool) -> usize {
+    let backend = DirectMicrophone::default();
+    let mut capture = AudioCapture::with_backend(
+        backend.clone(),
+        Audio {
+            sample_rate: RATE,
+            preroll_ms: 0,
+            postroll_ms: 0,
+            device: None,
+        },
+        Recording {
+            enabled: false,
+            dir: "/unused".into(),
+            max_total_bytes: 1,
+        },
+    )
+    .expect("open the direct microphone");
+    let mut worker = Worker::new(Pipeline {
+        recognizer: Counting {
+            words: false,
+            delay: Duration::ZERO,
+            calls: Arc::new(Mutex::new(Vec::new())),
+        },
+        segmenter: Some(Chunker::Speech(Vad::default())),
+    });
+    let utterance = Utterance::new(1);
+    capture.start_capture().expect("start the capture");
+
+    let buffer = RATE as usize / 50;
+    let interval = 1_100 * RATE as usize / 1_000;
+    let frames = minutes * 60 * RATE as usize;
+    let baseline = resident_bytes();
+    let mut peak = 0;
+    let mut through = Frames::ZERO;
+    let mut next_tick = interval;
+    let mut speech = vec![0.0_f32; buffer];
+    for start in (0..frames).step_by(buffer) {
+        // Four seconds of speech, six of silence: every pause settles, and
+        // the silence is what used to keep growing.
+        let talking = (start / RATE as usize) % 10 < 4;
+        for (i, sample) in speech.iter_mut().enumerate() {
+            *sample = match (talking, (start + i) % 2 == 0) {
+                (false, _) => 0.0,
+                (true, true) => 0.5,
+                (true, false) => -0.5,
+            };
+        }
+        backend.feed(&speech);
+        if start + buffer < next_tick {
+            continue;
+        }
+        next_tick += interval;
+        peak = peak.max(resident_bytes().saturating_sub(baseline));
+        let snapshot = capture.snapshot_capture(through);
+        worker
+            .tick(
+                &snapshot.samples,
+                snapshot.start,
+                &utterance,
+                TickKind::Preview,
+                |c| through = c.through,
+            )
+            .expect("tick");
+        if dropping {
+            capture.discard_before(through);
+        }
+    }
+    peak.max(resident_bytes().saturating_sub(baseline))
+}
+
+/// Resident set size of this process, in bytes.
+fn resident_bytes() -> usize {
+    let status = fs::read_to_string("/proc/self/status").expect("/proc/self/status");
+    let line = status
+        .lines()
+        .find(|line| line.starts_with("VmRSS:"))
+        .expect("VmRSS");
+    let kilobytes: usize = line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|n| n.parse().ok())
+        .expect("VmRSS value");
+    kilobytes * 1024
+}
+
+/// A microphone the caller drives itself: no thread, no waiting, one
+/// callback per `feed`.
+#[derive(Clone, Default)]
+struct DirectMicrophone {
+    core: Arc<Mutex<Option<Arc<CallbackCore>>>>,
+    alive: Arc<AtomicBool>,
+}
+
+struct DirectStream(Arc<AtomicBool>);
+
+impl InputStream for DirectStream {
+    fn is_active(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+    fn close(self, _teardown: Teardown) {
+        self.0.store(false, Ordering::Relaxed);
+    }
+}
+
+impl InputBackend for DirectMicrophone {
+    type Stream = DirectStream;
+    fn open(&self, _config: &Audio, core: Arc<CallbackCore>) -> Result<DirectStream> {
+        self.alive.store(true, Ordering::Relaxed);
+        *lock(&self.core) = Some(Arc::clone(&core));
+        // A real device delivers at once; skip the first-callback stall.
+        core.process(&[], 0);
+        Ok(DirectStream(Arc::clone(&self.alive)))
+    }
+}
+
+impl DirectMicrophone {
+    fn feed(&self, samples: &[f32]) {
+        let core = lock(&self.core).clone().expect("stream opened");
+        core.process(samples, 0);
+    }
+}
+
+/// Dropping settled silence leaves the audio that follows covered by the
+/// same detector windows, and the keep-back leaves Silero enough silence to
+/// find the same speech in it. The first is arithmetic — the drop is a whole
+/// number of `VAD_WINDOW`s — the second is a property of the model, which is
+/// what this measures against the real one.
+#[test]
+#[ignore = "loads the real Silero model from the default model directory"]
+fn dropping_settled_silence_does_not_move_the_detector_spans() {
+    let config = Config::default();
+    let sample = config.asr.model_dir.join("test_en.wav");
+    if !sample.is_file() || !config.vad.model.is_file() {
+        eprintln!("skipping: `spokenpad fetch-models` has not been run");
+        return;
+    }
+    let (source, rate) = read_capture(&sample).expect("read the bundled sample");
+    let speech = resample(&source, rate, RATE);
+    let mut segmenter = load_segmenter(&config.vad, RATE).expect("load Silero");
+
+    let keep = settling_silence(&config.vad, RATE);
+    let forgotten = keep + 56 * RATE as usize;
+    assert_eq!(
+        (forgotten - keep) % VAD_WINDOW,
+        0,
+        "the drop has to be a whole number of detector windows"
+    );
+    let mut with_prefix = |silence: usize| {
+        let mut samples = vec![0.0_f32; silence];
+        samples.extend_from_slice(&speech);
+        samples.extend(std::iter::repeat_n(0.0, RATE as usize));
+        segmenter.split(&samples).expect("split")
+    };
+
+    let trimmed = with_prefix(keep);
+    let whole = with_prefix(forgotten);
+    let shift = forgotten - keep;
+    assert!(!trimmed.segments.is_empty(), "the sample has speech in it");
+    assert_eq!(
+        trimmed.segments.len(),
+        whole.segments.len(),
+        "a minute of extra leading silence changed how many windows there are"
+    );
+    for (short, long) in trimmed.segments.iter().zip(&whole.segments) {
+        assert_eq!(
+            (
+                short.window.start + shift,
+                short.window.end + shift,
+                short.speech_end + shift,
+                short.settled
+            ),
+            (
+                long.window.start,
+                long.window.end,
+                long.speech_end,
+                long.settled
+            ),
+            "the window moved by more than the silence that was dropped"
+        );
+    }
 }
 
 #[test]

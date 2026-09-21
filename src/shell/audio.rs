@@ -23,6 +23,12 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// The most audio one capture may hold in memory at once. Audio the decoder
+/// has finished with is dropped as the capture runs, by
+/// [`AudioCapture::discard_before`], so this is a ceiling on the *retained*
+/// window rather than on how long a capture may be; with a VAD model loaded
+/// nothing comes near it. Without one nothing ever settles, and this is what
+/// stops a forgotten capture from taking the machine's memory.
 pub const MAX_UTTERANCE_SECONDS: usize = 3_600;
 const FIRST_CALLBACK_TIMEOUT: Duration = Duration::from_millis(500);
 const STALE_STREAM: Duration = Duration::from_secs(1);
@@ -169,21 +175,62 @@ struct Chunk {
     kept: usize,
 }
 
+/// Part of a running capture, handed to the inference worker. `start` is
+/// where `samples` begins in the capture.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Snapshot {
+    pub start: Frames,
+    pub samples: Vec<f32>,
+}
+
+impl Snapshot {
+    fn empty(start: Frames) -> Self {
+        Self {
+            start,
+            samples: Vec::new(),
+        }
+    }
+}
+
+/// A capture that has ended: the audio still held, and the facts about the
+/// rest of it that outlive the samples themselves.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Captured {
+    /// The retained audio, beginning at `start`.
+    pub samples: Vec<f32>,
+    pub start: Frames,
+    /// Where the capture ended, counted from its first frame.
+    pub frames: Frames,
+    /// The loudest sample of the whole capture, dropped audio included.
+    pub peak: f32,
+}
+
 /// Either the pre-roll ring is filling, or a capture is accumulating chunks.
 enum CaptureState {
     Idle {
         ring: VecDeque<f32>,
     },
     Capturing {
+        /// The audio still held, covering `start..frames` of the capture.
         chunks: Vec<Chunk>,
-        /// Sum of `kept` over `chunks`, cached because the callback needs it.
+        /// Where `chunks` begins in the capture: what
+        /// [`AudioCapture::discard_before`] has dropped.
+        start: Frames,
+        /// End of the accepted audio, counted from the first frame of the
+        /// capture and never moved back, because it is what a snapshot and
+        /// the committed offset are measured against.
         frames: Frames,
         /// Device frames delivered since the capture started, counted after
         /// they were recorded and whether or not the memory ceiling let them
         /// into `chunks`. A stop measures its post-roll with this: `frames`
         /// stops growing at the ceiling.
         delivered: Frames,
-        /// Samples were dropped because the memory ceiling was reached.
+        /// The loudest sample of the whole capture, which outlives the audio
+        /// that was dropped.
+        peak: f32,
+        /// The retained window reached the memory ceiling and audio was
+        /// dropped. Final for the rest of the capture: accepting again after
+        /// a gap would splice audio that is not contiguous.
         capped: bool,
     },
 }
@@ -240,19 +287,25 @@ impl CallbackCore {
         match &mut *state {
             CaptureState::Capturing {
                 chunks,
+                start,
                 frames,
                 delivered,
+                peak: highest,
                 capped,
             } => {
                 // One copy of the device's reused buffer, shared by the disk
                 // and memory sinks. Disk receives it before the memory ceiling
-                // is consulted, so the one-hour cap cannot truncate recovery.
+                // is consulted, so the cap cannot truncate recovery.
                 let captured: Arc<[f32]> = Arc::from(samples);
                 self.recorder.write_shared(Arc::clone(&captured));
                 *delivered += captured.len();
-                let remaining = self.maximum_frames.saturating_sub(frames.get());
+                *highest = highest.max(peak);
+                if *capped {
+                    return;
+                }
+                let remaining = self.maximum_frames.saturating_sub(frames.since(*start));
                 let kept = captured.len().min(remaining);
-                *capped |= kept < captured.len();
+                *capped = kept < captured.len();
                 if kept == 0 {
                     return;
                 }
@@ -381,10 +434,12 @@ impl<B: InputBackend> AudioCapture<B> {
         };
         let mut chunks = Vec::with_capacity(reserve);
         let mut frames = Frames::ZERO;
+        let mut peak = 0.0_f32;
         if !preroll.is_empty() {
             let preroll: Arc<[f32]> = Arc::from(preroll);
             self.core.recorder.write_shared(Arc::clone(&preroll));
             frames += preroll.len();
+            peak = preroll.iter().fold(0.0_f32, |p, s| p.max(s.abs()));
             chunks.push(Chunk {
                 kept: preroll.len(),
                 samples: preroll,
@@ -392,8 +447,10 @@ impl<B: InputBackend> AudioCapture<B> {
         }
         *state = CaptureState::Capturing {
             chunks,
+            start: Frames::ZERO,
             frames,
             delivered: Frames::ZERO,
+            peak,
             capped: false,
         };
         Ok(())
@@ -401,7 +458,7 @@ impl<B: InputBackend> AudioCapture<B> {
 
     /// Ends a capture that is being thrown away: no post-roll, only the
     /// buffer in flight at the key event, which the recovery WAV still owes.
-    pub fn stop_capture(&mut self) -> Vec<f32> {
+    pub fn stop_capture(&mut self) -> Captured {
         match self.await_delivery(1, FINAL_CALLBACK_WAIT, &mut || false) {
             PostRoll::TimedOut => {
                 log::debug!("no further callback arrived within the release window")
@@ -421,7 +478,7 @@ impl<B: InputBackend> AudioCapture<B> {
         &mut self,
         released: Instant,
         mut interrupted: impl FnMut() -> bool,
-    ) -> (Vec<f32>, PostRoll) {
+    ) -> (Captured, PostRoll) {
         let remaining = self.config.postroll().saturating_sub(released.elapsed());
         let postroll = self.await_delivery(
             self.config.frames_in(remaining).max(1),
@@ -431,18 +488,24 @@ impl<B: InputBackend> AudioCapture<B> {
         (self.take_capture(), postroll)
     }
 
-    fn take_capture(&mut self) -> Vec<f32> {
-        let (chunks, capped) = {
+    fn take_capture(&mut self) -> Captured {
+        let (chunks, start, frames, peak, capped) = {
             let mut state = lock(&self.core.state);
             match &mut *state {
-                CaptureState::Idle { .. } => (Vec::new(), false),
-                CaptureState::Capturing { chunks, capped, .. } => {
-                    let taken = std::mem::take(chunks);
-                    let capped = *capped;
+                CaptureState::Idle { .. } => (Vec::new(), Frames::ZERO, Frames::ZERO, 0.0, false),
+                CaptureState::Capturing {
+                    chunks,
+                    start,
+                    frames,
+                    peak,
+                    capped,
+                    ..
+                } => {
+                    let taken = (std::mem::take(chunks), *start, *frames, *peak, *capped);
                     *state = CaptureState::Idle {
                         ring: VecDeque::with_capacity(self.core.preroll_frames),
                     };
-                    (taken, capped)
+                    taken
                 }
             }
         };
@@ -461,19 +524,59 @@ impl<B: InputBackend> AudioCapture<B> {
         for chunk in chunks {
             samples.extend_from_slice(&chunk.samples[..chunk.kept]);
         }
-        samples
+        Captured {
+            samples,
+            start,
+            frames,
+            peak,
+        }
     }
 
-    /// Samples of the current capture after `since`, empty when idle.
-    pub fn snapshot_capture(&self, since: Frames) -> Vec<f32> {
-        let (chunks, needed) = {
+    /// Drops capture audio the decoder is finished with: everything before
+    /// `through`, to whole chunks. No window of any later decode reaches back
+    /// across the committed offset, and `through` never runs ahead of it, so
+    /// what goes here is audio nothing will read again. The recovery WAV has
+    /// it all either way.
+    pub fn discard_before(&self, through: Frames) {
+        let mut state = lock(&self.core.state);
+        let CaptureState::Capturing { chunks, start, .. } = &mut *state else {
+            return;
+        };
+        let mut dropped = 0;
+        let mut whole = 0;
+        for chunk in chunks.iter() {
+            if *start + (dropped + chunk.kept) > through {
+                break;
+            }
+            dropped += chunk.kept;
+            whole += 1;
+        }
+        if whole == 0 {
+            return;
+        }
+        chunks.drain(..whole);
+        *start += dropped;
+    }
+
+    /// Samples of the current capture after `since`, empty when idle. The
+    /// snapshot says where it begins: audio already dropped cannot be handed
+    /// out, however far back `since` reaches.
+    pub fn snapshot_capture(&self, since: Frames) -> Snapshot {
+        let (chunks, needed, start) = {
             let state = lock(&self.core.state);
-            let CaptureState::Capturing { chunks, frames, .. } = &*state else {
-                return Vec::new();
+            let CaptureState::Capturing {
+                chunks,
+                start,
+                frames,
+                ..
+            } = &*state
+            else {
+                return Snapshot::empty(since);
             };
-            let needed = frames.since(since);
+            let start = since.max(*start);
+            let needed = frames.since(start);
             if needed == 0 {
-                return Vec::new();
+                return Snapshot::empty(start);
             }
             let mut selected = Vec::new();
             let mut selected_frames = 0;
@@ -485,27 +588,36 @@ impl<B: InputBackend> AudioCapture<B> {
                 }
             }
             selected.reverse();
-            (selected, needed)
+            (selected, needed, start)
         };
 
         let selected_frames = chunks.iter().map(|(_, kept)| kept).sum::<usize>();
         let skip = selected_frames - needed;
-        let mut result = Vec::with_capacity(needed);
+        let mut samples = Vec::with_capacity(needed);
         let mut skipped = 0;
-        for (samples, kept) in chunks {
+        for (chunk, kept) in chunks {
             let chunk_skip = (skip - skipped).min(kept);
-            result.extend_from_slice(&samples[chunk_skip..kept]);
+            samples.extend_from_slice(&chunk[chunk_skip..kept]);
             skipped += chunk_skip;
         }
-        result
+        Snapshot { start, samples }
     }
 
-    /// Frames of the current capture held in memory; zero while idle. The
-    /// event loop uses this to size the open tail without copying it.
+    /// End of the current capture, counted from its first frame; zero while
+    /// idle. The event loop uses this to size the open tail without copying
+    /// it.
     pub fn captured_frames(&self) -> Frames {
         match &*lock(&self.core.state) {
             CaptureState::Capturing { frames, .. } => *frames,
             CaptureState::Idle { .. } => Frames::ZERO,
+        }
+    }
+
+    /// Samples of the current capture held in memory; zero while idle.
+    pub fn retained_frames(&self) -> usize {
+        match &*lock(&self.core.state) {
+            CaptureState::Capturing { start, frames, .. } => frames.since(*start),
+            CaptureState::Idle { .. } => 0,
         }
     }
 
@@ -1023,7 +1135,7 @@ mod tests {
         capture.start_capture().unwrap();
         backend.feed(&[8.0, 9.0]);
         assert_eq!(
-            capture.stop_capture(),
+            capture.stop_capture().samples,
             [3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0],
             "capture starts with exactly the pre-roll before the press"
         );
@@ -1032,11 +1144,125 @@ mod tests {
         // capture's audio, even though less than preroll_ms has passed.
         capture.start_capture().unwrap();
         backend.feed(&[10.0]);
-        assert_eq!(capture.stop_capture(), [10.0]);
+        assert_eq!(capture.stop_capture().samples, [10.0]);
 
         backend.feed(&[11.0, 12.0]);
         capture.start_capture().unwrap();
-        assert_eq!(capture.stop_capture(), [11.0, 12.0]);
+        assert_eq!(capture.stop_capture().samples, [11.0, 12.0]);
+    }
+
+    /// Audio the worker has committed is dropped to whole device buffers,
+    /// and what is left says where it begins, so nothing is ever spliced from
+    /// the wrong offset.
+    #[test]
+    fn committed_audio_is_dropped_and_the_snapshot_says_where_it_begins() {
+        let (backend, mut capture) = capture(0);
+        capture.start_capture().unwrap();
+        for samples in [
+            [0.0, 1.0, 2.0, 3.0],
+            [4.0, 5.0, 6.0, 7.0],
+            [8.0, 9.0, 10.0, 11.0],
+        ] {
+            backend.feed(&samples);
+        }
+        assert_eq!(capture.retained_frames(), 12);
+
+        // Half a buffer is not dropped: the chunk it is in is still needed.
+        capture.discard_before(Frames(6));
+        assert_eq!(capture.retained_frames(), 8);
+        let snapshot = capture.snapshot_capture(Frames(6));
+        assert_eq!(snapshot.start, Frames(6));
+        assert_eq!(snapshot.samples, [6.0, 7.0, 8.0, 9.0, 10.0, 11.0]);
+        assert_eq!(
+            capture.captured_frames(),
+            Frames(12),
+            "the capture is still twelve frames long"
+        );
+
+        capture.discard_before(Frames(8));
+        assert_eq!(capture.retained_frames(), 4);
+        let dropped = capture.snapshot_capture(Frames(2));
+        assert_eq!(
+            (dropped.start, dropped.samples.as_slice()),
+            (Frames(8), [8.0, 9.0, 10.0, 11.0].as_slice()),
+            "a snapshot cannot reach into audio that is gone"
+        );
+
+        backend.feed(&[12.0, 13.0]);
+        assert_eq!(
+            capture.snapshot_capture(Frames(11)).samples,
+            [11.0, 12.0, 13.0],
+            "later audio still lands at its own offset"
+        );
+        let taken = capture.stop_capture();
+        assert_eq!(taken.start, Frames(8));
+        assert_eq!(taken.frames, Frames(14));
+        assert_eq!(taken.samples, [8.0, 9.0, 10.0, 11.0, 12.0, 13.0]);
+    }
+
+    /// The ceiling is on the audio held at once. With the decoder keeping up
+    /// it is never reached, however long the capture runs; the recovery WAV
+    /// holds all of it either way.
+    #[test]
+    fn the_ceiling_bounds_what_is_held_not_how_long_a_capture_runs() {
+        let (backend, mut capture) = capped_capture(0, 8);
+        capture.start_capture().unwrap();
+        for round in 0..20 {
+            backend.feed(&[0.5; 4]);
+            capture.discard_before(Frames(4 * round));
+            assert!(
+                capture.retained_frames() <= 8,
+                "held {} frames in round {round}",
+                capture.retained_frames()
+            );
+        }
+        let taken = capture.stop_capture();
+        assert_eq!(taken.frames, Frames(80), "every frame was accepted");
+        assert!(
+            capture
+                .poll()
+                .iter()
+                .all(|e| !matches!(e, CaptureEvent::MemoryCapReached { .. }))
+        );
+    }
+
+    /// Once the ceiling drops audio the capture has a hole in it, so it never
+    /// accepts again: splicing what came after the hole onto what came before
+    /// would decode speech that was never spoken in that order.
+    #[test]
+    fn the_ceiling_is_final_for_the_rest_of_the_capture() {
+        let (backend, mut capture) = capped_capture(0, 4);
+        capture.start_capture().unwrap();
+        backend.feed(&[1.0, 2.0, 3.0, 4.0, 5.0]);
+        assert_eq!(capture.retained_frames(), 4);
+        capture.discard_before(Frames(4));
+        backend.feed(&[6.0, 7.0]);
+        let taken = capture.stop_capture();
+        assert!(
+            taken.samples.is_empty(),
+            "audio after the hole is not spliced on: {:?}",
+            taken.samples
+        );
+        assert!(
+            capture
+                .poll()
+                .iter()
+                .any(|e| matches!(e, CaptureEvent::MemoryCapReached { .. }))
+        );
+    }
+
+    /// The loudest sample of the capture decides the "nearly silent" notice,
+    /// so it has to survive the audio it was measured in.
+    #[test]
+    fn the_capture_peak_outlives_the_audio_that_was_dropped() {
+        let (backend, mut capture) = capture(0);
+        capture.start_capture().unwrap();
+        backend.feed(&[0.9, -0.2]);
+        capture.discard_before(Frames(2));
+        backend.feed(&[0.001, 0.001]);
+        let taken = capture.stop_capture();
+        assert!(taken.samples.iter().all(|s| s.abs() < 0.01));
+        assert_eq!(taken.peak, 0.9);
     }
 
     #[test]
@@ -1052,14 +1278,14 @@ mod tests {
         }
         assert_eq!(capture.captured_frames(), Frames(12));
         assert_eq!(
-            capture.snapshot_capture(Frames(5)),
+            capture.snapshot_capture(Frames(5)).samples,
             [5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0]
         );
-        assert!(capture.snapshot_capture(Frames(12)).is_empty());
-        assert!(capture.snapshot_capture(Frames(99)).is_empty());
+        assert!(capture.snapshot_capture(Frames(12)).samples.is_empty());
+        assert!(capture.snapshot_capture(Frames(99)).samples.is_empty());
         capture.stop_capture();
         assert_eq!(capture.captured_frames(), Frames::ZERO);
-        assert!(capture.snapshot_capture(Frames::ZERO).is_empty());
+        assert!(capture.snapshot_capture(Frames::ZERO).samples.is_empty());
     }
 
     #[test]
@@ -1102,7 +1328,7 @@ mod tests {
                 .any(|e| matches!(e, CaptureEvent::MemoryCapReached { .. })),
             "the notice is delivered once per capture"
         );
-        let samples = capture.stop_capture();
+        let samples = capture.stop_capture().samples;
         assert_eq!(samples, [1.0, 2.0, 3.0, 4.0, 5.0]);
 
         let RecordingStatus::Recorded(path) = capture.recording_status() else {
@@ -1118,7 +1344,7 @@ mod tests {
         let (backend, mut capture) = capped_capture(0, 2);
         capture.start_capture().unwrap();
         backend.feed(&[1.0, 2.0, 3.0]);
-        assert_eq!(capture.stop_capture(), [1.0, 2.0]);
+        assert_eq!(capture.stop_capture().samples, [1.0, 2.0]);
         assert!(
             capture
                 .poll()
@@ -1196,7 +1422,7 @@ mod tests {
         );
         backend.feed(&[2.0]);
         assert_eq!(
-            capture.stop_capture(),
+            capture.stop_capture().samples,
             [1.0, 2.0],
             "audio received before the gap is kept"
         );
@@ -1263,7 +1489,8 @@ mod tests {
         capture.start_capture().unwrap();
         backend.feed(&[0.5; 3]);
         let _device = Feeder::start(&backend);
-        let (samples, postroll) = capture.finish_capture(Instant::now(), || false);
+        let (captured, postroll) = capture.finish_capture(Instant::now(), || false);
+        let samples = captured.samples;
         assert_eq!(postroll, PostRoll::Complete);
         assert_eq!(samples[..3], [0.5; 3], "audio before the release is kept");
         assert!(
@@ -1279,7 +1506,8 @@ mod tests {
         capture.start_capture().unwrap();
         backend.feed(&[0.5; 3]);
         let started = Instant::now();
-        let (samples, postroll) = capture.finish_capture(Instant::now(), || false);
+        let (captured, postroll) = capture.finish_capture(Instant::now(), || false);
+        let samples = captured.samples;
         let waited = started.elapsed();
         assert_eq!(postroll, PostRoll::TimedOut);
         assert_eq!(samples, [0.5; 3], "what arrived is still returned");
@@ -1297,10 +1525,11 @@ mod tests {
         backend.feed(&[0.5; 3]);
         let started = Instant::now();
         let mut asked = 0;
-        let (samples, postroll) = capture.finish_capture(Instant::now(), || {
+        let (captured, postroll) = capture.finish_capture(Instant::now(), || {
             asked += 1;
             asked > 2
         });
+        let samples = captured.samples;
         assert_eq!(postroll, PostRoll::Interrupted);
         assert_eq!(asked, 3, "the interrupt is asked between polls");
         assert_eq!(samples, [0.5; 3]);
@@ -1318,7 +1547,8 @@ mod tests {
         backend.feed(&[0.5; 10]);
         let _device = Feeder::start(&backend);
         let started = Instant::now();
-        let (samples, postroll) = capture.finish_capture(Instant::now(), || false);
+        let (captured, postroll) = capture.finish_capture(Instant::now(), || false);
+        let samples = captured.samples;
         assert_eq!(
             postroll,
             PostRoll::Complete,
@@ -1340,7 +1570,8 @@ mod tests {
         capture.start_capture().unwrap();
         backend.feed(&[0.5; 3]);
         backend.kill();
-        let (samples, postroll) = capture.finish_capture(Instant::now(), || false);
+        let (captured, postroll) = capture.finish_capture(Instant::now(), || false);
+        let samples = captured.samples;
         assert_eq!(postroll, PostRoll::StreamStale);
         assert_eq!(
             samples,

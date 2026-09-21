@@ -71,8 +71,15 @@ the root because both sides read it. Nothing under `core/` may import
   that went stale as a microphone gap. A discard (tap, cancel) waits only for
   one further device buffer, up to 100 ms. Failure-path teardown aborts the stream rather than stopping it,
   so a wedged device cannot block the event loop; orderly shutdown still stops.
-  The in-memory ceiling is `MAX_UTTERANCE_SECONDS = 3600`, a compile-time
-  constant, not a config key.
+  `discard_before` drops whole device buffers the decoder has committed past,
+  so what a capture holds is its open tail rather than its length;
+  `snapshot_capture` returns a `Snapshot` that says where the audio it hands
+  out begins, and `finish_capture` a `Captured` that carries the capture's
+  length and its loudest sample, both of which outlive the audio that was
+  dropped. `MAX_UTTERANCE_SECONDS = 3600` is a compile-time constant, not a
+  config key, and now bounds the *retained* window; reaching it is final for
+  that capture, because accepting audio again after a hole would splice two
+  moments that were never spoken together.
 - `shell/recorder.rs` writes shared chunks independently before the in-memory
   limit is applied. `start()` never joins the previous writer on the key-press
   path — it detaches it, because that path must not wait on a sick filesystem.

@@ -719,3 +719,53 @@ contain its reference's first sentence ("So, this is a test."): Parakeet,
 Whisper and SenseVoice all hear the clip start at "Let's try". The recording
 tool of the time had cut it; the reference is corrected, and the STATUS note
 about first words lost was largely this artifact.
+
+## Constant memory while recording (2026-09-21)
+
+A running capture kept every sample in memory: about 230 MB per hour, which is
+why `MAX_UTTERANCE_SECONDS` capped one at 3600 seconds and why a 13m41s hold in
+2026-09-08 lost its tail. The audio was already useless by then — a tick
+decodes from the committed offset and so does the release, and a window's lead
+padding is clamped to the start of the slice it was cut from, so nothing can
+read a sample before that offset.
+
+So the capture buffer now holds `committed offset .. last frame` and the event
+loop drops whole device buffers behind it as the offset moves
+([progressive-commit.md](progressive-commit.md#what-is-kept-in-memory)). Half
+an hour of latched capture costs 3.6 MiB instead of 116.5 MiB
+([experiment](experiments/2026-09-21-constant-ram-recording.md)).
+
+Two things had to change for the offset to keep moving, and both are the same
+rule applied where it was missing:
+
+- A pause longer than the split threshold closed a pending chunk only when a
+  later span arrived to close it. It now closes one that is simply at the end
+  of the slice. The window is the one the release would have decoded anyway;
+  only the moment of the decode moves earlier.
+- Silence the VAD heard nothing in advanced nothing at all, so a forgotten
+  latch grew for as long as it ran. The offset now advances to one split
+  threshold before the end of such a slice and commits empty text: no decode,
+  because there is no speech, and the keep-back leaves a later window its lead
+  padding. The advance is a whole number of detector windows, so the audio that
+  stays is covered by exactly the windows it was before — and Silero, measured
+  against the real model, finds the same spans after four seconds of silence as
+  after a minute.
+
+The preview pause was a one-way door: it stopped the whole tick, and only a
+tick can commit, so a tail that once passed `preview.max_seconds` stayed past
+it for the rest of the capture. A paused preview now skips the cosmetic decode
+of the open tail and keeps committing settled chunks, which is what makes the
+documented "resume by themselves" true, and what keeps the memory bound from
+depending on the recognizer keeping up.
+
+Rejected: dropping the cap. Without a VAD model nothing settles, nothing can be
+dropped, and a forgotten capture would take the machine's memory. It stays, now
+bounding the *retained* window rather than the length of a capture, and is
+final for a capture once it drops audio — accepting again after a hole would
+splice two moments that were never spoken together. No new setting: the
+keep-back is the split threshold the merge policy already computes.
+
+Not done: a capture still has no length limit of its own. The recovery WAV's
+RIFF sizes overflow at about 37 hours and `spokenpad transcribe` refuses one
+over 4 hours, so a latch forgotten for a day is still a way to lose a
+recording. An automatic stop belongs to the state machine, not here.

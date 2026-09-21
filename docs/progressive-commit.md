@@ -13,11 +13,13 @@ so release latency is bounded by one chunk rather than the whole passage.
 | Term | Meaning |
 |---|---|
 | capture | Audio accumulated since key-down, in memory and independently on disk |
+| retained window | The part of the capture still in memory: from the committed offset to the last frame |
 | VAD span | One raw run of speech reported by Silero |
 | chunk | One or more spans merged for recognizer context and padded with real surrounding audio |
 | settled chunk | A chunk whose boundary cannot move as more audio arrives |
 | open tail | Audio after the committed offset; may still change |
 | committed offset | Exclusive input frame through which text has landed |
+| settled silence | Trailing silence old enough that no later window can reach into it |
 
 ## Chunk construction
 
@@ -25,7 +27,9 @@ Raw speech spans normally merge until they contain `vad.chunk_seconds` of
 speech. This preserves context across ordinary breathing and thinking pauses;
 decoding every short span separately measured about four WER points worse.
 
-A long internal silence closes the pending chunk early. The boundary is:
+A long internal silence closes the pending chunk early, and so does the same
+length of silence at the end of the slice: the pause is a decode boundary
+whether or not the speaker has started again. The boundary is:
 
 ```text
 max(1 second, 2 × max(edge_pad_seconds, pad_seconds))
@@ -44,28 +48,74 @@ there is enough speech for extra silence not to dominate. `end_frame` remains
 the unpadded speech boundary; advancing by padded length would skip or repeat
 audio at the next split.
 
+Unbroken speech is not cut here at all. Silero ends a span at
+`vad.max_speech_seconds` (20 s), that span is already past `chunk_seconds`, so
+it closes a chunk on its own; `chunk_seconds` only decides how many *shorter*
+runs are merged into one window.
+
 ## Recording tick
 
 On each preview tick the inference worker receives audio from a lagging hint,
 then slices from its authoritative committed offset.
 
 1. Split the remainder into chunks. No speech in it means no chunks, and the
-   tick ends there with an empty preview.
+   tick ends there with an empty preview and the settled-silence commit below.
 2. Decode and commit every settled chunk in order.
 3. Advance the offset to each committed chunk's `end_frame`.
 4. Decode the first unsettled chunk as preview only.
 5. Render that preview as Neovim extmark virtual text.
 
+When the split holds no chunk at all, or only settled silence after the last
+one, the offset still moves: it advances to one split threshold before the end
+of the slice, on the detector's window grid, and commits empty text. Nothing is
+decoded there — the VAD heard no speech — but the audio behind it is finished
+with, which is what keeps a silent latch from growing.
+
 No tick is issued at all when the pipeline has no segmenter: with nothing ever
-settling, the preview would be a re-decode of the whole growing capture. Ticks
-also pause while the uncommitted tail exceeds `preview.max_seconds` (30 s) and
-resume by themselves once it falls back under; the winbar says which.
+settling, the preview would be a re-decode of the whole growing capture. While
+the uncommitted tail exceeds `preview.max_seconds` (30 s) the tick still runs
+and still commits every settled chunk; only the cosmetic decode of the open
+tail is skipped, so the tail settles and previews resume by themselves. The
+winbar says which.
 
 The worker owns the offset because preview and release inference are serialized
 there. The main loop's hint exists only to avoid copying an entire long capture
 on every tick and is never trusted for correctness. Both are `Frames` —
 capture-absolute sample offsets with their own type, distinct from indices into
 a snapshot, which may begin after the capture did.
+
+## What is kept in memory
+
+The capture buffer holds `committed offset .. last frame` and nothing else.
+`AudioCapture::discard_before` drops whole device buffers from the front as the
+committed offset moves, once per pass of the event loop. This is safe by
+construction rather than by measurement: a tick slices from the committed
+offset, a release slices from the committed offset, and a window's lead padding
+is clamped to the start of the slice it was cut from, so no decode can read a
+sample before that offset. The recovery WAV is written from the callback
+before any of this and still holds the complete capture.
+
+The retained window is therefore the open tail, bounded by:
+
+- one chunk of speech and the pauses inside it — at most one Silero span
+  (`vad.max_speech_seconds`, 20 s) for unbroken speech, and for merged short
+  runs `vad.chunk_seconds` of speech plus the internal gaps, each under the
+  split threshold;
+- one split threshold of silence (4 s with the default padding), kept back so
+  that a later window's lead padding has real audio to use and the detector
+  sees the same windows it would have seen;
+- the audio that arrives while a tick is running: one `preview.interval_ms`
+  plus the decode.
+
+Measured over half an hour of latched capture: 3.6 MiB above the baseline,
+against 116.5 MiB when the committed audio is kept
+([experiment](experiments/2026-09-21-constant-ram-recording.md)).
+
+`MAX_UTTERANCE_SECONDS` (3600) is now a ceiling on that retained window, not on
+the length of a capture. With a VAD model loaded nothing comes near it; without
+one nothing settles, so it is what stops a forgotten capture from taking the
+machine's memory. Reaching it is final for that capture: accepting audio again
+after a hole would splice two moments that were never spoken together.
 
 ## Release and cancellation
 
@@ -85,6 +135,9 @@ a newer one's offset.
 ## Invariants
 
 - No committed region is decoded again on release.
+- Audio before the committed offset is dropped, and no window ever reads it.
+- Settled silence advances the offset without any decode, by a whole number of
+  detector windows, so the audio that stays is covered by the same windows.
 - Preview re-decode is confined to the bounded open tail.
 - Preview text never enters the Neovim buffer or transcript file.
 - Empty chunk text still advances a settled offset.
@@ -100,9 +153,15 @@ a newer one's offset.
 ## Verification
 
 Unit tests cover offset ownership, stale work, cancellation, long-pause
-closure, padding, settlement, preview isolation, and release tails;
-`tests/e2e.rs` checks progressive commits landing before release through the
-real event loop and a real nvim. `examples/verify_native.rs` prints the
+closure, padding, settlement, preview isolation, and release tails. The
+`long_capture` tests in `core/decode.rs` replay half an hour of synthetic
+capture through the real merge policy and a counting recognizer, assert the
+retained window stays under 45 s, and assert that dropping the committed audio
+decodes exactly the same windows, over the same capture-absolute samples, as
+keeping all of it. `tests/e2e.rs` checks progressive commits landing before
+release through the real event loop and a real nvim, and a latched capture that
+runs through a pause long enough to settle; two ignored tests measure the
+memory and check the real Silero against the silence that was dropped. `examples/verify_native.rs` prints the
 segment bounds, settlement flags, commit offsets, raw text and final
 remainder of a simulated live passage as JSON, for inspection against the
 real models.
