@@ -769,3 +769,42 @@ Not done: a capture still has no length limit of its own. The recovery WAV's
 RIFF sizes overflow at about 37 hours and `spokenpad transcribe` refuses one
 over 4 hours, so a latch forgotten for a day is still a way to lose a
 recording. An automatic stop belongs to the state machine, not here.
+
+## Lead padding stops at the committed offset (2026-09-21)
+
+A chunk's window began `pad_seconds` (or `edge_pad_seconds`) before its first
+speech, with nothing stopping that reach at the previous chunk's speech end.
+When the pause between two chunks was shorter than the padding, the second
+window began inside speech the first chunk had already committed and appended,
+and the recognizer was given those words a second time. Over a replay of 400
+generated captures at three tick cadences, 8 committed windows in 7 captures
+began inside committed speech, the worst by 0.370 s — long enough for a short
+word to be written twice.
+
+It needed two chunks in one slice, so it showed up wherever a chunk closes with
+another one behind it: on a long gap closing it, on the speech target being
+reached, on the release decoding a remainder with several chunks in it, and —
+new that day — on trailing silence closing it at a tick. The trigger was new,
+the defect was not.
+
+So lead padding is now clamped to the previous chunk's `speech_end`, which is
+exactly where committing that chunk leaves the offset. `merge_spans` is pure
+and knows nothing about the worker, so the clamp is expressed in its own terms;
+that it equals the committed offset is what makes it correct on every path, and
+it makes the tick and the release cut the same window for the same chunk. The
+first chunk of a slice needs no clamp: the slice starts at the committed offset
+already. A chunk after a silence commit may still pad back into that silence,
+which is not committed speech and is what padding is for.
+
+This changes windows relative to the previous behaviour, not only in the case
+that prompted it: any chunk that follows a close with a pause shorter than its
+padding now gets a shorter lead. It removes audio from the recognizer's input,
+so it can move a transcript. The effect on WER has **not** been measured yet;
+the corpus replay is noted as open in
+[the experiment](experiments/2026-09-21-constant-ram-recording.md).
+
+Not fixed here: the same reach exists on the trailing side, where a chunk's
+`pad_seconds` can extend into the *next* chunk's speech (worst case 0.435 s over
+the same 400 captures, 201 windows affected). It predates this work, it is
+bounded by `pad_seconds`, and clamping it would change far more windows than
+this did, so it wants the WER corpus first.

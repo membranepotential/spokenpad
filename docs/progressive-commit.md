@@ -48,6 +48,13 @@ there is enough speech for extra silence not to dominate. `end_frame` remains
 the unpadded speech boundary; advancing by padded length would skip or repeat
 audio at the next split.
 
+Lead padding stops at the previous chunk's `end_frame`. It may use the silence
+after it — that audio is not committed, the offset stops at the speech — but
+never the speech before it, which is already in the file. Without the clamp a
+chunk after a pause shorter than its padding began up to 0.3 s inside the
+previous chunk's speech and handed the recognizer words it had already
+appended.
+
 Unbroken speech is not cut here at all. Silero ends a span at
 `vad.max_speech_seconds` (20 s), that span is already past `chunk_seconds`, so
 it closes a chunk on its own; `chunk_seconds` only decides how many *shorter*

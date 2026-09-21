@@ -111,28 +111,31 @@ pub fn merge_spans(spans: &[Range<usize>], len: usize, config: &Vad, rate: u32) 
     let edge = (config.edge_pad_seconds * f64::from(rate)) as usize;
     let last = chunks.len() - 1;
     let speech_end = chunks[last].end;
-    let segments = chunks
-        .into_iter()
-        .enumerate()
-        .map(|(i, c)| {
-            let wide = c.speech >= 3 * rate as usize;
-            let lead = if wide && (i == 0 || c.edge_lead) {
-                edge
-            } else {
-                pad
-            };
-            let trail = if wide && (i == last || c.edge_trail) {
-                edge
-            } else {
-                pad
-            };
-            Segment {
-                window: c.start.saturating_sub(lead)..len.min(c.end + trail),
-                speech_end: c.end,
-                settled: c.closed && (i < last || len.saturating_sub(c.end) >= rate as usize),
-            }
-        })
-        .collect();
+    // Where the previous chunk's speech ended, which is exactly where
+    // committing it leaves the offset. Lead padding may use the silence after
+    // it, never the speech before it: that speech is already in the file, and
+    // feeding it to the recognizer again is how a word lands twice.
+    let mut committed = 0;
+    let mut segments = Vec::with_capacity(chunks.len());
+    for (i, c) in chunks.into_iter().enumerate() {
+        let wide = c.speech >= 3 * rate as usize;
+        let lead = if wide && (i == 0 || c.edge_lead) {
+            edge
+        } else {
+            pad
+        };
+        let trail = if wide && (i == last || c.edge_trail) {
+            edge
+        } else {
+            pad
+        };
+        segments.push(Segment {
+            window: c.start.saturating_sub(lead).max(committed)..len.min(c.end + trail),
+            speech_end: c.end,
+            settled: c.closed && (i < last || len.saturating_sub(c.end) >= rate as usize),
+        });
+        committed = c.end;
+    }
     Split {
         segments,
         silent_through: settled_prefix(speech_end, len, split_silence),
@@ -253,6 +256,170 @@ mod tests {
             rate,
         )[0];
         assert_eq!(closed.window, later.window);
+    }
+
+    /// The reproduction from the review of ba805a9: a chunk that follows a
+    /// short pause must not pad back into the speech the previous chunk has
+    /// already committed. Before the clamp the second window began at
+    /// 155_200 and fed the recognizer 0.30 s that had already been appended.
+    #[test]
+    fn lead_padding_never_reaches_into_speech_another_chunk_committed() {
+        let config = Vad::default();
+        let rate = 16_000;
+        // Ten seconds of speech — the chunk target, so it closes — then a
+        // 0.2 s pause, half a second more speech, and four seconds of silence
+        // to settle the second chunk at the tick.
+        let spans = [0..160_000, 163_200..171_200];
+        let len = 235_200;
+
+        let at_tick = merge_spans(&spans, len, &config, rate);
+        assert_eq!(at_tick.segments.len(), 2);
+        assert_eq!(at_tick.segments[0].speech_end, 160_000);
+        assert!(at_tick.segments[0].settled && at_tick.segments[1].settled);
+        assert_eq!(
+            at_tick.segments[1].window,
+            160_000..179_200,
+            "the second window starts where the first one's speech ended"
+        );
+
+        // The same chunk, as the release decodes it: the slice begins at the
+        // committed offset, with the rest of the capture in it.
+        let shifted = 3_200..11_200;
+        let after = merge_spans(std::slice::from_ref(&shifted), len - 160_000, &config, rate);
+        assert_eq!(after.segments.len(), 1);
+        assert_eq!(
+            160_000 + after.segments[0].window.start..160_000 + after.segments[0].window.end,
+            at_tick.segments[1].window,
+            "the tick and the release cut the same window"
+        );
+    }
+
+    /// Randomised captures, replayed at three tick cadences, checking the two
+    /// properties the padding clamp is there for. The 6 s and 9 s cadences
+    /// matter because they are longer than the 4 s settle threshold: that is
+    /// the regime — a worker falling behind — in which a chunk settles with a
+    /// gap behind it.
+    #[test]
+    fn no_committed_window_reaches_back_over_committed_speech() {
+        let config = Vad::default();
+        let rate = 16_000;
+        for seed in 0..400 {
+            let (spans, len) = random_capture(seed, rate);
+            for cadence in [1.1, 6.0, 9.0] {
+                let step = (cadence * f64::from(rate)) as usize;
+                replay_and_check(&spans, len, step, &config, rate);
+            }
+        }
+    }
+
+    /// Speech spans over one capture: bursts and pauses on both sides of the
+    /// split threshold, from a seeded generator so a failure is reproducible.
+    fn random_capture(seed: u64, rate: u32) -> (Vec<Range<usize>>, usize) {
+        let mut state = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15).wrapping_add(1);
+        let mut next = |modulo: u64| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) % modulo
+        };
+        let rate = rate as usize;
+        let mut spans = vec![];
+        let mut at = next(3_000) as usize * rate / 1_000;
+        for _ in 0..12 {
+            // 0.15 s to 12 s of speech: long enough to pass the chunk target
+            // on its own, short enough to have to merge.
+            let burst = (150 + next(11_850)) as usize * rate / 1_000;
+            // 0.05 s to 9 s of pause: on both sides of the 4 s threshold, and
+            // some shorter than the 0.5 s of inner padding.
+            let pause = (50 + next(8_950)) as usize * rate / 1_000;
+            spans.push(at..at + burst);
+            at += burst + pause;
+        }
+        (spans, at + rate / 2)
+    }
+
+    /// The spans of a capture that fall inside one slice, as the detector
+    /// would report them: indexed from the slice's own first sample.
+    fn spans_in(spans: &[Range<usize>], slice: Range<usize>) -> Vec<Range<usize>> {
+        spans
+            .iter()
+            .filter_map(|span| {
+                let start = span.start.max(slice.start);
+                let end = span.end.min(slice.end);
+                (start < end).then(|| start - slice.start..end - slice.start)
+            })
+            .collect()
+    }
+
+    /// Walks one capture the way `Worker::tick` does — a slice from the
+    /// committed offset every `step` samples, then the release — asserting
+    /// that no committed window reaches back over committed speech, and that
+    /// the release would cut each settled chunk the same way.
+    fn replay_and_check(spans: &[Range<usize>], len: usize, step: usize, config: &Vad, rate: u32) {
+        let mut offset = 0;
+        let mut committed = 0;
+        let mut at = step;
+        loop {
+            let slice = offset..at.min(len);
+            if slice.is_empty() {
+                break;
+            }
+            let split = merge_spans(&spans_in(spans, slice.clone()), slice.len(), config, rate);
+            // What the release would make of the same slice start with the
+            // rest of the capture present.
+            let rest = offset..len;
+            let at_release = merge_spans(&spans_in(spans, rest), len - offset, config, rate);
+            let mut settled = 0;
+            for (i, segment) in split.segments.iter().enumerate() {
+                if !segment.settled {
+                    break;
+                }
+                let window = offset + segment.window.start..offset + segment.window.end;
+                assert!(
+                    window.start >= committed,
+                    "window {window:?} reaches back over speech committed through \
+                     {committed} (step {step}, slice {slice:?})"
+                );
+                let same = &at_release.segments[i];
+                assert_eq!(
+                    offset + same.speech_end,
+                    offset + segment.speech_end,
+                    "the release cut a different chunk here (step {step})"
+                );
+                assert_eq!(
+                    window.start,
+                    offset + same.window.start,
+                    "the tick and the release disagree on where the window starts \
+                     (step {step}, slice {slice:?})"
+                );
+                // The ends may differ: a chunk that is the last one in the
+                // tick's slice takes the wider edge padding, where the
+                // release, seeing a chunk after it, takes the inner padding.
+                // Whichever is wider, the difference has to be silence —
+                // otherwise one of the two decodes speech the other commits.
+                let release_end = (offset + same.window.end).min(slice.end);
+                assert!(
+                    window.end <= slice.end,
+                    "the tick decoded past the audio it had (step {step})"
+                );
+                let extra = window.end.min(release_end)..window.end.max(release_end);
+                assert!(
+                    spans_in(spans, extra.clone()).is_empty(),
+                    "the tick and the release disagree over {extra:?}, which holds \
+                     speech (step {step}, slice {slice:?})"
+                );
+                committed = offset + segment.speech_end;
+                settled += 1;
+            }
+            offset = committed;
+            if settled == split.segments.len() && split.silent_through > 0 {
+                offset = offset.max(slice.start + split.silent_through);
+            }
+            if at >= len {
+                break;
+            }
+            at += step;
+        }
     }
 
     #[test]

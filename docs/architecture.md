@@ -147,7 +147,8 @@ of it.
 ## Decode invariants
 
 - A committed sample range is decoded once, and is dropped from memory
-  afterwards without any window ever reading it again.
+  afterwards without any window ever reading it again: a window's lead padding
+  stops at the previous chunk's speech end.
 - Long silence can close a pending VAD chunk before the speech-size target,
   whether a later span follows it or it is simply the end of the slice;
   ordinary pauses still merge for recognizer context.
