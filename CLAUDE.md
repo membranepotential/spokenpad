@@ -81,9 +81,12 @@ running: they use temp dirs and never the real state dir or the daemon lock.
   `README.md` ("While you dictate"), the relevant `docs/*.md`, and
   `config.example.toml` comments in the same change.
 - Commits: signed, on `main`, message written to a file and passed with `-F`.
-  Only commit when asked. Restarting the service (`systemctl --user restart
-  spokenpad`) to deploy a verified build is always allowed; it closes the
-  user's dictation window, so say that you did it.
+  Commit each finished unit of work without being asked, once the checks
+  above pass and the docs are updated: one focused commit per logical change,
+  never a half-done state. Pushing still needs the user's word. Restarting
+  the service (`systemctl --user restart spokenpad`) to deploy a verified
+  build is always allowed; it closes the user's dictation window, so say
+  that you did it.
 - `.agents/` and `.codex/` are untracked directories used by other tools.
   Leave them alone even when empty.
 - `models/` (~630 MB) and `eval-samples/*.wav` (the user's voice) are local
