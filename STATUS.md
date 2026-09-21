@@ -7,10 +7,8 @@ Hold a key (or latch with shift), speak, and text appears in an nvim that
 never takes focus. Fully local, CPU-only. Next milestone: public release.
 
 ## Now
-- own-window — research done (own X11 window, _NET_WM_USER_TIME=0, nvim
-  --embed; Xwayland on Wayland); awaiting the user's go.
-- live replay greedy vs beam over 170 captures (scratch, running) — confirms
-  the decoder fix; then drop examples/live_replay.rs (untracked).
+- own-window — plan written, approved "phased": .claude/plans/own-window.md
+  (+ research beside it, git-ignored). Next: P0 headless spike. Compact first.
 
 ## Done
 - 09-21: Lost tail fixed: Parakeet now decodes greedy by default (beam search
@@ -36,13 +34,15 @@ never takes focus. Fully local, CPU-only. Next milestone: public release.
   post-roll), found by replaying 128 recovery WAVs. WER 17.6% unchanged.
 
 ## Next
-1. Live check after restart: short sentences land first time, word endings
-   at key-up survive, the clipboard holds the whole buffer, a quick re-press
-   and a latched stop behave; plus the 09-11 checks (tap notice, Escape).
-2. Decide whether a "no speech detected" notice is wanted for a press the VAD
-   judged silent (needs the release result to carry a reason).
+1. Live check of the deploy: M4 hold, Shift+M4 latch, Ctrl+M4 cancel,
+   clipboard, tail no longer lost.
+2. Best of both decoders: beam search, and a greedy re-decode only for a
+   chunk beam returns empty or bare "Yeah." (a second exception to decode-
+   once). Needs a bigger WER set than 5 clips first; greedy's 3-point loss
+   there is a few words. Upstream fix (#3267) is the long route.
 3. Measure removing the 1 s zero padding (hurt greedy 2/9 on the lost tail;
    0.5 s once made `cd home` empty) with a corpus replay.
+4. Decide whether a "no speech detected" notice is wanted.
 
 ## Known issues / open questions
 - Post-roll length (250 ms) is unproven live; a mic stalling at key-up only logs.
