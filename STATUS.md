@@ -13,8 +13,8 @@ never takes focus. Fully local, CPU-only. Next milestone: public release.
   the empty-chunk replay — agent, scratch build
 - gpu-models — research: other models and GPU (GTX 1650, 4 GB) — agent
 - const-ram — constant RAM while recording (latched: 230 MB/h today) — agent, wt
-- own-window P0 — headless x11rb property spike (.claude/plans/own-window.md)
-  — agent, wt. Then P1..P3 in sequence.
+- own-window P1 — grid renderer + embedded nvim, headless (plan: .claude/
+  plans/own-window.md) — agent, wt. P0 passed on i3 (603b714). Then P2, P3.
 
 ## Done
 - 09-21: Lost tail fixed: Parakeet now decodes greedy by default (beam search
