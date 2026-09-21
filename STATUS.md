@@ -14,8 +14,9 @@ never takes focus. Fully local, CPU-only. Next milestone: public release.
 - models — sherpa-onnx 1.13.8; try parakeet-unified-en (RNNT: beam + hotwords
   may work) and a Qwen3-ASR family (prompt hotwords) — agent, wt. Research
   (.claude/plans/gpu-models-research.md): GPU not worth it on a GTX 1650.
-- own-window P1 — grid renderer + embedded nvim, headless (plan: .claude/
-  plans/own-window.md) — agent, wt. P0 passed on i3 (603b714). Then P2, P3.
+- own-window P2 — `nvim.mode = "pane"` in the daemon (plan: .claude/plans/
+  own-window.md) — agent, wt. P0+P1 passed headless on i3 (63ed094: grid ==
+  nvim screen, umlauts, no focus); P1 code review running. Then P3.
 
 ## Done
 - 09-21: Constant RAM while recording (1e2631f): only the uncommitted tail is
