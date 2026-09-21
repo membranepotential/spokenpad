@@ -11,7 +11,9 @@ never takes focus. Fully local, CPU-only. Next milestone: public release.
   local/) + corpus WER harness; greedy vs beam vs zero padding — agent, wt
 - beam-fix — build sherpa-onnx with upstream PR #3657, test the lost tail and
   the empty-chunk replay — agent, scratch build
-- gpu-models — research: other models and GPU (GTX 1650, 4 GB) — agent
+- models — sherpa-onnx 1.13.8; try parakeet-unified-en (RNNT: beam + hotwords
+  may work) and a Qwen3-ASR family (prompt hotwords) — agent, wt. Research
+  (.claude/plans/gpu-models-research.md): GPU not worth it on a GTX 1650.
 - const-ram — constant RAM while recording (latched: 230 MB/h today) — agent, wt
 - own-window P1 — grid renderer + embedded nvim, headless (plan: .claude/
   plans/own-window.md) — agent, wt. P0 passed on i3 (603b714). Then P2, P3.
