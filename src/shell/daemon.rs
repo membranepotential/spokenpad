@@ -206,9 +206,18 @@ fn join_bounded(handle: JoinHandle<()>, name: &str) {
 /// Owns the editor connection. It runs until its channel says to stop, never
 /// on a shared flag: text already queued must reach the file even while the
 /// daemon is shutting down or the capture it came from was cancelled.
+/// Where an utterance's last commit went. A later commit of the same
+/// utterance continues its line only in the same place: joined onto another
+/// file's last line, it would run into unrelated text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Sink {
+    Editor,
+    Passage,
+}
+
 fn editor_thread(config: crate::config::Nvim, rx: Receiver<EditorWork>) {
     let mut nvim = NvimSession::new(config);
-    let mut paragraph: Option<UtteranceId> = None;
+    let mut paragraph: Option<(UtteranceId, Sink)> = None;
     let mut shown: Option<IndicatorState> = None;
     let mut quit = false;
     while !quit {
@@ -243,12 +252,12 @@ fn editor_thread(config: crate::config::Nvim, rx: Receiver<EditorWork>) {
                     {
                         log::warn!("could not reattach to the dictation window: {e:#}");
                     }
-                    let mut continued = paragraph == Some(utterance);
                     if nvim.connected() {
                         let now = Instant::now();
+                        let continued = paragraph == Some((utterance, Sink::Editor));
                         match nvim.append(&text, continued) {
                             Ok(line) => {
-                                paragraph = Some(utterance);
+                                paragraph = Some((utterance, Sink::Editor));
                                 shown = None;
                                 log::info!(
                                     "appended in {:.0}ms (line {line})",
@@ -259,10 +268,9 @@ fn editor_thread(config: crate::config::Nvim, rx: Receiver<EditorWork>) {
                             // The editor went away before it got the text —
                             // closed while the tail was decoding — so the
                             // text is certainly not there and goes to the
-                            // file below. A new file, so a new paragraph.
+                            // file below.
                             Err(AppendFailure::NotSent(e)) => {
                                 log::warn!("the dictation editor did not receive the text: {e:#}");
-                                continued = false;
                             }
                             // The editor may hold the text already; writing
                             // it anywhere else could write it twice.
@@ -278,9 +286,10 @@ fn editor_thread(config: crate::config::Nvim, rx: Receiver<EditorWork>) {
                     }
                     // With no editor at all, the text goes to the file the
                     // next editor will open on, rather than nowhere.
+                    let continued = paragraph == Some((utterance, Sink::Passage));
                     match nvim.append_detached(&text, continued) {
                         Ok(write) => {
-                            paragraph = Some(utterance);
+                            paragraph = Some((utterance, Sink::Passage));
                             log::info!("no dictation editor: appended to {}", write.path.display());
                             if write.started {
                                 nvim.notify_detached(&write.path);
