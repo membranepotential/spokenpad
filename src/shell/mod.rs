@@ -10,4 +10,4 @@ pub mod inference;
 pub mod logging;
 pub mod nvim;
 pub mod recorder;
-pub mod x11;
+pub mod wm;

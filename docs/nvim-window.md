@@ -327,10 +327,12 @@ the cost. Three other things were, and all three are fixed:
 - **The first X query of the process cost ~1.9 s**, where every later one
   costs ~50 ms. That landed on the first dictation of a session — the one
   occasion with nothing on screen to hide it. The layout is queried once per
-  spawn, before the editor starts, so a slow editor start costs one `xrandr`,
-  not one per attempt. (There is no warm-up on thread start: the first query of
-  a session still pays that cost, on the spawn path where the window is opening
-  anyway.) On the headless path no X query is made at all.
+  spawn, before the editor starts, so a slow editor start costs one query,
+  not one per attempt. Since 2026-09-21 the outputs, the configuration and
+  the tree come from the window manager's own IPC socket (`shell/wm.rs`), one
+  request per connection under a two-second deadline, instead of `xrandr` and
+  `i3-msg` subprocesses; only the pointer still costs one `xdotool` call, on
+  i3. On the headless path no query is made at all.
 - **The window was placed after nvim answered.** It is now told where to open
   (`window.position.x`/`y`, which i3 honours for a floating window: verified,
   the window maps at exactly the requested point, floating and unfocused), so

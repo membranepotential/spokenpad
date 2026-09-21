@@ -17,8 +17,9 @@ use crate::{
         geometry::{Rect, pick_output, placement},
         session::NoticeText,
         state::IndicatorPhase,
+        wm::{Criterion, Property},
     },
-    shell::x11,
+    shell::wm::Wm,
 };
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use rmpv::Value;
@@ -451,23 +452,32 @@ impl NvimSession {
                     .any(|argument| argument == "--headless"),
                 "terminal=[] is safe only with an editor command that explicitly contains --headless"
             );
+        }
+        // Only a window manager can be asked where the window should go, and
+        // only a graphical editor has one. The headless path asks nothing.
+        let window = if self.config.terminal.is_empty() {
+            None
         } else {
             ensure!(
                 alacritty_declares_instance(&self.config.terminal),
                 "graphical nvim requires alacritty --class GENERAL,{{instance}} so its X11 instance is provable before mapping"
             );
-            ensure!(
-                x11::has_no_focus_rule(&self.config.window_instance),
-                "active i3 configuration does not prove a no_focus rule for instance {:?}",
-                self.config.window_instance
-            );
-        }
-        // Only a window manager can be asked where the window should go, and
-        // only a graphical editor has one. On the headless path these are two
-        // subprocess round trips (xrandr, xdotool) that answer nothing.
-        let window_rect = (!self.config.terminal.is_empty())
-            .then(|| self.window_placement())
-            .flatten();
+            let wm =
+                Wm::connect().context("a graphical dictation window needs a running i3 or sway")?;
+            let criteria = [Criterion::new(
+                Property::Instance,
+                &self.config.window_instance,
+            )?];
+            if let Some(unproven) = wm.unproven_no_focus(&criteria)? {
+                bail!(
+                    "the running {} configuration does not prove `no_focus {unproven}`",
+                    wm.kind()
+                );
+            }
+            let rect = window_placement(&wm, self.config.window_fraction);
+            Some((wm, criteria, rect))
+        };
+        let window_rect = window.as_ref().and_then(|(_, _, rect)| *rect);
 
         let mut fresh = NewFileGuard::create(&self.config)?;
         if let Some(parent) = self.config.socket_path.parent() {
@@ -522,8 +532,8 @@ impl NvimSession {
         self.reap_replaced_process();
 
         let deadline = Instant::now() + Duration::from_secs_f64(self.config.startup_timeout_s);
-        if let Some(rect) = window_rect {
-            self.place_when_mapped(&mut editor, rect, deadline);
+        if let Some((wm, criteria, Some(rect))) = &window {
+            place_when_mapped(&mut editor, wm, criteria, *rect, deadline);
         }
         let mut last_error = None;
         // A healthy client is handed back to the next attempt: an editor that
@@ -631,46 +641,6 @@ impl NvimSession {
         }))
     }
 
-    fn place_when_mapped(
-        &self,
-        editor: &mut SpawnedEditorGuard,
-        rect: Rect,
-        startup_deadline: Instant,
-    ) {
-        let deadline = (Instant::now() + MAP_TIMEOUT).min(startup_deadline);
-        while Instant::now() < deadline {
-            if editor.exited() {
-                return;
-            }
-            if x11::i3_window_exists(&self.config.window_instance) {
-                let _ = x11::place_window(&self.config.window_instance, rect);
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-    }
-
-    fn window_placement(&self) -> Option<Rect> {
-        let outputs = x11::outputs();
-        let pointer = x11::pointer_position();
-        let anchor = pointer.map(|(x, y)| Rect {
-            x,
-            y,
-            width: 1,
-            height: 1,
-        });
-        let output = pick_output(
-            &outputs,
-            anchor.unwrap_or(Rect {
-                x: i32::MAX,
-                y: i32::MAX,
-                width: 1,
-                height: 1,
-            }),
-        )?;
-        Some(placement(output, pointer, self.config.window_fraction))
-    }
-
     fn reap_replaced_process(&mut self) {
         if let Some(mut process) = self.process.take()
             && process.try_wait().ok().flatten().is_none()
@@ -686,6 +656,42 @@ impl Drop for NvimSession {
     fn drop(&mut self) {
         self.reap_replaced_process();
     }
+}
+
+/// Waits for the window to appear, then floats, sizes and places it. Best
+/// effort: a window that never shows up within the deadline, or a refused
+/// command, leaves it wherever the window manager put it.
+fn place_when_mapped(
+    editor: &mut SpawnedEditorGuard,
+    wm: &Wm,
+    criteria: &[Criterion],
+    rect: Rect,
+    startup_deadline: Instant,
+) {
+    let deadline = (Instant::now() + MAP_TIMEOUT).min(startup_deadline);
+    while Instant::now() < deadline {
+        if editor.exited() {
+            return;
+        }
+        if let Ok(Some(criterion)) = wm.find(criteria) {
+            if let Err(error) = wm.place(criterion, rect) {
+                log::warn!("could not place the dictation window: {error:#}");
+            }
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Where a new window goes: the pointer's output, or the focused one.
+fn window_placement(wm: &Wm, fraction: f64) -> Option<Rect> {
+    let outputs = wm
+        .outputs()
+        .inspect_err(|error| log::warn!("could not read the outputs: {error:#}"))
+        .ok()?;
+    let pointer = wm.pointer();
+    let output = pick_output(&outputs, pointer)?;
+    Some(placement(output, pointer, fraction))
 }
 
 /// The outcome of one attempt to adopt a freshly spawned editor.

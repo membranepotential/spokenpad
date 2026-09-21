@@ -13,3 +13,4 @@ pub mod segments;
 pub mod session;
 pub mod state;
 pub mod text;
+pub mod wm;

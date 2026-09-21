@@ -20,21 +20,33 @@ impl Rect {
 pub struct Output {
     pub rect: Rect,
     pub primary: bool,
+    /// The output holding keyboard focus, where the window manager reports one
+    /// (sway does; i3 does not).
+    pub focused: bool,
 }
-pub fn pick_output(outputs: &[Output], anchor: Rect) -> Option<Rect> {
-    let best = outputs
-        .iter()
-        .enumerate()
-        .max_by_key(|(i, o)| (o.rect.intersection(anchor), std::cmp::Reverse(*i)))?
-        .1;
-    Some(
-        if best.rect.intersection(anchor) > 0 {
-            best
-        } else {
-            outputs.iter().find(|o| o.primary).unwrap_or(&outputs[0])
-        }
-        .rect,
-    )
+/// The output the window opens on: the one under the pointer, or — with no
+/// pointer to go by, or one outside every output — the focused output, then
+/// the primary, then the first listed.
+pub fn pick_output(outputs: &[Output], pointer: Option<(i32, i32)>) -> Option<Rect> {
+    let under_pointer = pointer.and_then(|(x, y)| {
+        let anchor = Rect {
+            x,
+            y,
+            width: 1,
+            height: 1,
+        };
+        outputs
+            .iter()
+            .enumerate()
+            .max_by_key(|(i, o)| (o.rect.intersection(anchor), std::cmp::Reverse(*i)))
+            .filter(|(_, o)| o.rect.intersection(anchor) > 0)
+    });
+    under_pointer
+        .map(|(_, output)| output)
+        .or_else(|| outputs.iter().find(|o| o.focused))
+        .or_else(|| outputs.iter().find(|o| o.primary))
+        .or_else(|| outputs.first())
+        .map(|output| output.rect)
 }
 pub fn placement(output: Rect, anchor: Option<(i32, i32)>, fraction: f64) -> Rect {
     let width = (f64::from(output.width) * fraction) as u32;
@@ -75,18 +87,15 @@ mod tests {
             pick_output(
                 &[Output {
                     rect: r,
-                    primary: true
+                    primary: true,
+                    focused: false,
                 }],
-                Rect {
-                    x: 9999,
-                    y: 9999,
-                    width: 1,
-                    height: 1
-                }
+                Some((9999, 9999))
             ),
             Some(r)
         );
-        assert_eq!(pick_output(&[], r), None);
+        assert_eq!(pick_output(&[], Some((0, 0))), None);
+        assert_eq!(pick_output(&[], None), None);
     }
 
     fn screen(x: i32, primary: bool) -> Output {
@@ -98,16 +107,12 @@ mod tests {
                 height: 1080,
             },
             primary,
+            focused: false,
         }
     }
 
-    fn pointer(x: i32) -> Rect {
-        Rect {
-            x,
-            y: 10,
-            width: 1,
-            height: 1,
-        }
+    fn pointer(x: i32) -> Option<(i32, i32)> {
+        Some((x, 10))
     }
 
     #[test]
@@ -120,12 +125,17 @@ mod tests {
                 "pointer at {x} landed on the wrong monitor"
             );
         }
-        // A pointer nobody can read falls back to the primary, not to the
-        // first-listed monitor.
+        // A pointer off every monitor, or one nobody can read, falls back to
+        // the primary, not to the first-listed monitor.
         assert_eq!(
             pick_output(&outputs, pointer(i32::MAX)).map(|rect| rect.x),
             Some(0)
         );
+        assert_eq!(pick_output(&outputs, None).map(|rect| rect.x), Some(0));
+        // A focused output (sway reports one) wins over the primary.
+        let mut focused = outputs.clone();
+        focused[2].focused = true;
+        assert_eq!(pick_output(&focused, None).map(|rect| rect.x), Some(1920));
         // With no primary declared, the first monitor is the fallback.
         let unmarked = [screen(-1920, false), screen(0, false)];
         assert_eq!(
@@ -137,7 +147,7 @@ mod tests {
     #[test]
     fn mirrored_monitors_tie_break_on_the_earlier_one() {
         // Two outputs covering the same corner intersect the pointer equally.
-        // The tie-break is the order xrandr listed them, so the choice is
+        // The tie-break is the order the window manager listed them, so the choice is
         // stable across queries rather than whichever compared last.
         let mirrored = |width: u32, primary: bool| Output {
             rect: Rect {
@@ -147,6 +157,7 @@ mod tests {
                 height: 1080,
             },
             primary,
+            focused: false,
         };
         assert_eq!(
             pick_output(&[mirrored(1920, false), mirrored(1280, true)], pointer(10))

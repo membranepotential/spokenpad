@@ -1,28 +1,31 @@
-//! Manually-run X11/i3 smoke check for the graphical Neovim sink.
+//! Manually-run i3/sway smoke check for the graphical Neovim sink.
 
 use anyhow::{Context, Result, anyhow, ensure};
 use rmpv::Value;
 use spokenpad::{
     config::Config,
-    core::{session::Notice, state::IndicatorPhase},
+    core::{
+        session::Notice,
+        state::IndicatorPhase,
+        wm::{Criterion, Property},
+    },
     shell::{
         nvim::{IndicatorState, NvimSession},
-        x11,
+        wm::Wm,
     },
 };
 use std::{
     fs,
-    io::{Read, Write},
+    io::Write,
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
     thread,
     time::{Duration, Instant},
 };
 use tempfile::TempDir;
 
 const TEST_TEXT: &str = "Spokenpad window smoke test.\nGrüße — 東京 🌿";
-const PROCESS_TIMEOUT: Duration = Duration::from_secs(2);
+const WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
@@ -37,7 +40,7 @@ fn main() -> Result<()> {
     match (verification, shutdown) {
         (Ok(()), Ok(())) => {
             println!(
-                "PASS: saved-file content verified exactly; active X11 window unchanged after ensure and append"
+                "PASS: saved-file content verified exactly; focused window unchanged after ensure and append"
             );
             Ok(())
         }
@@ -49,6 +52,8 @@ fn main() -> Result<()> {
 }
 
 fn verify(socket_path: &Path, dictation_dir: &Path) -> Result<()> {
+    let wm = Wm::connect().context("this check needs a running i3 or sway")?;
+    let active_window = || wm.focused_node();
     let before = active_window()?;
     // Exercise the deployed editor mode, including bundled init/theme choices.
     // Only the test's socket and transcript location are isolated below.
@@ -60,8 +65,12 @@ fn verify(socket_path: &Path, dictation_dir: &Path) -> Result<()> {
     // This check opens a window of its own and then kills it. Running it
     // beside a live dictation window would adopt that window's socket and
     // close someone's passage, so refuse before anything is opened.
+    let criteria = [
+        Criterion::new(Property::Instance, &config.window_instance)?,
+        Criterion::new(Property::AppId, &config.window_instance)?,
+    ];
     ensure!(
-        !x11::i3_window_exists(&config.window_instance),
+        wm.find(&criteria)?.is_none(),
         "a {} window is already open; close the dictation window before running this check",
         config.window_instance
     );
@@ -74,7 +83,7 @@ fn verify(socket_path: &Path, dictation_dir: &Path) -> Result<()> {
         .context("open graphical dictation Neovim")?;
     ensure!(
         active_window()? == before,
-        "active X11 window changed while ensuring the Neovim session"
+        "focused window changed while ensuring the Neovim session"
     );
 
     let mut indicator = IndicatorState {
@@ -85,7 +94,7 @@ fn verify(socket_path: &Path, dictation_dir: &Path) -> Result<()> {
     session.set_indicator(&indicator)?;
     ensure!(
         active_window()? == before,
-        "active X11 window changed while showing the first preview"
+        "focused window changed while showing the first preview"
     );
 
     session
@@ -99,7 +108,7 @@ fn verify(socket_path: &Path, dictation_dir: &Path) -> Result<()> {
     session.set_indicator(&indicator)?;
     ensure!(
         active_window()? == before,
-        "active X11 window changed while appending to Neovim"
+        "focused window changed while appending to Neovim"
     );
     let expected = format!("{TEST_TEXT}\n");
     ensure!(
@@ -108,49 +117,6 @@ fn verify(socket_path: &Path, dictation_dir: &Path) -> Result<()> {
     );
     drop(session);
     Ok(())
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct WindowId(u64);
-
-fn active_window() -> Result<WindowId> {
-    let mut child = Command::new("xprop")
-        .args(["-root", "_NET_ACTIVE_WINDOW"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .context("start bounded xprop query")?;
-    let deadline = Instant::now() + PROCESS_TIMEOUT;
-    loop {
-        if let Some(status) = child.try_wait().context("poll xprop query")? {
-            ensure!(status.success(), "xprop active-window query failed");
-            let mut output = String::new();
-            child
-                .stdout
-                .take()
-                .context("capture xprop output")?
-                .take(4096)
-                .read_to_string(&mut output)
-                .context("read xprop output")?;
-            let token = output
-                .split_whitespace()
-                .last()
-                .context("xprop returned no active-window value")?;
-            let hexadecimal = token
-                .strip_prefix("0x")
-                .context("xprop returned a malformed active-window value")?;
-            return u64::from_str_radix(hexadecimal, 16)
-                .map(WindowId)
-                .context("parse xprop active-window value");
-        }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(anyhow!("xprop active-window query timed out"));
-        }
-        thread::sleep(POLL_INTERVAL);
-    }
 }
 
 struct CleanupGuard {
@@ -201,7 +167,7 @@ impl CleanupGuard {
             )
         })?;
         stream
-            .set_write_timeout(Some(PROCESS_TIMEOUT))
+            .set_write_timeout(Some(WRITE_TIMEOUT))
             .context("set Neovim shutdown write deadline")?;
         let message = Value::Array(vec![
             Value::from(2),

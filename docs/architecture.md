@@ -18,6 +18,7 @@ imperative shell, and `config.rs` sits at the root because both sides read it.
 | `core/frames.rs` | `Frames`: capture-absolute sample offsets, distinct from slice indices | none |
 | `core/geometry.rs` | Which output the pointer is on, and the clamped window rect | none |
 | `core/text.rs` | Filler stripping, exact replacements, whitespace repair | none |
+| `core/wm.rs` | i3 IPC framing; parsing outputs, tree, config and `no_focus` rules | none |
 | `core/session.rs` | Utterance lifecycle, preview cadence, and the one user-visible notice | internal channels |
 | `core/decode.rs` | Committed sample offset, settled commits, release tails, preview isolation | worker messages |
 | `core/segments.rs` | VAD merge/pad/settlement: spans in, decode windows out | none |
@@ -26,9 +27,9 @@ imperative shell, and `config.rs` sits at the root because both sides read it.
 | `shell/hotkey.rs` | Observe evdev keys read-only: scan, open, poll, read | `/dev/input` |
 | `shell/audio.rs` | Pre-roll, immutable capture chunks, the memory ceiling, stream repair | PortAudio (behind `InputBackend`) |
 | `shell/recorder.rs` | Persist every capture independently of decode, and prune the directory | filesystem |
-| `shell/nvim/mod.rs` | Owned editor lifecycle, ownership proof, transactional appends, indicator | Unix socket, i3 |
+| `shell/nvim/mod.rs` | Owned editor lifecycle, ownership proof, transactional appends, indicator | Unix socket, window manager |
 | `shell/nvim/rpc.rs` | msgpack-RPC transport with absolute deadlines; pure codec | Unix socket |
-| `shell/x11.rs` | Bounded `xrandr`/`xdotool`/`i3-msg` queries, once per spawn | subprocesses |
+| `shell/wm.rs` | i3/sway IPC requests under a deadline, once per spawn; `xdotool` for the pointer on i3 | IPC socket, one subprocess |
 | `shell/logging.rs` | Private 0600 diagnostic log, rotated at 1 MB | filesystem |
 | `shell/daemon.rs` | `run` (the shell) and `serve` (the event loop) | all of the above |
 
@@ -53,12 +54,14 @@ unit-tested without a device, a thread, or a process. Nothing there may import
 - `core/hotkey.rs` — which keyboards hold the hotkey and which latch modifiers
   they report, and when a rescan must reprobe a device node.
 - `core/frames.rs`, `core/geometry.rs`, `core/text.rs` — values and arithmetic.
+- `core/wm.rs` — the i3 IPC protocol as values: frames, replies, `no_focus`
+  proof, `include` resolution, placement commands.
 - one pure half still lives inside a shell module: in `shell/nvim`, the RPC
   codec, the spawn argv, and ownership parsing.
 
 The shell owns everything that can fail for reasons outside the program:
 `shell::daemon::run` and `shell::daemon::serve`, the audio backends,
-`shell::recorder`, the hotkey run loop, the nvim session, `shell::x11`, and
+`shell::recorder`, the hotkey run loop, the nvim session, `shell::wm`, and
 `shell::logging`.
 
 `shell::daemon::run` is the imperative shell proper — it takes the per-user
