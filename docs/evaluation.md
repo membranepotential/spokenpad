@@ -138,6 +138,7 @@ time, and four counts WER cannot express.
 | `e1` | Speech chunks whose padded decode returned nothing, so the pipeline decoded them again bare. |
 | `e2` | Of those, the ones the bare retry returned nothing for either: speech that is simply gone. |
 | `yeah` | Commits that are nothing but "Yeah." — what beam search invents for clear speech ([k2-fsa/sherpa-onnx#3267](https://github.com/k2-fsa/sherpa-onnx/issues/3267)). |
+| `dup` | Chunk seams where the next committed chunk began with the words the previous one ended with: two decode windows that overlapped, written into the file twice. |
 
 `e1` and `e2` are structurally zero on the `whole` path: with no segmenter
 nothing claims a window holds speech, so `Pipeline::transcribe_speech` never
@@ -153,9 +154,11 @@ words anyway.
 ### The two paths
 
 `--path live` drives `core::decode::Worker` the way `shell/daemon.rs` does: a
-preview tick every `preview.interval_ms`, every settled chunk committed once,
-then the release decoding only the tail. `--path whole` decodes each capture in
-one pass with no segmenter. Both run by default.
+tick every `preview.interval_ms` over the audio since the committed offset,
+bounded by `preview.max_seconds` as one tick's work, every settled chunk
+committed once, then the release decoding only the audio still held — the
+daemon drops the rest (`AudioCapture::discard_before`). `--path whole` decodes
+each capture in one pass with no segmenter. Both run by default.
 
 The live replay's clock is the capture's own, not the wall clock. The daemon
 ticks on wall time, so a loaded machine ticks over a longer stretch of audio and
@@ -163,11 +166,13 @@ lands on different chunk boundaries; ticking on audio time makes a replay
 reproducible and models an idle machine, where a decode runs ~14x faster than
 real time.
 
-The preview decode is skipped unless `--previews` is given. The preview is
-cosmetic — `Worker::tick` neither commits it nor advances the offset by it — so
-the committed text is identical word for word, while the replay does about a
-tenth of the decodes. With `--previews` the wall time is the daemon's real
-workload; without it, only the decodes that produce text.
+The preview decode is skipped unless `--previews` is given: the replay ticks
+with `TickKind::Commits`, which is the daemon's own way of keeping the commits
+coming while the cosmetic decode is off. `Worker::tick` returns at the first
+unsettled chunk whichever kind it is given, so the kind cannot change one
+committed word — an assertion `examples/corpus.rs` carries as a test — while
+the replay does about a tenth of the decodes. With `--previews` the wall time
+is the daemon's real workload; without it, only the decodes that produce text.
 
 ### Where the corpus comes from
 

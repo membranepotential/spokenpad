@@ -10,9 +10,10 @@
 //!
 //! Two paths, because they fail differently:
 //!
-//! * `live` drives [`Worker`] as `shell/daemon.rs` does -- a preview tick every
-//!   `preview.interval_ms` of audio, every settled chunk committed once, then
-//!   the release decoding only the tail.
+//! * `live` drives [`Worker`] as `shell/daemon.rs` does -- a tick every
+//!   `preview.interval_ms` of audio over the audio since the committed offset,
+//!   bounded by `preview.max_seconds`, every settled chunk committed once, then
+//!   the release decoding only what is still held.
 //! * `whole` decodes each capture in one pass with no segmenter, like
 //!   `eval --whole`.
 //!
@@ -30,7 +31,7 @@ use serde::Deserialize;
 use spokenpad::{
     config::{Config, Decoding, Model},
     core::{
-        decode::{Pipeline, Recognizer, Segment, Segmenter, TrailingSilence, Utterance, Worker},
+        decode::{Pipeline, Recognizer, TickKind, TrailingSilence, Utterance, Worker},
         frames::Frames,
         text::Processor,
     },
@@ -229,6 +230,45 @@ fn align(reference: &[String], hypothesis: &[String]) -> Alignment {
     }
 }
 
+/// Longest repeat a chunk seam is examined for. A trailing pad of 0.5 s cannot
+/// carry more than a word or two of the next chunk's speech.
+const SEAM_WINDOW: usize = 4;
+
+/// Words that a chunk seam wrote twice: the tail of one committed chunk
+/// repeated at the head of the next.
+///
+/// This is what an overlap between two decode windows looks like in the file.
+/// Lead padding is clamped at the previous chunk's speech end so it cannot
+/// reach back into committed speech, but a chunk's *trailing* pad still reaches
+/// forward into the next chunk's speech, and nothing clamps that.
+#[derive(Default, Clone, Copy)]
+struct Seams {
+    /// Seams where the next chunk began with words the previous one ended with.
+    repeated: usize,
+    /// Words repeated over all of them.
+    words: usize,
+}
+fn seam_repeats(texts: &[String]) -> Seams {
+    let chunks: Vec<Vec<String>> = texts
+        .iter()
+        .map(|t| tokenize(t))
+        .filter(|t| !t.is_empty())
+        .collect();
+    let mut seams = Seams::default();
+    for pair in chunks.windows(2) {
+        let (before, after) = (&pair[0], &pair[1]);
+        let overlap = (1..=SEAM_WINDOW.min(before.len()).min(after.len()))
+            .rev()
+            .find(|k| before[before.len() - k..] == after[..*k])
+            .unwrap_or(0);
+        if overlap > 0 {
+            seams.repeated += 1;
+            seams.words += overlap;
+        }
+    }
+    seams
+}
+
 /// A commit that is nothing but the interjection beam search invents for clear
 /// speech (k2-fsa/sherpa-onnx#3267).
 fn is_yeah(text: &str) -> bool {
@@ -316,30 +356,7 @@ impl<R: Recognizer> Recognizer for Probe<R> {
     }
 }
 
-/// The segmenter a preview tick sees. The preview is cosmetic -- its text can
-/// never reach the file, and `Worker::tick` neither commits it nor advances
-/// the offset by it -- so with `hide` set the trailing unsettled chunk is
-/// dropped before the tick sees it. The committed text is identical word for
-/// word, and the replay saves the great majority of its decodes: a tick then
-/// decodes only what it commits. `Worker::finish` must see that tail, so
-/// [`replay_live`] clears the flag before it.
-struct TailHider<S> {
-    inner: S,
-    hide: bool,
-}
-impl<S: Segmenter> Segmenter for TailHider<S> {
-    fn split(&mut self, samples: &[f32]) -> Result<Vec<Segment>> {
-        let mut segments = self.inner.split(samples)?;
-        if self.hide {
-            while segments.last().is_some_and(|s| !s.settled) {
-                segments.pop();
-            }
-        }
-        Ok(segments)
-    }
-}
-
-type Engine = Worker<Probe<Transcriber>, TailHider<SpeechSegmenter>>;
+type Engine = Worker<Probe<Transcriber>, SpeechSegmenter>;
 
 fn engine(config: &Config, padding: Option<usize>, path: DecodePath) -> Result<Engine> {
     let rate = config.audio.sample_rate;
@@ -347,10 +364,7 @@ fn engine(config: &Config, padding: Option<usize>, path: DecodePath) -> Result<E
     // Warm up before the probe, so lazy native initialisation is not counted.
     recognizer.warm_up()?;
     let segmenter = match path {
-        DecodePath::Live => Some(TailHider {
-            inner: SpeechSegmenter::new(&config.vad, rate)?,
-            hide: false,
-        }),
+        DecodePath::Live => Some(SpeechSegmenter::new(&config.vad, rate)?),
         DecodePath::Whole => None,
     };
     Ok(Worker::new(Pipeline {
@@ -361,49 +375,53 @@ fn engine(config: &Config, padding: Option<usize>, path: DecodePath) -> Result<E
 
 // -- the two paths ----------------------------------------------------------------
 
-/// Replays one capture as the daemon drives it: a preview tick every `tick`
-/// samples, each settled chunk committed once, then the release decode of the
-/// tail. Returns the committed texts in order.
+/// Replays one capture through `shell/daemon.rs`'s own loop: a tick every
+/// `tick` samples over the audio since the committed offset, bounded by
+/// `preview.max_seconds`, each settled chunk committed once, then the release
+/// decoding only the audio still held. Returns the committed texts in order.
 ///
 /// The clock is the capture's own, not the wall clock. The daemon ticks on wall
 /// time, so a loaded machine ticks over a longer stretch of audio and lands on
 /// different chunk boundaries. Ticking on audio time makes a replay reproducible
 /// and models the idle machine, where a decode runs ~14x faster than real time.
-fn replay_live(
-    worker: &mut Engine,
-    samples: &[f32],
-    tick: usize,
-    max_tail: usize,
-    previews: bool,
-) -> Result<Vec<String>> {
-    if let Some(segmenter) = worker.pipeline.segmenter.as_mut() {
-        segmenter.hide = !previews;
-    }
+///
+/// `TickKind::Commits` is the daemon's own way to skip the cosmetic decode, and
+/// `Worker::tick` returns at the first unsettled chunk whichever kind it is
+/// given, so the kind cannot change one committed word. Without `--previews`
+/// every tick uses it, which costs the replay about a tenth of its decodes.
+fn replay_live(worker: &mut Engine, samples: &[f32], plan: Plan) -> Result<Vec<String>> {
     let utterance = Utterance::new(1);
+    // `session.committed_hint`. Here it never lags: the replay is one thread,
+    // so it is the worker's own offset.
     let mut hint = Frames::ZERO;
     let mut landed = vec![];
     let mut texts = vec![];
-    let mut available = tick;
+    let mut available = plan.tick;
     while available < samples.len() {
-        // Past preview.max_seconds of uncommitted audio the daemon pauses
-        // previews and tries again one interval later.
-        if available - hint.get() <= max_tail {
-            worker.tick(&samples[hint.get()..available], hint, &utterance, |c| {
-                landed.push((c.text, c.through));
-            })?;
-            for (text, through) in landed.drain(..) {
-                hint = hint.max(through);
-                texts.push(text);
-            }
+        // Past preview.max_seconds of uncommitted audio the daemon stops the
+        // cosmetic decode but keeps ticking, so settled chunks still commit.
+        let kind = if plan.previews && available - hint.get() <= plan.max_tail {
+            TickKind::Preview
+        } else {
+            TickKind::Commits
+        };
+        // `snapshot_capture(committed_hint)`, truncated to one tick's work.
+        let end = available.min(hint.get() + plan.max_tail);
+        worker.tick(&samples[hint.get()..end], hint, &utterance, kind, |c| {
+            landed.push((c.text, c.through))
+        })?;
+        for (text, through) in landed.drain(..) {
+            hint = hint.max(through);
+            texts.push(text);
         }
-        available += tick;
+        available += plan.tick;
     }
     utterance.release();
-    // The release decodes the open tail, so the tail must be visible again.
-    if let Some(segmenter) = worker.pipeline.segmenter.as_mut() {
-        segmenter.hide = false;
-    }
-    worker.finish(samples, &utterance, |c| texts.push(c.text))?;
+    // `discard_before(committed_hint)` has dropped everything already
+    // committed, so the release sees only the audio still held.
+    worker.finish(&samples[hint.get()..], hint, &utterance, |c| {
+        texts.push(c.text)
+    })?;
     Ok(texts)
 }
 
@@ -431,6 +449,10 @@ struct Row {
     wer: Option<f64>,
     lost_tail: usize,
     yeah: usize,
+    seams: Seams,
+    /// The committed chunk texts, in order. Private speech: written out only
+    /// with `--with-text`.
+    commits: Vec<String>,
     tally: Tally,
     decode_seconds: f64,
 }
@@ -460,25 +482,15 @@ fn run_pass(config: &Config, entries: &[Entry], plan: Plan, jobs: usize) -> Resu
                     worker.pipeline.recognizer.take();
                     let started = Instant::now();
                     let texts = match plan.path {
-                        DecodePath::Live => replay_live(
-                            &mut worker,
-                            &samples,
-                            plan.tick,
-                            plan.max_tail,
-                            plan.previews,
-                        )?,
+                        DecodePath::Live => replay_live(&mut worker, &samples, plan)?,
                         DecodePath::Whole => decode_whole(&mut worker, &samples)?,
                     };
                     let decode_seconds = started.elapsed().as_secs_f64();
                     let yeah = texts.iter().filter(|t| is_yeah(t)).count();
-                    let hypothesis = processor.process(
-                        &texts
-                            .iter()
-                            .filter(|t| !t.trim().is_empty())
-                            .map(String::as_str)
-                            .collect::<Vec<_>>()
-                            .join(" "),
-                    );
+                    let commits: Vec<String> =
+                        texts.into_iter().filter(|t| !t.trim().is_empty()).collect();
+                    let seams = seam_repeats(&commits);
+                    let hypothesis = processor.process(&commits.join(" "));
                     let reference = tokenize(&entry.reference);
                     let hyp = tokenize(&hypothesis);
                     let alignment = align(&reference, &hyp);
@@ -497,6 +509,8 @@ fn run_pass(config: &Config, entries: &[Entry], plan: Plan, jobs: usize) -> Resu
                                 .then(|| alignment.edits as f64 / reference.len() as f64),
                             lost_tail: alignment.lost_tail,
                             yeah,
+                            seams,
+                            commits,
                             tally: worker.pipeline.recognizer.take(),
                             decode_seconds,
                         },
@@ -532,6 +546,7 @@ struct Summary {
     lost_tail_files: usize,
     lost_tail_words: usize,
     yeah: usize,
+    seams: Seams,
     tally: Tally,
     audio_seconds: f64,
     decode_seconds: f64,
@@ -550,6 +565,7 @@ fn summarize(rows: &[Row], lost_tail: usize) -> Summary {
         lost_tail_files: 0,
         lost_tail_words: 0,
         yeah: 0,
+        seams: Seams::default(),
         tally: Tally::default(),
         audio_seconds: 0.0,
         decode_seconds: 0.0,
@@ -559,6 +575,8 @@ fn summarize(rows: &[Row], lost_tail: usize) -> Summary {
         s.decode_seconds += row.decode_seconds;
         s.hyp_words += row.hyp_words;
         s.yeah += row.yeah;
+        s.seams.repeated += row.seams.repeated;
+        s.seams.words += row.seams.words;
         s.tally += row.tally;
         if row.ref_words == 0 {
             s.empty_reference += 1;
@@ -586,8 +604,8 @@ fn quantile(sorted: &[f64], q: f64) -> f64 {
 
 fn print_report(rows: &[Row], summary: &Summary, args: &Args, plan: Plan, wall: f64) {
     let header = format!(
-        "{:<34} {:>4} {:>6} {:>5} {:>5} {:>7} {:>5} {:>4} {:>4} {:>5} {:>7}",
-        "file", "lang", "dur", "ref", "hyp", "WER", "lost", "e1", "e2", "yeah", "decode"
+        "{:<34} {:>4} {:>6} {:>5} {:>5} {:>7} {:>5} {:>4} {:>4} {:>5} {:>4} {:>7}",
+        "file", "lang", "dur", "ref", "hyp", "WER", "lost", "e1", "e2", "yeah", "dup", "decode"
     );
     let mut shown: Vec<&Row> = rows.iter().collect();
     if !args.all {
@@ -616,7 +634,7 @@ fn print_report(rows: &[Row], summary: &Summary, args: &Args, plan: Plan, wall: 
             None => "n/a".into(),
         };
         println!(
-            "{:<34} {:>4} {:>5.0}s {:>5} {:>5} {:>7} {:>5} {:>4} {:>4} {:>5} {:>6.2}s",
+            "{:<34} {:>4} {:>5.0}s {:>5} {:>5} {:>7} {:>5} {:>4} {:>4} {:>5} {:>4} {:>6.2}s",
             row.file,
             row.language,
             row.duration_s,
@@ -627,6 +645,7 @@ fn print_report(rows: &[Row], summary: &Summary, args: &Args, plan: Plan, wall: 
             row.tally.empty_first,
             row.tally.empty_after_retry,
             row.yeah,
+            row.seams.repeated,
             row.decode_seconds
         );
     }
@@ -706,6 +725,12 @@ fn print_report(rows: &[Row], summary: &Summary, args: &Args, plan: Plan, wall: 
     );
     println!("commits that are nothing but \"Yeah.\": {}", summary.yeah);
     println!(
+        "chunk seams that wrote a word twice: {} ({} words), over {} committed chunks",
+        summary.seams.repeated,
+        summary.seams.words,
+        rows.iter().map(|r| r.commits.len()).sum::<usize>()
+    );
+    println!(
         "captures with an empty reference: {}  ({} of them decoded to words anyway)",
         summary.empty_reference, summary.invented
     );
@@ -767,11 +792,14 @@ fn write_jsonl(
             "empty_first": row.tally.empty_first,
             "empty_after_retry": row.tally.empty_after_retry,
             "decodes": row.tally.decodes, "yeah": row.yeah,
+            "seam_repeats": row.seams.repeated, "seam_words": row.seams.words,
+            "chunks": row.commits.len(),
             "decode_seconds": row.decode_seconds,
         });
         if args.with_text {
             value["reference"] = row.reference.clone().into();
             value["hypothesis"] = row.hypothesis.clone().into();
+            value["commits"] = row.commits.clone().into();
         }
         writeln!(out, "{value}")?;
     }
@@ -792,6 +820,7 @@ fn write_jsonl(
             "empty_first": summary.tally.empty_first,
             "empty_after_retry": summary.tally.empty_after_retry,
             "decodes": summary.tally.decodes, "yeah": summary.yeah,
+            "seam_repeats": summary.seams.repeated, "seam_words": summary.seams.words,
             "lost_tail_threshold": args.lost_tail,
             "lost_tail_files": summary.lost_tail_files,
             "lost_tail_words": summary.lost_tail_words,
@@ -1000,30 +1029,59 @@ mod tests {
         assert_eq!((tally.empty_first, tally.empty_after_retry), (0, 0));
     }
 
+    /// Without `--previews` the replay ticks with `TickKind::Commits`, which
+    /// is only sound because the kind decides the cosmetic decode and nothing
+    /// else. If that ever stops holding, every number this harness has
+    /// produced without `--previews` is wrong, so assert it here.
     #[test]
-    fn hiding_the_open_tail_drops_only_the_unsettled_end() {
-        struct Three;
-        impl Segmenter for Three {
-            fn split(&mut self, _: &[f32]) -> Result<Vec<Segment>> {
-                Ok([(0..4, true), (4..8, true), (8..10, false)]
-                    .into_iter()
-                    .map(|(window, settled)| Segment {
-                        speech_end: window.end,
-                        window,
-                        settled,
-                    })
-                    .collect())
+    fn the_tick_kind_changes_no_committed_word() {
+        use spokenpad::core::decode::{Segment, Segmenter, Split};
+        struct Chunks;
+        impl Segmenter for Chunks {
+            fn split(&mut self, samples: &[f32]) -> Result<Split> {
+                Ok(Split {
+                    segments: (0..samples.len())
+                        .step_by(4)
+                        .map(|i| Segment {
+                            window: i..(i + 4).min(samples.len()),
+                            speech_end: (i + 4).min(samples.len()),
+                            settled: i + 4 < samples.len(),
+                        })
+                        .collect(),
+                    silent_through: 0,
+                })
             }
         }
-        let mut hider = TailHider {
-            inner: Three,
-            hide: false,
+        /// Text that depends only on the window, so two runs are comparable.
+        struct ByContent;
+        impl Recognizer for ByContent {
+            fn transcribe(&mut self, samples: &[f32], _: TrailingSilence) -> Result<String> {
+                Ok(format!("w{}", samples.iter().sum::<f32>()))
+            }
+        }
+        let run = |kind| {
+            let mut worker = Worker::new(Pipeline {
+                recognizer: Probe::new(ByContent, None),
+                segmenter: Some(Chunks),
+            });
+            let samples: Vec<f32> = (0..10).map(|i| i as f32).collect();
+            let mut commits = vec![];
+            worker
+                .tick(&samples, Frames::ZERO, &Utterance::new(1), kind, |c| {
+                    commits.push((c.text, c.through.get()))
+                })
+                .unwrap();
+            (commits, worker.pipeline.recognizer.take().decodes)
         };
-        assert_eq!(hider.split(&[]).unwrap().len(), 3);
-        hider.hide = true;
-        let kept = hider.split(&[]).unwrap();
-        assert_eq!(kept.len(), 2);
-        assert!(kept.iter().all(|s| s.settled));
+        let (previewed, previewed_decodes) = run(TickKind::Preview);
+        let (committed, committed_decodes) = run(TickKind::Commits);
+        assert_eq!(previewed, committed, "the same chunks, with the same text");
+        assert_eq!(committed.len(), 2, "two settled chunks of the three");
+        assert_eq!(
+            (previewed_decodes, committed_decodes),
+            (3, 2),
+            "the cosmetic decode of the open tail is the only difference"
+        );
     }
 
     fn row(ref_words: usize, hyp_words: usize, edits: usize, lost_tail: usize) -> Row {
@@ -1039,9 +1097,34 @@ mod tests {
             wer: (ref_words > 0).then(|| edits as f64 / ref_words as f64),
             lost_tail,
             yeah: 0,
+            seams: Seams::default(),
+            commits: vec![],
             tally: Tally::default(),
             decode_seconds: 0.1,
         }
+    }
+
+    #[test]
+    fn a_seam_repeat_is_the_longest_tail_the_next_chunk_starts_with() {
+        let texts = |v: &[&str]| v.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        let clean = seam_repeats(&texts(&["one two three", "four five"]));
+        assert_eq!((clean.repeated, clean.words), (0, 0));
+        // The trailing pad carried "three" into the next window as well.
+        let once = seam_repeats(&texts(&["one two three", "Three, four five."]));
+        assert_eq!(
+            (once.repeated, once.words),
+            (1, 1),
+            "case and punctuation are normalised away"
+        );
+        let two = seam_repeats(&texts(&["one two three", "two three four", "four five"]));
+        assert_eq!(
+            (two.repeated, two.words),
+            (2, 3),
+            "two words at the first seam, one at the second"
+        );
+        // A word that merely recurs inside a chunk is not a seam repeat.
+        let inside = seam_repeats(&texts(&["the cat sat", "on the mat"]));
+        assert_eq!(inside.repeated, 0);
     }
 
     #[test]
