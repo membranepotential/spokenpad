@@ -40,6 +40,8 @@ without taking focus. Fully local, CPU-only; the GTX 1650 stays free.
 3. Investigate the Rust/Python ASR divergence (Known issues) by comparing the
    onnxruntime linked by the Python wheel with the sherpa prebuilt libs.
 4. `ruff format` on the three pre-existing unformatted Python files.
+5. Public release: README rewrite, Python out of `src/`, WM/terminal
+   portability (evaluated 09-21; awaiting the user's decisions).
 
 ## Known issues / open questions
 - Rust/Python ASR divergence: `um z E T` vs `um Z S E T` on one clip, and
