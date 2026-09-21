@@ -11,7 +11,7 @@
 //! committed text so that a failure to land it is visible rather than silent.
 //! With no editor to append to, `passage` writes the text to the file itself.
 mod passage;
-mod rpc;
+pub(crate) mod rpc;
 
 pub use passage::DetachedWrite;
 
@@ -921,7 +921,7 @@ fn spawn_argv(
 
 /// The editor's own argv: the configured command, the init and colourscheme,
 /// the ownership marker, the socket, the readiness flag and the file.
-fn editor_argv(
+pub(crate) fn editor_argv(
     config: &Nvim,
     target: &Path,
     marker: &str,
@@ -1258,13 +1258,13 @@ fn utf8_path(path: &Path) -> Result<&str> {
         .with_context(|| format!("path must be UTF-8: {}", path.display()))
 }
 
-fn marker_path(socket: &Path) -> PathBuf {
+pub(crate) fn marker_path(socket: &Path) -> PathBuf {
     let mut name = socket.as_os_str().to_owned();
     name.push(".owner");
     PathBuf::from(name)
 }
 
-fn new_marker() -> Result<String> {
+pub(crate) fn new_marker() -> Result<String> {
     let mut bytes = [0_u8; 32];
     File::open("/dev/urandom")
         .context("open system random source")?
@@ -1287,7 +1287,7 @@ fn read_marker(path: &Path) -> Result<Option<String>> {
     Ok(Some(marker))
 }
 
-fn write_marker(path: &Path, marker: &str) -> Result<()> {
+pub(crate) fn write_marker(path: &Path, marker: &str) -> Result<()> {
     let parent = path.parent().context("ownership marker has no parent")?;
     fs::create_dir_all(parent)?;
     let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
@@ -1304,7 +1304,7 @@ fn write_marker(path: &Path, marker: &str) -> Result<()> {
 }
 
 /// `nvim.init` as the path nvim is given, writing out the bundled one.
-fn resolve_init(config: &Nvim) -> Result<Option<PathBuf>> {
+pub(crate) fn resolve_init(config: &Nvim) -> Result<Option<PathBuf>> {
     Ok(match config.init.as_deref() {
         Some(path) if path == Path::new("bundled") => Some(materialize_bundled_init()?),
         Some(path) => Some(path.to_owned()),

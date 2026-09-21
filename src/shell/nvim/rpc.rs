@@ -19,12 +19,100 @@ use std::{
 
 /// Depth limit for a decoded reply, so a hostile or broken peer cannot make
 /// the decoder recurse without bound.
-const RPC_MAX_DEPTH: usize = 32;
+pub(crate) const RPC_MAX_DEPTH: usize = 32;
 /// Byte budget for one message on the wire: a request is refused if its
 /// encoding exceeds this, and a reply is abandoned once it has read this
 /// much. It is per message, not per session — a long dictation sends many
 /// appends, each of which is bounded on its own.
-const RPC_MAX_BYTES: usize = 8 * 1024 * 1024;
+pub(crate) const RPC_MAX_BYTES: usize = 8 * 1024 * 1024;
+
+/// One msgpack-RPC message, in either direction.
+///
+/// The transport is not part of this: the daemon speaks to the editor over a
+/// Unix socket ([`RpcClient`] below), and the pane speaks to the Neovim it
+/// embedded over that process's stdin and stdout
+/// ([`shell::pane::ui`](crate::shell::pane::ui)). Both frame messages the
+/// same way, so both build them here.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Message {
+    Request {
+        id: u64,
+        method: String,
+        arguments: Vec<Value>,
+    },
+    Response {
+        id: u64,
+        /// `Nil` when the call succeeded.
+        error: Value,
+        result: Value,
+    },
+    Notification {
+        method: String,
+        arguments: Vec<Value>,
+    },
+}
+
+impl Message {
+    /// The message as msgpack, or an error when it would exceed the per
+    /// message budget.
+    pub(crate) fn encode(&self) -> Result<Vec<u8>> {
+        let value = match self {
+            Self::Request {
+                id,
+                method,
+                arguments,
+            } => Value::Array(vec![
+                Value::from(0),
+                Value::from(*id),
+                Value::from(method.as_str()),
+                Value::Array(arguments.clone()),
+            ]),
+            Self::Response { id, error, result } => Value::Array(vec![
+                Value::from(1),
+                Value::from(*id),
+                error.clone(),
+                result.clone(),
+            ]),
+            Self::Notification { method, arguments } => Value::Array(vec![
+                Value::from(2),
+                Value::from(method.as_str()),
+                Value::Array(arguments.clone()),
+            ]),
+        };
+        let mut bytes = Vec::new();
+        rmpv::encode::write_value(&mut bytes, &value)?;
+        ensure!(
+            bytes.len() <= RPC_MAX_BYTES,
+            "nvim RPC message exceeded {RPC_MAX_BYTES} bytes"
+        );
+        Ok(bytes)
+    }
+
+    /// A decoded msgpack value as a message, or `None` when it is not one.
+    ///
+    /// Anything else on the channel is the peer's business, not a protocol
+    /// error to abort on: the caller skips it and reads the next message.
+    pub(crate) fn parse(value: &Value) -> Option<Self> {
+        let parts = value.as_array()?;
+        match (parts.first()?.as_i64()?, parts.len()) {
+            (0, 4) => Some(Self::Request {
+                id: parts[1].as_u64()?,
+                method: parts[2].as_str()?.to_owned(),
+                arguments: parts[3].as_array()?.clone(),
+            }),
+            (1, 4) => Some(Self::Response {
+                id: parts[1].as_u64()?,
+                error: parts[2].clone(),
+                result: parts[3].clone(),
+            }),
+            (2, 3) => Some(Self::Notification {
+                method: parts[1].as_str()?.to_owned(),
+                arguments: parts[2].as_array()?.clone(),
+            }),
+            _ => None,
+        }
+    }
+}
 
 /// A failure of one RPC call, classified by what the caller can do about it.
 #[derive(Debug)]
@@ -141,12 +229,11 @@ impl RpcClient {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
         self.send(
-            Value::Array(vec![
-                Value::from(0),
-                Value::from(id),
-                Value::from(method),
-                Value::Array(arguments),
-            ]),
+            Message::Request {
+                id,
+                method: method.to_owned(),
+                arguments,
+            },
             deadline,
         )?;
         Ok(id)
@@ -166,19 +253,23 @@ impl RpcClient {
                 .map_err(|error| {
                     RpcFailure::from_io(error.into(), &format!("nvim RPC {method} timed out"))
                 })?;
-            let Some(parts) = message.as_array() else {
+            let Some(Message::Response {
+                id: answered,
+                error,
+                result,
+            }) = Message::parse(&message)
+            else {
                 continue;
             };
-            if parts.len() != 4 || parts[0].as_i64() != Some(1) || parts[1].as_u64() != Some(id) {
+            if answered != id {
                 continue;
             }
-            if !parts[2].is_nil() {
+            if !error.is_nil() {
                 return Err(RpcFailure::Other(anyhow!(
-                    "nvim RPC {method} failed: {}",
-                    parts[2]
+                    "nvim RPC {method} failed: {error}"
                 )));
             }
-            return Ok(parts[3].clone());
+            return Ok(result);
         }
     }
 
@@ -190,24 +281,16 @@ impl RpcClient {
         deadline: Instant,
     ) -> Result<(), RpcFailure> {
         self.send(
-            Value::Array(vec![
-                Value::from(2),
-                Value::from(method),
-                Value::Array(arguments),
-            ]),
+            Message::Notification {
+                method: method.to_owned(),
+                arguments,
+            },
             deadline,
         )
     }
 
-    fn send(&mut self, message: Value, deadline: Instant) -> Result<(), RpcFailure> {
-        let mut bytes = Vec::new();
-        rmpv::encode::write_value(&mut bytes, &message)
-            .map_err(|error| RpcFailure::Other(error.into()))?;
-        if bytes.len() > RPC_MAX_BYTES {
-            return Err(RpcFailure::Other(anyhow!(
-                "nvim RPC request exceeded {RPC_MAX_BYTES} bytes"
-            )));
-        }
+    fn send(&mut self, message: Message, deadline: Instant) -> Result<(), RpcFailure> {
+        let bytes = message.encode().map_err(RpcFailure::Other)?;
         let mut writer = DeadlineWrite::new(&mut self.writer, deadline);
         writer
             .write_all(&bytes)

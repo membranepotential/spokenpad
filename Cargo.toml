@@ -26,11 +26,16 @@ sherpa-onnx = { version = "=1.13.6", default-features = false, features = ["stat
 # Pin the FFI and the safe wrapper together: native config layout is versioned.
 sherpa-onnx-sys = { version = "=1.13.6", default-features = false, features = ["static"] }
 signal-hook = "0.4"
+# The pane's glyphs: hinted rasterising of one grapheme at a time.
+swash = "0.2"
 tempfile = "3.27"
 toml = { version = "0.8", features = ["preserve_order"] }
 # The pane's window. `allow-unsafe-code` is what provides `XCBConnection`, the
 # one x11rb connection type `xkbcommon`'s X11 half can read a keymap from.
 x11rb = { version = "0.14", features = ["allow-unsafe-code"] }
+# The keyboard layout the X server actually loaded, with dead keys and
+# Compose. The `x11` feature is the half that reads it over the connection.
+xkbcommon = { version = "0.9", features = ["x11"] }
 # The only network access anywhere in spokenpad: downloading the pinned
 # default model files. rustls, not native-tls/OpenSSL, so the static binary
 # links no system TLS library; gzip is off, the default models are already
@@ -41,6 +46,9 @@ ureq = { version = "3.4", default-features = false, features = ["rustls"] }
 # Already a runtime dependency; integration tests need it to reap the editor
 # process group they spawned.
 libc = "0.2"
+# The screenshot the pane example and the render test write. A PNG encoder is
+# for looking at the result, not for the daemon, so it stays a dev-dependency.
+png = "0.18"
 # XTEST, to fake a click and a keystroke against the test's own X server.
 # spokenpad never synthesises input, so the feature is asked for here and not
 # in [dependencies]: it is not compiled into the binary.

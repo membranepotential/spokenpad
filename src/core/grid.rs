@@ -22,20 +22,6 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Rgb(pub u32);
 
-impl Rgb {
-    pub fn red(self) -> u8 {
-        (self.0 >> 16) as u8
-    }
-
-    pub fn green(self) -> u8 {
-        (self.0 >> 8) as u8
-    }
-
-    pub fn blue(self) -> u8 {
-        self.0 as u8
-    }
-}
-
 /// How a run of underline is drawn. Neovim has one flag per style rather than
 /// one field, so this keeps them apart: a cell has at most one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

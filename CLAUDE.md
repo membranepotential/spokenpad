@@ -63,9 +63,13 @@ those belongs in `src/shell/`.
   families), `shell/models.rs` (downloads and verifies the default models),
   `shell/nvim/mod.rs` (editor lifecycle, both modes, `spokenpad editor`),
   `shell/nvim/passage.rs` (text dictated with no editor open), `shell/wm.rs`
-  (i3/sway IPC socket), `shell/pane/x11.rs` (the dictation window spokenpad
-  draws itself: the properties that keep a window manager from focusing it;
-  nothing uses it yet), `shell/logging.rs`.
+  (i3/sway IPC socket), `shell/logging.rs`.
+- The pane (`shell/pane/`, the dictation window spokenpad draws itself;
+  nothing in the daemon uses it yet): `mod.rs` (the run loop, the renderer
+  and `editor_command`), `x11.rs` (the window, the properties that keep a
+  window manager from focusing it, `PutImage`), `ui.rs` (`nvim --embed` over
+  stdio, `nvim_ui_attach`), `font.rs` (`fc-match` plus swash glyphs),
+  `keyboard.rs` (xkbcommon: the user's real layout, dead keys, Compose).
 - Editor UI: `src/lua/spokenpad.lua` (winbar, preview extmark, transactional
   `append_once`) and `src/lua/dictation_init.lua` (bundled init).
 - Tests: unit tests in-module; `src/shell/nvim/tests.rs` (real
@@ -74,7 +78,8 @@ those belongs in `src/shell/`.
   channel or the real control socket and CLI, and a real headless nvim.
 - `examples/eval.rs` (WER harness), `examples/verify_window.rs` (manual
   i3/sway window smoke check), `examples/verify_native.rs` (JSON dump of
-  segments and progressive commits).
+  segments and progressive commits), `examples/pane.rs` (opens the pane on a
+  given display, and can write a screenshot).
 - `tests/pane_window.rs` opens the pane window on an Xvfb and i3 it starts
   itself and proves it never takes focus.
 - `scripts/install.sh` (binary to `~/.local/bin`, user unit; `--uninstall`).
