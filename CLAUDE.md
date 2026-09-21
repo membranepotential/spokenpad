@@ -74,8 +74,8 @@ those belongs in `src/shell/`.
   `requirements` for `spokenpad check`), `host.rs` (its thread, and the two
   things the daemon tells it), `x11.rs` (the window, the properties that keep
   a window manager from focusing it, `PutImage`), `ui.rs` (`nvim --embed`
-  over stdio, `nvim_ui_attach`), `font.rs` (`fc-match` plus swash glyphs and
-  per-character fallback), `keyboard.rs` (the user's real layout, dead keys,
+  over stdio, `nvim_ui_attach`), `font.rs` (`fc-match` plus swash glyphs, and a
+  character fallback kept off the drawing path), `keyboard.rs` (the user's real layout, dead keys,
   Compose), `place.rs` (RandR monitors and the X pointer, fed to
   `core/geometry.rs`), `xkb.rs` (libxcb and libxkbcommon opened with `dlopen`
   when a pane opens, so the binary starts without them in the other modes).

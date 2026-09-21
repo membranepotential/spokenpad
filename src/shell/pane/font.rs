@@ -11,9 +11,22 @@
 //! base letter and its combining marks are rendered onto one bitmap: there is
 //! no shaper here, and stacking the marks at the same pen position is what a
 //! monospace grid wants anyway.
+//!
+//! `fc-match` is a process, and spawning one costs tens of milliseconds, so
+//! it is kept off the drawing path in three ways: a face already loaded for
+//! another character is used when it covers this one, so a page of Japanese
+//! asks fontconfig once rather than five hundred times; a paint that has
+//! spent [`FALLBACK_BUDGET`] asking stops and leaves the rest to the next
+//! one, which is what [`Font::deferred`] tells the caller; and a single
+//! `fc-match` that does not answer is killed after [`MATCH_TIMEOUT`].
 use crate::config::FontFamily;
 use anyhow::{Context, Result, bail, ensure};
-use std::{collections::HashMap, path::PathBuf, process::Command};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    process::{Command, Stdio},
+    time::{Duration, Instant},
+};
 use swash::{
     FontRef, GlyphId,
     scale::{Render, ScaleContext, Source, StrikeWith, image::Content},
@@ -90,6 +103,21 @@ pub enum Coverage {
     Colour(Vec<u8>),
 }
 
+/// How long one paint may spend asking fontconfig for fonts it has not
+/// needed before.
+///
+/// The pane draws in the thread that owns the window, so time spent here is
+/// time the window answers nothing. One `fc-match` costs about 60 ms, so in
+/// practice this is "one new font per frame": the characters that did not fit
+/// are blank for that frame and asked for again in the next, which the paint
+/// arranges by waking the loop. Every frame settles at least one of them, so
+/// it converges.
+const FALLBACK_BUDGET: Duration = Duration::from_millis(50);
+
+/// How long a single `fc-match` may take before it is killed. Four times what
+/// it costs on a cold cache, and the bound on the worst one frame can do.
+const MATCH_TIMEOUT: Duration = Duration::from_millis(250);
+
 /// One font file, loaded.
 struct Loaded {
     data: Vec<u8>,
@@ -120,10 +148,42 @@ pub struct Font {
     /// remembered too: asking fontconfig again on every frame would put a
     /// process spawn on the drawing path.
     fallback_of: HashMap<char, Option<usize>>,
+    /// What this paint has already spent asking fontconfig, against
+    /// [`FALLBACK_BUDGET`].
+    spent: Duration,
+    /// Whether this paint left a character unasked because that budget ran
+    /// out. Nothing about it is cached, so the next paint tries again.
+    deferred: bool,
+    /// What fontconfig answered for some character on each 256-character
+    /// page of Unicode. A page is one script's worth, so this is what makes
+    /// the number of `fc-match` calls grow with the scripts on screen rather
+    /// than with the characters: when the best font for a page does not have
+    /// this character either, nothing does, and asking again would be a
+    /// process spawn to hear the same answer.
+    page_of: HashMap<u32, Option<usize>>,
     context: ScaleContext,
     metrics: CellMetrics,
     size: f32,
     family: FontFamily,
+}
+
+/// Which face draws a character the chosen family does not cover.
+enum Fallback {
+    /// This loaded fallback face has it.
+    Face(usize),
+    /// Fontconfig was asked and nothing has it.
+    Nothing,
+    /// Nobody has asked yet, because this paint had no budget left to.
+    Deferred,
+}
+
+/// What a paint got back for one grapheme.
+enum Rendered {
+    /// Rasterised, or missing from every font that was asked. Either way it
+    /// is an answer, and it is cached.
+    Settled(Option<Glyph>),
+    /// The font it needs has not been looked up yet. Nothing is cached.
+    Deferred,
 }
 
 impl Font {
@@ -182,6 +242,9 @@ impl Font {
             context: ScaleContext::new(),
             fallbacks: Vec::new(),
             fallback_of: HashMap::new(),
+            spent: Duration::ZERO,
+            deferred: false,
+            page_of: HashMap::new(),
             metrics,
             size,
             family: family.clone(),
@@ -192,24 +255,47 @@ impl Font {
         self.metrics
     }
 
+    /// Start a paint. The budget for asking fontconfig is per frame.
+    pub fn new_frame(&mut self) {
+        self.spent = Duration::ZERO;
+        self.deferred = false;
+    }
+
+    /// Whether this paint left a character undrawn because looking up its
+    /// font would have cost the frame too much. The caller repaints, so the
+    /// next frame spends its own budget and the character appears.
+    pub fn deferred(&self) -> bool {
+        self.deferred
+    }
+
     /// The rasterised grapheme, or `None` when the font has nothing for it.
     ///
     /// A missing glyph is cached as a miss too: a text full of characters this
-    /// font does not cover must not rasterise on every frame.
+    /// font does not cover must not rasterise on every frame. A grapheme whose
+    /// font has not been looked up yet is `None` as well, and is not cached.
     pub fn glyph(&mut self, text: &str, face: Face) -> Option<&Glyph> {
         let index = face.index();
         if !self.caches[index].contains_key(text) {
-            let rendered = self.render(text, index);
-            self.caches[index].insert(text.to_owned(), rendered);
+            match self.render(text, index) {
+                Rendered::Settled(glyph) => {
+                    self.caches[index].insert(text.to_owned(), glyph);
+                }
+                Rendered::Deferred => {
+                    self.deferred = true;
+                    return None;
+                }
+            }
         }
         self.caches[index][text].as_ref()
     }
 
     /// Rasterise one grapheme from the face that has it.
-    fn render(&mut self, text: &str, index: usize) -> Option<Glyph> {
-        let character = text.chars().next()?;
+    fn render(&mut self, text: &str, index: usize) -> Rendered {
+        let Some(character) = text.chars().next() else {
+            return Rendered::Settled(None);
+        };
         let fallback = match covers(&self.faces[index], character) {
-            true => None,
+            true => Fallback::Nothing,
             false => self.fallback_for(character),
         };
         let Self {
@@ -220,23 +306,52 @@ impl Font {
             ..
         } = self;
         let loaded = match fallback {
-            Some(fallback) => &fallbacks[fallback],
-            None => &faces[index],
+            Fallback::Face(fallback) => &fallbacks[fallback],
+            Fallback::Nothing => &faces[index],
+            Fallback::Deferred => return Rendered::Deferred,
         };
-        rasterise(loaded, context, *size, text)
+        Rendered::Settled(rasterise(loaded, context, *size, text))
     }
 
-    /// The face fontconfig names for a character the family does not cover,
-    /// loading it the first time it is asked for.
-    fn fallback_for(&mut self, character: char) -> Option<usize> {
+    /// The face that draws a character the family does not cover, loading it
+    /// the first time it is asked for.
+    fn fallback_for(&mut self, character: char) -> Fallback {
         if let Some(known) = self.fallback_of.get(&character) {
-            return *known;
+            return known.map_or(Fallback::Nothing, Fallback::Face);
         }
+        // A face loaded for some earlier character comes before asking
+        // fontconfig again. The fallback fonts a desktop installs cover whole
+        // scripts, so this turns a page of Japanese from five hundred process
+        // spawns into one. It can pick a face fontconfig would not have --
+        // the first one that has the character wins -- which costs a little
+        // typographic nicety and is what a terminal does.
+        if let Some(already) = self
+            .fallbacks
+            .iter()
+            .position(|face| covers(face, character))
+        {
+            self.fallback_of.insert(character, Some(already));
+            return Fallback::Face(already);
+        }
+        // Fontconfig always names a font, and for a character nothing on the
+        // machine covers that font is simply its best guess. Once it has
+        // guessed for this page, the guess stands for the whole page.
+        let page = character as u32 >> 8;
+        if let Some(known) = self.page_of.get(&page).copied() {
+            let slot = known.filter(|slot| covers(&self.fallbacks[*slot], character));
+            self.fallback_of.insert(character, slot);
+            return slot.map_or(Fallback::Nothing, Fallback::Face);
+        }
+        if self.spent >= FALLBACK_BUDGET {
+            return Fallback::Deferred;
+        }
+        let asked = Instant::now();
         let found = match_character(&self.family, character)
             .inspect_err(|error| {
                 log::debug!("no fallback font for {character:?}: {error:#}");
             })
             .ok();
+        self.spent += asked.elapsed();
         let slot = found.and_then(|found| {
             if let Some(already) = self.fallbacks.iter().position(|face| face.source == found) {
                 return Some(already);
@@ -263,7 +378,8 @@ impl Font {
             Some(self.fallbacks.len() - 1)
         });
         self.fallback_of.insert(character, slot);
-        slot
+        self.page_of.insert(page, slot);
+        slot.map_or(Fallback::Nothing, Fallback::Face)
     }
 }
 
@@ -293,11 +409,28 @@ fn match_face(face: Face, family: &FontFamily) -> Result<Matched> {
 }
 
 fn read_match(pattern: &str) -> Result<Matched> {
-    let output = Command::new("fc-match")
+    // Not `output()`: that waits for as long as the process takes, and this
+    // runs in the thread that draws the window. A fontconfig rebuilding a
+    // stale cache over a network mount would otherwise hold the pane for as
+    // long as it liked.
+    let mut child = Command::new("fc-match")
         .arg("--format=%{file}\n%{index}\n")
         .arg(pattern)
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .context("run fc-match; the pane needs fontconfig to find a font")?;
+    let deadline = Instant::now() + MATCH_TIMEOUT;
+    while child.try_wait()?.is_none() {
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("fc-match did not answer for {pattern:?} within {MATCH_TIMEOUT:?}");
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let output = child.wait_with_output()?;
     ensure!(
         output.status.success(),
         "fc-match failed for {pattern:?}: {}",
@@ -527,6 +660,9 @@ mod tests {
         // has no outline for is fetched from whichever font fontconfig
         // names for it — if this machine has one at all.
         for text in ["\u{6f22}", "\u{2713}"] {
+            // One character per frame: a frame's budget for asking
+            // fontconfig is spent by the first of them.
+            font.new_frame();
             let Some(glyph) = font.glyph(text, Face::PLAIN) else {
                 // No font on this machine covers it; nothing to assert.
                 continue;
@@ -539,6 +675,69 @@ mod tests {
                 Coverage::Colour(_) => {}
             }
         }
+    }
+
+    #[test]
+    fn a_page_of_a_script_the_family_lacks_costs_a_bounded_number_of_frames() {
+        let Some(mut font) = font_or_skip() else {
+            return;
+        };
+        // Two hundred distinct ideographs: the case that used to put two
+        // hundred `fc-match` spawns on the drawing path, about sixty
+        // milliseconds each, with the window answering nothing in between.
+        // Fontconfig is asked once for the page now, and every later
+        // character of it is answered from the face that came back.
+        let page: Vec<String> = (0x4e00..0x4e00 + 200_u32)
+            .filter_map(char::from_u32)
+            .map(String::from)
+            .collect();
+        let mut frames = 0;
+        let mut worst = Duration::ZERO;
+        loop {
+            frames += 1;
+            assert!(
+                frames <= 4,
+                "{frames} frames to draw one page of one script: fontconfig is still \
+                 being asked per character"
+            );
+            let started = Instant::now();
+            font.new_frame();
+            for text in &page {
+                let _ = font.glyph(text, Face::PLAIN);
+            }
+            worst = worst.max(started.elapsed());
+            if !font.deferred() {
+                break;
+            }
+        }
+        // The frame count is the question under test: a frame asks
+        // fontconfig at most until its budget is gone, so few frames means
+        // few questions. The wall clock is the gross bound -- rasterising two
+        // hundred ideographs for the first time is most of it, and this is an
+        // unoptimised build -- against the twelve seconds it used to be.
+        assert!(
+            worst < Duration::from_secs(1),
+            "one frame spent {worst:?} on a page of new characters"
+        );
+
+        // And a frame that draws them again asks nothing at all, so the
+        // window redraws at the speed of rasterising.
+        let started = Instant::now();
+        font.new_frame();
+        for text in &page {
+            let _ = font.glyph(text, Face::PLAIN);
+        }
+        let again = started.elapsed();
+        assert!(!font.deferred());
+        assert!(
+            again < Duration::from_millis(10),
+            "redrawing the same page cost {again:?}: something is still spawning a process"
+        );
+        println!(
+            "200 ideographs: {frames} frame(s), worst {} ms, again {} us",
+            worst.as_millis(),
+            again.as_micros()
+        );
     }
 
     #[test]

@@ -36,7 +36,7 @@ imperative shell, and `config.rs` sits at the root because both sides read it.
 | `shell/pane/host.rs` | The pane's thread: the two things the daemon tells it, whether a pane is open, and restarting after a panic | internal channels |
 | `shell/pane/x11.rs` | The window, the properties that keep a window manager from focusing it, and `PutImage` | X11 |
 | `shell/pane/ui.rs` | `nvim --embed` over stdio, `nvim_ui_attach`, and the thread that decodes its redraw stream | a child process |
-| `shell/pane/font.rs` | `fc-match` for the face, swash for hinted glyphs, per-grapheme caching and per-character fallback | fontconfig, filesystem |
+| `shell/pane/font.rs` | `fc-match` for the face, swash for hinted glyphs, per-grapheme caching, and a character fallback kept off the drawing path: loaded faces first, one answer per Unicode page, a budget per frame and a timeout per process | fontconfig, filesystem |
 | `shell/pane/keyboard.rs` | The layout the X server has loaded, dead keys and Compose | X11, libxkbcommon |
 | `shell/pane/place.rs` | The monitors from RandR and the pointer from X, fed to `core/geometry.rs` | X11 |
 | `shell/pane/xkb.rs` | libxcb and libxkbcommon, opened with `dlopen` when a pane opens | shared libraries |

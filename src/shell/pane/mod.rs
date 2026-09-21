@@ -503,8 +503,20 @@ impl Pane {
         if first > last || self.canvas.width == 0 || self.canvas.height == 0 {
             return Ok(());
         }
+        self.font.new_frame();
         for row in first..=last {
             self.paint_row(row);
+        }
+        if self.font.deferred() {
+            // Some cell holds a character whose font nobody has looked up,
+            // because this frame had already spent its budget on fontconfig.
+            // It is blank for now. Ask for these rows again and wake the
+            // loop, so the next frame spends its own budget on them: text the
+            // user dictated must not stay invisible, and a window that stops
+            // answering for a second while it asks is worse than a character
+            // that appears a frame late.
+            self.damage(Damage::rows(first, last));
+            self.window.wake()?;
         }
         let height = usize::from(self.canvas.height);
         let top = usize::from(first) * self.metrics.height as usize;

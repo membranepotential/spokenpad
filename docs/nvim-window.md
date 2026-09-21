@@ -146,7 +146,7 @@ it, and say what you find.
 | resident memory the window adds | about 5.5 MB, for the framebuffer, the rasterised glyphs and the editor's client |
 | key-up to the transcript in the file, opening the window on the way | about 300 ms |
 | system libraries | `libxcb`, `libxkbcommon`, `libxkbcommon-x11`, opened when a pane opens rather than linked, so the binary starts without them in the other modes |
-| programs | `fc-match`, from fontconfig, once per font at startup |
+| programs | `fc-match`, from fontconfig: four times at startup, and at most once per frame after that |
 
 `spokenpad check` reports all of those before anyone dictates, and exits
 non-zero when one is missing.
@@ -166,6 +166,26 @@ Bold is thickened by hand where fontconfig has no bold face — which is what
 face, because a synthetic slant looks worse than none. A character the family
 does not cover is fetched from whichever font fontconfig names for it, so a
 transcript that contains `漢` or `✓` shows them rather than blank cells.
+
+Asking fontconfig means spawning `fc-match`, which costs about 60 ms, and the
+pane draws in the thread that owns the window — so a page of a script the
+family lacks must not become one spawn per character. Three things keep that
+off the drawing path:
+
+- a fallback face already loaded for an earlier character is used when it
+  covers this one, so a page of Japanese asks once instead of five hundred
+  times (the first face that has the character wins, which is what a terminal
+  does, and can differ from what fontconfig would have picked);
+- fontconfig's answer stands for the whole 256-character page the character
+  is on, verified in process — if the best font for that page does not have
+  this character either, nothing does;
+- a frame that has spent 50 ms asking stops, paints the rest of that page
+  blank for one frame and repaints straight away, so the window keeps
+  answering. A single `fc-match` that does not come back is killed after
+  250 ms.
+
+Two hundred ideographs the family does not cover take one frame and one
+`fc-match`; the same page drawn again costs no lookup at all.
 
 There is no input method: dead keys and Compose work, because they are
 xkbcommon's and spokenpad reads the layout the X server has loaded, but IBus

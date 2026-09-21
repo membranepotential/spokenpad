@@ -868,7 +868,12 @@ What it costs, stated plainly:
 - **Text rendering is spokenpad's problem now**, and a terminal has had
   decades of work on it. Bold is thickened by hand where fontconfig has no
   bold face, italic falls back to plain, and a character the family does not
-  cover is fetched from whichever font fontconfig names for it.
+  cover is fetched from whichever font fontconfig names for it — but never
+  once per character: a loaded face that covers it comes first, an answer
+  stands for a whole 256-character page of Unicode, a frame stops asking
+  after 50 ms and repaints, and an `fc-match` that hangs is killed after
+  250 ms. A page of two hundred ideographs went from eight seconds of frozen
+  window to one frame.
 - **Verified on i3 only.** The rest is read from source.
 - **Closing a pane may not lose typed text, and that is a budget.** The
   editor dies with the window, so the pane writes every modified buffer
