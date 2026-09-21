@@ -7,14 +7,16 @@ Hold a key (or latch with shift), speak, and text appears in an nvim that
 never takes focus. Fully local, CPU-only. Next milestone: public release.
 
 ## Now
-- lost-tail — live release decode returned "" (09-21 14:24). Cause:
-  sherpa-onnx modified_beam_search on Parakeet TDT (upstream #3267) + zero
-  padding. Replaying all captures beam vs greedy — then fix, deploy.
-- own-window — research done (X11 window, _NET_WM_USER_TIME=0, nvim
+- own-window — research done (own X11 window, _NET_WM_USER_TIME=0, nvim
   --embed; Xwayland on Wayland); awaiting the user's go.
-- Deploy pending: control socket needs i3 bindings (bindcode 194).
+- live replay greedy vs beam over 170 captures (scratch, running) — confirms
+  the decoder fix; then drop examples/live_replay.rs (untracked).
 
 ## Done
+- 09-21: Lost tail fixed: Parakeet now decodes greedy by default (beam search
+  = sherpa-onnx #3267: "" / "Yeah."; 19 vs 4 empty chunks on 170 captures).
+  shell-commands reference corrected. Deployed (b6939db): control socket,
+  i3 M4 bindings in keybindings.conf, clipboard on for the user.
 - 09-21: Control socket + `spokenpad start|stop|toggle|cancel` (no /dev/input);
   built-in model download; clipboard copy opt-in. 177 lib + 22 e2e green.
 - 09-21: Review fixes: no spawn on an empty workspace, only loaded WM config
@@ -39,14 +41,11 @@ never takes focus. Fully local, CPU-only. Next milestone: public release.
    and a latched stop behave; plus the 09-11 checks (tap notice, Escape).
 2. Decide whether a "no speech detected" notice is wanted for a press the VAD
    judged silent (needs the release result to carry a reason).
-3. Whole-buffer path (VAD off) loses words: `cd-home` decodes to "" (the
-   empty-chunk retry is VAD-only) and `shell-commands` loses its first
-   sentence; WER 18.7% whole vs 17.6% VAD (was documented as 13.9%).
+3. Measure removing the 1 s zero padding (hurt greedy 2/9 on the lost tail;
+   0.5 s once made `cd home` empty) with a corpus replay.
 
 ## Known issues / open questions
 - Post-roll length (250 ms) is unproven live; a mic stalling at key-up only logs.
-- First words lost on long dictations: reproduced 09-21 only on the
-  whole-buffer path (Next 3); never seen with the VAD on.
 - Dying input stream: root cause unknown; the watchdog recovers it and a gap
   is now shown to the user. Latched capture ~230 MB RAM/hour, capped at 3600s.
 - LLM cleanup / technical vocabulary still open; no fuzzy replacements.
