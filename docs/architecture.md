@@ -16,7 +16,7 @@ imperative shell, and `config.rs` sits at the root because both sides read it.
 |---|---|---|
 | `config.rs` | Parse and validate the TOML once, before any thread or model | filesystem |
 | `core/control.rs` | The control protocol: `Request`, `Reply`, their one-line codec, the stamped `Received` | none |
-| `core/state.rs` | Total session-state transition function over requests and the clock; the minimum hold and the repeat window | none |
+| `core/state.rs` | Total session-state transition function over requests and the clock; the minimum hold, the repeat window, and the limits that end a capture nobody ends | none |
 | `core/frames.rs` | `Frames`: capture-absolute sample offsets, distinct from slice indices | none |
 | `core/geometry.rs` | Which output the pointer is on, and the clamped window rect | none |
 | `core/text.rs` | Filler stripping, exact replacements, whitespace repair | none |
@@ -59,9 +59,11 @@ unit-tested without a device, a thread, or a process. Nothing there may import
 `libc`, PortAudio, sherpa, `std::fs`, `std::process`, `std::net` or
 `std::thread`; code that needs one of those belongs in `shell/`.
 
-- `core/state.rs` — `step(State, Event) -> (State, Command)`, total: which
-  request starts, continues, latches or ends a capture, and when the clock
-  closes a release's repeat window.
+- `core/state.rs` — `step(State, Event, silence) -> (State, Command)`, total:
+  which request starts, continues, latches or ends a capture; when the clock
+  closes a release's repeat window; and when the clock ends a capture nobody
+  is ending. Every ending carries a `Cause`, and the three that are not
+  `KeyPress` are what the user reads in the winbar.
 - `core/control.rs` — the control protocol as values.
 - `core/session.rs` — what a capture means: which utterance is current, whether
   a preview is due, which notice is showing.
@@ -127,7 +129,7 @@ event is delivered exactly once.
 
 The session owns the single user-visible notice — held too briefly, microphone
 gap, microphone unavailable, capture incomplete, nearly silent, preview paused,
-memory cap. It is shown in the winbar in every phase, beside the phase label
+stopped after silence, reached the time limit, memory cap. It is shown in the winbar in every phase, beside the phase label
 and never in place of the preview, and is cleared by the next key press, not by
 a timer and not by the daemon re-warning. When a capture collects two, the
 ranking in `Notice::priority` decides which one stands, and `Session::notify`
@@ -153,6 +155,24 @@ capture costs the same at an hour as at ten seconds
 ([progressive-commit.md](progressive-commit.md#what-is-kept-in-memory)). The
 recovery WAV is written from the callback before the drop and still holds all
 of it.
+
+Which is why the table ends a capture nobody is ending. Three rules, all of
+them producing the same `Command::Decode` a key release produces, so the tail
+is decoded and everything spoken is kept:
+
+| rule | when | setting |
+|---|---|---|
+| `Cause::Silence` | a latch has heard no speech for the timeout | `capture.silence_timeout_s`, 300 s |
+| `Cause::Length` | any capture has run for `MAX_CAPTURE` | none: it keeps the WAV readable |
+| `Cause::Memory` | `AudioCapture` reports the in-memory ceiling | none: it bounds this machine's RAM |
+
+Only the shell can see the ceiling, so it arrives as `Event::Exhausted` rather
+than as a rule over the clock; the other two are the clock alone. What tells
+the table a capture is not forgotten is `Event::Speech`, which `Session` raises
+whenever the recognizer produced text — a settled commit or a live preview.
+With no VAD model, or with the progressive tick off, nothing produces text
+before the release, so the silence rule is off and the other two bound the
+capture.
 
 ## Decode invariants
 

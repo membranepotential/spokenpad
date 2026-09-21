@@ -77,9 +77,10 @@ the root because both sides read it. Nothing under `core/` may import
   out begins, and `finish_capture` a `Captured` that carries the capture's
   length and its loudest sample, both of which outlive the audio that was
   dropped. `MAX_UTTERANCE_SECONDS = 3600` is a compile-time constant, not a
-  config key, and now bounds the *retained* window; reaching it is final for
+  config key, and bounds the *retained* window; reaching it is final for
   that capture, because accepting audio again after a hole would splice two
-  moments that were never spoken together.
+  moments that were never spoken together, so it ends the capture through
+  `Session::cap` and `state::Event::Exhausted`.
 - `shell/recorder.rs` writes shared chunks independently before the in-memory
   limit is applied. `start()` never joins the previous writer on the key-press
   path — it detaches it, because that path must not wait on a sick filesystem.
@@ -135,7 +136,8 @@ whose absence stays the plain "missing model" error). `[asr]` is parsed into a t
 `audio.sample_rate` must be **16000** — the Silero window is 512 samples at
 that rate and every supported model family reads it, and nothing resamples in
 between. `vad.chunk_seconds` must be positive, `preview.max_seconds` at most
-3600 (default 30), and `nvim.colorscheme` must match `[A-Za-z0-9_.-]+`, since it
+3600 (default 30), `capture.silence_timeout_s` either 0 (off) or in [1,3600]
+(default 300), and `nvim.colorscheme` must match `[A-Za-z0-9_.-]+`, since it
 becomes Lua code. Recovery rejects a WAV whose rate differs from the configured
 capture rate, as in the original command.
 

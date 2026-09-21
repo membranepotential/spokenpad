@@ -12,6 +12,9 @@
 //! - **Modifiers.** Shift and the key come up in either order, so the `stop`
 //!   that follows a latching `toggle` may or may not arrive. A latched
 //!   capture ignores every `stop`; the next `start` or `toggle` ends it.
+//!
+//! The clock also ends a capture nobody is ending: see [`MAX_CAPTURE`] and
+//! the `silence` argument of [`step`].
 use crate::core::control::{Received, Request};
 use std::time::{Duration, Instant};
 
@@ -32,11 +35,34 @@ pub const MINIMUM_HOLD: Duration = Duration::from_millis(120);
 /// keeps recording, which loses nothing.
 pub const REPEAT_WINDOW: Duration = Duration::from_millis(150);
 
+/// The longest any capture may run, whatever is being said into it.
+///
+/// A capture holds only its uncommitted tail in memory, so its length is
+/// bounded by nothing else; the recovery WAV is what needs the bound. `hound`
+/// writes a 32-bit RIFF data length, which overflows at 4 GiB — about 37
+/// hours of 16 kHz mono PCM16 — and `shell::recorder::read_capture` refuses
+/// anything past this limit plus the pre-roll and post-roll around it, so a
+/// capture that reached it is still recoverable.
+///
+/// Deliberately not configurable: it is what keeps a file readable, not a
+/// preference. The silence timeout below is the one users tune.
+pub const MAX_CAPTURE: Duration = Duration::from_secs(4 * 3600);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
     Idle,
-    Recording { started: Instant, hold: Hold },
-    Transcribing { started: Instant, released: Instant },
+    Recording {
+        started: Instant,
+        /// The last moment the recognizer produced text for this capture, or
+        /// `started` while it has produced none. A latched capture that has
+        /// been quiet this long ends itself; see [`step`].
+        last_speech: Instant,
+        hold: Hold,
+    },
+    Transcribing {
+        started: Instant,
+        released: Instant,
+    },
 }
 
 /// What is keeping a capture running.
@@ -57,11 +83,23 @@ pub enum Hold {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Event {
     Request(Received),
-    /// The time now. Closes a [`Hold::Releasing`] window that has passed.
-    /// The shell delivers it before every request, at that request's own
-    /// stamp, and on every pass of its loop.
+    /// The time now. Closes a [`Hold::Releasing`] window that has passed, and
+    /// ends a capture that has run too long or been quiet too long. The shell
+    /// delivers it before every request, at that request's own stamp, and on
+    /// every pass of its loop.
     Clock {
         now: Instant,
+    },
+    /// The recognizer produced text for the running capture at `at`, so the
+    /// user is still talking. It moves `last_speech` and nothing else: no
+    /// command can follow it.
+    Speech {
+        at: Instant,
+    },
+    /// The capture may hold no more audio in memory. Only the shell can see
+    /// this, which is why it is an event rather than a rule over the clock.
+    Exhausted {
+        at: Instant,
     },
     Finished,
 }
@@ -75,14 +113,31 @@ pub enum DiscardReason {
     Cancelled,
 }
 
+/// What ended a capture. Everything but [`Cause::KeyPress`] is spokenpad
+/// ending one the user did not end, and the user is told which it was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cause {
+    /// The key: a `stop` whose repeat window closed, or the press that ends
+    /// a latch.
+    KeyPress,
+    /// A latched capture heard no speech for the silence timeout.
+    Silence,
+    /// The capture ran for [`MAX_CAPTURE`].
+    Length,
+    /// The in-memory ceiling ([`Event::Exhausted`]).
+    Memory,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
     Nothing,
     Start,
     /// End the capture and decode it. `released` is when the key came up:
-    /// the post-roll runs from there, not from when the window closed.
+    /// the post-roll runs from there, not from when the window closed. A
+    /// capture that ended by itself is released at the moment it ended.
     Decode {
         released: Instant,
+        cause: Cause,
     },
     Discard(DiscardReason),
 }
@@ -129,66 +184,91 @@ impl State {
     }
 }
 
-/// A capture ends: decoded, unless it was only a tap.
-fn end(started: Instant, released: Instant) -> (State, Command) {
-    if released.saturating_duration_since(started) < MINIMUM_HOLD {
+/// A capture begins. Nothing has been heard yet, so the silence timeout runs
+/// from the press.
+fn begin(at: Instant, hold: Hold) -> (State, Command) {
+    (
+        State::Recording {
+            started: at,
+            last_speech: at,
+            hold,
+        },
+        Command::Start,
+    )
+}
+
+/// A capture ends: decoded, unless a key ended it inside [`MINIMUM_HOLD`],
+/// which makes it a stray tap. Only a key can tap: the other causes need
+/// minutes of capture to fire, and throwing away what they end would lose
+/// dictation rather than a slip of the finger.
+fn end(started: Instant, released: Instant, cause: Cause) -> (State, Command) {
+    if cause == Cause::KeyPress && released.saturating_duration_since(started) < MINIMUM_HOLD {
         (State::Idle, Command::Discard(DiscardReason::TooShort))
     } else {
         (
             State::Transcribing { started, released },
-            Command::Decode { released },
+            Command::Decode { released, cause },
         )
     }
 }
 
-pub fn step(state: State, event: Event) -> (State, Command) {
+/// One transition. `silence` is how long a latched capture may hear no speech
+/// before it ends itself, or `None` where nothing can report speech: with no
+/// VAD model, or with the progressive tick off, the recognizer runs only at
+/// the release and [`Event::Speech`] never arrives.
+pub fn step(state: State, event: Event, silence: Option<Duration>) -> (State, Command) {
     use Command::Nothing;
     use Hold::*;
     use Request::*;
     use State::*;
-    let recording = |started, hold| (Recording { started, hold }, Nothing);
     match (state, event) {
         // A capture that already ended, still decoding, does not stop a new
         // one: a quick re-press is a new paragraph.
         (Idle | Transcribing { .. }, Event::Request(Received { request, at })) => match request {
-            Start => (
-                Recording {
-                    started: at,
-                    hold: Held,
-                },
-                Command::Start,
-            ),
-            Toggle => (
-                Recording {
-                    started: at,
-                    hold: Latched { last_press: at },
-                },
-                Command::Start,
-            ),
+            Start => begin(at, Held),
+            Toggle => begin(at, Latched { last_press: at }),
             // The `stop` of the press that ended a latched capture, or of a
             // tap already discarded; and a cancel after the release, which
-            // must not destroy a dictation that is already captured.
+            // must not destroy a dictation that is already captured. A
+            // capture that ended by itself sees the same strays, later.
             Stop | Cancel => (state, Nothing),
         },
-        (Recording { started, hold }, Event::Request(Received { request, at })) => {
+        (
+            Recording {
+                started,
+                last_speech,
+                hold,
+            },
+            Event::Request(Received { request, at }),
+        ) => {
+            let holding = |hold| {
+                (
+                    Recording {
+                        started,
+                        last_speech,
+                        hold,
+                    },
+                    Nothing,
+                )
+            };
             match (hold, request) {
                 // Auto-repeat of the held key.
                 (Held, Start) => (state, Nothing),
-                (Held, Stop) => recording(started, Releasing { at }),
+                (Held, Stop) => holding(Releasing { at }),
                 // The key came back within the window: it never came up.
                 // The shell closes a passed window with a `Clock` at this
                 // request's stamp first, so here `at` is inside it.
-                (Releasing { .. }, Start) => recording(started, Held),
+                (Releasing { .. }, Start) => holding(Held),
                 // The first release is the one that counts.
                 (Releasing { .. }, Stop) => (state, Nothing),
                 // Shift added to a held key latches it: its auto-repeat now
                 // fires the toggle binding.
-                (Held | Releasing { .. }, Toggle) => recording(started, Latched { last_press: at }),
+                (Held | Releasing { .. }, Toggle) => holding(Latched { last_press: at }),
                 (Latched { last_press }, Start | Toggle) => {
                     if at.saturating_duration_since(last_press) <= REPEAT_WINDOW {
-                        recording(started, Latched { last_press: at })
+                        holding(Latched { last_press: at })
                     } else {
-                        end(started, at)
+                        end(started, at, Cause::KeyPress)
                     }
                 }
                 // Shift and the key come up in either order.
@@ -199,12 +279,55 @@ pub fn step(state: State, event: Event) -> (State, Command) {
         (
             Recording {
                 started,
-                hold: Releasing { at },
+                last_speech,
+                hold,
             },
             Event::Clock { now },
-        ) if now.saturating_duration_since(at) > REPEAT_WINDOW => end(started, at),
+        ) => match hold {
+            // The key came up and its repeat window has closed: the release
+            // is what ended this capture, at the moment the key came up.
+            Releasing { at } if now.saturating_duration_since(at) > REPEAT_WINDOW => {
+                end(started, at, Cause::KeyPress)
+            }
+            // Every capture is bounded, so its recovery WAV stays readable.
+            _ if now.saturating_duration_since(started) >= MAX_CAPTURE => {
+                end(started, now, Cause::Length)
+            }
+            // A latch only. A held key auto-repeats its binding every few
+            // tens of milliseconds, so ending its capture would start the
+            // next one immediately; a key under a book is bounded by
+            // `MAX_CAPTURE` instead. A latch has no key down at all, which
+            // is the forgotten capture this rule is for.
+            Latched { .. }
+                if silence.is_some_and(|q| now.saturating_duration_since(last_speech) >= q) =>
+            {
+                end(started, now, Cause::Silence)
+            }
+            _ => (state, Nothing),
+        },
+        // A stamp from a decode that finished out of order must not move the
+        // silence timeout backwards.
+        (
+            Recording {
+                started,
+                last_speech,
+                hold,
+            },
+            Event::Speech { at },
+        ) => (
+            Recording {
+                started,
+                last_speech: last_speech.max(at),
+                hold,
+            },
+            Nothing,
+        ),
+        (Recording { started, .. }, Event::Exhausted { at }) => end(started, at, Cause::Memory),
         (Transcribing { .. }, Event::Finished) => (Idle, Nothing),
-        (_, Event::Clock { .. } | Event::Finished) => (state, Nothing),
+        (
+            _,
+            Event::Clock { .. } | Event::Speech { .. } | Event::Exhausted { .. } | Event::Finished,
+        ) => (state, Nothing),
     }
 }
 
@@ -213,15 +336,36 @@ mod tests {
     use super::*;
     use DiscardReason::*;
 
+    /// The silence timeout these tests run with. Long enough that nothing in
+    /// a test measured in milliseconds reaches it, so every case below is
+    /// also a check that the timeout leaves ordinary dictation alone.
+    const QUIET: Duration = Duration::from_secs(300);
+
     fn request(request: Request, at: Instant) -> Event {
         Event::Request(Received { request, at })
+    }
+
+    /// The command a key release produces, which is most of them.
+    fn decode(released: Instant) -> Command {
+        Command::Decode {
+            released,
+            cause: Cause::KeyPress,
+        }
     }
 
     /// Folds `events` from `state`, returning the final state and every
     /// command that was not `Nothing`.
     fn run(state: State, events: &[Event]) -> (State, Vec<Command>) {
+        run_with(Some(QUIET), state, events)
+    }
+
+    fn run_with(
+        silence: Option<Duration>,
+        state: State,
+        events: &[Event],
+    ) -> (State, Vec<Command>) {
         events.iter().fold((state, Vec::new()), |(s, mut out), e| {
-            let (s, c) = step(s, *e);
+            let (s, c) = step(s, *e, silence);
             if c != Command::Nothing {
                 out.push(c);
             }
@@ -241,18 +385,29 @@ mod tests {
     fn all_state_event_pairs() {
         let t = Instant::now();
         let later = t + Duration::from_secs(1);
-        let at = |hold| State::Recording { started: t, hold };
+        let at = |hold| State::Recording {
+            started: t,
+            last_speech: t,
+            hold,
+        };
+        // The same capture after `Event::Speech { at: later }`.
+        let spoke = |hold| State::Recording {
+            started: t,
+            last_speech: later,
+            hold,
+        };
         let transcribing = State::Transcribing {
             started: t,
             released: later - Duration::from_millis(500),
+        };
+        let releasing = Hold::Releasing {
+            at: later - REPEAT_WINDOW,
         };
         let states = [
             State::Idle,
             at(Hold::Held),
             // A window that is exactly at its edge at `later`.
-            at(Hold::Releasing {
-                at: later - REPEAT_WINDOW,
-            }),
+            at(releasing),
             at(Hold::Latched { last_press: t }),
             transcribing,
         ];
@@ -262,18 +417,36 @@ mod tests {
             request(Request::Toggle, later),
             request(Request::Cancel, later),
             Event::Clock { now: later },
+            Event::Speech { at: later },
+            Event::Exhausted { at: later },
             Event::Finished,
         ];
-        let held_new = State::Recording {
+        let begun = |hold| State::Recording {
             started: later,
-            hold: Hold::Held,
+            last_speech: later,
+            hold,
         };
-        let latched_new = State::Recording {
-            started: later,
-            hold: Hold::Latched { last_press: later },
-        };
+        let held_new = begun(Hold::Held);
+        let latched_new = begun(Hold::Latched { last_press: later });
         let latched_now = at(Hold::Latched { last_press: later });
         let cancelled = (State::Idle, Command::Discard(Cancelled));
+        let ended = (
+            State::Transcribing {
+                started: t,
+                released: later,
+            },
+            decode(later),
+        );
+        let exhausted = (
+            State::Transcribing {
+                started: t,
+                released: later,
+            },
+            Command::Decode {
+                released: later,
+                cause: Cause::Memory,
+            },
+        );
         let nothing = |s| (s, Command::Nothing);
         let expected = [
             // Idle
@@ -281,6 +454,8 @@ mod tests {
                 (held_new, Command::Start),
                 nothing(State::Idle),
                 (latched_new, Command::Start),
+                nothing(State::Idle),
+                nothing(State::Idle),
                 nothing(State::Idle),
                 nothing(State::Idle),
                 nothing(State::Idle),
@@ -292,6 +467,8 @@ mod tests {
                 nothing(latched_now),
                 cancelled,
                 nothing(at(Hold::Held)),
+                nothing(spoke(Hold::Held)),
+                exhausted,
                 nothing(at(Hold::Held)),
             ],
             // Releasing, window exactly at its edge: still open.
@@ -301,27 +478,19 @@ mod tests {
                 nothing(latched_now),
                 cancelled,
                 nothing(states[2]),
+                nothing(spoke(releasing)),
+                exhausted,
                 nothing(states[2]),
             ],
             // Latched
             [
-                (
-                    State::Transcribing {
-                        started: t,
-                        released: later,
-                    },
-                    Command::Decode { released: later },
-                ),
+                ended,
                 nothing(states[3]),
-                (
-                    State::Transcribing {
-                        started: t,
-                        released: later,
-                    },
-                    Command::Decode { released: later },
-                ),
+                ended,
                 cancelled,
                 nothing(states[3]),
+                nothing(spoke(Hold::Latched { last_press: t })),
+                exhausted,
                 nothing(states[3]),
             ],
             // Transcribing
@@ -332,12 +501,18 @@ mod tests {
                 // A cancel cannot destroy a dictation that is already captured.
                 nothing(transcribing),
                 nothing(transcribing),
+                nothing(transcribing),
+                nothing(transcribing),
                 nothing(State::Idle),
             ],
         ];
         for (i, state) in states.into_iter().enumerate() {
             for (j, event) in events.into_iter().enumerate() {
-                assert_eq!(step(state, event), expected[i][j], "state {i}, event {j}");
+                assert_eq!(
+                    step(state, event, Some(QUIET)),
+                    expected[i][j],
+                    "state {i}, event {j}"
+                );
             }
         }
     }
@@ -357,10 +532,7 @@ mod tests {
             ]
             .concat(),
         );
-        assert_eq!(
-            commands,
-            [Command::Start, Command::Decode { released: ms(1000) }]
-        );
+        assert_eq!(commands, [Command::Start, decode(ms(1000))]);
         assert_eq!(
             state,
             State::Transcribing {
@@ -413,8 +585,9 @@ mod tests {
                 Event::Clock {
                     now: released + REPEAT_WINDOW + Duration::from_millis(1),
                 },
+                Some(QUIET),
             );
-            assert_eq!(commands, Command::Decode { released }, "{order}");
+            assert_eq!(commands, decode(released), "{order}");
             assert_eq!(
                 state,
                 State::Transcribing {
@@ -439,6 +612,7 @@ mod tests {
             state,
             State::Recording {
                 started: t,
+                last_speech: t,
                 hold: Hold::Held
             }
         );
@@ -456,18 +630,12 @@ mod tests {
                 (Request::Start, ms(1151)),
             ]),
         );
-        assert_eq!(
-            commands,
-            [
-                Command::Start,
-                Command::Decode { released: ms(1000) },
-                Command::Start
-            ]
-        );
+        assert_eq!(commands, [Command::Start, decode(ms(1000)), Command::Start]);
         assert_eq!(
             state,
             State::Recording {
                 started: ms(1151),
+                last_speech: ms(1151),
                 hold: Hold::Held
             }
         );
@@ -491,11 +659,7 @@ mod tests {
                     (Request::Stop, ms(5080)),
                 ]),
             );
-            assert_eq!(
-                commands,
-                [Command::Start, Command::Decode { released: ms(5000) }],
-                "{ending}"
-            );
+            assert_eq!(commands, [Command::Start, decode(ms(5000))], "{ending}");
             assert_eq!(
                 state,
                 State::Transcribing {
@@ -544,7 +708,7 @@ mod tests {
             state,
             &requests(&[(Request::Start, ms(2000)), (Request::Stop, ms(2100))]),
         );
-        assert_eq!(commands, [Command::Decode { released: ms(2000) }]);
+        assert_eq!(commands, [decode(ms(2000))]);
     }
 
     #[test]
@@ -595,7 +759,7 @@ mod tests {
                 assert_eq!(commands, [Command::Start, Command::Discard(TooShort)]);
                 assert_eq!(state, State::Idle);
             } else {
-                assert_eq!(commands, [Command::Start, Command::Decode { released }]);
+                assert_eq!(commands, [Command::Start, decode(released)]);
                 assert_eq!(
                     state,
                     State::Transcribing {
@@ -605,5 +769,296 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The capture the user forgot: latched, nothing said, no key down. It
+    /// ends on the clock, as a release does, so the tail is decoded and kept.
+    #[test]
+    fn a_silent_latch_ends_itself_on_the_clock() {
+        let t = Instant::now();
+        let (state, commands) = run(State::Idle, &requests(&[(Request::Toggle, t)]));
+        assert_eq!(commands, [Command::Start]);
+
+        let (still, commands) = run(
+            state,
+            &[Event::Clock {
+                now: t + QUIET - Duration::from_millis(1),
+            }],
+        );
+        assert_eq!(commands, [], "one millisecond early");
+        assert!(still.latched());
+
+        let ended = t + QUIET;
+        let (after, commands) = run(still, &[Event::Clock { now: ended }]);
+        assert_eq!(
+            commands,
+            [Command::Decode {
+                released: ended,
+                cause: Cause::Silence
+            }]
+        );
+        assert_eq!(
+            after,
+            State::Transcribing {
+                started: t,
+                released: ended
+            }
+        );
+    }
+
+    /// Text from the recognizer is the proof that the user is still there,
+    /// and it restarts the timeout wherever it lands.
+    #[test]
+    fn speech_restarts_the_silence_timeout() {
+        let t = Instant::now();
+        let (state, _) = run(State::Idle, &requests(&[(Request::Toggle, t)]));
+        let mut state = state;
+        // Half the timeout apart, four times over: never quiet long enough.
+        for i in 1..=4 {
+            let at = t + QUIET / 2 * i;
+            let (next, commands) = run(state, &[Event::Clock { now: at }, Event::Speech { at }]);
+            assert_eq!(commands, [], "speech at {i} half-timeouts ended it");
+            state = next;
+        }
+        let quiet_from = t + QUIET / 2 * 4;
+        let (state, commands) = run(
+            state,
+            &[Event::Clock {
+                now: quiet_from + QUIET,
+            }],
+        );
+        assert_eq!(
+            commands,
+            [Command::Decode {
+                released: quiet_from + QUIET,
+                cause: Cause::Silence
+            }],
+            "the timeout runs from the last speech, not from the press"
+        );
+        assert!(!state.recording());
+    }
+
+    /// A stale stamp from a decode that finished out of order must not pull
+    /// the timeout backwards into a stop.
+    #[test]
+    fn speech_stamped_in_the_past_does_not_shorten_the_timeout() {
+        let t = Instant::now();
+        let (state, _) = run(State::Idle, &requests(&[(Request::Toggle, t)]));
+        let recent = t + QUIET;
+        let (state, _) = run(state, &[Event::Speech { at: recent }]);
+        let (state, commands) = run(
+            state,
+            &[
+                Event::Speech { at: t },
+                Event::Clock {
+                    now: recent + QUIET - Duration::from_millis(1),
+                },
+            ],
+        );
+        assert_eq!(commands, []);
+        assert!(state.latched());
+    }
+
+    /// A held key re-fires its binding every few tens of milliseconds, so
+    /// ending its capture for silence would only start the next one. The
+    /// length limit is what bounds it.
+    #[test]
+    fn silence_ends_a_latch_but_never_a_held_key() {
+        let t = Instant::now();
+        for (opening, latched) in [(Request::Start, false), (Request::Toggle, true)] {
+            let (state, _) = run(State::Idle, &requests(&[(opening, t)]));
+            let (state, commands) = run(state, &[Event::Clock { now: t + QUIET * 3 }]);
+            if latched {
+                assert!(matches!(
+                    commands[..],
+                    [Command::Decode {
+                        cause: Cause::Silence,
+                        ..
+                    }]
+                ));
+            } else {
+                assert_eq!(commands, [], "a held key is not ended by silence");
+                assert!(state.recording());
+            }
+        }
+    }
+
+    /// With no VAD model, or with the progressive tick off, nothing ever
+    /// reports speech: there is no silence to measure, and the rule is off.
+    #[test]
+    fn without_speech_reports_only_the_length_limit_applies() {
+        let t = Instant::now();
+        let (latched, _) = run_with(None, State::Idle, &requests(&[(Request::Toggle, t)]));
+        let (state, commands) = run_with(
+            None,
+            latched,
+            &[Event::Clock {
+                now: t + MAX_CAPTURE - Duration::from_secs(1),
+            }],
+        );
+        assert_eq!(commands, [], "silence alone cannot end it");
+        assert!(state.latched());
+        let limit = t + MAX_CAPTURE;
+        let (state, commands) = run_with(None, state, &[Event::Clock { now: limit }]);
+        assert_eq!(
+            commands,
+            [Command::Decode {
+                released: limit,
+                cause: Cause::Length
+            }]
+        );
+        assert!(!state.recording());
+    }
+
+    /// Held or latched, quiet or not: no capture outlives the limit that
+    /// keeps its recovery WAV readable.
+    #[test]
+    fn every_capture_ends_at_the_length_limit() {
+        let t = Instant::now();
+        let limit = t + MAX_CAPTURE;
+        for opening in [Request::Start, Request::Toggle] {
+            let (mut state, _) = run(State::Idle, &requests(&[(opening, t)]));
+            // Talking throughout, so the silence rule never fires.
+            let mut at = t;
+            while at + QUIET / 2 < limit {
+                at += QUIET / 2;
+                let (next, commands) =
+                    run(state, &[Event::Clock { now: at }, Event::Speech { at }]);
+                assert_eq!(commands, [], "{opening} ended early at {:?}", at - t);
+                state = next;
+            }
+            let (state, commands) = run(
+                state,
+                &[
+                    Event::Clock {
+                        now: limit - Duration::from_millis(1),
+                    },
+                    Event::Clock { now: limit },
+                ],
+            );
+            assert_eq!(
+                commands,
+                [Command::Decode {
+                    released: limit,
+                    cause: Cause::Length
+                }],
+                "{opening}"
+            );
+            assert_eq!(
+                state,
+                State::Transcribing {
+                    started: t,
+                    released: limit
+                }
+            );
+        }
+    }
+
+    /// The in-memory ceiling: the capture cannot hold more audio, so it ends
+    /// and is decoded rather than recording on into a file nobody reads.
+    #[test]
+    fn the_memory_ceiling_ends_the_capture() {
+        let t = Instant::now();
+        let at = t + Duration::from_secs(3600);
+        for opening in [Request::Start, Request::Toggle] {
+            let (state, _) = run(State::Idle, &requests(&[(opening, t)]));
+            let (state, commands) = run(state, &[Event::Exhausted { at }]);
+            assert_eq!(
+                commands,
+                [Command::Decode {
+                    released: at,
+                    cause: Cause::Memory
+                }]
+            );
+            assert_eq!(
+                state,
+                State::Transcribing {
+                    started: t,
+                    released: at
+                }
+            );
+            // Reported again while the tail decodes: nothing more to end.
+            let (state, commands) = run(
+                state,
+                &[Event::Exhausted {
+                    at: at + Duration::from_secs(1),
+                }],
+            );
+            assert_eq!(commands, []);
+            assert!(!state.recording());
+        }
+    }
+
+    /// Only a key can tap. A capture that spokenpad ends is never discarded
+    /// as too short, however the stamps fall: what it ends is dictation.
+    #[test]
+    fn an_auto_stop_is_never_read_as_a_tap() {
+        let t = Instant::now();
+        let soon = t + MINIMUM_HOLD / 2;
+        for (event, cause) in [
+            (Event::Exhausted { at: soon }, Cause::Memory),
+            (Event::Clock { now: soon }, Cause::Silence),
+        ] {
+            let silence = Some(MINIMUM_HOLD / 4);
+            let (state, _) = run_with(silence, State::Idle, &requests(&[(Request::Toggle, t)]));
+            let (state, commands) = run_with(silence, state, &[event]);
+            assert_eq!(
+                commands,
+                [Command::Decode {
+                    released: soon,
+                    cause
+                }],
+                "{cause:?}"
+            );
+            assert_eq!(
+                state,
+                State::Transcribing {
+                    started: t,
+                    released: soon
+                }
+            );
+        }
+    }
+
+    /// The key the user finally presses after a capture ended itself. A
+    /// `stop` or a `cancel` must change nothing, and a press must start a
+    /// fresh capture rather than resurrect the old one.
+    #[test]
+    fn a_late_key_after_an_auto_stop_is_harmless() {
+        let t = Instant::now();
+        let ended = t + QUIET;
+        let (state, _) = run(State::Idle, &requests(&[(Request::Toggle, t)]));
+        let (transcribing, _) = run(state, &[Event::Clock { now: ended }]);
+        let late = |state, from: Instant| {
+            let (state, commands) = run(
+                state,
+                &requests(&[
+                    (Request::Stop, from + Duration::from_secs(1)),
+                    (Request::Cancel, from + Duration::from_secs(2)),
+                    (Request::Stop, from + Duration::from_secs(3)),
+                ]),
+            );
+            assert_eq!(commands, []);
+            state
+        };
+        // While the tail is still decoding, and again once it has landed.
+        let state = late(transcribing, ended);
+        assert_eq!(state, transcribing);
+        let (idle, commands) = run(state, &[Event::Finished]);
+        assert_eq!(commands, []);
+        assert_eq!(idle, State::Idle);
+        assert_eq!(late(idle, ended + Duration::from_secs(10)), State::Idle);
+
+        let again = ended + Duration::from_secs(60);
+        let (state, commands) = run(idle, &requests(&[(Request::Toggle, again)]));
+        assert_eq!(commands, [Command::Start]);
+        assert_eq!(
+            state,
+            State::Recording {
+                started: again,
+                last_speech: again,
+                hold: Hold::Latched { last_press: again }
+            }
+        );
     }
 }

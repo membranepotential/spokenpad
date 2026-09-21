@@ -169,7 +169,9 @@ Hold the push-to-talk key, speak, and release. The text is appended to the
 dictation file as its own paragraph and saved after every utterance.
 
 - **Latch:** press Shift with the key (`spokenpad toggle`), then let go and
-  keep talking. Press the key again, with or without Shift, to stop.
+  keep talking. Press the key again, with or without Shift, to stop. One you
+  forget stops by itself after five minutes without speech, keeping
+  everything you said.
 - **Cancel:** press the cancel key (`spokenpad cancel`) while recording. Text
   that already reached the file stays, and the WAV is kept. After release,
   cancel does nothing.
@@ -198,8 +200,9 @@ a sentence explaining it, added only when the window is wide enough for all of
 it. A narrow window gives up the level meter first, then the explanation, but
 never the phase label or the headline. When two things happen to the same
 capture, the more serious one is shown: memory limit reached > capture
-incomplete > microphone unavailable > microphone gap > nearly silent > held
-too briefly > preview paused. The log always has the full sentence and paths.
+incomplete > microphone unavailable > microphone gap > reached the time limit >
+stopped after silence > nearly silent > held too briefly > preview paused. The
+log always has the full sentence and paths.
 
 - **Recording continues for a quarter second after you let go**
   (`audio.postroll_ms`), so a word still sounding at key-up is not cut off.
@@ -226,13 +229,28 @@ too briefly > preview paused. The log always has the full sentence and paths.
 - **A long recording costs no more memory than a short one.** Audio that has
   been transcribed is dropped as you speak; what is held is the sentence you
   are still in. The recovery WAV keeps the whole recording.
-- **Past the 60-minute in-memory limit** the capture is decoded and the winbar
-  names the recovery WAV, which keeps recording. Text that lands while you
-  speak is what makes the audio droppable, so the limit is reachable only
-  where nothing lands: with no VAD model, with `vad.enabled = false`, with
+- **A latch you forget stops by itself** after five minutes without speech
+  (`capture.silence_timeout_s`). It is an ordinary stop: the tail is decoded,
+  everything spoken is kept, and the winbar says "stopped after silence" until
+  your next press. Press the key to dictate again. The timeout runs from the
+  last text the recogniser produced, so a pause while you think is not
+  silence to it — but music or a conversation in the room is speech to the
+  detector, and only the limit below ends such a capture. A push-to-talk key
+  held down is not stopped this way: a held key re-fires its binding every
+  few tens of milliseconds, so stopping it would only start the next capture.
+- **No capture runs longer than four hours**, whatever is being said into it.
+  This is not a setting: it is what keeps the recovery WAV readable, since a
+  WAV's own size field overflows at about 37 hours. The winbar says "reached
+  the time limit".
+- **Past the 60-minute in-memory limit** the capture is decoded and ends, and
+  the winbar names the recovery WAV. Text that lands while you speak is what
+  makes the audio droppable, so the limit is reachable only where nothing
+  lands: with no VAD model, with `vad.enabled = false`, with
   `preview.enabled = false` (which turns the whole progressive tick off, not
   just the visible preview), or with a `preview.interval_ms` long enough that
-  few ticks fire.
+  few ticks fire. Those are the same cases in which nothing can report speech,
+  so the silence timeout is off there and this limit, or the four-hour one, is
+  what ends a forgotten capture.
 
 ## A window that opens by itself
 
@@ -296,6 +314,7 @@ cannot pass silently. Keys are not configured here; see
 
 | key | default | what it does |
 |---|---|---|
+| `capture.silence_timeout_s` | `300` | seconds without speech after which a latched capture ends by itself; `0` turns it off, and the four-hour limit still applies |
 | `asr.family` | `"parakeet"` | model family: `parakeet`, `whisper` or `sense_voice` ([docs/asr.md](docs/asr.md)) |
 | `asr.vocabulary` | `[]` | words to bias Parakeet towards, such as `["kubectl", "nginx"]`; switches to beam search, which sometimes drops a sentence ([docs/asr.md](docs/asr.md)) |
 | `nvim.mode` | `"attach"` | `attach`: you run `spokenpad editor`; `managed`: the daemon opens a terminal on i3 or sway; `pane`: the daemon opens a window it draws itself |

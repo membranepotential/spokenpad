@@ -15,6 +15,10 @@ pub const REQUIRED_SAMPLE_RATE: u32 = 16_000;
 /// Upper bound for `audio.postroll_ms`: every release blocks the event loop
 /// this long at most, and a key pressed meanwhile ends it early.
 pub const MAX_POSTROLL_MS: u32 = 1_000;
+/// Upper bound for `audio.preroll_ms`. Together with [`MAX_POSTROLL_MS`] it
+/// bounds how much a recovery WAV holds beyond the capture itself, which is
+/// what `shell::recorder`'s own limit has to leave room for.
+pub const MAX_PREROLL_MS: u32 = 60_000;
 
 /// How a transducer searches. Hotwords exist only inside
 /// `ModifiedBeamSearch`, the one sherpa-onnx search that applies them.
@@ -67,6 +71,30 @@ impl Audio {
     /// Whole frames in `span` at the sample rate.
     pub fn frames_in(&self, span: Duration) -> usize {
         (u128::from(self.sample_rate) * span.as_millis() / 1000) as usize
+    }
+}
+
+/// When a capture nobody is ending ends by itself. The absolute limit that
+/// bounds every capture is `core::state::MAX_CAPTURE`, which is not a
+/// setting: it is what keeps a recovery WAV readable.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Capture {
+    /// Seconds a latched capture may hear no speech before it ends itself,
+    /// or `0` to never end one for silence.
+    pub silence_timeout_s: f64,
+}
+impl Default for Capture {
+    fn default() -> Self {
+        Self {
+            silence_timeout_s: 300.,
+        }
+    }
+}
+impl Capture {
+    /// The timeout as a duration, or `None` where it is off.
+    pub fn silence_timeout(&self) -> Option<Duration> {
+        (self.silence_timeout_s > 0.).then(|| Duration::from_secs_f64(self.silence_timeout_s))
     }
 }
 
@@ -500,6 +528,7 @@ impl Default for Preview {
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub audio: Audio,
+    pub capture: Capture,
     pub recording: Recording,
     pub asr: Asr,
     pub vad: Vad,
@@ -584,8 +613,13 @@ impl Config {
             "audio.sample_rate must be {REQUIRED_SAMPLE_RATE}: the Silero VAD window is 512 samples at 16kHz and the ASR models expect 16kHz input"
         );
         ensure!(
-            self.audio.preroll_ms <= 60_000,
-            "audio.preroll_ms must be <= 60000"
+            self.audio.preroll_ms <= MAX_PREROLL_MS,
+            "audio.preroll_ms must be <= {MAX_PREROLL_MS}"
+        );
+        let quiet = self.capture.silence_timeout_s;
+        ensure!(
+            quiet == 0. || (quiet.is_finite() && (1.0..=3600.).contains(&quiet)),
+            "capture.silence_timeout_s must be 0 (off) or in [1,3600]: it is how long a latched capture may hear no speech before it ends itself"
         );
         ensure!(
             self.audio.postroll_ms <= MAX_POSTROLL_MS,
@@ -771,6 +805,27 @@ mod tests {
         )
         .unwrap();
     }
+    /// `0` is the one value outside the range, and it means off: the type
+    /// the daemon reads says so rather than a sentinel number travelling on.
+    #[test]
+    fn the_silence_timeout_is_a_duration_or_nothing() {
+        let timeout = |toml: &str| {
+            Config::parse(toml, None)
+                .expect("valid")
+                .capture
+                .silence_timeout()
+        };
+        assert_eq!(timeout(""), Some(Duration::from_secs(300)));
+        assert_eq!(
+            timeout("[capture]\nsilence_timeout_s=1"),
+            Some(Duration::from_secs(1))
+        );
+        assert_eq!(
+            timeout("[capture]\nsilence_timeout_s=3600"),
+            Some(Duration::from_secs(3600))
+        );
+        assert_eq!(timeout("[capture]\nsilence_timeout_s=0"), None);
+    }
     #[test]
     fn reject_invalid_boundaries() {
         for bad in [
@@ -801,6 +856,11 @@ mod tests {
             "[nvim]\nmode=true",
             "[nvim]\nterminal=['alacritty', '-e']",
             "[recording]\nmax_total_bytes=0",
+            "[capture]\nsilence_timeout_s=0.5",
+            "[capture]\nsilence_timeout_s=3601",
+            "[capture]\nsilence_timeout_s=-1",
+            "[capture]\nsilence_timeout_s=nan",
+            "[capture]\nsilence_timeou_s=300",
             "[asr]\ndecoding='typo'",
             "[asr]\ndecoding='greedy_search'\nvocabulary=['rust']",
             "[asr]\ndecoding='greedy_search'\nhotwords_score=3.0",

@@ -311,6 +311,9 @@ struct Settings {
     /// Mirrors `nvim.copy_to_clipboard`, off by default like the setting
     /// itself; the clipboard tests opt in explicitly.
     copy_to_clipboard: bool,
+    /// Mirrors `capture.silence_timeout_s`. Off unless a test asks, so no
+    /// other test can end on the clock while it is thinking.
+    silence_timeout_s: f64,
 }
 
 impl Default for Settings {
@@ -326,6 +329,7 @@ impl Default for Settings {
             delay: Duration::ZERO,
             socket: false,
             copy_to_clipboard: false,
+            silence_timeout_s: 0.,
         }
     }
 }
@@ -357,6 +361,7 @@ impl Harness {
         config.nvim.dictation_dir = root.join("dictation");
         config.nvim.startup_timeout_s = 10.0;
         config.preview.interval_ms = settings.interval_ms;
+        config.capture.silence_timeout_s = settings.silence_timeout_s;
         config.validate().expect("harness config is valid");
 
         let calls = Arc::new(Mutex::new(Vec::new()));
@@ -1451,6 +1456,84 @@ fn a_capture_that_runs_through_a_long_pause_is_still_committed_whole() {
         "the recovery WAV holds the whole capture, silence included: {} frames",
         recorded.len()
     );
+    h.finish();
+}
+
+/// The latch the user forgot. Nobody presses anything: the microphone keeps
+/// delivering silence, and the capture ends by itself, decodes its tail, says
+/// why in the winbar, and closes its recovery WAV. The next press then starts
+/// a fresh capture, as after any release.
+#[test]
+fn a_forgotten_latch_stops_itself_and_the_next_press_starts_fresh() {
+    if !nvim_available() {
+        return;
+    }
+    let h = Harness::start(Settings {
+        vad: Some(brisk_vad()),
+        words: false,
+        interval_ms: 200,
+        // The shortest the configuration allows, so the suite waits seconds
+        // rather than the five minutes a user gets.
+        silence_timeout_s: 1.0,
+        ..Settings::default()
+    });
+    h.press(true);
+    h.say(&tone(1.5));
+    // Nothing else is said and no key is pressed from here on. The fake
+    // microphone keeps delivering silence, exactly as a real one does.
+    wait_until("the latch ends itself", || {
+        h.indicator("phase").trim() == "idle"
+    });
+    assert!(
+        h.winbar().contains("stopped after silence"),
+        "the winbar has to say why the recording stopped: {}",
+        h.winbar()
+    );
+    assert_eq!(h.captures(), 1, "no second capture was started");
+
+    // Everything spoken was decoded, and exactly once.
+    let spoken = loud_samples(&h.recovery_wav().0);
+    assert!(spoken > 0);
+    assert_eq!(
+        counted(&h.text()),
+        spoken,
+        "every loud sample is committed exactly once: {:?}",
+        h.text()
+    );
+
+    // The recorder stopped with the capture: the WAV is complete, readable
+    // and no longer growing.
+    let (recorded, rate) = h.recovery_wav();
+    assert_eq!(rate, RATE);
+    assert!(
+        recorded.len() >= (1.5 * f64::from(RATE)) as usize,
+        "the recovery WAV is short: {} frames",
+        recorded.len()
+    );
+    thread::sleep(Duration::from_millis(400));
+    assert_eq!(
+        h.recovery_wav().0.len(),
+        recorded.len(),
+        "the recovery WAV kept growing after the capture ended"
+    );
+
+    // A press after an auto-stop is an ordinary new capture.
+    let before = h.text();
+    h.press(true);
+    assert_eq!(h.captures(), 2);
+    assert_eq!(
+        h.indicator("phase").trim(),
+        "recording",
+        "the next press records again"
+    );
+    assert!(
+        !h.winbar().contains("stopped after silence"),
+        "the press clears the notice"
+    );
+    h.say(&tone(1.0));
+    h.press_only(true);
+    h.release_for_good();
+    wait_until("the second capture lands", || h.text().len() > before.len());
     h.finish();
 }
 

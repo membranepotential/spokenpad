@@ -4,7 +4,10 @@
 //! writer owns each WAV, checkpoints its header after every buffer, and may be
 //! abandoned after a bounded wait without affecting live capture or ASR.
 
-use crate::{config::Recording, core::session::RecordingStatus};
+use crate::{
+    config::Recording,
+    core::{session::RecordingStatus, state::MAX_CAPTURE},
+};
 use anyhow::{Context, Result, bail, ensure};
 use chrono::Local;
 use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
@@ -31,8 +34,15 @@ const MAX_SAME_SECOND: usize = 100;
 const FULL_SCALE: f32 = 32_767.0;
 const WRITER_JOIN: Duration = Duration::from_secs(3);
 const QUEUE_SECONDS: usize = 60;
+/// What a WAV may hold beyond the capture itself: the pre-roll before it and
+/// the post-roll after it, both bounded by `config`.
+const RECOVERY_MARGIN_SECONDS: f64 = 120.0;
 /// Recovery refuses implausibly long WAVs rather than allocating for them.
-const MAX_RECOVERY_SECONDS: f64 = 4.0 * 3600.0;
+/// A WAV this daemon wrote holds one capture, which
+/// [`MAX_CAPTURE`](crate::core::state::MAX_CAPTURE) ends, plus that margin —
+/// so the limit is derived from the limit that produced the file and the two
+/// cannot drift apart (`the_recovery_limit_covers_a_whole_capture`).
+const MAX_RECOVERY_SECONDS: f64 = MAX_CAPTURE.as_secs() as f64 + RECOVERY_MARGIN_SECONDS;
 
 trait WavSink: Send {
     fn write(&mut self, samples: &[f32]) -> Result<()>;
@@ -713,6 +723,20 @@ mod tests {
         recorder
     }
 
+    /// The state machine ends a capture so that its WAV stays readable, which
+    /// only holds while recovery accepts everything such a capture can write:
+    /// the capture itself plus the widest pre-roll and post-roll allowed.
+    #[test]
+    fn the_recovery_limit_covers_a_whole_capture() {
+        let longest = MAX_CAPTURE.as_secs_f64()
+            + f64::from(crate::config::MAX_PREROLL_MS) / 1000.
+            + f64::from(crate::config::MAX_POSTROLL_MS) / 1000.;
+        assert!(
+            MAX_RECOVERY_SECONDS >= longest,
+            "recovery refuses {longest:.0}s, which a capture may reach, at {MAX_RECOVERY_SECONDS:.0}s"
+        );
+    }
+
     #[test]
     fn pcm_uses_ties_even_and_clips() {
         let half = 0.5 / FULL_SCALE;
@@ -876,9 +900,10 @@ mod tests {
     fn read_rejects_implausibly_long_recordings() {
         let temporary = tempdir().unwrap();
         let path = temporary.path().join("long.wav");
-        // One sample per second: four hours of "audio" in five frames.
+        // One sample per second, so the file is as many frames as the limit
+        // is seconds, plus one.
         let mut writer = WavWriter::create(&path, mono_pcm16(1)).unwrap();
-        for _ in 0..(4 * 3600 + 1) {
+        for _ in 0..=(MAX_RECOVERY_SECONDS as u32) {
             writer.write_sample(0_i16).unwrap();
         }
         writer.finalize().unwrap();

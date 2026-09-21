@@ -905,3 +905,70 @@ Rejected on the way:
 
 The default stays `attach`. Whether `pane` should replace `managed` is a
 question for after it has been used on a real desktop.
+
+## A capture that nobody ends, ends (2026-09-21)
+
+Dropping committed audio ([above](#constant-memory-while-recording-2026-09-21))
+left a capture with no length of its own. `spokenpad toggle` with nobody to
+toggle again recorded until `hound`'s 32-bit RIFF length overflowed at 4 GiB —
+about 37 hours — and `read_capture` already refused a recording over 4 hours,
+so the safety net was gone long before the daemon noticed. The old
+`MAX_UTTERANCE_SECONDS` bounded only the retained window, and `Session::cap`
+marked the utterance released without telling the state machine, so a capped
+capture kept writing to disk with nothing reading it.
+
+So `core/state.rs` ends a capture on the clock. Three rules, one shape: each
+produces the same `Command::Decode` a key release produces, carrying a `Cause`,
+so the tail is decoded, every sample already captured is kept, the recorder
+stops with the capture, and one ranked notice says which rule it was.
+
+- **`Cause::Silence`** — a latched capture that has heard no speech for
+  `capture.silence_timeout_s` (default 300 s). "Heard speech" is text the
+  recognizer produced, from a settled commit or a live preview, which
+  `Session` turns into `Event::Speech`; an empty commit is settled silence and
+  an empty preview is a quiet tail, so neither counts. The timeout therefore
+  runs from the last word, not the last key press: a thinking pause is not
+  silence, and five minutes means five minutes of nothing said.
+- **`Cause::Length`** — `MAX_CAPTURE` (4 h), for every capture. Not a setting:
+  it is what keeps the recovery WAV readable, so `shell/recorder.rs` derives
+  its own `MAX_RECOVERY_SECONDS` from it plus the widest pre-roll and
+  post-roll `config` allows, and a unit test asserts the margin covers them.
+  The two cannot drift apart.
+- **`Cause::Memory`** — the in-memory ceiling, which only the shell can see,
+  so it arrives as `Event::Exhausted` rather than as a rule over the clock.
+  This is the pre-existing gap closed: the ceiling now ends the capture
+  instead of only stopping its decoding.
+
+Decisions inside that:
+
+- **Latched only, for silence.** A held push-to-talk key re-fires its binding
+  every few tens of milliseconds, so ending its capture would start the next
+  one 40 ms later — an endless chain of five-minute captures rather than a
+  fix. A latch has no key down at all, which is the forgotten capture this is
+  for. A key left under a book is bounded by the length limit instead, and
+  nothing can do better: spokenpad reads no input device, so it cannot tell a
+  stuck key from a held one.
+- **A stop, not a cancel.** Everything spoken is kept and appended, as after
+  any release. Only a key press can be read as a tap: `end` applies the
+  `MINIMUM_HOLD` rule to `Cause::KeyPress` alone, because throwing away what
+  the other three end would lose dictation rather than a slip of the finger.
+- **The late key is harmless.** After an auto-stop the session is
+  `Transcribing` and then `Idle`, where a `stop` and a `cancel` are already
+  no-ops; the notice survives both and only the next press clears it. That
+  press starts a fresh capture, which is what `toggle` from `Idle` has always
+  meant.
+- **Off where there is no silence to measure.** With no VAD model,
+  `vad.enabled = false` or `preview.enabled = false`, nothing produces text
+  before the release, so `Event::Speech` never arrives and every latch would
+  end at the timeout. `serve` passes `None` in exactly those cases — the same
+  condition that already turns the progressive tick off — and the length limit
+  and the ceiling bound the capture there.
+- **One setting, and only one.** Long dictation with pauses over five minutes
+  is plausible, so the silence timeout is configurable (0 turns it off, and
+  the limits still apply). The other two limits are not preferences: one keeps
+  a file readable, the other bounds this machine's RAM.
+
+Notice ranking: news about audio that was lost still outranks news about a
+capture that ended cleanly, so `LengthLimit` and `SilenceTimeout` sit below
+the microphone notices and above `NearlySilent`. Nothing is lost when they
+fire, and the log line names the cause either way.

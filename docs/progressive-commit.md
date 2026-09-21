@@ -131,11 +131,43 @@ and pauses peaks at 26.0 s of retained audio
 ([experiment](experiments/2026-09-21-constant-ram-recording.md)). Both are
 measurements of those schedules, not the bound.
 
-`MAX_UTTERANCE_SECONDS` (3600) is now a ceiling on that retained window, not on
+`MAX_UTTERANCE_SECONDS` (3600) is a ceiling on that retained window, not on
 the length of a capture. With a VAD model loaded nothing comes near it; without
-one nothing settles, so it is what stops a forgotten capture from taking the
-machine's memory. Reaching it is final for that capture: accepting audio again
-after a hole would splice two moments that were never spoken together.
+one nothing settles, so it is what bounds a forgotten capture's memory.
+Reaching it is final for that capture: accepting audio again after a hole would
+splice two moments that were never spoken together. So reaching it now *ends*
+the capture — `AudioCapture` reports it, `Session::cap` turns it into
+`Event::Exhausted`, and the state machine answers with the same
+`Command::Decode` a key release produces. Until 2026-09-21 it only marked the
+utterance released, which stopped the decoding and left the recorder writing to
+disk with nothing reading it.
+
+## When a capture ends by itself
+
+Dropping committed audio left a capture with no length of its own. Three rules
+in `core/state.rs` give it one, and all three end it the way a release does:
+the tail is decoded, everything spoken is kept, and one notice says which rule
+it was.
+
+- **Silence.** A latched capture that has heard no speech for
+  `capture.silence_timeout_s` (300 s) ends. "Heard speech" is text the
+  recognizer produced — a settled commit or a live preview, whichever came
+  last. `Session` raises `Event::Speech` for it, so an empty commit (settled
+  silence) and an empty preview prove nothing, which is exactly what a quiet
+  latch produces every tick. The rule is off where nothing can produce text
+  before the release: no VAD model, `vad.enabled = false`,
+  `preview.enabled = false`. It applies to a latch only; a held key re-fires
+  its binding every few tens of milliseconds, so ending its capture would
+  start the next one immediately.
+- **Length.** Any capture reaching `MAX_CAPTURE` (4 h) ends, whatever is
+  being said into it. This is what keeps the recovery WAV readable: a WAV's
+  RIFF sizes overflow at about 37 hours, and `read_capture` derives its own
+  limit from `MAX_CAPTURE` plus the widest pre-roll and post-roll, so the two
+  cannot drift apart.
+- **Memory.** The in-memory ceiling above.
+
+Only a key press can be read as a tap: a capture one of these rules ends is
+never discarded for being shorter than `MINIMUM_HOLD`.
 
 ## Release and cancellation
 
@@ -180,7 +212,9 @@ retained window stays under 45 s, and assert that dropping the committed audio
 decodes exactly the same windows, over the same capture-absolute samples, as
 keeping all of it. `tests/e2e.rs` checks progressive commits landing before
 release through the real event loop and a real nvim, and a latched capture that
-runs through a pause long enough to settle; two ignored tests measure the
+runs through a pause long enough to settle, and a latch nobody ends: it stops
+on the silence rule, commits what was said exactly once, shows the notice, and
+closes its recovery WAV. Two ignored tests measure the
 memory and check the real Silero against the silence that was dropped. `examples/verify_native.rs` prints the
 segment bounds, settlement flags, commit offsets, raw text and final
 remainder of a simulated live passage as JSON, for inspection against the

@@ -2,7 +2,7 @@
 use crate::core::{
     decode::{Commit, Preview, Utterance, UtteranceId},
     frames::Frames,
-    state::{self, Command, DiscardReason, Event, State},
+    state::{self, Cause, Command, DiscardReason, Event, MAX_CAPTURE, State},
 };
 use std::{
     borrow::Cow,
@@ -34,6 +34,11 @@ pub enum Notice {
     NearlySilent,
     PreviewPaused,
     MemoryCap(RecordingStatus),
+    /// A latched capture heard no speech for `capture.silence_timeout_s` and
+    /// ended itself.
+    SilenceTimeout,
+    /// A capture ran for [`MAX_CAPTURE`] and ended itself.
+    LengthLimit,
 }
 
 /// A notice as the winbar draws it: a headline short enough to stand beside the
@@ -61,21 +66,27 @@ impl Notice {
     /// two things happen to the same one this ranking decides which the user
     /// reads; [`Session::notify`] is the only place it is applied.
     ///
-    /// Highest first, and this list is the definition:
+    /// Highest first, and this list is the definition. News about audio that
+    /// was lost outranks news about a capture that ended cleanly: the two
+    /// auto-stops below lost nothing, and everything spoken is in the editor.
     ///
     /// 1. `MemoryCap` — the capture is over and the audio is only in a WAV.
     /// 2. `CaptureIncomplete` — most of what was said never arrived.
     /// 3. `MicrophoneUnavailable` — audio is missing and did not come back.
     /// 4. `MicrophoneGap` — audio came back, with a hole in the recording.
-    /// 5. `NearlySilent` — everything arrived and may still be worth nothing.
-    /// 6. `HeldTooBriefly` — nothing was recorded, and nothing was lost.
-    /// 7. `PreviewPaused` — cosmetic: only the live tail stopped.
+    /// 5. `LengthLimit` — the capture ran to the length limit and ended.
+    /// 6. `SilenceTimeout` — a latch was quiet long enough to end.
+    /// 7. `NearlySilent` — everything arrived and may still be worth nothing.
+    /// 8. `HeldTooBriefly` — nothing was recorded, and nothing was lost.
+    /// 9. `PreviewPaused` — cosmetic: only the live tail stopped.
     pub fn priority(&self) -> u8 {
         match self {
-            Self::MemoryCap(_) => 6,
-            Self::CaptureIncomplete => 5,
-            Self::MicrophoneUnavailable => 4,
-            Self::MicrophoneGap => 3,
+            Self::MemoryCap(_) => 8,
+            Self::CaptureIncomplete => 7,
+            Self::MicrophoneUnavailable => 6,
+            Self::MicrophoneGap => 5,
+            Self::LengthLimit => 4,
+            Self::SilenceTimeout => 3,
             Self::NearlySilent => 2,
             Self::HeldTooBriefly => 1,
             Self::PreviewPaused => 0,
@@ -92,6 +103,8 @@ impl Notice {
             Self::NearlySilent => "nearly silent",
             Self::PreviewPaused => "preview paused",
             Self::MemoryCap(_) => "memory limit reached",
+            Self::SilenceTimeout => "stopped after silence",
+            Self::LengthLimit => "reached the time limit",
         }
     }
     /// Why it happened, or what to do about it. The memory-cap detail names the
@@ -121,6 +134,14 @@ impl Notice {
             Self::MemoryCap(RecordingStatus::NotRecorded) => {
                 "past 60 minutes with no recovery recording; new audio is being discarded".into()
             }
+            Self::SilenceTimeout => {
+                "no speech for capture.silence_timeout_s; press the key to dictate again".into()
+            }
+            Self::LengthLimit => format!(
+                "a capture ends after {} hours; press the key to dictate again",
+                MAX_CAPTURE.as_secs() / 3600
+            )
+            .into(),
         }
     }
     /// Both halves, as the indicator carries them to the editor.
@@ -162,12 +183,19 @@ pub struct Session {
     pending: Option<(UtteranceId, Instant)>,
     interval: Duration,
     enabled: bool,
+    silence: Option<Duration>,
     previews: Previews,
     warned_tick_failure: bool,
 }
 impl Session {
-    pub fn new(enabled: bool, interval: Duration) -> Self {
+    /// `silence` is how long a latched capture may hear no speech before it
+    /// ends itself. It belongs to the caller that knows whether anything can
+    /// report speech at all: with no VAD model, or with the progressive tick
+    /// off, the recognizer runs only at the release and there is no silence
+    /// to measure, so it is `None`.
+    pub fn new(enabled: bool, interval: Duration, silence: Option<Duration>) -> Self {
         Self {
+            silence,
             state: State::Idle,
             current: None,
             committed_hint: Frames::ZERO,
@@ -184,7 +212,7 @@ impl Session {
         }
     }
     pub fn event(&mut self, event: Event) -> Command {
-        let (state, command) = state::step(self.state, event);
+        let (state, command) = state::step(self.state, event, self.silence);
         self.state = state;
         match command {
             Command::Start => {
@@ -199,11 +227,19 @@ impl Session {
                 self.pending = None;
                 self.due = self.enabled.then(|| Instant::now() + self.interval);
             }
-            Command::Decode { .. } => {
+            Command::Decode { cause, .. } => {
                 if let Some(u) = &self.current {
                     u.release();
                 }
                 self.due = None;
+                match cause {
+                    // Nothing to say: the user's own key, or the ceiling,
+                    // whose notice [`Session::cap`] raises with the file
+                    // name that only it knows.
+                    Cause::KeyPress | Cause::Memory => {}
+                    Cause::Silence => self.notify(Notice::SilenceTimeout),
+                    Cause::Length => self.notify(Notice::LengthLimit),
+                }
             }
             Command::Discard(reason) => {
                 if let Some(u) = &self.current {
@@ -225,10 +261,11 @@ impl Session {
     /// Records that text has landed. Cancelling stops *decoding*; it never
     /// unwrites text the recognizer already produced, so there is no reject
     /// path here — only the live capture's hints move.
-    pub fn note_commit(&mut self, c: &Commit) {
+    pub fn note_commit(&mut self, c: &Commit, now: Instant) {
         if !self.is_current(c.utterance.id) {
             return;
         }
+        self.heard(&c.text, now);
         self.committed_hint = self.committed_hint.max(c.through);
         if c.through > self.preview_epoch {
             self.preview_epoch = c.through;
@@ -275,6 +312,7 @@ impl Session {
         let Some(Preview { text, through }) = preview else {
             return;
         };
+        self.heard(&text, now);
         if through < self.committed_hint {
             return;
         }
@@ -309,15 +347,28 @@ impl Session {
             self.notice = None;
         }
     }
+    /// Text the recognizer produced is the only proof that the user is still
+    /// talking, wherever it came from: a settled commit or a live preview.
+    /// Empty text is what settled silence and a silent preview look like, so
+    /// it proves nothing and is not reported.
+    ///
+    /// No command can follow [`Event::Speech`] (see [`state::step`]), which
+    /// is why this returns nothing.
+    fn heard(&mut self, text: &str, now: Instant) {
+        if !text.trim().is_empty() {
+            self.event(Event::Speech { at: now });
+        }
+    }
+
     /// The in-memory ceiling ends this capture: nothing more can be decoded,
-    /// so release what is held and stop previewing for good.
-    pub fn cap(&mut self, recovery: RecordingStatus) {
+    /// so it is decoded now and the recorder stops with it. Returns the
+    /// command the shell has to carry out, like [`Session::event`] does.
+    pub fn cap(&mut self, recovery: RecordingStatus, now: Instant) -> Command {
         self.previews = Previews::Capped;
+        let command = self.event(Event::Exhausted { at: now });
         self.due = None;
         self.notify(Notice::MemoryCap(recovery));
-        if let Some(u) = &self.current {
-            u.release();
-        }
+        command
     }
     /// Raises `notice`, unless what is already shown matters more. Ties go to
     /// the newer one: the same kind of trouble, reported again, is the more
@@ -372,6 +423,21 @@ mod tests {
             now: at + state::REPEAT_WINDOW + Duration::from_millis(1),
         })
     }
+    /// A latch: the capture the silence timeout applies to.
+    fn latch(s: &mut Session, at: Instant) {
+        request(s, Request::Toggle, at);
+    }
+    fn commit(s: &mut Session, text: &str, now: Instant) {
+        let utterance = s.current.clone().expect("a capture to commit into");
+        s.note_commit(
+            &Commit {
+                utterance,
+                text: text.into(),
+                through: Frames(0),
+            },
+            now,
+        );
+    }
     fn preview(text: &str, through: usize) -> Option<Preview> {
         Some(Preview {
             text: text.into(),
@@ -381,7 +447,7 @@ mod tests {
     #[test]
     fn first_recording_schedules_and_accepts_preview_before_any_commit() {
         let interval = Duration::from_millis(1100);
-        let mut s = Session::new(true, interval);
+        let mut s = Session::new(true, interval, None);
         start(&mut s);
         let id = s.current.as_ref().unwrap().id;
         let due = s.due.expect("first recording must arm the preview timer");
@@ -401,39 +467,45 @@ mod tests {
     }
     #[test]
     fn stale_finished_does_not_end_new_recording() {
-        let mut s = Session::new(true, Duration::from_secs(1));
+        let mut s = Session::new(true, Duration::from_secs(1), None);
         start(&mut s);
         let old = s.current.clone().unwrap();
         release(&mut s, Instant::now() + Duration::from_secs(1));
         start(&mut s);
         s.finish(old.id);
         assert!(s.state.recording());
-        s.note_commit(&Commit {
-            utterance: old,
-            text: "older".into(),
-            through: Frames(999),
-        });
+        s.note_commit(
+            &Commit {
+                utterance: old,
+                text: "older".into(),
+                through: Frames(999),
+            },
+            Instant::now(),
+        );
         assert_eq!(s.committed_hint, Frames::ZERO);
     }
     #[test]
     fn a_cancelled_utterance_still_keeps_the_text_it_already_produced() {
-        let mut s = Session::new(true, Duration::from_secs(1));
+        let mut s = Session::new(true, Duration::from_secs(1), None);
         start(&mut s);
         let u = s.current.clone().unwrap();
         cancel(&mut s);
         assert!(u.cancelled(), "cancelling stops further decoding");
         // The commit was produced before the cancel became visible; the hint
         // still moves, because this is the utterance the session owns.
-        s.note_commit(&Commit {
-            utterance: Arc::clone(&u),
-            text: "already spoken".into(),
-            through: Frames(4),
-        });
+        s.note_commit(
+            &Commit {
+                utterance: Arc::clone(&u),
+                text: "already spoken".into(),
+                through: Frames(4),
+            },
+            Instant::now(),
+        );
         assert_eq!(s.committed_hint, Frames(4));
     }
     #[test]
     fn shrink_guard_resets_only_on_commit_epoch() {
-        let mut s = Session::new(true, Duration::from_secs(1));
+        let mut s = Session::new(true, Duration::from_secs(1), None);
         start(&mut s);
         let id = s.current.as_ref().unwrap().id;
         for (text, through, expected) in [
@@ -447,7 +519,7 @@ mod tests {
     }
     #[test]
     fn a_notice_stands_beside_the_preview_without_stopping_it() {
-        let mut s = Session::new(true, Duration::from_secs(1));
+        let mut s = Session::new(true, Duration::from_secs(1), None);
         start(&mut s);
         let id = s.current.as_ref().unwrap().id;
         s.notify(Notice::MicrophoneGap);
@@ -472,7 +544,7 @@ mod tests {
     }
     #[test]
     fn a_too_short_tap_tells_the_user_why_nothing_appeared() {
-        let mut s = Session::new(true, Duration::from_secs(1));
+        let mut s = Session::new(true, Duration::from_secs(1), None);
         let at = Instant::now();
         request(&mut s, Request::Start, at);
         let command = release(&mut s, at + Duration::from_millis(50));
@@ -483,7 +555,7 @@ mod tests {
     }
     #[test]
     fn paused_previews_keep_ticking_and_resume_by_themselves() {
-        let mut s = Session::new(true, Duration::from_millis(200));
+        let mut s = Session::new(true, Duration::from_millis(200), None);
         start(&mut s);
         let id = s.current.as_ref().unwrap().id;
         let now = Instant::now();
@@ -501,12 +573,22 @@ mod tests {
         assert!(s.notice().is_none());
     }
     #[test]
-    fn cap_releases_the_capture_and_survives_a_late_preview() {
-        let mut s = Session::new(true, Duration::from_secs(1));
+    fn cap_ends_the_recording_and_survives_a_late_preview() {
+        let mut s = Session::new(true, Duration::from_secs(1), None);
         start(&mut s);
         let u = s.current.clone().unwrap();
         let id = u.id;
-        s.cap(RecordingStatus::NotRecorded);
+        let command = s.cap(RecordingStatus::NotRecorded, Instant::now());
+        // The shell carries this out: it is what stops the recorder. Marking
+        // the utterance released is not enough -- the capture kept running.
+        assert!(matches!(
+            command,
+            Command::Decode {
+                cause: Cause::Memory,
+                ..
+            }
+        ));
+        assert!(!s.state.recording(), "the capture itself has to end");
         assert!(!u.ticking(), "the capture is released for its final decode");
         s.defer_previews();
         assert!(
@@ -531,6 +613,8 @@ mod tests {
             Notice::CaptureIncomplete,
             Notice::MicrophoneUnavailable,
             Notice::MicrophoneGap,
+            Notice::LengthLimit,
+            Notice::SilenceTimeout,
             Notice::NearlySilent,
             Notice::HeldTooBriefly,
             Notice::PreviewPaused,
@@ -548,7 +632,7 @@ mod tests {
     /// not. The pause still happens -- it just does not take the winbar.
     #[test]
     fn a_paused_preview_never_hides_what_went_wrong_with_the_capture() {
-        let mut s = Session::new(true, Duration::from_millis(200));
+        let mut s = Session::new(true, Duration::from_millis(200), None);
         start(&mut s);
         s.notify(Notice::MicrophoneGap);
         s.defer_previews();
@@ -566,10 +650,13 @@ mod tests {
     /// audio went, not the microphone trouble that follows from the shutdown.
     #[test]
     fn the_memory_cap_notice_outlives_every_later_complaint() {
-        let mut s = Session::new(true, Duration::from_secs(1));
+        let mut s = Session::new(true, Duration::from_secs(1), None);
         start(&mut s);
         let capped = Notice::MemoryCap(RecordingStatus::Recorded("/tmp/capture.wav".into()));
-        s.cap(RecordingStatus::Recorded("/tmp/capture.wav".into()));
+        s.cap(
+            RecordingStatus::Recorded("/tmp/capture.wav".into()),
+            Instant::now(),
+        );
         for later in [
             Notice::MicrophoneGap,
             Notice::MicrophoneUnavailable,
@@ -577,6 +664,8 @@ mod tests {
             Notice::NearlySilent,
             Notice::HeldTooBriefly,
             Notice::PreviewPaused,
+            Notice::SilenceTimeout,
+            Notice::LengthLimit,
         ] {
             s.notify(later.clone());
             assert_eq!(s.notice(), Some(&capped), "{later:?} displaced the ceiling");
@@ -591,7 +680,7 @@ mod tests {
     /// second report of the same trouble is the more recent one.
     #[test]
     fn a_worse_notice_replaces_a_lesser_one_and_never_the_reverse() {
-        let mut s = Session::new(true, Duration::from_secs(1));
+        let mut s = Session::new(true, Duration::from_secs(1), None);
         start(&mut s);
         s.notify(Notice::NearlySilent);
         s.notify(Notice::CaptureIncomplete);
@@ -629,9 +718,159 @@ mod tests {
             format!("{} — {}", text.headline, text.detail)
         );
     }
+    /// The forgotten latch. The tail is decoded like any release, and the
+    /// winbar says what happened until the next press.
+    #[test]
+    fn a_forgotten_latch_ends_itself_and_says_so() {
+        let quiet = Duration::from_secs(300);
+        let mut s = Session::new(true, Duration::from_secs(1), Some(quiet));
+        let t = Instant::now();
+        latch(&mut s, t);
+        let u = s.current.clone().unwrap();
+        assert_eq!(
+            s.event(Event::Clock {
+                now: t + quiet - Duration::from_secs(1)
+            }),
+            Command::Nothing
+        );
+        assert!(s.notice().is_none(), "nothing to say while it still runs");
+
+        let ended = t + quiet;
+        assert_eq!(
+            s.event(Event::Clock { now: ended }),
+            Command::Decode {
+                released: ended,
+                cause: Cause::Silence
+            }
+        );
+        assert_eq!(s.notice(), Some(&Notice::SilenceTimeout));
+        assert!(!u.ticking(), "released for its final decode");
+        assert!(!s.state.recording());
+        // Through the decode, and only the next press clears it.
+        s.finish(u.id);
+        assert_eq!(s.notice(), Some(&Notice::SilenceTimeout));
+        start(&mut s);
+        assert!(s.notice().is_none());
+    }
+
+    /// Text the recognizer produced is what says the user is still there,
+    /// from a settled commit or from a live preview. Empty text is what
+    /// settled silence looks like and proves nothing.
+    #[test]
+    fn text_restarts_the_silence_timeout_and_empty_text_does_not() {
+        let quiet = Duration::from_secs(300);
+        for label in ["commit", "preview"] {
+            for (text, ends) in [("", true), ("a word", false)] {
+                let mut s = Session::new(true, Duration::from_secs(1), Some(quiet));
+                let t = Instant::now();
+                latch(&mut s, t);
+                let half = t + quiet / 2;
+                s.event(Event::Clock { now: half });
+                if label == "commit" {
+                    commit(&mut s, text, half);
+                } else {
+                    let id = s.current.as_ref().unwrap().id;
+                    s.tick_finished(id, preview(text, 0), half);
+                }
+                let command = s.event(Event::Clock { now: t + quiet });
+                if ends {
+                    assert!(
+                        matches!(command, Command::Decode { .. }),
+                        "{label}: empty text is not speech"
+                    );
+                } else {
+                    assert_eq!(command, Command::Nothing, "{label} did not restart it");
+                    assert_eq!(
+                        s.event(Event::Clock { now: half + quiet }),
+                        Command::Decode {
+                            released: half + quiet,
+                            cause: Cause::Silence
+                        },
+                        "{label}: the timeout runs from the last text"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The length limit ends a capture that is still being talked into, and
+    /// names itself in the winbar.
+    #[test]
+    fn the_length_limit_ends_a_busy_capture() {
+        let mut s = Session::new(true, Duration::from_secs(1), Some(Duration::from_secs(300)));
+        let t = Instant::now();
+        latch(&mut s, t);
+        let limit = t + MAX_CAPTURE;
+        commit(&mut s, "still going", limit - Duration::from_secs(1));
+        assert_eq!(
+            s.event(Event::Clock { now: limit }),
+            Command::Decode {
+                released: limit,
+                cause: Cause::Length
+            }
+        );
+        assert_eq!(s.notice(), Some(&Notice::LengthLimit));
+        assert!(!s.state.recording());
+    }
+
+    /// With no tick nothing can report speech, so there is no silence to
+    /// measure and the rule is off. The length limit still ends it.
+    #[test]
+    fn with_no_speech_reports_a_latch_runs_to_the_length_limit() {
+        let mut s = Session::new(false, Duration::from_secs(1), None);
+        let t = Instant::now();
+        latch(&mut s, t);
+        assert_eq!(
+            s.event(Event::Clock {
+                now: t + MAX_CAPTURE - Duration::from_secs(1)
+            }),
+            Command::Nothing
+        );
+        assert!(s.notice().is_none());
+        let limit = t + MAX_CAPTURE;
+        assert!(matches!(
+            s.event(Event::Clock { now: limit }),
+            Command::Decode {
+                cause: Cause::Length,
+                ..
+            }
+        ));
+    }
+
+    /// The key the user presses when they come back. Neither a stop nor a
+    /// cancel may touch the capture that already ended, or the notice that
+    /// explains it; a press starts a fresh one and clears the slot.
+    #[test]
+    fn a_late_key_after_an_auto_stop_keeps_the_dictation_and_its_notice() {
+        let quiet = Duration::from_secs(300);
+        let mut s = Session::new(true, Duration::from_secs(1), Some(quiet));
+        let t = Instant::now();
+        latch(&mut s, t);
+        let u = s.current.clone().unwrap();
+        s.event(Event::Clock { now: t + quiet });
+        s.finish(u.id);
+
+        let later = t + quiet + Duration::from_secs(600);
+        for late in [Request::Stop, Request::Cancel, Request::Stop] {
+            assert_eq!(request(&mut s, late, later), Command::Nothing, "{late}");
+        }
+        assert_eq!(s.notice(), Some(&Notice::SilenceTimeout));
+        assert!(!u.cancelled(), "a late cancel must not reach it");
+
+        let again = later + Duration::from_secs(1);
+        assert_eq!(
+            request(&mut s, Request::Toggle, again),
+            Command::Start,
+            "the next press starts a fresh capture"
+        );
+        assert!(s.notice().is_none());
+        assert!(s.state.latched());
+        assert_ne!(s.current.as_ref().unwrap().id, u.id);
+    }
+
     #[test]
     fn tick_failure_rearms_and_stale_tick_cannot_rearm() {
-        let mut s = Session::new(true, Duration::from_secs(1));
+        let mut s = Session::new(true, Duration::from_secs(1), None);
         start(&mut s);
         let id = s.current.as_ref().unwrap().id;
         s.requested(Instant::now());

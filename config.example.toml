@@ -37,6 +37,43 @@ postroll_ms = 250
 # the device name and host API. Omit to use the default input device.
 # device = "USB ALSA"
 
+[capture]
+# When a capture nobody is ending ends by itself.
+#
+# A latched capture (`spokenpad toggle`) has no key down: forget it and the
+# daemon records until something stops it. After this many seconds without
+# speech, it stops itself. That is an ordinary stop -- the tail is decoded,
+# everything spoken is kept, and the winbar says "stopped after silence"
+# until the next press.
+#
+# The clock runs from the last text the recogniser produced, not from the
+# last key press, so thinking pauses do not count and five minutes is
+# genuinely five minutes of nothing said. Raise it if you dictate with longer
+# pauses. 0 turns it off; the limits below still apply. Must be 0, or between
+# 1 and 3600 -- a value of a few seconds ends a capture between sentences.
+#
+# It applies to a latch only. A push-to-talk key that is held down re-fires
+# its binding every few tens of milliseconds, so ending its capture would
+# only start the next one; a key left under a book is bounded by the length
+# limit instead.
+#
+# It is off regardless of this setting wherever nothing can report speech: no
+# VAD model, vad.enabled = false, preview.enabled = false. There is no
+# progressive decode in those cases, so there is no silence to measure.
+silence_timeout_s = 300
+
+# Two limits have no setting at all, because they are not preferences:
+#
+#   * No capture runs longer than 4 hours (MAX_CAPTURE in core/state.rs).
+#     A WAV's RIFF sizes are 32-bit and overflow at about 37 hours, and
+#     `spokenpad transcribe` refuses a longer recording rather than
+#     allocating for it; the limit is what keeps the safety net readable.
+#     `shell/recorder.rs` derives its own limit from this one, so the two
+#     cannot drift apart.
+#   * The in-memory ceiling ends a capture too (see [recording] below).
+#
+# Both decode the tail and keep what was said, like the silence timeout.
+
 [recording]
 # Every capture is written to a wav while you are speaking, independently of
 # decoding. This is the safety net, and it is ON by default: an opt-in one is
@@ -63,12 +100,12 @@ postroll_ms = 250
 # few ticks fire. It is 3600 seconds of *held* audio
 # (MAX_UTTERANCE_SECONDS in audio.rs), a compile-time constant rather than a
 # setting: it is a bound on how much of this machine's RAM one capture may
-# occupy (~230 MB/hour at 16 kHz), not a policy. Reaching it says so in the
-# winbar and names the WAV that keeps recording past it; the recovery file is
-# written before the ceiling is consulted, so the cap can never truncate it.
-# A capture is not otherwise limited in length: the WAV is, at about 37 hours,
-# where the RIFF 32-bit size overflows, and `spokenpad transcribe` refuses a
-# recording over 4 hours rather than allocating for it.
+# occupy (~230 MB/hour at 16 kHz), not a policy. Reaching it ends the capture
+# and decodes its tail, says so in the winbar and names the WAV; the recovery
+# file is written before the ceiling is consulted, so the cap can never
+# truncate it. Until 2026-09-21 it only stopped the decoding and the daemon
+# kept writing to disk; now it stops the recorder with everything else.
+# Every capture is bounded in length as well: see [capture] above.
 enabled = true
 
 # Where the recordings go. Created mode 0700, each file mode 0600 -- a capture

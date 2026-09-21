@@ -15,7 +15,7 @@ use crate::{
         },
         frames::Frames,
         session::{Notice, RecordingStatus, Session},
-        state::{Command, DiscardReason, Event, State},
+        state::{Cause, Command, DiscardReason, Event, State},
         text::Processor,
     },
     shell::{
@@ -479,7 +479,24 @@ where
         .name("spokenpad-asr".into())
         .spawn(move || engine_thread(&mut worker, &work_rx, &result_tx))?;
 
-    let mut session = Session::new(previews, Duration::from_millis(config.preview.interval_ms));
+    // Only a tick can report speech, so without one there is no silence to
+    // measure and a latch is bounded by its length alone.
+    let silence = previews.then(|| config.capture.silence_timeout()).flatten();
+    match silence {
+        Some(timeout) => log::info!(
+            "a latched capture ends by itself after {:.0}s without speech",
+            timeout.as_secs_f64()
+        ),
+        None => log::info!(
+            "no silence timeout: a capture ends at the {}-hour limit or the in-memory ceiling",
+            crate::core::state::MAX_CAPTURE.as_secs() / 3600
+        ),
+    }
+    let mut session = Session::new(
+        previews,
+        Duration::from_millis(config.preview.interval_ms),
+        silence,
+    );
     let (editor_tx, editor_rx) = mpsc::channel();
     let editor_config = config.nvim.clone();
     let editor = thread::Builder::new()
@@ -489,13 +506,33 @@ where
     let mut next_device_poll = Instant::now();
     let result = (|| -> Result<()> {
         while !stopping.load(Ordering::Acquire) {
-            // Give requests and the clock priority over delivery of
-            // inference results.
+            // What the device has to say comes first: the in-memory ceiling
+            // ends the capture, and the command it produces is carried out by
+            // the same match as a key press's. Only the ceiling produces one,
+            // and only once per capture.
+            let at = Instant::now();
+            let mut ceiling = Command::Nothing;
+            if at >= next_device_poll {
+                next_device_poll = at + DEVICE_POLL_INTERVAL;
+                for event in capture.poll() {
+                    let command = apply_capture_event(event, &mut session, at);
+                    if command != Command::Nothing {
+                        ceiling = command;
+                    }
+                }
+            }
+            // Then requests and the clock, which have priority over delivery
+            // of inference results. The clock is also what ends a capture
+            // that has run too long or been quiet too long.
             for _ in 0..256 {
-                let Some(event) = requests.next() else {
+                let command = if ceiling != Command::Nothing {
+                    std::mem::replace(&mut ceiling, Command::Nothing)
+                } else if let Some(event) = requests.next() {
+                    session.event(event)
+                } else {
                     break;
                 };
-                match session.event(event) {
+                match command {
                     Command::Start => {
                         if let Err(e) = capture.start_capture() {
                             // The press cleared the previous notice; cancel
@@ -513,7 +550,15 @@ where
                         // no explanation anywhere.
                         send(&editor_tx, EditorWork::Ensure)?;
                     }
-                    Command::Decode { released } => {
+                    Command::Decode { released, cause } => {
+                        if cause != Cause::KeyPress {
+                            log::warn!(
+                                "no key ended this capture; spokenpad did: {}",
+                                session
+                                    .notice()
+                                    .map_or_else(|| format!("{cause:?}"), Notice::to_string)
+                            );
+                        }
                         // The winbar says "transcribing" from here on, not
                         // only once the post-roll has arrived.
                         send(
@@ -525,7 +570,10 @@ where
                         });
                         note_postroll(postroll, &mut session);
                         for event in capture.poll() {
-                            apply_capture_event(event, &mut session);
+                            let command = apply_capture_event(event, &mut session, Instant::now());
+                            // This capture has already ended, so the ceiling
+                            // can only add its notice here.
+                            debug_assert_eq!(command, Command::Nothing);
                         }
                         release(&mut session, &capture, captured, config, dump_dir, &work_tx)?;
                     }
@@ -620,12 +668,6 @@ where
                 }
             }
             let now = Instant::now();
-            if now >= next_device_poll {
-                next_device_poll = now + DEVICE_POLL_INTERVAL;
-                for event in capture.poll() {
-                    apply_capture_event(event, &mut session);
-                }
-            }
             if session.tick_due(now) {
                 let tail = capture.captured_frames().since(session.committed_hint);
                 // A tail too long to redraw cheaply stops the cosmetic decode
@@ -747,7 +789,7 @@ fn commit(
     processor: &Processor,
     editor_tx: &Sender<EditorWork>,
 ) -> Result<()> {
-    session.note_commit(&c);
+    session.note_commit(&c, Instant::now());
     let text = processor.process(&c.text);
     log::debug!(
         "utterance {} committed through {}: {text:?}",
@@ -904,7 +946,11 @@ fn note_postroll(postroll: PostRoll, session: &mut Session) {
     }
 }
 
-fn apply_capture_event(event: CaptureEvent, session: &mut Session) {
+/// Hands the device's news to the session. Only the in-memory ceiling ends a
+/// capture, so only it can return anything but [`Command::Nothing`], and the
+/// caller has to carry that command out.
+#[must_use]
+fn apply_capture_event(event: CaptureEvent, session: &mut Session, now: Instant) -> Command {
     match event {
         CaptureEvent::StreamRestarted {
             gap,
@@ -917,6 +963,7 @@ fn apply_capture_event(event: CaptureEvent, session: &mut Session) {
             if during_capture {
                 session.notify(Notice::MicrophoneGap);
             }
+            Command::Nothing
         }
         CaptureEvent::StreamUnavailable {
             reason,
@@ -926,6 +973,7 @@ fn apply_capture_event(event: CaptureEvent, session: &mut Session) {
             if during_capture {
                 session.notify(Notice::MicrophoneUnavailable);
             }
+            Command::Nothing
         }
         CaptureEvent::MemoryCapReached { recovery } => {
             // The notice names the recovery WAV by file name, so that a narrow
@@ -937,9 +985,12 @@ fn apply_capture_event(event: CaptureEvent, session: &mut Session) {
                 }
                 RecordingStatus::NotRecorded => log::warn!("{notice}"),
             }
-            session.cap(recovery);
+            session.cap(recovery, now)
         }
-        CaptureEvent::Flags(flags) => log::warn!("PortAudio: {flags}"),
+        CaptureEvent::Flags(flags) => {
+            log::warn!("PortAudio: {flags}");
+            Command::Nothing
+        }
     }
 }
 
