@@ -7,14 +7,16 @@ Hold a key (or latch with shift), speak, and text appears in an nvim that
 never takes focus. Fully local, CPU-only. Next milestone: public release.
 
 ## Now
-- control-cli — replace the evdev watcher with a control socket + `spokenpad
-  start|stop|toggle|cancel` bound in the WM — agent (worktree) — merge.
-- model-fetch — built-in model download (command + first launch), clipboard
-  copy configurable, default off — agent (worktree) — merge.
-- own-window research — spokenpad draws nvim (--embed) in its own non-focusing
-  window, no terminal; X11/Wayland/GNOME options — agent — report to user.
+- lost-tail — live release decode returned "" (09-21 14:24). Cause:
+  sherpa-onnx modified_beam_search on Parakeet TDT (upstream #3267) + zero
+  padding. Replaying all captures beam vs greedy — then fix, deploy.
+- own-window — research done (X11 window, _NET_WM_USER_TIME=0, nvim
+  --embed; Xwayland on Wayland); awaiting the user's go.
+- Deploy pending: control socket needs i3 bindings (bindcode 194).
 
 ## Done
+- 09-21: Control socket + `spokenpad start|stop|toggle|cancel` (no /dev/input);
+  built-in model download; clipboard copy opt-in. 177 lib + 22 e2e green.
 - 09-21: Review fixes: no spawn on an empty workspace, only loaded WM config
   proves no_focus (sway: main file), unsent appends go to the pending
   passage, no writes behind an editor, greedy+hotwords rejected. README
