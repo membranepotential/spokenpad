@@ -14,11 +14,14 @@ never takes focus. Fully local, CPU-only. Next milestone: public release.
 - models — sherpa-onnx 1.13.8; try parakeet-unified-en (RNNT: beam + hotwords
   may work) and a Qwen3-ASR family (prompt hotwords) — agent, wt. Research
   (.claude/plans/gpu-models-research.md): GPU not worth it on a GTX 1650.
-- const-ram — constant RAM while recording (latched: 230 MB/h today) — agent, wt
 - own-window P1 — grid renderer + embedded nvim, headless (plan: .claude/
   plans/own-window.md) — agent, wt. P0 passed on i3 (603b714). Then P2, P3.
 
 ## Done
+- 09-21: Constant RAM while recording (1e2631f): only the uncommitted tail is
+  held (1.7 MiB vs 116 MiB per 30 min); lead padding stops at committed
+  speech; a tick sees at most preview.max_seconds. Reviewed. NOT deployed:
+  first replay the real captures before/after (corpus harness) for WER.
 - 09-21: Lost tail fixed: Parakeet now decodes greedy by default (beam search
   = sherpa-onnx #3267: "" / "Yeah."; 19 vs 4 empty chunks on 170 captures).
   shell-commands reference corrected. Deployed (b6939db): control socket,
@@ -36,11 +39,7 @@ never takes focus. Fully local, CPU-only. Next milestone: public release.
   whisper / sense_voice; models in $XDG_DATA_HOME; install.sh/fetch-models.sh;
   attach mode (default) + managed i3/sway over native IPC, terminal table.
   169 lib + 5 CLI + 18 e2e (+1 real-model) green.
-- 09-21: Preview auto-scroll fixed (it hung below the window from the second
-  paragraph on); arrow Up/Down move by screen line like j/k. CLAUDE.md now
-  commits verified work unasked. 144 lib + 16 e2e green.
-- 09-19: Lost words fixed (empty-chunk retry without trailing silence; 250 ms
-  post-roll), found by replaying 128 recovery WAVs. WER 17.6% unchanged.
+- 09-21: Preview auto-scroll fixed; arrow Up/Down move by screen line.
 
 ## Next
 1. Decide the decoder from the corpus numbers: patched beam, another model,
