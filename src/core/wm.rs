@@ -8,10 +8,7 @@
 use crate::core::geometry::{Output, Rect};
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::Value;
-use std::{
-    fmt,
-    path::{Path, PathBuf},
-};
+use std::fmt;
 
 pub const MAGIC: &[u8; 6] = b"i3-ipc";
 pub const HEADER_LEN: usize = MAGIC.len() + 8;
@@ -77,30 +74,15 @@ impl fmt::Display for WmKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Version {
-    pub kind: WmKind,
-    /// The main configuration file. sway's `GET_CONFIG` returns only this
-    /// file's text, so its `include`s are resolved relative to it.
-    pub config_file: Option<PathBuf>,
-}
-
 /// `GET_VERSION`. sway adds `"variant": "sway"`; i3 has no such field.
-pub fn parse_version(reply: &str) -> Result<Version> {
+pub fn parse_version(reply: &str) -> Result<WmKind> {
     let document: Value = serde_json::from_str(reply).context("GET_VERSION reply is not JSON")?;
     ensure!(document.is_object(), "GET_VERSION reply is not an object");
-    let kind = match document.get("variant").and_then(Value::as_str) {
-        Some("sway") => WmKind::Sway,
-        None => WmKind::I3,
+    match document.get("variant").and_then(Value::as_str) {
+        Some("sway") => Ok(WmKind::Sway),
+        None => Ok(WmKind::I3),
         Some(other) => bail!("unsupported i3 IPC implementation {other:?}"),
-    };
-    Ok(Version {
-        kind,
-        config_file: document
-            .get("loaded_config_file_name")
-            .and_then(Value::as_str)
-            .map(PathBuf::from),
-    })
+    }
 }
 
 /// `GET_OUTPUTS`: the active outputs, in the order the window manager lists
@@ -201,8 +183,13 @@ impl fmt::Display for Criterion {
     }
 }
 
-/// The configuration text `GET_CONFIG` returns: the main file, plus — on i3
-/// 4.20 and later — every included file. sway returns the main file only.
+/// The configuration text `GET_CONFIG` returns, exactly as the window manager
+/// loaded it: the main file, plus — on i3 4.20 and later — every file it
+/// included, with i3's variables replaced. sway returns the main file only,
+/// so a rule in a file sway includes is not in this text and proves nothing:
+/// reading that file from disk could count a rule sway never loaded (a file
+/// linked in since the last reload, or a path whose variables expand
+/// differently in the daemon's environment).
 pub fn parse_config(reply: &str) -> Result<Vec<String>> {
     let document: Value = serde_json::from_str(reply).context("GET_CONFIG reply is not JSON")?;
     let main = document
@@ -254,110 +241,6 @@ pub fn has_no_focus_rule<'a>(
         let suffix = criteria[close + 1..].trim();
         (suffix.is_empty() || suffix.starts_with('#')) && pattern.is_match(&criteria[..close])
     })
-}
-
-/// The arguments of every `include` line in one configuration file, split on
-/// unquoted whitespace, with the quotes removed.
-pub fn include_arguments(source: &str) -> Vec<String> {
-    source
-        .lines()
-        .filter_map(|line| {
-            let rest = line.trim_start().strip_prefix("include")?;
-            rest.starts_with(char::is_whitespace).then_some(rest)
-        })
-        .flat_map(words)
-        .collect()
-}
-
-fn words(text: &str) -> Vec<String> {
-    let mut words = Vec::new();
-    let mut current: Option<String> = None;
-    let mut quote: Option<char> = None;
-    for c in text.chars() {
-        match (quote, c) {
-            (Some(open), c) if c == open => quote = None,
-            (Some(_), c) => current.get_or_insert_default().push(c),
-            (None, '"' | '\'') => {
-                quote = Some(c);
-                current.get_or_insert_default();
-            }
-            (None, c) if c.is_whitespace() => words.extend(current.take()),
-            (None, c) => current.get_or_insert_default().push(c),
-        }
-    }
-    words.extend(current);
-    words
-}
-
-/// Where an `include` argument points: a directory and a file-name pattern.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IncludePath {
-    pub directory: PathBuf,
-    /// The last path component, possibly with `*` and `?` wildcards.
-    pub name: String,
-}
-
-/// Resolves one `include` argument the way sway's `wordexp` would, for the
-/// subset spokenpad can reproduce with certainty: `~`, `$NAME`/`${NAME}` from
-/// the environment, a path relative to the including file's directory, and
-/// wildcards in the last component only. Anything else — a sway `set`
-/// variable, a wildcard in a directory, command substitution — yields `None`,
-/// and a rule inside such a file then does not count as proven.
-pub fn resolve_include(
-    argument: &str,
-    parent: &Path,
-    home: &Path,
-    env: impl Fn(&str) -> Option<String>,
-) -> Option<IncludePath> {
-    let expanded = expand_variables(argument, &env)?;
-    let expanded = if expanded == "~" {
-        home.to_path_buf()
-    } else if let Some(tail) = expanded.strip_prefix("~/") {
-        home.join(tail)
-    } else {
-        parent.join(&expanded)
-    };
-    let name = expanded.file_name()?.to_str()?.to_owned();
-    let directory = expanded.parent()?.to_path_buf();
-    let wild = |text: &str| text.contains(['*', '?', '[', '`', '(', '{']);
-    (!wild(directory.to_str()?)).then_some(IncludePath { directory, name })
-}
-
-fn expand_variables(text: &str, env: &impl Fn(&str) -> Option<String>) -> Option<String> {
-    let pattern = regex::Regex::new(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)")
-        .expect("static variable regex");
-    let mut missing = false;
-    let expanded = pattern.replace_all(text, |captures: &regex::Captures<'_>| {
-        let name = captures
-            .get(1)
-            .or_else(|| captures.get(2))
-            .expect("one group matched")
-            .as_str();
-        env(name).unwrap_or_else(|| {
-            missing = true;
-            String::new()
-        })
-    });
-    (!missing && !expanded.contains('$')).then(|| expanded.into_owned())
-}
-
-/// Shell-style matching of one file name against `*` and `?`. A name
-/// beginning with a dot matches only a pattern that does, as in the shell.
-pub fn name_matches(pattern: &str, name: &str) -> bool {
-    if name.starts_with('.') && !pattern.starts_with('.') {
-        return false;
-    }
-    fn matches(pattern: &[char], name: &[char]) -> bool {
-        match pattern.split_first() {
-            None => name.is_empty(),
-            Some(('*', rest)) => (0..=name.len()).any(|skip| matches(rest, &name[skip..])),
-            Some(('?', rest)) => !name.is_empty() && matches(rest, &name[1..]),
-            Some((literal, rest)) => name.first() == Some(literal) && matches(rest, &name[1..]),
-        }
-    }
-    let pattern: Vec<char> = pattern.chars().collect();
-    let name: Vec<char> = name.chars().collect();
-    matches(&pattern, &name)
 }
 
 /// Every node of a `GET_TREE` reply, tiled and floating alike.
@@ -454,16 +337,12 @@ mod tests {
             r#"{"major":4,"minor":25,"patch":1,"loaded_config_file_name":"/home/u/.config/i3/config"}"#,
         )
         .unwrap();
-        assert_eq!(i3.kind, WmKind::I3);
+        assert_eq!(i3, WmKind::I3);
         let sway = parse_version(
             r#"{"variant":"sway","major":1,"loaded_config_file_name":"/home/u/.config/sway/config"}"#,
         )
         .unwrap();
-        assert_eq!(sway.kind, WmKind::Sway);
-        assert_eq!(
-            sway.config_file.as_deref(),
-            Some(Path::new("/home/u/.config/sway/config"))
-        );
+        assert_eq!(sway, WmKind::Sway);
         assert!(parse_version(r#"{"variant":"hyprland"}"#).is_err());
         assert!(parse_version("[]").is_err());
     }
@@ -543,72 +422,6 @@ mod tests {
             ["no_focus [instance=\"spokenpad\"] # the dictation window"],
             &instance("spokenpad")
         ));
-    }
-
-    #[test]
-    fn sway_includes_resolve_the_way_wordexp_would_for_the_safe_subset() {
-        let env = |name: &str| (name == "XDG_CONFIG_HOME").then(|| "/cfg".to_owned());
-        let home = Path::new("/home/u");
-        let parent = Path::new("/home/u/.config/sway");
-        let arguments = include_arguments(
-            "set $mod Mod4\ninclude config.d/*\n  include \"~/sway extra.conf\"\ninclude_typo x\ninclude $XDG_CONFIG_HOME/sway/rules ${XDG_CONFIG_HOME}/a/*.conf\n",
-        );
-        assert_eq!(
-            arguments,
-            [
-                "config.d/*",
-                "~/sway extra.conf",
-                "$XDG_CONFIG_HOME/sway/rules",
-                "${XDG_CONFIG_HOME}/a/*.conf"
-            ]
-        );
-        let resolve = |argument| resolve_include(argument, parent, home, env);
-        assert_eq!(
-            resolve("config.d/*"),
-            Some(IncludePath {
-                directory: parent.join("config.d"),
-                name: "*".into()
-            })
-        );
-        assert_eq!(
-            resolve("~/sway.conf"),
-            Some(IncludePath {
-                directory: home.to_path_buf(),
-                name: "sway.conf".into()
-            })
-        );
-        assert_eq!(
-            resolve("${XDG_CONFIG_HOME}/a/*.conf"),
-            Some(IncludePath {
-                directory: PathBuf::from("/cfg/a"),
-                name: "*.conf".into()
-            })
-        );
-        assert_eq!(
-            resolve("/etc/sway/config.d/50-systemd"),
-            Some(IncludePath {
-                directory: PathBuf::from("/etc/sway/config.d"),
-                name: "50-systemd".into()
-            })
-        );
-        // Unset or sway-level variables, and wildcards above the last
-        // component, are not guessed at.
-        assert_eq!(resolve("$UNSET/x"), None);
-        assert_eq!(resolve("$mod/x"), None);
-        assert_eq!(resolve("*/x.conf"), None);
-        assert_eq!(resolve("$(echo x)/y"), None);
-    }
-
-    #[test]
-    fn file_names_match_like_the_shell() {
-        assert!(name_matches("*", "spokenpad.conf"));
-        assert!(name_matches("*.conf", "spokenpad.conf"));
-        assert!(name_matches("50-?pokenpad", "50-spokenpad"));
-        assert!(!name_matches("*.conf", "spokenpad.conf.bak"));
-        assert!(!name_matches("*", ".hidden"));
-        assert!(name_matches(".*", ".hidden"));
-        assert!(name_matches("exact", "exact"));
-        assert!(!name_matches("exact", "exactly"));
     }
 
     #[test]

@@ -9,12 +9,10 @@
 //! `i3 --get-socketpath` when no socket is named in the environment.
 use crate::core::{
     geometry::{Output, Rect},
-    wm::{self, Criterion, Message, Version, WmKind},
+    wm::{self, Criterion, Message, WmKind},
 };
 use anyhow::{Context, Result, bail, ensure};
 use std::{
-    collections::HashSet,
-    fs,
     io::{ErrorKind, Read, Write},
     os::{
         fd::AsRawFd,
@@ -30,14 +28,11 @@ const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 /// A tree of a few hundred windows is well under a megabyte; this only stops
 /// a peer announcing a length that would exhaust memory.
 const MAX_REPLY_BYTES: usize = 64 * 1024 * 1024;
-/// How deep sway `include`s are followed, and how large one file may be.
-const MAX_INCLUDE_DEPTH: usize = 8;
-const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 
 /// The window manager answering on one IPC socket, and what it said it is.
 pub struct Wm {
     socket: PathBuf,
-    version: Version,
+    kind: WmKind,
 }
 
 impl Wm {
@@ -63,12 +58,12 @@ impl Wm {
     /// The window manager answering on `socket`.
     pub fn at(socket: PathBuf) -> Result<Self> {
         let reply = request(&socket, Message::GetVersion, "")?;
-        let version = wm::parse_version(&reply)?;
-        Ok(Self { socket, version })
+        let kind = wm::parse_version(&reply)?;
+        Ok(Self { socket, kind })
     }
 
     pub fn kind(&self) -> WmKind {
-        self.version.kind
+        self.kind
     }
 
     /// The monitor layout, queried afresh. Once per window spawn, so a monitor
@@ -89,40 +84,17 @@ impl Wm {
     }
 
     /// The first of `criteria` the loaded configuration does not prove a
-    /// `no_focus` rule for, or `None` when every one is proven.
+    /// `no_focus` rule for, or `None` when every one is proven. Only the text
+    /// `GET_CONFIG` returns counts — nothing is read from disk — so on sway,
+    /// which returns its main file alone, a rule must be in that file.
     pub fn unproven_no_focus<'a>(
         &self,
         criteria: &'a [Criterion],
     ) -> Result<Option<&'a Criterion>> {
-        let sources = self.config_sources()?;
+        let sources = wm::parse_config(&request(&self.socket, Message::GetConfig, "")?)?;
         Ok(criteria.iter().find(|criterion| {
             !wm::has_no_focus_rule(sources.iter().map(String::as_str), criterion)
         }))
-    }
-
-    /// The configuration the window manager is running, includes and all.
-    ///
-    /// i3 (4.20+) returns every included file with `GET_CONFIG`. sway returns
-    /// the main file only, so its `include` lines are followed on disk, as
-    /// they are *now*: a file edited since the last reload is read in its
-    /// edited form, which is the one approximation in this proof.
-    fn config_sources(&self) -> Result<Vec<String>> {
-        let sources = wm::parse_config(&request(&self.socket, Message::GetConfig, "")?)?;
-        match (self.kind(), &self.version.config_file) {
-            (WmKind::I3, _) | (WmKind::Sway, None) => Ok(sources),
-            (WmKind::Sway, Some(main)) => {
-                let mut visited = HashSet::new();
-                if let Ok(canonical) = main.canonicalize() {
-                    visited.insert(canonical);
-                }
-                let mut all = Vec::new();
-                for source in sources {
-                    all.extend(sway_includes(&source, main, 0, &mut visited));
-                    all.push(source);
-                }
-                Ok(all)
-            }
-        }
     }
 
     /// The first of `criteria` that selects a window now on screen.
@@ -141,75 +113,6 @@ impl Wm {
         let command = wm::placement_command(self.kind(), criterion, rect);
         wm::check_command_reply(&request(&self.socket, Message::RunCommand, &command)?)
     }
-}
-
-/// The text of every file `source` includes, recursively, in include order.
-/// A file that cannot be resolved or read is skipped: it then proves nothing.
-fn sway_includes(
-    source: &str,
-    including: &Path,
-    depth: usize,
-    visited: &mut HashSet<PathBuf>,
-) -> Vec<String> {
-    if depth >= MAX_INCLUDE_DEPTH {
-        return Vec::new();
-    }
-    let parent = including.parent().unwrap_or(Path::new("/"));
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_default();
-    let mut texts = Vec::new();
-    for argument in wm::include_arguments(source) {
-        let Some(include) =
-            wm::resolve_include(&argument, parent, &home, |name| std::env::var(name).ok())
-        else {
-            log::debug!("sway include {argument:?} not followed: cannot resolve it safely");
-            continue;
-        };
-        for path in matching_files(&include) {
-            let Ok(canonical) = path.canonicalize() else {
-                continue;
-            };
-            if !visited.insert(canonical.clone()) {
-                continue;
-            }
-            let Ok(text) = read_config_file(&canonical) else {
-                continue;
-            };
-            texts.extend(sway_includes(&text, &canonical, depth + 1, visited));
-            texts.push(text);
-        }
-    }
-    texts
-}
-
-fn matching_files(include: &wm::IncludePath) -> Vec<PathBuf> {
-    if !include.name.contains(['*', '?']) {
-        return vec![include.directory.join(&include.name)];
-    }
-    let Ok(entries) = fs::read_dir(&include.directory) else {
-        return Vec::new();
-    };
-    let mut names: Vec<String> = entries
-        .flatten()
-        .filter_map(|entry| entry.file_name().into_string().ok())
-        .filter(|name| wm::name_matches(&include.name, name))
-        .collect();
-    // wordexp sorts its matches; keeping that order keeps "later overrides
-    // earlier" the way sway applied it.
-    names.sort();
-    names
-        .into_iter()
-        .map(|name| include.directory.join(name))
-        .collect()
-}
-
-fn read_config_file(path: &Path) -> Result<String> {
-    let file = fs::File::open(path)?;
-    ensure!(file.metadata()?.is_file(), "not a regular file");
-    let mut text = String::new();
-    file.take(MAX_CONFIG_BYTES).read_to_string(&mut text)?;
-    Ok(text)
 }
 
 /// One request on a fresh connection, under one absolute deadline: a window
@@ -490,28 +393,21 @@ mod tests {
         assert_eq!(wm.focused_node().unwrap(), None);
     }
 
+    /// sway's `GET_CONFIG` is the main file as loaded, without its includes.
+    /// A rule that is only in an included file on disk may never have been
+    /// loaded (linked in since the last reload), so it proves nothing.
     #[test]
-    fn sway_rules_are_proven_through_includes_read_from_disk() {
+    fn sway_rules_count_only_in_the_config_sway_returned() {
         let configs = tempfile::tempdir().unwrap();
         let main = configs.path().join("config");
-        fs::create_dir(configs.path().join("config.d")).unwrap();
-        fs::write(
+        std::fs::create_dir(configs.path().join("config.d")).unwrap();
+        std::fs::write(
             configs.path().join("config.d/50-spokenpad.conf"),
-            "include ../nested.conf\nno_focus [app_id=\"spokenpad\"]\n",
+            "no_focus [app_id=\"spokenpad\"]\nno_focus [instance=\"spokenpad\"]\n",
         )
         .unwrap();
-        fs::write(
-            configs.path().join("nested.conf"),
-            "no_focus [instance=\"spokenpad\"]\ninclude config.d/*\n",
-        )
-        .unwrap();
-        fs::write(
-            configs.path().join("config.d/.hidden"),
-            "no_focus [app_id=\"hidden\"]\n",
-        )
-        .unwrap();
-        let main_text = "set $mod Mod4\ninclude config.d/*\n";
-        fs::write(&main, main_text).unwrap();
+        let main_text = "include config.d/*\nno_focus [instance=\"spokenpad\"]\n";
+        std::fs::write(&main, main_text).unwrap();
         let fake = FakeWm::start(vec![
             (
                 Message::GetVersion,
@@ -534,10 +430,8 @@ mod tests {
             criterion(Property::AppId, "spokenpad"),
             criterion(Property::Instance, "spokenpad"),
         ];
-        assert_eq!(wm.unproven_no_focus(&both).unwrap(), None);
-        // A dotfile is not matched by `*`, as in the shell.
-        let hidden = [criterion(Property::AppId, "hidden")];
-        assert_eq!(wm.unproven_no_focus(&hidden).unwrap(), Some(&hidden[0]));
+        assert_eq!(wm.unproven_no_focus(&both).unwrap(), Some(&both[0]));
+        assert_eq!(wm.unproven_no_focus(&both[1..]).unwrap(), None);
 
         assert_eq!(wm.find(&both).unwrap(), Some(&both[0]));
         assert_eq!(wm.focused_node().unwrap(), Some(4));
