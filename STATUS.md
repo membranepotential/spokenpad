@@ -7,10 +7,12 @@ Hold a key (or latch with shift), speak, and text appears in an nvim that
 never takes focus. Fully local, CPU-only. Next milestone: public release.
 
 ## Now
-- corpus — Gladia references for the ~176 captures (private, eval-samples/
-  local/) + corpus WER harness; greedy vs beam vs zero padding — agent, wt
-- beam-fix — build sherpa-onnx with upstream PR #3657, test the lost tail and
-  the empty-chunk replay — agent, scratch build
+- corpus — harness + 181 Gladia references done (greedy 11.2% / 0 lost vs
+  beam 11.5% / 2 lost; 21% of the words are German). Now: rebase onto main,
+  before/after run for the lead-padding clamp, doc clean-up — agent, wt
+- beam-fix — real cause found: blank skips frames for free, so the empty path
+  wins; one-line fix gives 9/9 on the lost tail, corpus 1 lost (greedy 0).
+  PR #3657 makes it worse. Now: public repro clip + upstream draft — agent
 - own-window — P0-P2 merged (e8c161e): `nvim.mode = "pane"`, own X11 window,
   X libs loaded at run time, verified headless on i3 only. P2 code review
   running. P3 (other WMs) waits for packages; P4 = the user's live check.
@@ -40,8 +42,8 @@ never takes focus. Fully local, CPU-only. Next milestone: public release.
   XDG model dir, install.sh, attach (default) + managed i3/sway mode.
 
 ## Next
-1. Decide the decoder from the corpus numbers. Open question to the user:
-   German too, or English only (then parakeet-unified-en is a candidate)?
+1. Deploy main after the clamp before/after run. Decoder stays greedy; the
+   user OKs (or not) posting the beam fix upstream.
 2. own-window P4: live checks by the user.
 
 ## Known issues / open questions
