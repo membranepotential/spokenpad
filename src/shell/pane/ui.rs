@@ -20,6 +20,7 @@ use anyhow::{Context, Result, bail};
 use rmpv::Value;
 use std::{
     io::{BufReader, Write},
+    os::unix::process::CommandExt,
     process::{Child, ChildStdin, Command, Stdio},
     sync::mpsc::Sender,
     thread::JoinHandle,
@@ -57,12 +58,26 @@ impl Editor {
     /// Start `command` with `--embed` already in its argv, and begin reading
     /// its side of the channel into `events`.
     pub fn spawn(mut command: Command, events: Sender<Event>) -> Result<Self> {
-        let mut process = command
+        command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .context("start the embedded nvim")?;
+            .stderr(Stdio::inherit());
+        // Its own session, as a spawned terminal editor gets. A daemon run in
+        // the foreground shares its process group with whatever started it,
+        // and a Ctrl-C there would otherwise reach nvim first — before the
+        // pane has had the chance to write what is in the buffer.
+        //
+        // SAFETY: this closure calls only the async-signal-safe `setsid`
+        // between fork and exec, and does not capture or allocate.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut process = command.spawn().context("start the embedded nvim")?;
         let stdin = process.stdin.take().context("nvim gave no stdin")?;
         let stdout = process.stdout.take().context("nvim gave no stdout")?;
         let reader = std::thread::Builder::new()
@@ -185,6 +200,13 @@ impl Editor {
             }
         }
         if matches!(self.process.try_wait(), Ok(None)) {
+            // The whole session, not just nvim: it has its own process group
+            // (see `spawn`), and anything it started belongs to that group.
+            //
+            // SAFETY: `id()` is this child's pid, which `setsid` made the
+            // group id, and the child is not reaped until the `wait` below,
+            // so neither number can have been reused.
+            let _ = unsafe { libc::kill(-(self.process.id() as libc::pid_t), libc::SIGKILL) };
             let _ = self.process.kill();
         }
         let _ = self.process.wait();

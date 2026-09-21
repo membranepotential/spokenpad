@@ -33,7 +33,7 @@ pub mod xkb;
 
 use crate::core::{
     geometry::Rect,
-    grid::{Cell, CursorShape, Damage, Rgb, Screen, Style, Underline},
+    grid::{Cell, CursorShape, Damage, RedrawEvent, Rgb, Screen, Style, Underline},
 };
 use anyhow::{Context, Result, bail, ensure};
 use font::{CellMetrics, Coverage, Face, Font};
@@ -111,17 +111,22 @@ pub struct Pane {
     /// Set when the pane is going away, so the thread waiting for X events
     /// stops instead of blocking on the next one.
     stopping: Arc<AtomicBool>,
-    /// The window's pixels, `0x00RRGGBB`, row by row.
-    pixels: Vec<u32>,
-    width: u16,
-    height: u16,
+    canvas: Canvas,
     columns: u16,
     rows: u16,
     /// Rows changed since the last frame was drawn.
     pending: Damage,
+    /// Whether what is pending is a whole frame. Neovim ends one with
+    /// `flush`, and a `redraw` notification can carry half of it: painting
+    /// then would show a scroll before the lines that refill what it
+    /// uncovered. Damage the window itself reports — an expose, a resize —
+    /// is whole by definition and sets this too.
+    frame_ready: bool,
     focused: bool,
     /// Which mouse button is down, so motion can be reported as a drag.
     dragging: Option<&'static str>,
+    /// Whether the editor has already exited, so nothing tries to talk to it.
+    editor_gone: bool,
 }
 
 impl Pane {
@@ -165,9 +170,12 @@ impl Pane {
         let keyboard = Keyboard::new(window.connection())?;
         let (sender, events) = channel();
         let stopping = Arc::new(AtomicBool::new(false));
-        let watcher = watch(&window, sender.clone(), Arc::clone(&stopping))?;
-        let mut editor = Editor::spawn(command, sender)?;
-        let attach = editor.attach(options.columns, options.rows)?;
+        // The editor first, and the pane around it, before the thread that
+        // waits for X events exists: everything that can fail from here on
+        // drops a whole `Pane`, which stops the editor. A watcher started
+        // before that would outlive a failed open, blocked in `wait_for_event`
+        // and holding the X connection with nobody left to close it.
+        let editor = Editor::spawn(command, sender.clone())?;
         let mut pane = Self {
             window,
             keyboard,
@@ -176,19 +184,21 @@ impl Pane {
             screen: Screen::new(),
             editor,
             events,
-            watcher: Some(watcher),
+            watcher: None,
             stopping,
-            pixels: vec![0; usize::from(width) * usize::from(height)],
-            width,
-            height,
+            canvas: Canvas::new(width, height, metrics),
             columns: options.columns,
             rows: options.rows,
             pending: Damage::NONE,
+            frame_ready: false,
             focused: false,
             dragging: None,
+            editor_gone: false,
         };
+        let attach = pane.editor.attach(options.columns, options.rows)?;
         pane.await_response(attach, Duration::from_secs(20))
             .context("attach to the embedded nvim as a UI")?;
+        pane.watcher = Some(watch(&pane.window, sender, Arc::clone(&pane.stopping))?);
         Ok(pane)
     }
 
@@ -217,7 +227,7 @@ impl Pane {
     /// height. Only a caller that wants to save or inspect the image needs
     /// this; the pane itself keeps them up to date.
     pub fn framebuffer(&self) -> (&[u32], u16, u16) {
-        (&self.pixels, self.width, self.height)
+        (&self.canvas.pixels, self.canvas.width, self.canvas.height)
     }
 
     /// Wait for one thing to happen, handle it and everything queued behind
@@ -235,7 +245,12 @@ impl Pane {
                 status = Status::Finished;
             }
         }
-        self.draw()?;
+        // Nothing is drawn into a window that is gone: the X requests would
+        // fail, and the caller would hear an error where the truth is simply
+        // that the window closed and the passage ended.
+        if status == Status::Running {
+            self.draw()?;
+        }
         Ok(status)
     }
 
@@ -263,15 +278,24 @@ impl Pane {
                 .events
                 .recv_timeout(remaining)
                 .context("the pane's editor channel closed while waiting for an answer")?;
-            if let Event::Editor(FromEditor::Response {
-                id: answered,
-                error,
-                result,
-            }) = &event
-                && *answered == id
-            {
-                ensure!(error.is_nil(), "nvim RPC {id} failed: {error}");
-                return Ok(result.clone());
+            match &event {
+                Event::Editor(FromEditor::Response {
+                    id: answered,
+                    error,
+                    result,
+                }) if *answered == id => {
+                    ensure!(error.is_nil(), "nvim RPC {id} failed: {error}");
+                    return Ok(result.clone());
+                }
+                // The answer is never coming. Without this the wait runs to
+                // its whole timeout — twenty seconds per open attempt — for
+                // the commonest startup failures there are: an `nvim.editor`
+                // that is not a program, an `nvim.init` file that is not
+                // there, a plugin that raises on load.
+                Event::Editor(FromEditor::Gone) => {
+                    bail!("nvim exited before answering request {id}")
+                }
+                _ => {}
             }
             self.handle(event)?;
         }
@@ -282,6 +306,7 @@ impl Pane {
             Event::Editor(FromEditor::Redraw(events)) => {
                 for event in &events {
                     self.pending = self.pending.union(self.screen.apply(event));
+                    self.frame_ready |= matches!(event, RedrawEvent::Flush);
                 }
                 Ok(Status::Running)
             }
@@ -291,7 +316,10 @@ impl Pane {
                 }
                 Ok(Status::Running)
             }
-            Event::Editor(FromEditor::Gone) => Ok(Status::Finished),
+            Event::Editor(FromEditor::Gone) => {
+                self.editor_gone = true;
+                Ok(Status::Finished)
+            }
             Event::Window(event) => self.window_event(event),
         }
     }
@@ -299,7 +327,7 @@ impl Pane {
     fn window_event(&mut self, event: x11rb::protocol::Event) -> Result<Status> {
         use x11rb::protocol::Event as X;
         match event {
-            X::Expose(_) => self.pending = self.pending.union(everything(self.rows)),
+            X::Expose(_) => self.damage_everything(),
             X::ConfigureNotify(event) => self.resize(event.width, event.height)?,
             X::KeyPress(event) => {
                 if let Some(keys) = self.keyboard.press(event.detail, event.state) {
@@ -312,12 +340,12 @@ impl Pane {
             X::FocusIn(_) => {
                 self.focused = true;
                 self.editor.set_focus(true)?;
-                self.pending = self.pending.union(Damage::row(self.screen.cursor().row));
+                self.damage(Damage::row(self.screen.cursor().row));
             }
             X::FocusOut(_) => {
                 self.focused = false;
                 self.editor.set_focus(false)?;
-                self.pending = self.pending.union(Damage::row(self.screen.cursor().row));
+                self.damage(Damage::row(self.screen.cursor().row));
             }
             X::MappingNotify(_) => {
                 if let Err(error) = self.keyboard.refresh(self.window.connection()) {
@@ -332,15 +360,24 @@ impl Pane {
         Ok(Status::Running)
     }
 
+    /// Damage the pane itself decided on, which is always a whole frame:
+    /// there is no half of an expose.
+    fn damage(&mut self, damage: Damage) {
+        self.pending = self.pending.union(damage);
+        self.frame_ready = true;
+    }
+
+    fn damage_everything(&mut self) {
+        self.damage(everything(self.rows));
+    }
+
     /// A new window size means a new number of cells, which only Neovim can
     /// act on: it answers with a `grid_resize` and repaints.
     fn resize(&mut self, width: u16, height: u16) -> Result<()> {
-        if (width, height) == (self.width, self.height) {
+        if (width, height) == (self.canvas.width, self.canvas.height) {
             return Ok(());
         }
-        self.width = width;
-        self.height = height;
-        self.pixels = vec![0; usize::from(width) * usize::from(height)];
+        self.canvas.resize(width, height);
         let columns = (u32::from(width) / self.metrics.width).max(1) as u16;
         let rows = (u32::from(height) / self.metrics.height).max(1) as u16;
         if (columns, rows) != (self.columns, self.rows) {
@@ -348,7 +385,7 @@ impl Pane {
             self.rows = rows;
             self.editor.try_resize(columns, rows)?;
         }
-        self.pending = self.pending.union(everything(self.rows));
+        self.damage_everything();
         Ok(())
     }
 
@@ -401,53 +438,76 @@ impl Pane {
 
     /// Paint the rows that changed and copy them into the window.
     fn draw(&mut self) -> Result<()> {
+        if !self.frame_ready {
+            // Half a frame. The damage keeps accumulating until Neovim says
+            // the frame is whole.
+            return Ok(());
+        }
         let Some((first, last)) = self.pending.range() else {
+            self.frame_ready = false;
             return Ok(());
         };
         self.pending = Damage::NONE;
+        self.frame_ready = false;
         let last = last.min(self.rows.saturating_sub(1));
-        if first > last || self.width == 0 || self.height == 0 {
+        if first > last || self.canvas.width == 0 || self.canvas.height == 0 {
             return Ok(());
         }
         for row in first..=last {
             self.paint_row(row);
         }
+        let height = usize::from(self.canvas.height);
         let top = usize::from(first) * self.metrics.height as usize;
-        let mut bottom =
-            ((usize::from(last) + 1) * self.metrics.height as usize).min(usize::from(self.height));
+        let mut bottom = ((usize::from(last) + 1) * self.metrics.height as usize).min(height);
         if last == self.rows.saturating_sub(1) {
             // A window is rarely a whole number of cells tall. The strip under
             // the last row belongs to no cell, so nothing would ever paint it
             // and it would stay black under a light colourscheme.
             let background = self.screen.defaults().background;
-            let leftover = u32::from(self.height) - bottom as u32;
-            self.fill(
+            let leftover = u32::from(self.canvas.height) - bottom as u32;
+            self.canvas.fill(
                 0,
                 bottom as u32,
-                u32::from(self.width),
+                u32::from(self.canvas.width),
                 leftover,
                 background,
             );
-            bottom = usize::from(self.height);
+            bottom = height;
         }
         if top >= bottom {
             return Ok(());
         }
-        let stride = usize::from(self.width);
+        let stride = usize::from(self.canvas.width);
         self.window.present(
             0,
             i16::try_from(top).unwrap_or(i16::MAX),
-            self.width,
-            &self.pixels[top * stride..bottom * stride],
+            self.canvas.width,
+            &self.canvas.pixels[top * stride..bottom * stride],
         )
     }
 
     fn paint_row(&mut self, row: u16) {
-        let background = self.screen.defaults().background;
-        let (cell_width, cell_height) = (self.metrics.width, self.metrics.height);
-        let top = u32::from(row) * cell_height;
-        self.fill(0, top, u32::from(self.width), cell_height, background);
-        let cells: Vec<Cell> = self.screen.row(row).to_vec();
+        // Disjoint borrows: the screen is read while the canvas and the glyph
+        // cache are written. Copying the row out to satisfy one borrow would
+        // allocate a String per cell on every painted row of every frame.
+        let Self {
+            screen,
+            canvas,
+            font,
+            focused,
+            columns,
+            ..
+        } = self;
+        let metrics = canvas.metrics;
+        let top = u32::from(row) * metrics.height;
+        canvas.fill(
+            0,
+            top,
+            u32::from(canvas.width),
+            metrics.height,
+            screen.defaults().background,
+        );
+        let cells = screen.row(row);
         let mut column = 0;
         while column < cells.len() {
             let cell = &cells[column];
@@ -461,22 +521,131 @@ impl Pane {
                 Some(next) if next.is_continuation() => 2,
                 _ => 1,
             };
-            let style = self.screen.style(cell.highlight);
-            let left = column as u32 * cell_width;
-            self.fill(left, top, cell_width * span, cell_height, style.background);
-            self.paint_cell(&cell.text, style, left, top);
+            let style = screen.style(cell.highlight);
+            let left = column as u32 * metrics.width;
+            canvas.fill(
+                left,
+                top,
+                metrics.width * span,
+                metrics.height,
+                style.background,
+            );
+            canvas.cell(font, &cell.text, style, left, top);
             column += span as usize;
         }
-        if self.screen.cursor().row == row {
-            self.paint_cursor(row);
+        if screen.cursor().row == row {
+            paint_cursor(canvas, font, screen, row, *columns, *focused);
+        }
+    }
+}
+
+/// The cursor: filled while the pane has the focus, an outline when it does
+/// not, so the window says plainly that typing would go elsewhere.
+fn paint_cursor(
+    canvas: &mut Canvas,
+    font: &mut Font,
+    screen: &Screen,
+    row: u16,
+    columns: u16,
+    focused: bool,
+) {
+    let position = screen.cursor();
+    if position.column >= columns {
+        return;
+    }
+    if screen.busy() {
+        // Neovim is working, and where its cursor sits means nothing until it
+        // is done. A terminal hides the cursor then, and so does this.
+        return;
+    }
+    let style = screen.cursor_style();
+    let empty = Cell::default();
+    let cell = screen.cell(row, position.column).unwrap_or(&empty);
+    let under = screen.style(cell.highlight);
+    let (foreground, background) = match style.attribute {
+        Some(highlight) => {
+            let cursor = screen.style(highlight);
+            (cursor.foreground, cursor.background)
+        }
+        // Attribute 0 means "swap the cell's own colours".
+        None => (under.background, under.foreground),
+    };
+    let metrics = canvas.metrics;
+    let left = u32::from(position.column) * metrics.width;
+    let top = u32::from(row) * metrics.height;
+    let fraction = |whole: u32| (whole * u32::from(style.percentage) / 100).max(1);
+    if !focused {
+        canvas.outline(left, top, metrics.width, metrics.height, background);
+        return;
+    }
+    match style.shape {
+        CursorShape::Block => {
+            canvas.fill(left, top, metrics.width, metrics.height, background);
+            canvas.cell(
+                font,
+                &cell.text,
+                Style {
+                    foreground,
+                    ..under
+                },
+                left,
+                top,
+            );
+        }
+        CursorShape::Vertical => canvas.fill(
+            left,
+            top,
+            fraction(metrics.width),
+            metrics.height,
+            background,
+        ),
+        CursorShape::Horizontal => {
+            let thickness = fraction(metrics.height);
+            canvas.fill(
+                left,
+                top + metrics.height - thickness,
+                metrics.width,
+                thickness,
+                background,
+            );
+        }
+    }
+}
+
+/// The window's pixels, and everything that puts colour into them.
+///
+/// Separate from [`Pane`] so a row can be read from the screen while the
+/// pixels are written, which is the whole reason this is its own type.
+struct Canvas {
+    /// `0x00RRGGBB` per pixel, row by row.
+    pixels: Vec<u32>,
+    width: u16,
+    height: u16,
+    metrics: CellMetrics,
+}
+
+impl Canvas {
+    fn new(width: u16, height: u16, metrics: CellMetrics) -> Self {
+        Self {
+            pixels: vec![0; usize::from(width) * usize::from(height)],
+            width,
+            height,
+            metrics,
         }
     }
 
-    fn paint_cell(&mut self, text: &str, style: Style, left: u32, top: u32) {
+    fn resize(&mut self, width: u16, height: u16) {
+        self.pixels = vec![0; usize::from(width) * usize::from(height)];
+        self.width = width;
+        self.height = height;
+    }
+
+    /// One cell's text, underline and strikethrough, over the background the
+    /// caller has already laid down.
+    fn cell(&mut self, font: &mut Font, text: &str, style: Style, left: u32, top: u32) {
         let metrics = self.metrics;
         let baseline = top + metrics.baseline;
-        if let Some(glyph) = self
-            .font
+        if let Some(glyph) = font
             .glyph(text, Face::of(style.bold, style.italic))
             .cloned()
         {
@@ -494,74 +663,6 @@ impl Pane {
                 metrics.thickness,
                 style.special,
             );
-        }
-    }
-
-    /// The cursor: filled while the pane has the focus, an outline when it
-    /// does not, so the window says plainly that typing would go elsewhere.
-    fn paint_cursor(&mut self, row: u16) {
-        let position = self.screen.cursor();
-        if position.column >= self.columns {
-            return;
-        }
-        if self.screen.busy() {
-            // Neovim is working, and where its cursor sits means nothing until
-            // it is done. A terminal hides the cursor then, and so does this.
-            return;
-        }
-        let style = self.screen.cursor_style();
-        let cell = self
-            .screen
-            .cell(row, position.column)
-            .cloned()
-            .unwrap_or_default();
-        let under = self.screen.style(cell.highlight);
-        let (foreground, background) = match style.attribute {
-            Some(highlight) => {
-                let cursor = self.screen.style(highlight);
-                (cursor.foreground, cursor.background)
-            }
-            // Attribute 0 means "swap the cell's own colours".
-            None => (under.background, under.foreground),
-        };
-        let metrics = self.metrics;
-        let left = u32::from(position.column) * metrics.width;
-        let top = u32::from(row) * metrics.height;
-        let fraction = |whole: u32| (whole * u32::from(style.percentage) / 100).max(1);
-        if !self.focused {
-            self.outline(left, top, metrics.width, metrics.height, background);
-            return;
-        }
-        match style.shape {
-            CursorShape::Block => {
-                self.fill(left, top, metrics.width, metrics.height, background);
-                self.paint_cell(
-                    &cell.text,
-                    Style {
-                        foreground,
-                        ..under
-                    },
-                    left,
-                    top,
-                );
-            }
-            CursorShape::Vertical => self.fill(
-                left,
-                top,
-                fraction(metrics.width),
-                metrics.height,
-                background,
-            ),
-            CursorShape::Horizontal => {
-                let thickness = fraction(metrics.height);
-                self.fill(
-                    left,
-                    top + metrics.height - thickness,
-                    metrics.width,
-                    thickness,
-                    background,
-                );
-            }
         }
     }
 
@@ -655,8 +756,65 @@ impl Pane {
     }
 }
 
+/// Write every modified buffer, and say which ones would not go.
+///
+/// Dictated text is already on disk: the Lua side writes the file after every
+/// append. What is not on disk is anything the user typed into the pane since
+/// then, and closing the window must not be the thing that loses it. Managed
+/// mode never has this problem, because its editor outlives the daemon; a
+/// pane's editor does not, so it writes first.
+const WRITE_EVERYTHING: &str = r#"
+local unwritten = {}
+for _, buffer in ipairs(vim.api.nvim_list_bufs()) do
+  if vim.api.nvim_buf_is_loaded(buffer)
+     and vim.bo[buffer].modified
+     and vim.bo[buffer].buftype == "" then
+    local name = vim.api.nvim_buf_get_name(buffer)
+    local ok = pcall(vim.api.nvim_buf_call, buffer, function()
+      vim.cmd("silent noautocmd write")
+    end)
+    if not ok then
+      unwritten[#unwritten + 1] = name ~= "" and name or "[No Name]"
+    end
+  end
+end
+return unwritten
+"#;
+
+/// How long the editor gets to write its buffers before it is asked to quit.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+
+impl Pane {
+    fn write_buffers(&mut self) {
+        if self.editor_gone {
+            // Neovim decided for itself — `:q` with nothing unsaved, or a
+            // deliberate `:q!`. Either way there is nothing left to ask.
+            return;
+        }
+        let call = self.call(
+            "nvim_exec_lua",
+            vec![Value::from(WRITE_EVERYTHING), Value::Array(Vec::new())],
+            WRITE_TIMEOUT,
+        );
+        match call {
+            Ok(value) => {
+                for name in value.as_array().into_iter().flatten() {
+                    log::error!(
+                        "the pane closed with unwritten changes in {}",
+                        name.as_str().unwrap_or("a buffer")
+                    );
+                }
+            }
+            Err(error) => {
+                log::warn!("could not write the pane's buffers before closing: {error:#}")
+            }
+        }
+    }
+}
+
 impl Drop for Pane {
     fn drop(&mut self) {
+        self.write_buffers();
         self.editor.shutdown();
         // The watcher is blocked waiting for an X event. Tell it to stop, then
         // send it one of our own so it wakes up and sees that. Relying on the

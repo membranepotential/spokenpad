@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 use spokenpad::core::wm::{HEADER_LEN, Message, encode, reply_length};
 use std::{
-    io::{Read, Write},
+    io::{BufRead, Read, Write},
     net::Shutdown,
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
@@ -106,21 +106,35 @@ pub struct XServer {
 
 impl XServer {
     pub fn start() -> Self {
-        let number = free_display_number();
-        // The user dictates on :0. Nothing in this test may reach it.
-        assert!(
-            number >= 50,
-            "refusing to run on display :{number}; the test picks its own, above :50"
-        );
-        let display = format!(":{number}");
-        let child = Killed(
+        // The X server picks the number, not this test. `-displayfd` makes it
+        // search upwards from `:50` and report what it took, on the file
+        // descriptor named — here its stdout. Choosing a free number here
+        // instead would be a race: two test binaries looking at the same
+        // moment would both see the same number free and both try to take it.
+        let mut child = Killed(
             Command::new("Xvfb")
-                .args([&display, "-screen", "0", "1280x800x24", "-nolisten", "tcp"])
-                .stdout(Stdio::null())
+                .args([
+                    ":50",
+                    "-displayfd",
+                    "1",
+                    "-screen",
+                    "0",
+                    "1280x800x24",
+                    "-nolisten",
+                    "tcp",
+                ])
+                .stdout(Stdio::piped())
                 .stderr(Stdio::null())
                 .spawn()
                 .expect("start Xvfb"),
         );
+        let number = read_display_number(&mut child);
+        // The user dictates on :0. Nothing in this test may reach it.
+        assert!(
+            number >= 50,
+            "Xvfb took display :{number}; the test starts its search at :50"
+        );
+        let display = format!(":{number}");
         let (connection, screen_index) =
             wait_for(START_TIMEOUT, "the X server to accept connections", || {
                 x11rb::connect(Some(&display)).ok()
@@ -201,14 +215,25 @@ impl XServer {
     }
 }
 
-/// The lowest display number above :50 that no X server holds.
-fn free_display_number() -> u32 {
-    (50..200)
-        .find(|number| {
-            !Path::new(&format!("/tmp/.X{number}-lock")).exists()
-                && !Path::new(&format!("/tmp/.X11-unix/X{number}")).exists()
-        })
-        .expect("a free X display number")
+/// The display number Xvfb wrote to its stdout once it was ready.
+fn read_display_number(child: &mut Killed) -> u32 {
+    let stdout = child.0.stdout.take().expect("Xvfb's stdout");
+    let mut reader = std::io::BufReader::new(stdout);
+    let mut line = String::new();
+    let deadline = Instant::now() + START_TIMEOUT;
+    loop {
+        // One `read_line` is normally enough; the loop is for the case where
+        // the pipe hands over the digits and the newline separately.
+        let read = reader.read_line(&mut line).expect("read Xvfb's stdout");
+        if let Some(number) = line.trim().parse().ok().filter(|_| line.contains('\n')) {
+            return number;
+        }
+        assert!(read > 0, "Xvfb closed its stdout without naming a display");
+        assert!(
+            Instant::now() < deadline,
+            "Xvfb did not name a display within {START_TIMEOUT:?}"
+        );
+    }
 }
 
 /// i3 with a generated config: `focus_follows_mouse no`, so only a click can
@@ -433,6 +458,49 @@ pub fn press_keysym(server: &mut XServer, keysym: u32) -> bool {
         }
         None => false,
     }
+}
+
+/// Ask a window to close, the way a window manager's close button does.
+pub fn close_window(server: &XServer, window: Window) {
+    let message = x11rb::protocol::xproto::ClientMessageEvent::new(
+        32,
+        window,
+        server.atom("WM_PROTOCOLS"),
+        [server.atom("WM_DELETE_WINDOW"), 0, 0, 0, 0],
+    );
+    server
+        .connection
+        .send_event(
+            false,
+            window,
+            x11rb::protocol::xproto::EventMask::NO_EVENT,
+            message,
+        )
+        .expect("send WM_DELETE_WINDOW");
+    server.connection.flush().expect("flush");
+}
+
+/// `ISO_Level3_Shift`, which is what a German keyboard labels AltGr.
+pub const ISO_LEVEL3_SHIFT: u32 = 0xfe03;
+
+/// Press a key with AltGr held, naming the key by what it types *without* it.
+///
+/// AltGr is a level shift the layout applies, not a modifier Neovim names, so
+/// this is how the test proves the pane does not report it as Alt: `AltGr`+`q`
+/// on a German layout must arrive as the text `@`, not as `<M-q>`.
+pub fn press_with_altgr(server: &mut XServer, unshifted: u32) -> bool {
+    let (Some(level3), Some(key)) = (
+        find_key(server, ISO_LEVEL3_SHIFT),
+        find_key(server, unshifted),
+    ) else {
+        return false;
+    };
+    fake(server, KEY_PRESS_EVENT, level3.keycode, 0, 0);
+    fake(server, KEY_PRESS_EVENT, key.keycode, 0, 0);
+    fake(server, KEY_RELEASE_EVENT, key.keycode, 0, 0);
+    fake(server, KEY_RELEASE_EVENT, level3.keycode, 0, 0);
+    server.connection.flush().expect("flush");
+    true
 }
 
 /// Type a run of text on the loaded layout. Returns false if any character is

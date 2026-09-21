@@ -96,6 +96,8 @@ struct Loaded {
     /// Whether this is the same file fontconfig gave for the plain face, so a
     /// bold or italic run has to be synthesised rather than looked up.
     substituted: bool,
+    /// Where it came from, so the same file is not loaded twice.
+    source: Matched,
 }
 
 impl Loaded {
@@ -109,9 +111,18 @@ impl Loaded {
 pub struct Font {
     faces: [Loaded; 4],
     caches: [HashMap<String, Option<Glyph>>; 4],
+    /// Faces fontconfig named for characters the chosen family does not
+    /// cover. A dictation transcript is whatever was said, and a cell drawn
+    /// as nothing looks like lost text rather than like a missing glyph.
+    fallbacks: Vec<Loaded>,
+    /// Which of those covers a character, or that nothing does. Misses are
+    /// remembered too: asking fontconfig again on every frame would put a
+    /// process spawn on the drawing path.
+    fallback_of: HashMap<char, Option<usize>>,
     context: ScaleContext,
     metrics: CellMetrics,
     size: f32,
+    family: String,
 }
 
 impl Font {
@@ -150,6 +161,7 @@ impl Font {
                     .with_context(|| format!("read the font file {}", found.0.display()))?,
                 index: found.1,
                 substituted,
+                source: found,
             });
         }
         let faces: [Loaded; 4] = loaded
@@ -167,8 +179,11 @@ impl Font {
             faces,
             caches: Default::default(),
             context: ScaleContext::new(),
+            fallbacks: Vec::new(),
+            fallback_of: HashMap::new(),
             metrics,
             size,
+            family: family.to_owned(),
         })
     }
 
@@ -182,43 +197,117 @@ impl Font {
     /// font does not cover must not rasterise on every frame.
     pub fn glyph(&mut self, text: &str, face: Face) -> Option<&Glyph> {
         let index = face.index();
+        if !self.caches[index].contains_key(text) {
+            let rendered = self.render(text, index);
+            self.caches[index].insert(text.to_owned(), rendered);
+        }
+        self.caches[index][text].as_ref()
+    }
+
+    /// Rasterise one grapheme from the face that has it.
+    fn render(&mut self, text: &str, index: usize) -> Option<Glyph> {
+        let character = text.chars().next()?;
+        let fallback = match covers(&self.faces[index], character) {
+            true => None,
+            false => self.fallback_for(character),
+        };
         let Self {
             faces,
-            caches,
+            fallbacks,
             context,
             size,
             ..
         } = self;
-        if !caches[index].contains_key(text) {
-            let rendered = rasterise(&faces[index], context, *size, text);
-            caches[index].insert(text.to_owned(), rendered);
+        let loaded = match fallback {
+            Some(fallback) => &fallbacks[fallback],
+            None => &faces[index],
+        };
+        rasterise(loaded, context, *size, text)
+    }
+
+    /// The face fontconfig names for a character the family does not cover,
+    /// loading it the first time it is asked for.
+    fn fallback_for(&mut self, character: char) -> Option<usize> {
+        if let Some(known) = self.fallback_of.get(&character) {
+            return *known;
         }
-        caches[index][text].as_ref()
+        let found = match_character(&self.family, character)
+            .inspect_err(|error| {
+                log::debug!("no fallback font for {character:?}: {error:#}");
+            })
+            .ok();
+        let slot = found.and_then(|found| {
+            if let Some(already) = self.fallbacks.iter().position(|face| face.source == found) {
+                return Some(already);
+            }
+            let data = std::fs::read(&found.0)
+                .inspect_err(|error| {
+                    log::debug!(
+                        "cannot read the fallback font {}: {error}",
+                        found.0.display()
+                    );
+                })
+                .ok()?;
+            log::debug!(
+                "pane font: {} for {character:?}, which {:?} does not cover",
+                found.0.display(),
+                self.family
+            );
+            self.fallbacks.push(Loaded {
+                data,
+                index: found.1,
+                substituted: false,
+                source: found,
+            });
+            Some(self.fallbacks.len() - 1)
+        });
+        self.fallback_of.insert(character, slot);
+        slot
     }
 }
 
+/// Whether this face has an outline for the character at all.
+fn covers(face: &Loaded, character: char) -> bool {
+    face.font()
+        .map(|font| font.charmap().map(character) != 0)
+        .unwrap_or(false)
+}
+
+/// The font fontconfig picks for one character, preferring the configured
+/// family's own idea of a substitute.
+fn match_character(family: &str, character: char) -> Result<Matched> {
+    read_match(&format!("{family}:charset={:x}", character as u32))
+}
+
+/// A font file and the face inside it.
+type Matched = (PathBuf, u32);
+
 /// `fc-match`, which is fontconfig's own answer to "which file is this?".
-fn match_face(face: Face, family: &str) -> Result<(PathBuf, u32)> {
+fn match_face(face: Face, family: &str) -> Result<Matched> {
     ensure!(
         !family.is_empty() && !family.contains([':', ',', '-', '\\']),
         "font family {family:?} is not a plain fontconfig family name"
     );
+    read_match(&face.pattern(family))
+}
+
+fn read_match(pattern: &str) -> Result<Matched> {
     let output = Command::new("fc-match")
         .arg("--format=%{file}\n%{index}\n")
-        .arg(face.pattern(family))
+        .arg(pattern)
         .output()
         .context("run fc-match; the pane needs fontconfig to find a font")?;
     ensure!(
         output.status.success(),
-        "fc-match failed for {family:?}: {}",
+        "fc-match failed for {pattern:?}: {}",
         String::from_utf8_lossy(&output.stderr).trim()
     );
     let text = String::from_utf8(output.stdout).context("fc-match printed invalid UTF-8")?;
     let mut lines = text.lines();
     let (Some(file), Some(index)) = (lines.next(), lines.next()) else {
-        bail!("fc-match printed no file for {family:?}");
+        bail!("fc-match printed no file for {pattern:?}");
     };
-    ensure!(!file.is_empty(), "fc-match found no font for {family:?}");
+    ensure!(!file.is_empty(), "fc-match found no font for {pattern:?}");
     Ok((
         PathBuf::from(file),
         index.trim().parse().unwrap_or_default(),
@@ -425,6 +514,30 @@ mod tests {
             combined.top >= plain.top && combined.height >= plain.height,
             "the acute accent should extend the bitmap upwards: {plain:?} vs {combined:?}"
         );
+    }
+
+    #[test]
+    fn a_character_the_family_does_not_cover_comes_from_another_font() {
+        let Some(mut font) = font_or_skip() else {
+            return;
+        };
+        // A dictation transcript is whatever was said. A cell drawn as
+        // nothing reads as lost text, so a character the monospace family
+        // has no outline for is fetched from whichever font fontconfig
+        // names for it — if this machine has one at all.
+        for text in ["\u{6f22}", "\u{2713}"] {
+            let Some(glyph) = font.glyph(text, Face::PLAIN) else {
+                // No font on this machine covers it; nothing to assert.
+                continue;
+            };
+            assert!(glyph.width > 0 && glyph.height > 0, "{text:?}");
+            match &glyph.coverage {
+                Coverage::Mask(mask) => {
+                    assert!(mask.iter().any(|value| *value > 0), "{text:?} is blank")
+                }
+                Coverage::Colour(_) => {}
+            }
+        }
     }
 
     #[test]

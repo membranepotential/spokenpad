@@ -117,7 +117,13 @@ impl Window {
                             | EventMask::KEY_RELEASE
                             | EventMask::BUTTON_PRESS
                             | EventMask::BUTTON_RELEASE
-                            | EventMask::POINTER_MOTION
+                            // Motion only while a button is down. Plain
+                            // `POINTER_MOTION` would wake the pane for every
+                            // pixel the pointer crosses on its way somewhere
+                            // else, and a drag is the only motion it acts on.
+                            | EventMask::BUTTON1_MOTION
+                            | EventMask::BUTTON2_MOTION
+                            | EventMask::BUTTON3_MOTION
                             | EventMask::FOCUS_CHANGE,
                     ),
             )?
@@ -233,10 +239,6 @@ impl Window {
     /// from one thread and `wait_for_event` on another are allowed.
     pub fn shared_connection(&self) -> Arc<XCBConnection> {
         Arc::clone(&self.connection)
-    }
-
-    pub fn screen(&self) -> usize {
-        self.screen
     }
 
     pub fn map(&self) -> Result<()> {
@@ -355,11 +357,6 @@ impl Window {
                 .check()
                 .context("copy pixels into the pane window")?;
         }
-        self.connection.flush()?;
-        Ok(())
-    }
-
-    pub fn flush(&self) -> Result<()> {
         self.connection.flush()?;
         Ok(())
     }

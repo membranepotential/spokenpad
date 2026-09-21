@@ -443,6 +443,15 @@ pub struct Screen {
 /// The handle of the one grid an `ext_linegrid` UI is given.
 const GLOBAL_GRID: u64 = 1;
 
+/// The largest grid this screen will hold, in cells.
+///
+/// Neovim asks for the size the UI told it, so a real one is a few thousand
+/// cells. The limit is here because `grid_resize` arrives as two numbers off a
+/// socket: a `65535 x 65535` resize would ask for four thousand million cells
+/// and take the process down with it. Sixteen million is far past any
+/// display — a 4K screen of 6x13 pixel cells is about a quarter of a million.
+const MAX_CELLS: usize = 1 << 24;
+
 impl Default for Screen {
     fn default() -> Self {
         Self::new()
@@ -621,7 +630,12 @@ impl Screen {
         if (width, height) == (self.width, self.height) {
             return Damage::NONE;
         }
-        let mut cells = vec![Cell::blank(); usize::from(width) * usize::from(height)];
+        let wanted = usize::from(width) * usize::from(height);
+        if wanted > MAX_CELLS {
+            log::warn!("ignoring a {width}x{height} grid: more than {MAX_CELLS} cells");
+            return Damage::NONE;
+        }
+        let mut cells = vec![Cell::blank(); wanted];
         for row in 0..height.min(self.height) {
             for column in 0..width.min(self.width) {
                 let source = usize::from(row) * usize::from(self.width) + usize::from(column);
@@ -643,7 +657,10 @@ impl Screen {
         let Some(mut index) = self.index(row, column) else {
             return Damage::NONE;
         };
-        let end = self.index(row, 0).expect("the row exists") + usize::from(self.width);
+        let Some(start) = self.index(row, 0) else {
+            return Damage::NONE;
+        };
+        let end = start + usize::from(self.width);
         for cell in cells {
             for _ in 0..cell.repeat {
                 if index >= end {
@@ -673,16 +690,17 @@ impl Screen {
             }
         };
         let width = self.width;
+        // `unsigned_abs`, not `-rows`: negating `i32::MIN` overflows, and this
+        // number came off a socket.
+        let distance = u16::try_from(rows.unsigned_abs()).unwrap_or(u16::MAX);
         if rows > 0 {
             // Content moves up: row `top + n` takes what row `top + n + rows`
             // had, front to back so a row is read before it is written.
-            let distance = u16::try_from(rows).unwrap_or(u16::MAX);
             for target in top..bottom.saturating_sub(distance) {
                 copy(&mut self.cells, target + distance, target, width);
             }
         } else {
             // Content moves down, so back to front for the same reason.
-            let distance = u16::try_from(-rows).unwrap_or(u16::MAX);
             for target in (top.saturating_add(distance)..bottom).rev() {
                 copy(&mut self.cells, target - distance, target, width);
             }
@@ -1202,5 +1220,150 @@ mod tests {
             Value::Array(vec![value("flush"), Value::Array(Vec::new())]),
         ];
         assert_eq!(RedrawEvent::parse_batch(&payload), vec![RedrawEvent::Flush]);
+    }
+
+    // ------------------------------------------------- nothing may panic
+
+    #[test]
+    fn the_numbers_at_the_edges_of_the_protocol_are_survivable() {
+        let mut screen = screen(8, 4);
+        // `i32::MIN` cannot be negated, and this number comes off a socket.
+        screen.apply(&RedrawEvent::GridScroll {
+            grid: 1,
+            top: 0,
+            bottom: 4,
+            left: 0,
+            right: 8,
+            rows: i32::MIN,
+        });
+        screen.apply(&RedrawEvent::GridScroll {
+            grid: 1,
+            top: 0,
+            bottom: u16::MAX,
+            left: 0,
+            right: u16::MAX,
+            rows: i32::MAX,
+        });
+        // A grid of four thousand million cells is refused, not allocated.
+        let damage = screen.apply(&RedrawEvent::GridResize {
+            grid: 1,
+            width: u16::MAX,
+            height: u16::MAX,
+        });
+        assert!(damage.is_empty());
+        assert_eq!(screen.size(), (8, 4));
+        // A run that claims the whole row from the last column writes one cell.
+        screen.apply(&RedrawEvent::GridLine {
+            grid: 1,
+            row: 3,
+            column: 7,
+            cells: vec![LineCell {
+                text: "x".to_owned(),
+                highlight: u64::MAX,
+                repeat: u16::MAX,
+            }],
+        });
+        assert_eq!(screen.line(3), "       x");
+        // A cursor outside the grid is a position, not an index.
+        screen.apply(&RedrawEvent::GridCursorGoto {
+            grid: 1,
+            row: u16::MAX,
+            column: u16::MAX,
+        });
+        assert!(screen.cell(u16::MAX, u16::MAX).is_none());
+        assert_eq!(screen.line(u16::MAX), "");
+    }
+
+    /// A seeded xorshift, so a failing case replays exactly.
+    struct Noise(u64);
+
+    impl Noise {
+        fn next(&mut self) -> u64 {
+            let mut state = self.0;
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            self.0 = state;
+            state
+        }
+
+        fn below(&mut self, limit: u64) -> u64 {
+            self.next() % limit.max(1)
+        }
+
+        /// A value that is plausible msgpack but need not be sensible.
+        fn value(&mut self, depth: u32) -> Value {
+            match self.below(8) {
+                0 => Value::Nil,
+                1 => Value::from(self.next().is_multiple_of(2)),
+                2 => Value::from(self.next() as i64),
+                3 => Value::from(self.next()),
+                4 => Value::from(NAMES[(self.below(NAMES.len() as u64)) as usize]),
+                5 if depth > 0 => {
+                    Value::Array((0..self.below(5)).map(|_| self.value(depth - 1)).collect())
+                }
+                6 if depth > 0 => Value::Map(
+                    (0..self.below(4))
+                        .map(|_| (self.value(depth - 1), self.value(depth - 1)))
+                        .collect(),
+                ),
+                _ => Value::from(f64::from_bits(self.next())),
+            }
+        }
+    }
+
+    /// Event names, real and invented, so the walk hits the handled arms too.
+    const NAMES: [&str; 16] = [
+        "grid_resize",
+        "grid_line",
+        "grid_clear",
+        "grid_destroy",
+        "grid_scroll",
+        "grid_cursor_goto",
+        "default_colors_set",
+        "hl_attr_define",
+        "mode_info_set",
+        "mode_change",
+        "busy_start",
+        "busy_stop",
+        "flush",
+        "win_viewport",
+        "",
+        "grid_line",
+    ];
+
+    #[test]
+    fn random_and_malformed_redraw_batches_never_panic() {
+        // Neovim does not send nonsense, but the decoder is a boundary and a
+        // boundary that can panic takes the daemon with it.
+        let mut noise = Noise(0x9E37_79B9_7F4A_7C15);
+        let mut screen = Screen::new();
+        for _ in 0..4000 {
+            let payload: Vec<Value> = (0..noise.below(4) + 1)
+                .map(|_| {
+                    let name = NAMES[noise.below(NAMES.len() as u64) as usize];
+                    let mut entry = vec![Value::from(name)];
+                    for _ in 0..noise.below(3) {
+                        entry.push(Value::Array(
+                            (0..noise.below(7)).map(|_| noise.value(2)).collect(),
+                        ));
+                    }
+                    Value::Array(entry)
+                })
+                .collect();
+            for event in RedrawEvent::parse_batch(&payload) {
+                screen.apply(&event);
+            }
+            // Whatever it did, the grid stays self-consistent.
+            let (width, height) = screen.size();
+            assert_eq!(
+                screen.cells.len(),
+                usize::from(width) * usize::from(height),
+                "the cell store no longer matches the grid size"
+            );
+            for row in 0..height {
+                assert_eq!(screen.row(row).len(), usize::from(width));
+            }
+        }
     }
 }

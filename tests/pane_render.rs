@@ -25,8 +25,8 @@
 mod harness;
 
 use harness::{
-    I3, SETTLE, XServer, click, find_key, press_key, press_keysym, screenshot_dir, type_text,
-    wait_for, write_png,
+    I3, SETTLE, XServer, click, close_window, find_key, press_key, press_keysym, press_with_altgr,
+    screenshot_dir, type_text, wait_for, write_png,
 };
 use rmpv::Value;
 use spokenpad::{
@@ -34,7 +34,7 @@ use spokenpad::{
     core::{geometry::Rect, state::IndicatorPhase},
     shell::{
         nvim::{IndicatorState, NvimSession},
-        pane::{self, Options, Pane},
+        pane::{self, Options, Pane, Status},
     },
 };
 use std::{
@@ -107,6 +107,52 @@ fn the_pane_draws_what_neovim_draws() {
     );
     seed_buffer(&mut pane);
     same_as_nvim(&mut pane, "the seeded buffer");
+
+    // A double-width character, through the renderer rather than only through
+    // the grid model: Neovim leaves the cell after it empty, and the pane has
+    // to treat that cell as the right half of the one before rather than as a
+    // blank to paint over it.
+    call(
+        &mut pane,
+        "nvim_exec_lua",
+        vec![Value::from(WIDE_LINE), Value::Array(Vec::new())],
+        PATIENCE,
+    );
+    same_as_nvim(&mut pane, "a line with double-width characters");
+    assert_eq!(
+        pane.screen().cell(0, 0).expect("the first cell").text,
+        "\u{6f22}"
+    );
+    assert!(
+        pane.screen()
+            .cell(0, 1)
+            .expect("the cell after it")
+            .is_continuation(),
+        "the cell after a double-width character must be its right half"
+    );
+    // And it is actually drawn. The cursor is parked out of the way first:
+    // its outline sits in cell 0 and would otherwise make this pass whether
+    // or not a single glyph was rasterised. The `✓` is the same question for
+    // a character the monospace family has no outline for at all — without a
+    // fallback font both of these are blank cells, which in a transcript
+    // reads as lost text.
+    call(
+        &mut pane,
+        "nvim_exec_lua",
+        vec![
+            Value::from("vim.api.nvim_win_set_cursor(0, { 1, 20 })"),
+            Value::Array(Vec::new()),
+        ],
+        PATIENCE,
+    );
+    for (label, cells) in [("the double-width pair", 0..2_u32), ("a check mark", 9..10)] {
+        let painted = painted_pixels(&pane, cells);
+        assert!(
+            painted > 20,
+            "{label} drew only {painted} pixels; the font has no glyph and no fallback was found"
+        );
+    }
+    shoot(&pane, "pane-wide.png");
 
     let mut random = Prng::new(0x5D0_7E57_5EED);
     for step in 0..200 {
@@ -191,12 +237,34 @@ fn the_pane_draws_what_neovim_draws() {
     println!("(d) the preview is drawn in the grid and is not in the buffer");
     shoot(&pane, "pane-preview.png");
 
-    // Idle cost, with the window open and nothing happening.
-    let idle = idle_cost(&mut pane, Duration::from_secs(2));
+    // Idle cost, with the window open and nothing happening: the loop blocks
+    // on one channel, so this is the whole story.
+    let idle = idle_cost(&mut pane, Duration::from_secs(2), &mut server, Sweep::Still);
     println!("idle: {idle:.1} ms of processor time over 2 s with the pane open");
     assert!(
-        idle < 100.0,
+        idle < 50.0,
         "the pane burned {idle:.1} ms of processor time while idle"
+    );
+    // And with the pointer crossing the window, which is what a pane sitting
+    // under someone's mouse path actually meets. Sweeping the pointer costs
+    // this test something whether or not the pane hears about it, so the same
+    // sweep beside the window is the control: the window asks for motion only
+    // while a button is down, so the two should not differ.
+    let over = idle_cost(&mut pane, Duration::from_secs(2), &mut server, Sweep::Over);
+    let beside = idle_cost(
+        &mut pane,
+        Duration::from_secs(2),
+        &mut server,
+        Sweep::Beside,
+    );
+    println!(
+        "pointer sweeping for 2 s: {over:.1} ms over the pane, {beside:.1} ms beside it \
+         (the difference is what motion costs the pane)"
+    );
+    assert!(
+        over - beside < 40.0,
+        "moving the pointer over the pane cost it {:.1} ms more than moving it beside",
+        over - beside
     );
 
     // --------------------------------------------- (c) click, then type
@@ -244,6 +312,21 @@ fn the_pane_draws_what_neovim_draws() {
         true => format!("{TYPED}é"),
         false => TYPED.to_owned(),
     };
+    // AltGr is `ISO_Level3_Shift`, a level the layout applies, not a modifier
+    // Neovim names. These have to arrive as text: if the pane reported AltGr
+    // as Alt they would arrive as `<M-q>` and friends and nothing would land.
+    let altgr: String = ALTGR
+        .iter()
+        .filter(|(_, base)| press_with_altgr(&mut server, *base))
+        .map(|(character, _)| *character)
+        .collect();
+    assert_eq!(
+        altgr.chars().count(),
+        ALTGR.len(),
+        "the German layout should have every AltGr key this test presses"
+    );
+    let expected = format!("{expected}{altgr}");
+
     let escape = find_key(&server, 0xff1b).expect("the layout has Escape");
     press_key(&mut server, escape);
     let landed = wait_for(PATIENCE, "the typed text to reach the buffer", || {
@@ -253,7 +336,7 @@ fn the_pane_draws_what_neovim_draws() {
     });
     assert_eq!(landed.trim_end(), expected);
     println!(
-        "(c) typing on a German layout landed exactly: {expected:?}{}",
+        "(c) typing on a German layout landed exactly, AltGr included: {expected:?}{}",
         if composed {
             " (with a dead-key sequence)"
         } else {
@@ -286,7 +369,39 @@ fn the_pane_draws_what_neovim_draws() {
     println!("(e) the grid survived a resize to {}x{}", size.0, size.1);
     shoot(&pane, "pane-resized.png");
 
+    // ------------------- closing the window must not lose what was typed
+    // Dictated text is on disk already: the Lua side writes after every
+    // append. What is not on disk is what the user typed since, and in this
+    // mode closing the window ends the editor — so the pane has to write
+    // first. Managed mode never faces this: its editor outlives the daemon.
+    const BY_HAND: &str = "noch von Hand getippt";
+    let insert = find_key(&server, u32::from(b'o')).expect("the layout has an `o`");
+    press_key(&mut server, insert);
+    assert!(type_text(&mut server, BY_HAND), "the layout has the text");
+    let escape = find_key(&server, 0xff1b).expect("the layout has Escape");
+    press_key(&mut server, escape);
+    wait_for(PATIENCE, "the hand-typed line to reach the buffer", || {
+        let _ = pane.step(Duration::from_millis(50));
+        buffer_text(&mut pane).contains(BY_HAND).then_some(())
+    });
+
+    // Not written yet: Neovim only writes when spokenpad appends.
+    let on_disk = std::fs::read_to_string(&file).expect("read the dictation file");
+    assert!(
+        !on_disk.contains(BY_HAND),
+        "this test is not proving anything: the text was already on disk"
+    );
+    close_window(&server, pane.window().id());
+    wait_for(PATIENCE, "the pane to notice the window closed", || {
+        matches!(pane.step(Duration::from_millis(50)), Ok(Status::Finished)).then_some(())
+    });
     drop(pane);
+    let on_disk = std::fs::read_to_string(&file).expect("read the dictation file");
+    assert!(
+        on_disk.contains(BY_HAND),
+        "closing the window lost what was typed into it:\n{on_disk}"
+    );
+    println!("closing the window wrote the buffer: what was typed by hand is in the file");
 }
 
 // ------------------------------------------------------------------ helpers
@@ -313,6 +428,20 @@ vim.api.nvim_win_set_cursor(0, { 1, 0 })
         vec![Value::from(lua), Value::Array(Vec::new())],
         PATIENCE,
     );
+}
+
+/// How many pixels of the first row's cells `columns` are not the default
+/// background, which is how "was anything actually drawn here?" is asked.
+fn painted_pixels(pane: &Pane, columns: std::ops::Range<u32>) -> usize {
+    let metrics = pane.metrics();
+    let background = pane.screen().defaults().background.0;
+    let (pixels, width, _) = pane.framebuffer();
+    (0..metrics.height)
+        .flat_map(|y| {
+            (columns.start * metrics.width..columns.end * metrics.width).map(move |x| (x, y))
+        })
+        .filter(|(x, y)| pixels[(y * u32::from(width) + x) as usize] != background)
+        .count()
 }
 
 /// The whole grid as one string, for a "does this text show?" question.
@@ -426,12 +555,41 @@ fn nvim_size(pane: &mut Pane) -> (u16, u16) {
     (option(pane, "columns"), option(pane, "lines"))
 }
 
-/// Processor time this process spends while the pane sits idle.
-fn idle_cost(pane: &mut Pane, over: Duration) -> f64 {
+/// Where the pointer goes while the idle cost is measured.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Sweep {
+    /// Left where it is; the loop blocks for the whole period.
+    Still,
+    /// Back and forth across the pane.
+    Over,
+    /// The same sweep just above the pane, as the control.
+    Beside,
+}
+
+/// Processor time this process spends over `period` with the pane open.
+fn idle_cost(pane: &mut Pane, period: Duration, server: &mut XServer, sweep: Sweep) -> f64 {
+    let rect = pane.window().geometry().expect("the pane's geometry");
+    let y = match sweep {
+        Sweep::Beside => (rect.y - 40).max(0),
+        _ => rect.y + rect.height as i32 / 2,
+    };
+    let y = i16::try_from(y).expect("on screen");
+    let left = i16::try_from(rect.x).expect("on screen");
     let before = cpu_milliseconds();
-    let deadline = Instant::now() + over;
+    let deadline = Instant::now() + period;
+    let mut step = 0_i16;
     while Instant::now() < deadline {
-        let _ = pane.step(deadline.saturating_duration_since(Instant::now()));
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if sweep == Sweep::Still {
+            // Nothing to do but wait, which is exactly what is being measured.
+            let _ = pane.step(remaining);
+            continue;
+        }
+        // The pointer is moved from this thread, so the cost of moving it is
+        // in both the measurement and its control.
+        harness::move_pointer(server, left + (step % 64), y);
+        step += 4;
+        let _ = pane.step(remaining.min(Duration::from_millis(20)));
     }
     cpu_milliseconds() - before
 }
@@ -464,6 +622,25 @@ fn shoot(pane: &Pane, name: &str) {
         Err(error) => println!("could not write {}: {error:#}", path.display()),
     }
 }
+
+/// A buffer line whose first character takes two cells, plus a narrow symbol
+/// and a letter outside ASCII.
+const WIDE_LINE: &str = "vim.api.nvim_buf_set_lines(0, 0, -1, false, { '\u{6f22}\u{5b57} and \u{2713} and \u{df}' })\n\
+     vim.api.nvim_win_set_cursor(0, { 1, 0 })";
+
+/// What AltGr types on a German layout, named by the key's unshifted keysym
+/// rather than by its position.
+const ALTGR: [(char, u32); 9] = [
+    ('@', 'q' as u32),
+    ('\u{20ac}', 'e' as u32),
+    ('{', '7' as u32),
+    ('[', '8' as u32),
+    (']', '9' as u32),
+    ('}', '0' as u32),
+    ('\\', 0xdf), // the sharp-s key
+    ('~', 0x2b),  // the plus key
+    ('|', 0x3c),  // the less-than key
+];
 
 /// The operations the random walk picks from: edits, scrolls and jumps, all
 /// things that make Neovim redraw differently.
