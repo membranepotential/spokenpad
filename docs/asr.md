@@ -41,6 +41,7 @@ punctuation.
 | model | size | WER | wall time, 100 s of audio |
 |---|---|---|---|
 | `sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8` (default) | 670 MB | 18.7% | ~20 s |
+| `sherpa-onnx-nemo-parakeet-unified-en-0.6b-int8-non-streaming` | 633 MB | 8.2% | ~20 s |
 | `sherpa-onnx-whisper-tiny.en` | 100 MB (int8) | 23.0% | ~9 s |
 | `sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2025-09-09`, `language = "en"` | 240 MB | 29.4% | ~10 s |
 
@@ -48,6 +49,16 @@ Parakeet's row is greedy decoding against the corrected `shell-commands`
 reference (2026-09-21); the Whisper and SenseVoice rows were measured the same
 day before that correction, against a reference with one sentence the clip
 does not contain, so they read slightly high.
+
+`parakeet-unified-en-0.6b` is the same `parakeet` family with another
+`model_dir`, and it is the one model measured here whose beam search and
+hotwords work (next section). **Read its WER with the next paragraph, not on
+its own.** It is English only, and it does not fail gracefully on another
+language: it transliterates German into English words, or returns nothing at
+all. Replaying the author's 176 recovery captures, it left 16 speech chunks
+empty where the default left none, and returned 20% fewer words. Use it only
+if you dictate English and nothing else. Measurements:
+[experiments/2026-09-21-parakeet-unified-rnnt.md](experiments/2026-09-21-parakeet-unified-rnnt.md).
 
 Wall time is five `spokenpad transcribe` runs, each loading the model, on a
 machine busy with parallel builds; it compares the models, not the decode
@@ -129,6 +140,17 @@ path, beam search left 19 speech chunks empty (2 still empty after the
 retry without trailing silence) and greedy 4 (all recovered by the retry).
 Setting a non-empty `vocabulary` switches to beam search and accepts that
 cost.
+
+The defect is **TDT-only**, and spokenpad cannot detect that for you.
+sherpa-onnx builds its NeMo beam-search decoder with a TDT flag it takes from
+the encoder's `url` metadata, and every remaining defect sits on the TDT side
+of that flag. Measured on 1.13.8, the same 10.6 s of clear speech that TDT
+beam search decodes to `""` decodes to its words under beam search on
+`parakeet-unified-en-0.6b`, a NeMo RNNT that is not TDT, and hotwords bias
+that model's output as the tuning table below describes. Which side of the
+flag a directory holds sits in an ONNX metadata entry that sherpa-onnx does
+not expose, so spokenpad does not read it: `decoding` says what you want, and
+the model you point `model_dir` at decides whether beam search is safe.
 
 ## Hotwords: biasing the beam, not rewriting the output
 

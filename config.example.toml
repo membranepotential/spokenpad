@@ -118,7 +118,9 @@ num_threads = 6
 # Beam search on Parakeet TDT returns nothing, or an invented "Yeah.", for
 # clear speech about one time in five (upstream sherpa-onnx issue #3267);
 # replaying 170 real captures, it left 19 speech chunks empty against 4 for
-# greedy. Use it only if you need `vocabulary`.
+# greedy. Use it only if you need `vocabulary`. The defect is specific to TDT
+# models: on a NeMo transducer that is not TDT, such as
+# parakeet-unified-en-0.6b, beam search and hotwords both work.
 # decoding = "greedy_search"
 
 # Per-token bias applied to each phrase in `vocabulary`; implies beam search.
