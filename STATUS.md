@@ -53,8 +53,7 @@ never takes focus. Fully local, CPU-only. Next milestone: public release.
 
 ## Decided
 - Hard constraints: docs/constraints.md. No input device is read: keys are
-  bound in the WM to the control socket CLI. Rust-only since 09-21; TOML,
-  nvim Lua UI and the tested progressive-commit policy stay. No paste path.
+  bound in the WM to the control socket CLI. Rust-only. No paste path.
 - Cancel only while recording; a tap under 120ms is discarded with a notice;
   silence is not decoded; notices are ranked, shown in the winbar.
 - 09-21 (user): post-roll 250 ms stays; no "no speech" notice; no LLM
