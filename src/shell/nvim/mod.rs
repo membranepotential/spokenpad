@@ -1072,21 +1072,49 @@ impl Drop for SpawnedEditorGuard {
 /// The file is created before the editor is started, so that its name is
 /// settled and its permissions are ours from the first byte. A spawn that then
 /// failed used to leave a zero-byte file behind on every attempt. Anything
-/// with content in it is left alone: that is the user's transcript.
+/// with content in it is left alone: that is the user's transcript. A pending
+/// passage that `spokenpad editor` took is made pending again instead.
 struct NewFileGuard {
     path: PathBuf,
     keep: bool,
+    /// The socket whose pending pointer this passage was taken from, so it
+    /// can be restored if the editor never starts.
+    taken_from: Option<PathBuf>,
 }
 
 impl NewFileGuard {
     /// The pending passage, if dictation went to a file while no editor was
-    /// open, so the new editor shows it; otherwise a new, empty file.
+    /// open, so the new editor shows it; otherwise a new, empty file. For an
+    /// editor the daemon opens itself, on the thread that writes the passage;
+    /// the pointer is settled once the editor holds the file.
     fn claim(config: &Nvim) -> Result<Self> {
         let path = match passage::pending(config) {
             Some(pending) => pending,
             None => new_file(config)?,
         };
-        Ok(Self { path, keep: false })
+        Ok(Self {
+            path,
+            keep: false,
+            taken_from: None,
+        })
+    }
+
+    /// As [`claim`](Self::claim), for `spokenpad editor`: the pending passage
+    /// is taken, so the daemon starts a new one rather than write into the
+    /// file this editor shows.
+    fn take(config: &Nvim) -> Result<Self> {
+        Ok(match passage::take(config)? {
+            Some(pending) => Self {
+                path: pending,
+                keep: false,
+                taken_from: Some(config.socket_path.clone()),
+            },
+            None => Self {
+                path: new_file(config)?,
+                keep: false,
+                taken_from: None,
+            },
+        })
     }
 
     fn path(&self) -> &Path {
@@ -1103,7 +1131,14 @@ impl Drop for NewFileGuard {
         if self.keep {
             return;
         }
-        if fs::metadata(&self.path).is_ok_and(|metadata| metadata.len() == 0) {
+        if let Some(socket) = &self.taken_from {
+            if let Err(error) = passage::restore(socket, &self.path) {
+                log::warn!(
+                    "{} is no longer the pending dictation file: {error:#}",
+                    self.path.display()
+                );
+            }
+        } else if fs::metadata(&self.path).is_ok_and(|metadata| metadata.len() == 0) {
             let _ = fs::remove_file(&self.path);
         }
     }
@@ -1281,12 +1316,15 @@ fn resolve_init(config: &Nvim) -> Result<Option<PathBuf>> {
 /// whatever terminal it was run from, listening on the dictation socket.
 ///
 /// It opens the pending passage when dictation went to a file while no
-/// editor was open, and a new dictation file otherwise. It writes the
+/// editor was open, and a new dictation file otherwise. A pending passage is
+/// taken: until the daemon attaches, what it writes goes to a new passage,
+/// never into the file this editor already shows. It writes the
 /// ownership marker the way a spawn does, so the daemon adopts it on the next
 /// key-down. Returns only on failure: a live editor already on the socket, or
 /// an editor that could not be executed.
 pub fn open_editor(config: &Nvim) -> Result<Infallible> {
-    // The guard removes a new file again if the editor never starts.
+    // If the editor never starts, the guard removes a new file again or
+    // makes a taken passage pending again.
     let (_passage, mut command) = editor_command(config)?;
     let error = command.exec();
     Err(error).context("start the dictation editor")
@@ -1313,7 +1351,7 @@ fn editor_command(config: &Nvim) -> Result<(NewFileGuard, Command)> {
             }
         }
     }
-    let passage = NewFileGuard::claim(config)?;
+    let passage = NewFileGuard::take(config)?;
     if let Some(parent) = config.socket_path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("create socket directory {}", parent.display()))?;

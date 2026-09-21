@@ -6,14 +6,23 @@
 //! file — the *pending passage* — with the same paragraph rule the editor
 //! applies (`transactional_append` in `spokenpad.lua`), and the path is kept
 //! beside the socket in `<socket>.pending`. The next editor, however it is
-//! opened, starts on that file, so it shows everything said meanwhile; once
-//! the daemon has pinned it in an editor, the pointer is removed.
+//! opened, starts on that file, so it shows everything said meanwhile.
+//!
+//! The file is never written behind an editor's back, since that editor's
+//! buffer would go stale and its next save would stop at nvim's "file
+//! changed since reading" prompt. The daemon opens the passage in an editor
+//! only on its own editor thread, the thread that writes it, and removes the
+//! pointer once the editor holds it. `spokenpad editor`, a separate process,
+//! [`take`]s the passage instead: the pointer is removed before the editor
+//! reads the file, under a lock every write holds too, so a write either
+//! finishes before the editor reads the file or starts a new passage.
 use super::{new_file, utf8_path};
 use crate::config::Nvim;
 use anyhow::{Context, Result};
 use std::{
-    fs,
+    fs::{self, File, OpenOptions},
     io::Write,
+    os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
     path::{Path, PathBuf},
 };
 
@@ -29,13 +38,14 @@ pub struct DetachedWrite {
 /// Appends committed text to the pending passage, starting one if there is
 /// none, and does not return until the file is on disk.
 pub fn append(config: &Nvim, text: &str, continued: bool) -> Result<DetachedWrite> {
+    let _lock = lock(&config.socket_path)?;
     let (path, started) = match pending(config) {
         Some(path) => (path, false),
         None => {
             let path = new_file(config)?;
             // The text is written either way. A pointer that could not be
             // saved only means the next write starts another file.
-            if let Err(error) = write_pointer(config, &path) {
+            if let Err(error) = write_pointer(&config.socket_path, &path) {
                 log::warn!("could not record the pending dictation file: {error:#}");
             }
             (path, true)
@@ -67,9 +77,17 @@ pub fn pending(config: &Nvim) -> Option<PathBuf> {
     (path.starts_with(&root) && fs::metadata(&path).ok()?.is_file()).then_some(path)
 }
 
-/// Forgets the pending passage once an editor holds `pinned`. A pointer to a
-/// different file is kept: that passage has not been shown yet.
+/// Forgets the pending passage once an editor the daemon opened holds
+/// `pinned`. A pointer to a different file is kept: that passage has not
+/// been shown yet.
 pub fn settle(config: &Nvim, pinned: &Path) {
+    let _lock = match lock(&config.socket_path) {
+        Ok(lock) => lock,
+        Err(error) => {
+            log::warn!("could not clear the pending dictation pointer: {error:#}");
+            return;
+        }
+    };
     let Some(pending) = pending(config) else {
         return;
     };
@@ -80,8 +98,61 @@ pub fn settle(config: &Nvim, pinned: &Path) {
     }
 }
 
-fn write_pointer(config: &Nvim, path: &Path) -> Result<()> {
+/// Takes the pending passage for an editor that is about to open it, from
+/// another process than the daemon's. The pointer is gone when this
+/// returns, so no later write can land in the file that editor shows.
+pub fn take(config: &Nvim) -> Result<Option<PathBuf>> {
+    let _lock = lock(&config.socket_path)?;
+    let Some(path) = pending(config) else {
+        return Ok(None);
+    };
     let pointer = pointer_path(&config.socket_path);
+    fs::remove_file(&pointer).with_context(|| format!("remove {}", pointer.display()))?;
+    Ok(Some(path))
+}
+
+/// Makes `path` the pending passage again after the editor that took it did
+/// not start, unless another passage was started meanwhile.
+pub fn restore(socket: &Path, path: &Path) -> Result<()> {
+    let _lock = lock(socket)?;
+    if fs::symlink_metadata(pointer_path(socket)).is_ok() {
+        return Ok(());
+    }
+    write_pointer(socket, path)
+}
+
+/// An exclusive lock on `<socket>.pending.lock`, held until it is dropped.
+/// It serializes the pending passage and its pointer between the daemon and
+/// `spokenpad editor`, which are separate processes.
+fn lock(socket: &Path) -> Result<File> {
+    let mut name = socket.as_os_str().to_owned();
+    name.push(".pending.lock");
+    let path = PathBuf::from(name);
+    let directory = path.parent().context("socket path has no directory")?;
+    fs::create_dir_all(directory)?;
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .mode(0o600)
+        .open(&path)
+        .with_context(|| format!("open {}", path.display()))?;
+    loop {
+        // SAFETY: `file` owns a live descriptor for the duration of the call,
+        // and flock retains no pointer. Closing it when `file` is dropped
+        // releases the lock.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 {
+            return Ok(file);
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(error).with_context(|| format!("lock {}", path.display()));
+        }
+    }
+}
+
+fn write_pointer(socket: &Path, path: &Path) -> Result<()> {
+    let pointer = pointer_path(socket);
     let directory = pointer.parent().context("socket path has no directory")?;
     fs::create_dir_all(directory)?;
     let mut temporary = tempfile::NamedTempFile::new_in(directory)?;

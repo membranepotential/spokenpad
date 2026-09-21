@@ -279,6 +279,71 @@ fn attach_mode_adopts_the_users_editor_on_the_pending_passage() {
     );
 }
 
+/// The daemon may fail to reach an editor the user just opened on the
+/// pending passage (a probe that timed out while it started). The commit it
+/// then writes directly must not land in the file that editor shows: its
+/// buffer would go stale, and the next append's save would stop at nvim's
+/// "file changed since reading" prompt or overwrite the direct write.
+#[test]
+fn a_passage_an_editor_opened_is_never_written_behind_its_back() {
+    if !nvim_or_skip() {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let config = attach(directory.path());
+    let mut session = NvimSession::new(config.clone());
+    let first = session
+        .append_detached("said with no editor", false)
+        .unwrap();
+    let (opened, _editor) = open_user_editor(&config);
+    assert_eq!(opened, first.path);
+
+    let second = session
+        .append_detached("said while the editor started", false)
+        .unwrap();
+    assert_ne!(
+        second.path, first.path,
+        "the editor's file was written behind its back"
+    );
+    assert!(second.started);
+    assert_eq!(
+        fs::read_to_string(&first.path).unwrap(),
+        "said with no editor\n"
+    );
+
+    assert_eq!(session.ensure().unwrap(), Some(first.path.clone()));
+    session.append("said into the editor", false).unwrap();
+    assert_eq!(
+        fs::read_to_string(&first.path).unwrap(),
+        "said with no editor\n\nsaid into the editor\n"
+    );
+    assert_eq!(
+        fs::read_to_string(&second.path).unwrap(),
+        "said while the editor started\n"
+    );
+    assert_eq!(
+        passage::pending(&config),
+        Some(second.path),
+        "the passage no editor has shown stays pending"
+    );
+}
+
+/// An editor that took the pending passage and then never started gives it
+/// back, so the next editor still opens on it.
+#[test]
+fn an_editor_that_never_starts_leaves_the_passage_pending() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = attach(directory.path());
+    let session = NvimSession::new(config.clone());
+    let first = session.append_detached("kept", false).unwrap();
+    let (taken, _command) = editor_command(&config).unwrap();
+    assert_eq!(taken.path(), first.path);
+    assert_eq!(passage::pending(&config), None, "the passage is taken");
+    drop(taken);
+    assert_eq!(passage::pending(&config), Some(first.path.clone()));
+    assert_eq!(fs::read_to_string(&first.path).unwrap(), "kept\n");
+}
+
 #[test]
 fn a_second_editor_is_refused_while_one_is_listening() {
     if !nvim_or_skip() {
