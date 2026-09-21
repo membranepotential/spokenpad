@@ -131,8 +131,25 @@ Two decisions changed from the plan.
 - **x11rb runs with `allow-unsafe-code`**, which is the feature that provides
   `XCBConnection`. That is the only x11rb connection type `xkbcommon`'s X11
   half accepts, and reading the layout from the server is what makes dead keys
-  and a per-device `setxkbmap` work. It links the system `libxcb`, which every
-  X11 machine has. This was already flagged in the P0 experiment.
+  and a per-device `setxkbmap` work. This was already flagged in the P0
+  experiment.
+
+**The pane is the first part of spokenpad that is not self-contained.** The
+model runtime is linked statically so an installed binary needs nothing beside
+it; the pane needs four system libraries and one program:
+
+| what | why |
+|---|---|
+| `libxcb`, `libxcb-xkb` | the X11 connection, and XKB over it |
+| `libxkbcommon`, `libxkbcommon-x11` | the keyboard layout |
+| `fc-match` on `PATH` | which file "monospace" is |
+
+All of them are on any Linux desktop that can show a window, so this is not a
+new burden in practice — but it is a change to what "no library beside it"
+means, and the install notes have to say so when P2 lands. Measured with
+`ldd`: today's `spokenpad` binary links none of them, because nothing in the
+daemon opens a pane yet and the linker drops what nothing calls; the
+`examples/pane` binary links all four.
 
 One real bug was found by the test rather than by reading. **The thread that
 waits for X events did not stop when the pane was dropped**: the pane woke it

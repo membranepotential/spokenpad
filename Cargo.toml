@@ -32,6 +32,11 @@ tempfile = "3.27"
 toml = { version = "0.8", features = ["preserve_order"] }
 # The pane's window. `allow-unsafe-code` is what provides `XCBConnection`, the
 # one x11rb connection type `xkbcommon`'s X11 half can read a keymap from.
+# Unlike the model runtime above, these two are not static: a binary that opens
+# a pane needs libxcb, libxcb-xkb, libxkbcommon and libxkbcommon-x11 beside it,
+# and `fc-match` on PATH to find a font. Today nothing in the daemon opens one,
+# so the shipped binary still links none of them; wiring `nvim.mode = "pane"`
+# in is what adds them, and what has to say so in the install notes.
 x11rb = { version = "0.14", features = ["allow-unsafe-code"] }
 # The keyboard layout the X server actually loaded, with dead keys and
 # Compose. The `x11` feature is the half that reads it over the connection.
