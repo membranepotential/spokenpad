@@ -173,7 +173,7 @@ workload; without it, only the decodes that produce text.
 
 `scripts/gladia-references.sh` builds `eval-samples/local/references.json` by
 sending each recording to [Gladia](https://gladia.io) and keeping the
-transcript. The author's corpus of 2026-09-21 is 181 captures and 73 minutes:
+transcript. The author's corpus of 2026-09-21 is 181 captures and 75 minutes:
 124 English, 38 German and 19 that nobody spoke in
 ([the experiment](experiments/2026-09-21-gladia-reference-transcripts.md)).
 The harness prints a WER per reference language, and `--language de` scores

@@ -51,7 +51,7 @@ Probe 3's setting is the script's default.
 ## Data
 
 Every wav in `~/.local/state/spokenpad/audio` (176 recovery captures) and the
-five committed eval clips: 181 files, 73.4 minutes, 16 kHz mono. The responses
+five committed eval clips: 181 files, 75.1 minutes, 16 kHz mono. The responses
 and the index live in the git-ignored `eval-samples/local/`. Transcripts of the
 author's speech are private and appear nowhere in the repository.
 
@@ -59,10 +59,13 @@ Result of the full run:
 
 | | captures | reference words |
 |---|---|---|
-| English | 124 | 5360 |
-| German | 38 | 1427 |
+| English | 124 | 5383 |
+| German | 38 | 1449 |
 | no speech at all | 19 | 0 |
-| **total** | **181** | **6787** |
+| **total** | **181** | **6832** |
+
+Word counts are the harness's normalised tokens, which split `rm-rf` into two;
+counting whitespace-separated words instead gives 45 fewer.
 
 Every one of the 181 deletions returned HTTP 202, so no audio and no
 transcript is left on Gladia.
