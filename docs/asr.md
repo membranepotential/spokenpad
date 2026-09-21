@@ -8,7 +8,7 @@ the `[asr]` settings in [`config.rs`](../src/config.rs).
 ## Model families
 
 spokenpad runs offline models through
-[sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) 1.13.6, CPU only
+[sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) 1.13.8, CPU only
 (see [constraints.md](constraints.md#cpu-only)). `asr.family` selects how the
 files are loaded; the functional core sees only the `Recognizer` trait.
 
@@ -54,9 +54,10 @@ machine busy with parallel builds; it compares the models, not the decode
 speed below. Whisper tiny.en punctuates but misses technical words (`uda
 rules` for `udev rules`). SenseVoice writes English in capitals.
 
-Moonshine is not offered. sherpa-onnx 1.13.6 fails on every Moonshine v2
-window longer than about ten seconds (an onnxruntime broadcast error, then an
-empty result), and VAD windows are often longer.
+Moonshine is not offered. Measured on sherpa-onnx 1.13.6, it failed on every
+Moonshine v2 window longer than about ten seconds (an onnxruntime broadcast
+error, then an empty result), and VAD windows are often longer. Not re-measured
+on 1.13.8.
 
 ### Whisper's 30-second window
 

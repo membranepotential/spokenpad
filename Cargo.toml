@@ -22,9 +22,9 @@ serde_json = "1.0"
 sha2 = "0.11"
 # Static: sherpa-onnx and onnxruntime are linked into the one executable, so an
 # installed binary needs no library beside it.
-sherpa-onnx = { version = "=1.13.6", default-features = false, features = ["static"] }
+sherpa-onnx = { version = "=1.13.8", default-features = false, features = ["static"] }
 # Pin the FFI and the safe wrapper together: native config layout is versioned.
-sherpa-onnx-sys = { version = "=1.13.6", default-features = false, features = ["static"] }
+sherpa-onnx-sys = { version = "=1.13.8", default-features = false, features = ["static"] }
 signal-hook = "0.4"
 # The pane's glyphs: hinted rasterising of one grapheme at a time.
 swash = "0.2"

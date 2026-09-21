@@ -119,8 +119,8 @@ pub fn model_config(asr: &Asr) -> Result<OfflineModelConfig> {
 impl Transcriber {
     pub fn new(config: &Asr, rate: u32) -> Result<Self> {
         ensure!(
-            sherpa_onnx::version().trim_start_matches('v') == "1.13.6",
-            "native sherpa version {} does not match Rust bindings 1.13.6",
+            sherpa_onnx::version().trim_start_matches('v') == "1.13.8",
+            "native sherpa version {} does not match Rust bindings 1.13.8",
             sherpa_onnx::version()
         );
         let mut c = OfflineRecognizerConfig {

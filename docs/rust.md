@@ -118,7 +118,7 @@ This is an empirical input-context fix for omitted terminal speech, not an
 extra recording interval or a second decode. The original capture, saved WAV,
 VAD boundaries, and committed offsets are unchanged by these synthetic frames.
 Real samples and zero PCM are concatenated before a single waveform call:
-the pinned [native offline stream implementation](https://github.com/k2-fsa/sherpa-onnx/blob/v1.13.6/sherpa-onnx/csrc/offline-stream.cc#L150-L160)
+the pinned [native offline stream implementation](https://github.com/k2-fsa/sherpa-onnx/blob/v1.13.8/sherpa-onnx/csrc/offline-stream.cc#L150-L160)
 finalizes feature extraction on that call.
 
 ## Configuration and deployment
@@ -160,7 +160,7 @@ second daemon losing the race for
 lifetime, never unlinked) reports.
 
 Run `cargo build --locked --release`. The sherpa crates' `static` feature
-downloads the pinned 1.13.6 static libraries (or uses `SHERPA_ONNX_LIB_DIR`)
+downloads the pinned 1.13.8 static libraries (or uses `SHERPA_ONNX_LIB_DIR`)
 and links sherpa-onnx and onnxruntime into the executable, so the binary needs
 only system libraries (libc, libstdc++, PortAudio) and runs from any
 directory; there is no runpath and nothing to keep beside it.
@@ -269,5 +269,5 @@ the Python implementation unless identified as Rust measurements. Tests and
 saved recordings cannot establish live microphone reliability; that requires
 dictation through the running Rust service.
 
-Native API sources: [sherpa Rust wrapper](https://docs.rs/sherpa-onnx/1.13.6/sherpa_onnx/),
+Native API sources: [sherpa Rust wrapper](https://docs.rs/sherpa-onnx/1.13.8/sherpa_onnx/),
 [i3 IPC](https://i3wm.org/docs/ipc.html).

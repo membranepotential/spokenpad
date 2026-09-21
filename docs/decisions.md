@@ -808,3 +808,27 @@ Not fixed here: the same reach exists on the trailing side, where a chunk's
 the same 400 captures, 201 windows affected). It predates this work, it is
 bounded by `pad_seconds`, and clamping it would change far more windows than
 this did, so it wants the WER corpus first.
+
+## sherpa-onnx moves to 1.13.8 (2026-09-21)
+
+The two `=1.13.6` pins and the version assert in `Transcriber::new` now read
+`1.13.8`. Nothing in 1.13.7 or 1.13.8 touches the offline NeMo transducer,
+the NeMo TDT decoders, Silero VAD, Whisper or SenseVoice; the only change
+that could move a number is onnxruntime 1.27 → 1.28.2, and it moved none. The
+five eval clips score the same per clip and in aggregate on both versions
+(greedy 18.7% VAD / 14.3% `--whole`, beam 15.4%), the Rust crates' FFI struct
+definitions are byte-identical outside speaker diarization, and `ldd` still
+shows no sherpa or onnxruntime shared library beside the binary.
+
+The reason to take it is Qwen3-ASR: 1.13.7 carries the fix for that model
+hallucinating text on silent audio when hotwords or a language are set
+(#3907), and the centered-STFT feature alignment (#3873). Both are
+prerequisites for evaluating it as a candidate with working vocabulary
+biasing.
+
+It does **not** fix `modified_beam_search` on Parakeet TDT. The same clear
+10.6 s tail that decoded to `""` on 1.13.6 still decodes to `""` on 1.13.8,
+with and without trailing silence, while greedy returns the words. The
+decision above stands: greedy by default, and no hotwords on the current
+model. Measurements in
+[experiments/2026-09-21-sherpa-1.13.8-upgrade.md](experiments/2026-09-21-sherpa-1.13.8-upgrade.md).
