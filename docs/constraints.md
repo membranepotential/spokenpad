@@ -5,11 +5,10 @@
 are in [hardware.md](hardware.md); the rejected alternatives that led here
 are in [decisions.md](decisions.md).
 
-Every rule below traces to an observed failure in
-[Handy](https://github.com/cjpais/Handy) 0.9.6, evaluated first and rejected
-(see [decisions.md](decisions.md#rejected-handy-as-a-baseline)). These are
-not defaults chosen for taste — they are constraints earned by breaking a
-running system.
+Every rule below traces to an observed failure of the dictation tool this
+project replaced, which was evaluated first and rejected (see the first entry
+in [decisions.md](decisions.md)). These are not defaults chosen for taste —
+they are constraints earned by breaking a running system.
 
 | Rule | Observed failure it prevents | Damaged the system? |
 |---|---|---|
@@ -17,21 +16,21 @@ running system.
 | **Never** synthesise characters (`xdotool type` / enigo) | rewrote the core X keymap | yes |
 | **Never write to a window the user did not open for this** | text pasted into whatever had focus | no |
 | **Every committed sample decoded exactly once**, never from a growing buffer | growing-buffer re-decode dropped long utterances | no (functional, silent) |
-| **CPU only** | auto-selection bound the model to the 4 GB GTX 1650 | no |
+| **CPU only** | provider auto-selection bound the model to a small discrete GPU | no |
 | **Bias vocabulary at decode time**, never fuzzy replacement | edit-distance rewrite turned real words into wrong ones | no |
 | **No window spokenpad opens may take focus** | focus steal aborted transcription mid-utterance | no |
 
 ## Read evdev read-only
 
-Handy grabbed the M4 key by cloning the keyboard through a uinput virtual
-device (the standard way to intercept a key system-wide on Linux: grab the
-real device with `EVIOCGRAB`, then re-emit a filtered event stream through a
-new virtual one). The clone device does not inherit the per-device
-`setxkbmap` layout applied to the physical keyboard by
-`~/.local/bin/keychron-add.sh` (see [hardware.md](hardware.md)) — it gets
-whatever X11's default layout is. The result: keyboard layout for that
-input path silently reverted, corrupting keystrokes system-wide until the
-physical device was replugged.
+The replaced tool grabbed its hotkey by cloning the keyboard through a uinput
+virtual device (the standard way to intercept a key system-wide on Linux: grab
+the real device with `EVIOCGRAB`, then re-emit a filtered event stream through
+a new virtual one). The clone device does not inherit a per-device
+`setxkbmap -device` layout applied to the physical keyboard (see
+[hardware.md](hardware.md#per-device-keyboard-layouts)) — it gets whatever
+X11's default layout is. The result: keyboard layout for that input path
+silently reverted, corrupting keystrokes system-wide until the physical
+device was replugged.
 
 **Rule:** spokenpad reads `/dev/input/event*` for the hotkey only, never calls
 `EVIOCGRAB`, and never creates a uinput clone. It observes key state; it does
@@ -39,15 +38,14 @@ not intercept or re-emit it.
 
 ## Never synthesise characters
 
-Handy typed transcribed text with synthetic keystrokes (`xdotool type` /
-the equivalent enigo call). Both work by rewriting the *core* X keymap on the
-fly to find keycodes for arbitrary Unicode characters, one character at a
-time. This is not layout-neutral: it mutates global X server state, is why
+The replaced tool typed transcribed text with synthetic keystrokes
+(`xdotool type` / the equivalent enigo call). Both work by rewriting the
+*core* X keymap on the fly to find keycodes for arbitrary Unicode characters,
+one character at a time. This is not layout-neutral: it mutates global X server state, is why
 this failure mode is not merely rare-but-possible.
 
-It is also slow. Measured on this project's hardware: **183 ms** via
-clipboard + `ctrl+v` versus **3.3 s** via character synthesis for the same
-159-character string (README.md).
+It is also slow. Measured on one machine: **183 ms** via clipboard + `ctrl+v`
+versus **3.3 s** via character synthesis for the same 159-character string.
 
 **Rule:** spokenpad never synthesises characters.
 
@@ -57,7 +55,7 @@ appended to a neovim buffer over that editor's msgpack-RPC socket
 than the clipboard sink it replaced: no keystroke is sent anywhere, no global
 X state is read or written, and the transcript never crosses a shell or an
 argv boundary — it is a msgpack string argument, so a dictated `$(rm -rf ~)`
-is just text. The clipboard round trip (`inject.py`) is deleted; see
+is just text. The clipboard round trip is deleted; see
 [decisions.md](decisions.md#the-sink-is-neovim-not-the-clipboard).
 
 Since 2026-09-19 the clipboard is written again, but only as a copy, never as
@@ -69,18 +67,19 @@ above stays impossible. See
 
 ## Every committed sample is decoded exactly once, never streamed
 
-Handy streamed audio into the model continuously, re-decoding a growing
-buffer as more audio arrived. Measured real-time factor on this project's
-hardware: **1.37x real-time** — barely faster than the utterance itself —
-and it silently dropped audio past a 30 s cap, with no error surfaced to the
-user (STATUS.md). A 37 s dictation was discarded outright.
+The replaced tool streamed audio into the model continuously, re-decoding a
+growing buffer as more audio arrived. Measured real-time factor on the same
+machine: **1.37x real-time** — barely faster than the utterance itself — and
+it silently dropped audio past a 30 s cap, with no error surfaced to the
+user. A 37 s dictation was discarded outright.
 
 **Rule:** every captured sample that reaches the buffer is decoded **exactly
 once** (two exceptions, both only after a decode produced nothing: a speech
 chunk is decoded again without trailing silence, and when every chunk of a
-release is still empty the whole remainder is decoded once), and no committed text ever comes from re-decoding audio that is still
-growing. Cost is therefore linear in the audio, and nothing is capped or
-discarded at any length.
+release is still empty the whole remainder is decoded once), and no
+committed text ever comes from re-decoding audio that is still growing. Cost
+is therefore linear in the audio, and nothing is capped or discarded at any
+length.
 
 Until 2026-09-08 that rule was implemented as a single decode of the whole
 buffer after `KeyUp`. It is now implemented *progressively*: the capture is
@@ -88,10 +87,8 @@ split at silence by [`shell/inference.rs`](../src/shell/inference.rs) under
 the merge policy in [`core/segments.rs`](../src/core/segments.rs), driven by
 [`core/decode.rs`](../src/core/decode.rs), into chunks of about ten seconds of
 speech; a chunk is decoded and appended the moment no later audio can change
-it, and releasing the key decodes only the open tail. (`spokenpad.vad` mirrors
-the same splitter offline, for evaluation and the Rust/Python differential
-check — it is not in the daemon's path.) The full design, the rule for
-deciding that a chunk has settled, and the latency budget are in
+it, and releasing the key decodes only the open tail. The full design, the
+rule for deciding that a chunk has settled, and the latency budget are in
 [progressive-commit.md](progressive-commit.md). The `Decode` command in the
 [state machine](../src/core/state.rs) still fires only on
 `Recording → Transcribing`; what it now decodes is the remainder, not the
@@ -101,10 +98,10 @@ that buys.
 ### Segmented is not streamed
 
 "The transcript arrives in pieces" sounds like the failure mode by
-description, so the difference is worth being exact about. What broke Handy
-was re-decoding a *growing* buffer: the same audio decoded again and again as
-more arrived, so cost grew with the utterance and a cap had to be bolted on,
-which then dropped a 37 s dictation silently. Committing a settled chunk keeps
+description, so the difference is worth being exact about. What broke the
+replaced tool was re-decoding a *growing* buffer: the same audio decoded
+again and again as more arrived, so cost grew with the utterance and a cap had
+to be bolted on, which then dropped a 37 s dictation silently. Committing a settled chunk keeps
 both properties that rule protects. No committed region is ever decoded
 twice, so cost stays linear in the audio; and nothing is capped or discarded
 at any length, because a chunk boundary is a pause, not a limit.
@@ -142,13 +139,14 @@ detected run of speech separately costs about four WER points, because the
 model gets no context across a boundary. Runs are therefore merged until a
 chunk holds `vad.chunk_seconds` (10 s) of speech, and each chunk is padded by
 `vad.pad_seconds` (0.5 s) of the real surrounding audio, since Silero's
-boundaries clip word onsets and endings. Measured on the eval samples, per-run
-33.7% → 37.7% WER, merged-and-padded 33.4%. Measured again after the
-endpoint-padding fix, the harness scores the VAD path spokenpad actually uses at
-**17.6%** aggregate WER against **13.9%** whole-buffer (`uv run
-scripts/eval.py --vad` and without the flag; Handy 0.9.6 scores 48.7% on the
-same five clips). Splitting is not free on this set — it is bought for
-incremental delivery and for the empty-transcript failure below. Anyone
+boundaries clip word onsets and endings. Measured on the eval samples at the
+time, per-run 33.7% → 37.7% WER, merged-and-padded 33.4%. Measured on
+2026-09-21 with `cargo run --release --example=eval`, the VAD path spokenpad
+actually uses scores **17.6%** aggregate WER; the whole-buffer path (`--whole`)
+scores **18.7%**, because it lacks the empty-chunk retry and loses words of its
+own (see [evaluation.md](evaluation.md)). Before those whole-buffer losses
+appeared it scored 13.9%, so splitting is not free in principle — it is bought
+for incremental delivery and for the empty-transcript failure above. Anyone
 lowering `chunk_seconds` for faster text is spending more of it, and should
 re-run that harness.
 
@@ -167,7 +165,7 @@ The audio after the last settled chunk is decoded once per tick and shown as
 virtual text below the committed transcript, then thrown away. That is an
 extra decode of audio that is still growing, so the invariants that keep it
 on the safe side of this rule are worth stating, and they are asserted in the
-Rust session/nvim tests and retained Python decode tests:
+session, decode and nvim tests:
 
 1. **Preview output never reaches the buffer.** In nvim it is an extmark's
    virtual text, not buffer content, so it cannot be written to the file,
@@ -194,14 +192,16 @@ it lands.
 
 ## CPU only
 
-Handy's model backend auto-selected an execution provider and bound the
-model to the discrete GPU — a GTX 1650 with 4 GB VRAM. That GPU needs to stay
-free for other workloads; the project's stated goal was CPU-only local ASR
-from the start (README.md, STATUS.md: "the 4 GB GTX 1650 stays free").
+The replaced tool's model backend auto-selected an execution provider and
+bound the model to a small discrete GPU, whose memory was needed for other
+work. The goal was CPU-only local ASR from the start, and int8 weights on a
+few CPU threads decode fast enough that a GPU buys nothing
+([asr.md](asr.md#speed-on-a-cpu)).
 
-**Rule:** `Asr.num_threads` is fixed at 6 and the ONNX Runtime provider is
-pinned to `cpu` — [`shell/inference.rs`](../src/shell/inference.rs) sets it
-explicitly for both the recognizer and the VAD, as does the Python reference.
+**Rule:** the ONNX Runtime provider is pinned to `cpu`, with
+`asr.num_threads` threads (default 6) —
+[`shell/inference.rs`](../src/shell/inference.rs) sets it explicitly for both
+the recognizer and the VAD.
 No code path in this project selects a GPU provider, and nothing auto-detects
 one.
 
@@ -209,10 +209,11 @@ one.
 
 An earlier approach corrected ASR output with fuzzy/edit-distance string
 replacement after decoding. On short technical tokens, edit distance is not
-selective enough: `set` → `sed`, `reset` → `rust` (README.md; the
+selective enough: `set` → `sed`, `reset` → `rust` (the
 `[text].replacements` comment in
 [`config.example.toml`](../config.example.toml) names this failure directly,
-and `eval-samples/references.json` keeps it as a scored regression check).
+and `eval-samples/references.json` names it among the wordings a clip
+exercises).
 
 **Rule:** vocabulary correction happens inside decoding, by biasing the beam
 search toward configured hotwords (`asr.vocabulary`,
@@ -242,8 +243,8 @@ next editor opens on that file (see
 
 ## No window spokenpad opens may take focus
 
-Handy's status overlay was a focusable window. When it appeared during
-recording, it could take focus away from the application the user was
+The replaced tool's status overlay was a focusable window. When it appeared
+during recording, it could take focus away from the application the user was
 dictating into, aborting the transcription in progress.
 
 **Rule:** no window this project opens may receive keyboard focus at any point

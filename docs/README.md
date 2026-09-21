@@ -1,29 +1,31 @@
 # spokenpad docs
 
-Local push-to-talk dictation for Linux/X11 (i3). This folder is the technical
-reference behind the one-page pitch in the [project README](../README.md) and
-the live dashboard in [STATUS.md](../STATUS.md).
+Local push-to-talk dictation for Linux. This folder is the technical
+reference behind the [project README](../README.md) and the live dashboard in
+[STATUS.md](../STATUS.md).
 
 ## Reading order
 
-Start with **[rust.md](rust.md)** for the current runtime, thread ownership,
-build, and verification. Historical measurements are labeled where retained.
+Start with **[rust.md](rust.md)** for the runtime, thread ownership, build,
+and verification. Historical measurements are labelled where retained.
 
 1. **[architecture.md](architecture.md)** — the functional-core / imperative-shell
    split, the module map, and the keypress-to-text-in-the-buffer event flow.
 2. **[constraints.md](constraints.md)** — the hard rules this project will not
-   break, each traced to a specific Handy 0.9.6 failure.
+   break, each traced to a failure of the dictation tool this project
+   replaced.
 3. **[progressive-commit.md](progressive-commit.md)** — the decode design:
    settled chunks land while the user is still speaking, and releasing the
    key only decodes the open tail.
-4. **[nvim-window.md](nvim-window.md)** — the dictation window: how it is
-   opened, placed, refused focus, and what runs inside it.
-5. **[asr.md](asr.md)** — the ASR model, the measured decode speed, and the
-   `bpe.vocab` reconstruction that makes hotword biasing possible.
-6. **[evaluation.md](evaluation.md)** — the regression harness: WER, per-error
-   checks, and how to tune `hotwords_score` without guessing.
-7. **[hardware.md](hardware.md)** — the exact keyboard, keycode, and display
-   setup this is built and tuned against.
+4. **[nvim-window.md](nvim-window.md)** — the dictation editor: attach and
+   managed mode, how a managed window is opened, placed and refused focus,
+   and what runs inside nvim.
+5. **[asr.md](asr.md)** — the model families, the measured decode speed, and
+   the `bpe.vocab` reconstruction that makes hotword biasing possible.
+6. **[evaluation.md](evaluation.md)** — the regression harness
+   (`examples/eval.rs`): WER on the local clips and what it is worth.
+7. **[hardware.md](hardware.md)** — what spokenpad needs from the machine:
+   the hotkey's evdev code, CPU, audio, displays and window manager.
 8. **[decisions.md](decisions.md)** — an ADR-style log of what was chosen,
    what was rejected, and why.
 

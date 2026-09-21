@@ -3,8 +3,9 @@
 ← [docs index](README.md) | See also [constraints](constraints.md),
 [progressive commit](progressive-commit.md), and [Rust implementation](rust.md).
 
-Spokenpad's production path is entirely Rust. Python is an offline reference
-for ASR/VAD parity and evaluation; the daemon never imports or starts it.
+spokenpad is entirely Rust: one statically linked binary runs the daemon,
+`spokenpad editor`, `transcribe` and `check`. The WER harness is the
+`examples/eval.rs` example ([evaluation.md](evaluation.md)).
 
 ## Production components
 
@@ -18,7 +19,7 @@ imperative shell, and `config.rs` sits at the root because both sides read it.
 | `core/frames.rs` | `Frames`: capture-absolute sample offsets, distinct from slice indices | none |
 | `core/geometry.rs` | Which output the pointer is on, and the clamped window rect | none |
 | `core/text.rs` | Filler stripping, exact replacements, whitespace repair | none |
-| `core/wm.rs` | i3 IPC framing; parsing outputs, tree, config and `no_focus` rules | none |
+| `core/wm.rs` | i3/sway IPC framing; parsing outputs, tree, config and `no_focus` rules | none |
 | `core/terminal.rs` | The known terminals: how each names its window, where it opens, its argv | none |
 | `core/session.rs` | Utterance lifecycle, preview cadence, and the one user-visible notice | internal channels |
 | `core/decode.rs` | Committed sample offset, settled commits, release tails, preview isolation | worker messages |
@@ -56,8 +57,8 @@ unit-tested without a device, a thread, or a process. Nothing there may import
 - `core/hotkey.rs` — which keyboards hold the hotkey and which latch modifiers
   they report, and when a rescan must reprobe a device node.
 - `core/frames.rs`, `core/geometry.rs`, `core/text.rs` — values and arithmetic.
-- `core/wm.rs` — the i3 IPC protocol as values: frames, replies, `no_focus`
-  proof, `include` resolution, placement commands.
+- `core/wm.rs` — the i3 IPC protocol, which sway shares, as values: frames,
+  replies, `no_focus` proof, `include` resolution, placement commands.
 - `core/terminal.rs` — the terminal table: window names, focus criteria per
   window manager, argv.
 - one pure half still lives inside a shell module: in `shell/nvim`, the RPC
@@ -165,16 +166,3 @@ with autocommands suppressed, then acknowledge; a failed write rolls the
 buffer back. Reconnect retries carry append IDs so an ambiguous timeout cannot
 append twice. A new editor is accepted only after its ownership nonce and the
 nonce set by the final one-shot `VimEnter` handler both match.
-
-## Offline Python reference
-
-The package under `src/spokenpad/` retains only:
-
-- `asr.py`, `vad.py`, and `decode.py` for native differential checks;
-- `config.py` and `text.py` for evaluation configuration/post-processing;
-- `audio.py`, a NumPy type definition with no capture backend.
-
-`scripts/fetch_model.py`, `build_hotwords.py`, `eval.py`,
-`verify_references.py`, and `verify_rust.py` use that package. `install.py` is
-a standalone deployment helper. No Python module handles the microphone,
-keyboard, editor, window manager, service loop, or GUI.

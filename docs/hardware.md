@@ -7,27 +7,29 @@ directly instead of using a keysym-based hotkey library — reinforced by
 window's per-output placement is `pick_output`/`placement` in
 [`core/geometry.rs`](../src/core/geometry.rs).
 
-spokenpad needs Linux with evdev, an X11 session, a microphone PortAudio can
-open, and an x86-64 or aarch64 CPU. Figures below come from one example
-machine, the author's, and are labelled as such.
+spokenpad needs Linux with evdev, a microphone PortAudio can open, and an
+x86-64 or aarch64 CPU. Any desktop works, X11 or Wayland; only managed mode
+needs i3 or sway. Figures below come from one example machine and are
+labelled as such.
 
 ## Hotkey: an evdev key code
 
 `hotkey.key_code` is the Linux evdev code of the push-to-talk key, not the
 X11 keycode (which is the evdev code + 8, the standard XKB offset) and not a
-keysym. The default, `186`, is `KEY_F16`: a key most keyboards lack, so
-holding it collides with nothing. A programmable key can be set to send it.
-On the example machine that is the M4 key of a Keychron Q10 Pro:
+keysym. The default, `186`, is `KEY_F16`: no application binds it, so holding
+it collides with nothing. Most keyboards lack the key, but keyboard firmware
+(QMK, VIA) or a remapper such as keyd can send F13–F24 from any key. The
+chain for the default:
 
 ```
 evdev 186 (KEY_F16)  →  X11 keycode 194  →  keysym XF86Launch7
 ```
 
 To use another key, find its code with `evtest` (pick the keyboard, press
-the key, read `code NNN`), or `libinput debug-events`, and set
-`hotkey.key_code`. The daemon exits with code 3 when no readable input
-device advertises that code; reading `/dev/input` needs membership in the
-`input` group.
+the key, read `code NNN`) or `libinput debug-events --show-keycodes`, and set
+`hotkey.key_code`. On X11, `xev` prints the X11 keycode; subtract 8. The
+daemon exits with code 3 when no readable input device advertises that code;
+reading `/dev/input` needs membership in the `input` group.
 
 **Why evdev and not a keysym.** A keysym-based hotkey library resolves the
 binding through the X keymap, and X11 keycodes and their layout mapping are
@@ -41,24 +43,20 @@ keeps that default. The current TOML surface cannot disable cancelling
 
 ### Per-device keyboard layouts
 
-A keyboard can carry its own XKB layout, set with `setxkbmap -device`; the
-example machine gives its external keyboard a different layout from the
-laptop's. A uinput clone of the keyboard would lose that layout, which is one
+A keyboard can carry its own XKB layout, set with `setxkbmap -device`, for
+example an external keyboard with a different layout from the laptop's. A
+uinput clone of the keyboard would lose that layout, which is one
 reason spokenpad never grabs or clones a device
 ([constraints.md](constraints.md#read-evdev-read-only)).
 
 ## Displays
 
-The dictation window opens on whichever output holds the mouse pointer
-([nvim-window.md](nvim-window.md)). [`core/geometry.rs`](../src/core/geometry.rs)
-finds the output rectangle containing the pointer, as a pure function over
-the rectangles X11 reports, so any number and arrangement of outputs works.
-The example machine has two 3840x2160 outputs side by side:
-
-```
-HDMI-1-0            0,0      3840x2160
-eDP-1 (primary)  3840,0      3840x2160
-```
+Only managed mode places a window. On i3 it opens on whichever output holds
+the mouse pointer; sway gives a client no way to read the pointer, so there
+it opens on the focused output ([nvim-window.md](nvim-window.md#placement)).
+[`core/geometry.rs`](../src/core/geometry.rs) picks the output as a pure
+function over the output rectangles the window manager reports over IPC, so
+any number and arrangement of outputs works.
 
 ## CPU
 
@@ -79,7 +77,6 @@ PortAudio's device list is enumerated and the query's whitespace-separated
 words are matched case-insensitively, **in order**, against `"<device
 name>, <host API>"`, with a unique exact match winning an otherwise
 ambiguous query (see `[audio]` in [`config.example.toml`](../config.example.toml)).
-The example machine uses PipeWire.
 
 The input stream stays open while spokenpad runs, because the pre-roll ring has
 to be warm at the key press. A stream that stops delivering audio is reopened by
@@ -88,6 +85,8 @@ idle, where it is only logged.
 
 ## Window manager
 
-X11 (not Wayland). The dictation window must float and must never take
-focus; the window manager enforces both through rules
-([nvim-window.md](nvim-window.md)). The example machine runs i3.
+Attach mode (the default) needs nothing from the window manager: the user
+opens the editor in any terminal. Managed mode needs i3 or sway, where the
+dictation window must float and must never take focus; the window manager
+enforces both through the rules in `packaging/i3/` or `packaging/sway/`
+([nvim-window.md](nvim-window.md)).

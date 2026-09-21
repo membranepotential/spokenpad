@@ -1,9 +1,11 @@
 # spokenpad — agent notes
 
-Local push-to-talk dictation for Linux/X11/i3. Hold M4 (evdev 186), speak, release;
-the transcript lands in a floating Neovim the daemon owns, over msgpack-RPC. Rust
-runtime, CPU only (Parakeet TDT via sherpa-onnx, Silero VAD). Python exists only
-for model setup and offline evaluation; the daemon never runs it.
+Local push-to-talk dictation for Linux. Hold the hotkey (evdev 186, KEY_F16),
+speak, release; the transcript lands in a dictation Neovim over msgpack-RPC.
+`nvim.mode = "attach"` (default): the user runs `spokenpad editor` in any
+terminal; `"managed"`: the daemon opens a floating window on i3 or sway. Rust
+only, CPU only (sherpa-onnx linked statically: Parakeet TDT by default, Whisper
+or SenseVoice via `asr.family`; Silero VAD).
 
 Read first: `STATUS.md` (live dashboard, keep it true, ≤ 60 lines),
 `docs/constraints.md` (hard rules), `docs/architecture.md`, `docs/rust.md`.
@@ -15,8 +17,9 @@ Design history is `docs/decisions.md`; add an entry when you change behaviour.
   `Device::open`, `EVIOCGRAB`, uinput, or any input synthesis (`xdotool type`,
   enigo, XTest). Nothing is ever pasted. The only clipboard write is the
   dictation nvim setting its own `+` register to the whole buffer after a release.
-- No window spokenpad opens may take focus. The i3 `no_focus` rule is proven
-  before a graphical editor is spawned; the code contains no focus call.
+- No window spokenpad opens may take focus. Attach mode opens no window;
+  managed mode proves the i3/sway `no_focus` rule over IPC before it spawns a
+  graphical editor. The code contains no focus call.
 - Committed speech is decoded exactly once; the release decodes only the tail.
   The one exception: a VAD chunk that decodes to "" is decoded once more
   without trailing silence (`TrailingSilence::Bare`).
@@ -35,32 +38,39 @@ those belongs in `src/shell/`.
   (per-capture policy, notices), `core/decode.rs` (progressive commits over
   `Recognizer`/`Segmenter` traits), `core/segments.rs` (`merge_spans`:
   VAD spans to padded, settled windows), `core/hotkey.rs` (`WatcherState`,
-  `verdict`), `core/frames.rs`, `core/geometry.rs`, `core/text.rs`; plus the
-  `shell/nvim/rpc.rs` codec and `parse_ownership`, still inside their module.
+  `verdict`), `core/wm.rs` (i3/sway IPC protocol, `no_focus` proof),
+  `core/terminal.rs` (the terminal table), `core/frames.rs`, `core/geometry.rs`,
+  `core/text.rs`; plus the `shell/nvim/rpc.rs` codec, `parse_ownership` and
+  `passage::append_paragraph`, still inside their modules.
 - Imperative shell: `shell/daemon.rs` (`run` = lock/signals/devices, `serve` =
   the generic loop), `shell/audio.rs` (`InputBackend` seam; PortAudio impl),
   `shell/recorder.rs` (recovery WAV), `shell/hotkey.rs` (evdev scan/open/poll
-  and the run loop), `shell/inference.rs` (sherpa/Silero), `shell/nvim/mod.rs`
-  (editor lifecycle), `shell/x11.rs`, `shell/logging.rs`.
+  and the run loop), `shell/inference.rs` (sherpa/Silero, model families),
+  `shell/nvim/mod.rs` (editor lifecycle, both modes, `spokenpad editor`),
+  `shell/nvim/passage.rs` (text dictated with no editor open), `shell/wm.rs`
+  (i3/sway IPC socket), `shell/logging.rs`.
 - Editor UI: `src/lua/spokenpad.lua` (winbar, preview extmark, transactional
   `append_once`) and `src/lua/dictation_init.lua` (bundled init).
 - Tests: unit tests in-module; `src/shell/nvim/tests.rs` (real
   `nvim --headless`); `tests/cli.rs`; `tests/e2e.rs` drives
   `shell::daemon::serve` with a synthetic microphone, a scripted key channel
   and a real headless nvim.
-- Python reference: `src/spokenpad/` (ASR/VAD/decode mirrors, config, text),
-  `scripts/` (fetch_model, eval, verify_rust, build_hotwords, install).
+- `examples/eval.rs` (WER harness), `examples/verify_window.rs` (manual
+  i3/sway window smoke check), `examples/verify_native.rs` (JSON dump of
+  segments and progressive commits).
+- `scripts/install.sh` (binary to `~/.local/bin`, user unit; `--uninstall`),
+  `scripts/fetch-models.sh` (models to `$XDG_DATA_HOME/spokenpad/models`,
+  pinned sha256). `packaging/` holds the unit and the i3/sway rules.
 
 ## Commands
 
 ```sh
-cargo build --locked --release                 # the service runs target/release/spokenpad
-cargo test --locked --all-targets              # no keyboard, mic, X11 or lock is touched
-cargo test --locked --test e2e -- --ignored    # real-model e2e; needs models/
+cargo build --locked --release
+cargo test --locked --all-targets              # no keyboard, mic, display or lock is touched
+cargo test --locked --test e2e -- --ignored    # real-model e2e; needs scripts/fetch-models.sh
 cargo clippy --locked --all-targets -- -D warnings && cargo fmt --check
-uv run scripts/eval.py --vad                   # WER on the local eval clips
-.venv/bin/python scripts/verify_rust.py        # Rust/Python differential check
-uv run pytest -q; uv run ruff check .; uv run mypy
+cargo run --release --example=eval             # WER on the local eval clips (--whole: no VAD)
+scripts/install.sh                             # deploy: the service runs ~/.local/bin/spokenpad
 ```
 
 Nvim-dependent tests fail loudly when nvim is missing unless
@@ -72,22 +82,18 @@ running: they use temp dirs and never the real state dir or the daemon lock.
 - Style: fully typed, illegal states unrepresentable, functional core /
   imperative shell, no derived state stored, no wrapper with one caller. Every
   `unsafe` carries an accurate `SAFETY:` comment (lint is deny).
-- Keep the Python reference in step with Rust decode/VAD semantics, or the
-  differential check becomes meaningless. Known open mismatches: clip
-  `handy-1787827757` differs by one token (`z E T` vs `Z S E T`), and some
-  progressive commits differ in punctuation, with identical segments and offsets
-  (see STATUS.md); do not chase them as regressions.
 - Docs describe the system as implemented. When you change behaviour, update
   `README.md` ("While you dictate"), the relevant `docs/*.md`, and
   `config.example.toml` comments in the same change.
 - Commits: signed, on `main`, message written to a file and passed with `-F`.
   Commit each finished unit of work without being asked, once the checks
   above pass and the docs are updated: one focused commit per logical change,
-  never a half-done state. Pushing still needs the user's word. Restarting
-  the service (`systemctl --user restart spokenpad`) to deploy a verified
-  build is always allowed; it closes the user's dictation window, so say
-  that you did it.
+  never a half-done state. Pushing still needs the user's word. Deploying a
+  verified build (`scripts/install.sh`, then `systemctl --user restart
+  spokenpad`) is always allowed; in managed mode it closes the user's
+  dictation window, so say that you did it.
 - `.agents/` and `.codex/` are untracked directories used by other tools.
   Leave them alone even when empty.
-- `models/` (~630 MB) and `eval-samples/*.wav` (the user's voice) are local
-  only; never copy them anywhere or send them to a service.
+- The models (`~/.local/share/spokenpad/models`, ~670 MB) and
+  `eval-samples/*.wav` (the user's voice) are local only; never copy them
+  anywhere or send them to a service.

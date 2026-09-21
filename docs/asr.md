@@ -93,7 +93,8 @@ pinned Hugging Face revision, checks size and sha256, and puts them in
 
 Int8 weights on 6 CPU threads are fast enough that a GPU buys nothing for a
 decode fired once per utterance. On the example machine (i7-9850H, idle, warm
-model, `modified_beam_search`, best of 3):
+model, `modified_beam_search`, best of 3; measured before the Rust port with
+the same model, thread count and provider):
 
 | audio | decode | real-time factor |
 |---|---|---|

@@ -117,6 +117,15 @@ window-manager rule keys on, and it is restricted to `[A-Za-z][A-Za-z0-9_-]*`
 because it is interpolated into criteria strings — a config value must not be
 able to become window-manager syntax.
 
+The daemon runs as a systemd user service, so the terminal it spawns sees the
+user manager's environment, not your session's. Import what the terminal and
+the IPC socket need from your window manager's startup: `DISPLAY` (and
+`XAUTHORITY`) on i3; `SWAYSOCK`, `WAYLAND_DISPLAY` and `DISPLAY` on sway:
+
+```
+exec "systemctl --user import-environment DISPLAY XAUTHORITY; systemctl --user start spokenpad"
+```
+
 The window is opened lazily, on the **first key-down**, not at daemon start:
 until you dictate there is no reason for a terminal to be sitting on your
 desktop. It is opened on the editor thread while the utterance is still being
@@ -378,11 +387,11 @@ one directory providing the named scheme onto the runtimepath -- the colours,
 without the configuration they normally live in.
 
 **A theme loaded this way is the theme's defaults, not the theme as its owner
-configured it**, and that difference is visible. This user runs tokyonight
-with `transparent = true`, so their real editor shows the terminal through;
-loading the plugin raw took tokyonight's own `#222436` instead and painted a
-grey-blue block inside alacritty's black border -- close to right, and clearly
-wrong. `nvim.transparent` (on by default) clears the background groups after
+configured it**, and that difference is visible. With tokyonight configured
+as `transparent = true`, the real editor shows the terminal through; loading
+the plugin raw takes tokyonight's own `#222436` instead and paints a
+grey-blue block inside the terminal's black border -- close to right, and
+clearly wrong. `nvim.transparent` (on by default) clears the background groups after
 any colourscheme loads, which reproduces that setting and is the right answer
 for a window floating over a terminal in any case. Verified against the full
 config: `Normal`, `NormalFloat`, `EndOfBuffer`, `SignColumn` and `WinBar` all

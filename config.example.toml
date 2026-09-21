@@ -7,8 +7,10 @@
 # rather than silently ignoring them).
 
 [hotkey]
-# evdev key code for push-to-talk. 186 is KEY_F16 -- the Keychron Q10 Pro's
-# M4 key. This is the evdev code, not the X11 keycode (which is this + 8).
+# evdev key code for push-to-talk. 186 is KEY_F16: no application binds it,
+# and keyboard firmware (QMK, VIA) or a remapper such as keyd can send it from
+# any key. This is the evdev code, not the X11 keycode (which is this + 8);
+# find a key's code with `evtest` or `libinput debug-events --show-keycodes`.
 key_code = 186
 
 # evdev key code that discards a recording in progress. 1 is KEY_ESC. Set to a
@@ -44,8 +46,8 @@ cancel_key_code = 1
 latch_modifier = "shift"
 
 [audio]
-# Must be 16000. Silero's VAD window is 512 samples at 16 kHz and Parakeet's
-# feature extractor assumes the same rate; nothing resamples in between, so
+# Must be 16000. Silero's VAD window is 512 samples at 16 kHz and every
+# supported ASR model reads the same rate; nothing resamples in between, so
 # any other value is rejected at startup rather than silently degrading.
 sample_rate = 16000
 
@@ -168,8 +170,9 @@ vocabulary = []
 # against 11.0-11.7x segmented. What it changes is WHEN text appears: the first
 # chunk lands after ~1s instead of after the whole recording, so a five-minute
 # latched passage starts arriving immediately rather than all at once at the
-# end. Accuracy costs a little on the five reference clips: 17.6% aggregate WER
-# with the detector against 13.9% whole-buffer, measured with Parakeet.
+# end. On the five reference clips it scores 17.6% aggregate WER against
+# 18.7% whole-buffer, measured with Parakeet (`cargo run --release
+# --example=eval`, and `-- --whole` for the whole-buffer path).
 #
 # It also decides what NOT to decode: a capture this finds no speech in is not
 # handed to the recogniser at all. Silence does not decode to an empty string,

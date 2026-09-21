@@ -1,12 +1,12 @@
 # Rust implementation
 
-The Rust runtime implements the daemon and the `transcribe` command. There
-is no other implementation: the Python reference that mirrored ASR/VAD/decode
-during the port, and the differential check that compared against it, are
-both retired — see
+spokenpad is one Rust binary: the daemon and the `editor`, `transcribe` and
+`check` commands. There is no other implementation — the Python reference
+used during the port is retired, see
 [decisions.md](decisions.md#the-python-reference-implementation-is-dropped).
-Model setup (`scripts/fetch_model.py`, `scripts/install.py`) stays Python;
-evaluation is now `examples/eval.rs` (see [evaluation.md](evaluation.md)).
+Setup is two POSIX shell scripts, `scripts/install.sh` and
+`scripts/fetch-models.sh`; evaluation is `examples/eval.rs` (see
+[evaluation.md](evaluation.md)).
 
 ## Ownership and ordering
 
@@ -82,11 +82,12 @@ the root because both sides read it. Nothing under `core/` may import `evdev`,
   scan. Losing the keyboard that holds the hotkey, or the last hotkey-capable
   keyboard while a latched recording runs, sends `Event::HotkeyLost`: the
   recording ends by decoding what was said, never by cancelling.
-- `shell/nvim/mod.rs` owns the socket and pinned dictation buffer, and
-  `shell/nvim/rpc.rs` the msgpack transport, where every call carries an
-  absolute deadline. `shell/x11.rs` performs bounded placement queries, one per
-  spawn. No module synthesizes
-  input or calls X focus APIs.
+- `shell/nvim/mod.rs` owns the socket and pinned dictation buffer in both
+  `nvim.mode`s, and `shell/nvim/rpc.rs` the msgpack transport, where every
+  call carries an absolute deadline. `shell/nvim/passage.rs` writes commits
+  to the pending dictation file while no editor is open. `shell/wm.rs` speaks
+  the i3/sway IPC protocol for a managed spawn, one request per connection
+  under a deadline. No module synthesizes input or calls a focus API.
 
 The dictation preview uses the theme's comment foreground with an italic
 distinction, without an extra virtual blank line. It remains virtual text,
@@ -113,12 +114,14 @@ finalizes feature extraction on that call.
 ## Configuration and deployment
 
 All sections reject unknown fields, wrong types, non-finite durations, and
-invalid ranges. Model paths are `Option<PathBuf>`: a path set in a config
-resolves against that config's directory, and leaving the key out keeps the
-built-in, working-directory-relative default. `audio.sample_rate` must be
-**16000** — the Silero window is 512 samples at that rate and Parakeet's
-features assume it, and nothing resamples in between — and the error names both
-models. `vad.chunk_seconds` must be positive, `preview.max_seconds` at most
+invalid ranges. A model path set in a config resolves against that config's
+directory; leaving the key out keeps the default under
+`$XDG_DATA_HOME/spokenpad/models` (`~/.local/share` if unset), where
+`scripts/fetch-models.sh` puts the files. `[asr]` is parsed into a typed
+`Model` per `asr.family`, and a key the family cannot use is rejected.
+`audio.sample_rate` must be **16000** — the Silero window is 512 samples at
+that rate and every supported model family reads it, and nothing resamples in
+between. `vad.chunk_seconds` must be positive, `preview.max_seconds` at most
 3600 (default 30), and `nvim.colorscheme` must match `[A-Za-z0-9_.-]+`, since it
 becomes Lua code. Recovery rejects a WAV whose rate differs from the configured
 capture rate, as in the original command.
@@ -131,7 +134,8 @@ nowhere is how a user loses their settings.
 Command-line flags: `-c/--config PATH`, `--model-dir PATH`, `-v/--verbose`,
 `--log-file PATH` (the literal `none` disables the file), and, on the daemon
 only, `--dump-audio DIR`, which writes each capture exactly as decoded for
-debugging. Subcommands are `transcribe <WAV> [--out PATH]` and `check`.
+debugging. Subcommands are `editor`, `transcribe <WAV> [--out PATH]` and
+`check`.
 
 Exit codes are selected by error *type*, never by matching a message, so a
 reworded error cannot silently turn into a restart loop: `2` model files
@@ -143,24 +147,27 @@ second daemon losing the race for
 `$XDG_STATE_HOME/spokenpad/daemon.lock` (an `flock`, held for the process
 lifetime, never unlinked) reports.
 
-Run `cargo build --locked --release`. The official sherpa build script obtains
-the pinned native libraries, or uses `SHERPA_ONNX_LIB_DIR`. They are copied next
-to the executable and located using an origin-relative runpath. No Python is
-needed at runtime. The systemd unit executes
-`target/release/spokenpad`; the per-user lock above rejects a second Rust
-daemon.
+Run `cargo build --locked --release`. The sherpa crates' `static` feature
+downloads the pinned 1.13.6 static libraries (or uses `SHERPA_ONNX_LIB_DIR`)
+and links sherpa-onnx and onnxruntime into the executable, so the binary needs
+only system libraries (libc, libstdc++, PortAudio) and runs from any
+directory; there is no runpath and nothing to keep beside it.
+`scripts/install.sh` builds it and copies it to `~/.local/bin/spokenpad`,
+which the systemd unit runs; the per-user lock above rejects a second daemon.
 
-The installed i3 `no_focus` rule remains required. The Rust adapter checks
-the active configuration, including loaded include files, before opening a
-graphical terminal. Reattaching requires evidence that the editor belongs to
-spokenpad; an arbitrary nvim socket is refused.
-Fresh editors must also finish the startup handlers registered before our final
-one-shot `VimEnter` callback. Both ownership and readiness require the generated
-session nonce; an early RPC response alone is not proof of startup completion.
-The graphical launcher accepts an Alacritty command with an explicit instance
-setting. Unverifiable terminal commands are refused; `terminal = []` is only
-allowed for explicitly headless editors. This intentionally tightens the
-former Python adapter's permissive launcher to enforce the no-focus constraint.
+In attach mode (the default) the daemon opens no window: the user starts the
+editor with `spokenpad editor`, which writes an ownership marker beside the
+socket and then execs nvim. In managed mode the daemon spawns the editor in a
+terminal from the typed table in `core/terminal.rs` (alacritty, kitty, foot,
+wezterm, ghostty, or `headless`); any other terminal is refused, since its
+window cannot be named before it exists. Before a graphical spawn it reads
+the running i3 or sway configuration over IPC, following sway's `include`
+lines on disk, and refuses unless a `no_focus` rule names the window.
+Reattaching requires evidence that the editor belongs to spokenpad; an
+arbitrary nvim socket is refused. Fresh editors must also finish the startup
+handlers registered before our final one-shot `VimEnter` callback. Both
+ownership and readiness require the generated session nonce; an early RPC
+response alone is not proof of startup completion.
 
 ## Verification
 
@@ -181,7 +188,8 @@ press, a cancel keeping
 committed text and the WAV, a second press during transcription starting a new
 paragraph, the preview staying virtual text, and a microphone restart marking
 the gap while keeping the audio. One further test loads the real CPU models and
-is `#[ignore]`d; it needs `models/`:
+is `#[ignore]`d; it needs the default model directory filled by
+`scripts/fetch-models.sh`:
 
 ```sh
 cargo test --locked --test e2e -- --ignored
@@ -190,19 +198,14 @@ cargo test --locked --test e2e -- --ignored
 The nvim-dependent tests **fail** when nvim is missing rather than reporting a
 green suite; `SPOKENPAD_ALLOW_MISSING_NVIM=1` skips them deliberately.
 
-A Rust/Python differential check (`scripts/verify_rust.py`) compared exact
-segment start/end/padding/settlement, transcripts, progressive commit
-offsets, and the final release remainder against the Python reference through
-the port and several fixes after it; both are retired now — see
-[decisions.md](decisions.md#the-python-reference-implementation-is-dropped).
-While it ran it validated the initial port (2026-09-09: all five evaluation
-WAVs produced exactly the same segments and raw transcripts in Rust and
-Python; a 102.5s simulated live passage matched all six progressive commits,
-their offsets, and the final transcript) and, on 2026-09-19, confirmed that
-the empty-decode retry fix (see
-[decisions.md](decisions.md#an-empty-speech-chunk-is-decoded-again-without-trailing-silence))
-brought the `cd home` clip back into agreement with the Python decode after a
-2026-09-11 edge-case divergence.
+Until 2026-09-21 a differential check compared exact segment bounds,
+settlement, transcripts, progressive commit offsets and the release remainder
+against the Python reference used during the port; it validated the port on
+all five evaluation WAVs and a 102.5 s simulated live passage, and is retired
+with that reference. Its Rust half remains as
+`cargo run --release --example verify_native -- <wav>...`, which prints the
+segments, transcripts and a simulated progressive passage as JSON for
+inspection by hand.
 
 The follow-up regression reproduced the invisible first preview and delayed
 scrolling on an attached 40×10 Neovim grid. It now checks visible first-preview
@@ -228,20 +231,19 @@ for the two pre-existing behaviours this traces to. Five clips of one speaker
 are a regression proxy, not a general accuracy guarantee — see
 [evaluation.md](evaluation.md).
 
-`cargo test --locked --all-targets` passes **143 library, 1 binary, 4 CLI and
-16 end-to-end tests**, with the one real-model e2e test ignored by default,
+`cargo test --locked --all-targets` passes **169 library, 1 binary, 5 CLI and
+18 end-to-end tests**, with the one real-model e2e test ignored by default,
 plus 5 unit tests in `examples/eval.rs`. Strict all-target clippy and rustfmt
 checks apply.
-The optional `cargo run --example verify_window` smoke harness opened a real
-dedicated editor, saved multiline Unicode exactly, confirmed unchanged X11
-focus after opening and appending, and closed its temporary editor. Run this
-manual check only when no other dictation editor is open.
+The optional `cargo run --example verify_window` smoke harness opens a real
+managed editor on i3 or sway, saves multiline Unicode exactly, confirms that
+focus is unchanged after opening and appending, and closes its temporary
+editor. Run this manual check only when no other dictation editor is open.
 
-The user service was switched to `target/release/spokenpad` on 2026-09-09.
-Startup completed on the actual microphone/keyboards without a callback-timeout
-warning; live evdev descriptor flags were read-only, with no service restarts
-or watchdog warnings during the post-switch check. The executable and its
-native library resolution were checked independently of Python.
+The Rust daemon has been the live service since 2026-09-09. Startup completed
+on the actual microphone/keyboards without a callback-timeout warning; live
+evdev descriptor flags were read-only, with no service restarts or watchdog
+warnings during the post-switch check.
 
 The first live Rust dictation captured 89.3s of audio for an 89.2s hold;
 release decoded the remaining 2.6s in 0.27s, followed by a 33ms editor append.

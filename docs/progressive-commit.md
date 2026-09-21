@@ -99,9 +99,10 @@ a newer one's offset.
 
 ## Verification
 
-Rust tests cover offset ownership, stale work, cancellation, long-pause
-closure, padding, settlement, preview isolation, and release tails.
-`scripts/verify_rust.py` independently reproduces progressive commits with the
-retained Python ASR/VAD/decode reference, then compares exact segment bounds,
-settlement flags, commit offsets, raw text, and final remainder against
-`examples/verify_native.rs`.
+Unit tests cover offset ownership, stale work, cancellation, long-pause
+closure, padding, settlement, preview isolation, and release tails;
+`tests/e2e.rs` checks progressive commits landing before release through the
+real event loop and a real nvim. `examples/verify_native.rs` prints the
+segment bounds, settlement flags, commit offsets, raw text and final
+remainder of a simulated live passage as JSON, for inspection against the
+real models.

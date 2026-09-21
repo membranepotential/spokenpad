@@ -3,9 +3,9 @@
 [Unit]
 Description=spokenpad push-to-talk dictation
 Documentation=https://github.com/membranepotential/spokenpad
-# Dies with the graphical session: the hotkey watcher and the dictation
-# window both need X, and a daemon outliving the session it was
-# started for would hold /dev/input readers open for nothing.
+# Dies with the graphical session: a daemon outliving the session it was
+# started for would hold /dev/input readers and the microphone open for
+# nothing.
 PartOf=graphical-session.target
 After=graphical-session.target
 
@@ -38,9 +38,10 @@ RestartSec=3
 RestartPreventExitStatus=2 3
 
 [Install]
-# Desktop sessions that integrate with systemd start graphical-session.target
-# and import DISPLAY into the user manager. A plain X session such as i3 does
-# neither on its own: start a unit that binds to graphical-session.target, and
-# run `systemctl --user import-environment DISPLAY XAUTHORITY`, from its
-# startup.
+# Desktop sessions that integrate with systemd (GNOME, KDE Plasma) start
+# graphical-session.target. A plain i3 or sway session does not: start this
+# unit from its startup instead. Managed mode (nvim.mode = "managed") also
+# needs the session's environment in the user manager, imported first:
+#   exec "systemctl --user import-environment DISPLAY XAUTHORITY; systemctl --user start spokenpad"
+# (on sway: SWAYSOCK WAYLAND_DISPLAY DISPLAY).
 WantedBy=graphical-session.target
