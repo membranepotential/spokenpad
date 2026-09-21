@@ -43,9 +43,6 @@ pub enum FromEditor {
     Gone,
 }
 
-/// How long to wait for a Neovim that was asked to quit before killing it.
-const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
-
 /// The embedded Neovim process and the writing half of its UI channel.
 pub struct Editor {
     process: Child,
@@ -185,14 +182,18 @@ impl Editor {
         stdin.flush().context("flush the channel to nvim")
     }
 
-    /// Ask Neovim to quit, wait for it, and kill it if it will not.
-    ///
     /// Closing stdin is the polite half: `--embed` treats the channel closing
     /// as the UI detaching, and Neovim exits once its last UI is gone.
-    pub fn shutdown(&mut self) {
+    /// Ask Neovim to quit and wait `grace` for it, then kill its session.
+    ///
+    /// The caller has already written what mattered, so this is politeness
+    /// with a short fuse: a daemon that is shutting down has a budget for the
+    /// whole teardown, and none of it should go on an editor that has
+    /// nothing left to save.
+    pub fn shutdown(&mut self, grace: Duration) {
         let _ = self.notify("nvim_command", vec![Value::from("qall!")]);
         self.stdin = None;
-        let deadline = Instant::now() + SHUTDOWN_GRACE;
+        let deadline = Instant::now() + grace;
         while Instant::now() < deadline {
             match self.process.try_wait() {
                 Ok(Some(_)) | Err(_) => break,
@@ -219,7 +220,9 @@ impl Editor {
 impl Drop for Editor {
     fn drop(&mut self) {
         if self.stdin.is_some() || matches!(self.process.try_wait(), Ok(None)) {
-            self.shutdown();
+            // A pane that was dropped without being shut down first has
+            // nothing waiting on it, so the shortest grace is right.
+            self.shutdown(Duration::from_millis(250));
         }
     }
 }

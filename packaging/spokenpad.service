@@ -25,6 +25,14 @@ ExecStart=%h/.local/bin/spokenpad
 Restart=on-failure
 RestartSec=3
 
+# The daemon stops itself well inside this: it gives its background threads
+# three seconds, which is also the whole budget a dictation pane has to write
+# what is in its buffers and close its editor. The limit is here so a stop
+# that does go wrong ends in seconds rather than in systemd's default ninety,
+# and it must stay comfortably above those three seconds — a SIGKILL here
+# would be the thing that loses what the user typed into the pane.
+TimeoutStopSec=10
+
 # Exit 2 is "model files missing". That does not become true by trying
 # again, and restarting on it turns one clear error into an endless loop that
 # buries it.

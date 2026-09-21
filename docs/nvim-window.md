@@ -191,9 +191,37 @@ answer there.
   Nothing is lost: dictated text is written to the file after every utterance,
   and the pane writes every modified buffer before it quits, so a restart
   costs the window and not the transcript. The next dictation opens a new one.
+  [What closing a pane guarantees](#what-closing-a-pane-guarantees) says what
+  "nothing is lost" covers exactly.
 - **You run `spokenpad editor` anyway.** It opens an editor in your terminal
   and the daemon adopts it, rather than opening a pane — the socket is the
   contract, not the mode. Close it and the next dictation opens a pane again.
+
+### What closing a pane guarantees
+
+Dictated text is already on disk before the window closes: the Lua side
+writes the file after every append. Only what you typed into the pane
+yourself is still just in the buffer, and pane mode is the one mode where
+closing the window ends the editor — a managed terminal outlives the daemon.
+
+So the pane writes every modified buffer first, and the whole teardown has a
+budget, because `shell::daemon::SHUTDOWN_GRACE` (3 s) is what the daemon
+gives its editor thread before it exits and stops that thread wherever it had
+got to. The pane divides that budget: 1.2 s for the writes, then 0.5 s for
+the editor to quit before it is killed. The two are checked against the grace
+at compile time, so a change to one of them cannot quietly break the
+guarantee. The systemd unit's `TimeoutStopSec=10` sits well above all of it,
+so a stop that goes wrong ends in seconds and never in a SIGKILL during a
+write.
+
+If Neovim refuses to write a buffer — a file that turned read-only, a
+directory that went away, a full disk — the text comes back with the failure
+and spokenpad writes it to `<the file>.unsaved` next to it, with the same
+`0600` permissions the dictation files have. A buffer that never had a file
+goes to `unsaved-<timestamp>.md` in the state directory. Either way the log
+says where, at error level. The only case that loses anything is an editor
+that stops answering entirely: then there is no way to ask it what is in the
+buffer, and the log says that too.
 
 ### Where it opens
 

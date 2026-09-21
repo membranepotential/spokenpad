@@ -43,6 +43,9 @@ use font::{CellMetrics, Coverage, Face, Font};
 use keyboard::Keyboard;
 use rmpv::Value;
 use std::{
+    io::Write,
+    os::unix::fs::OpenOptionsExt,
+    path::PathBuf,
     process::Command,
     sync::{
         Arc,
@@ -817,19 +820,37 @@ for _, buffer in ipairs(vim.api.nvim_list_bufs()) do
      and vim.bo[buffer].modified
      and vim.bo[buffer].buftype == "" then
     local name = vim.api.nvim_buf_get_name(buffer)
-    local ok = pcall(vim.api.nvim_buf_call, buffer, function()
+    local ok, why = pcall(vim.api.nvim_buf_call, buffer, function()
       vim.cmd("silent noautocmd write")
     end)
     if not ok then
-      unwritten[#unwritten + 1] = name ~= "" and name or "[No Name]"
+      -- The text comes back with the failure: whatever stopped the write --
+      -- a read-only file, a directory that is gone, a full disk -- the
+      -- daemon still has the only copy and can put it somewhere else.
+      unwritten[#unwritten + 1] = {
+        name,
+        tostring(why),
+        vim.api.nvim_buf_get_lines(buffer, 0, -1, false),
+      }
     end
   end
 end
 return unwritten
 "#;
 
-/// How long the editor gets to write its buffers before it is asked to quit.
-const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+/// The whole teardown — writing every buffer and stopping the editor — has to
+/// fit inside the grace the daemon gives its editor thread, because when that
+/// runs out the process exits and this thread stops wherever it had got to.
+/// Writing comes first and takes most of it.
+const WRITE_TIMEOUT: Duration = Duration::from_millis(1_200);
+/// Then the editor is asked to quit. It has nothing left to save by then, so
+/// this is short and it is killed rather than waited for.
+const QUIT_GRACE: Duration = Duration::from_millis(500);
+const _: () = assert!(
+    WRITE_TIMEOUT.as_millis() + QUIT_GRACE.as_millis()
+        < crate::shell::daemon::SHUTDOWN_GRACE.as_millis(),
+    "the pane's teardown must fit inside the daemon's shutdown grace"
+);
 
 impl Pane {
     fn write_buffers(&mut self) {
@@ -845,24 +866,91 @@ impl Pane {
         );
         match call {
             Ok(value) => {
-                for name in value.as_array().into_iter().flatten() {
-                    log::error!(
-                        "the pane closed with unwritten changes in {}",
-                        name.as_str().unwrap_or("a buffer")
-                    );
+                for entry in value.as_array().into_iter().flatten() {
+                    rescue(entry);
                 }
             }
             Err(error) => {
-                log::warn!("could not write the pane's buffers before closing: {error:#}")
+                log::error!(
+                    "could not write the pane's buffers before closing: {error:#}; \
+                     anything typed into the window since the last utterance is lost"
+                )
             }
         }
     }
 }
 
+/// Keep the text of a buffer Neovim could not write.
+///
+/// The editor is about to be closed, so this is the last moment the text
+/// exists anywhere. It goes beside the file it belongs to, with the same
+/// private permissions the dictation files have, and the log says where.
+fn rescue(entry: &Value) {
+    let field = |index: usize| entry.as_array().and_then(|parts| parts.get(index));
+    let name = field(0).and_then(Value::as_str).unwrap_or_default();
+    let why = field(1).and_then(Value::as_str).unwrap_or("unknown");
+    let text: String = field(2)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let named = if name.is_empty() {
+        "an unnamed buffer"
+    } else {
+        name
+    };
+    if text.trim().is_empty() {
+        log::warn!("the pane could not write {named} ({why}), and it held nothing");
+        return;
+    }
+    match keep_beside(name, &text) {
+        Ok(path) => log::error!(
+            "the pane could not write {named} ({why}); its text is in {}",
+            path.display()
+        ),
+        Err(error) => {
+            log::error!(
+                "the pane could not write {named} ({why}) and could not keep its text \
+                     either ({error:#}); it is in this log"
+            );
+            log::debug!("unwritten text: {text:?}");
+        }
+    }
+}
+
+/// Write rescued text next to the file it came from, or into the state
+/// directory when the buffer had no file.
+fn keep_beside(name: &str, text: &str) -> Result<PathBuf> {
+    let path = match name.is_empty() {
+        false => PathBuf::from(format!("{name}.unsaved")),
+        true => {
+            let directory = crate::config::state_dir();
+            std::fs::create_dir_all(&directory)?;
+            directory.join(format!(
+                "unsaved-{}.md",
+                chrono::Local::now().format("%Y-%m-%d-%H%M%S")
+            ))
+        }
+    };
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&path)
+        .with_context(|| format!("create {}", path.display()))?;
+    file.write_all(text.as_bytes())?;
+    file.write_all(b"\n")?;
+    file.sync_all()?;
+    Ok(path)
+}
+
 impl Drop for Pane {
     fn drop(&mut self) {
         self.write_buffers();
-        self.editor.shutdown();
+        self.editor.shutdown(QUIT_GRACE);
         // The watcher is blocked waiting for an X event. Tell it to stop, then
         // send it one of our own so it wakes up and sees that. Relying on the
         // channel closing instead would deadlock: the receiver is still alive

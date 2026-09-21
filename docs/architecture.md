@@ -199,6 +199,13 @@ closed by the thread rather than left standing, and every failing path closes
 the pane. An abandoned one would be a live editor on the dictation socket that
 no session owns, which every later key-down would refuse rather than replace.
 
+Closing a pane ends the editor inside it, so the pane writes every modified
+buffer before it quits, and that teardown fits inside the grace the daemon's
+shutdown gives the thread — divided into a write budget and a quit budget,
+and checked against the grace at compile time. Text Neovim will not write
+comes back with the failure and is kept beside its file as `.unsaved`, rather
+than discarded along with the editor.
+
 The daemon tells that thread two things, open and stop, and is never told a
 window closed. It does not need to be: the editor dies with the window, its
 socket goes with it, and the next key-down finds a dead socket and asks for a

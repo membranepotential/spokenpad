@@ -870,6 +870,12 @@ What it costs, stated plainly:
   bold face, italic falls back to plain, and a character the family does not
   cover is fetched from whichever font fontconfig names for it.
 - **Verified on i3 only.** The rest is read from source.
+- **Closing a pane may not lose typed text, and that is a budget.** The
+  editor dies with the window, so the pane writes every modified buffer
+  first; and because the daemon abandons that thread after its shutdown
+  grace, the write and the quit each get a share of that grace, checked
+  against it at compile time. A buffer Neovim refuses to write is kept as
+  `<file>.unsaved` instead of being thrown away with `qall!` and a log line.
 
 Rejected on the way:
 

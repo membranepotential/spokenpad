@@ -19,6 +19,10 @@
 //! - **(d)** the preview is drawn and is never in the buffer.
 //! - **(e)** a resize leaves the pane and Neovim agreeing about the size and
 //!   the contents.
+//! - **(f)** closing the window writes what was typed into it, a buffer
+//!   Neovim refuses to write is kept beside its file instead of thrown away,
+//!   and the whole teardown fits inside the budget the daemon's shutdown
+//!   gives it, even when the editor has stopped answering.
 //!
 //! It also writes screenshots and a few timings; run with `-- --nocapture` to
 //! see where they went.
@@ -33,13 +37,14 @@ use spokenpad::{
     config::{Mode, Nvim},
     core::{geometry::Rect, state::IndicatorPhase},
     shell::{
+        daemon::SHUTDOWN_GRACE,
         nvim::pane_launch,
         nvim::{IndicatorState, NvimSession},
         pane::{Options, Pane, Sizing, Status},
     },
 };
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     thread::sleep,
     time::{Duration, Instant},
 };
@@ -63,22 +68,9 @@ fn the_pane_draws_what_neovim_draws() {
     sleep(SETTLE);
 
     let directory = tempfile::tempdir().expect("a temporary directory");
-    let dictation = directory.path().join("dictation");
-    std::fs::create_dir_all(&dictation).expect("make the dictation directory");
-    let file = dictation.join("dictation-2026-09-21-000000.md");
+    let config = dictation_config(directory.path());
+    let file = config.dictation_dir.join("dictation-2026-09-21-000000.md");
     std::fs::write(&file, "").expect("create the dictation file");
-    let config = Nvim {
-        mode: Mode::Attach,
-        socket_path: directory.path().join("nvim.sock"),
-        dictation_dir: dictation.clone(),
-        // The bundled configuration, read from the repository rather than
-        // materialised into the user's state directory.
-        init: Some(PathBuf::from(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/lua/dictation_init.lua"
-        ))),
-        ..Nvim::default()
-    };
     let (command, marker) = pane_launch(&config, &file).expect("build the nvim command");
     let mut pane = Pane::open(
         &Options {
@@ -408,9 +400,147 @@ fn the_pane_draws_what_neovim_draws() {
         "closing the window lost what was typed into it:\n{on_disk}"
     );
     println!("closing the window wrote the buffer: what was typed by hand is in the file");
+
+    // ------------------- (f) text Neovim will not write is kept, not lost
+    // A write can fail: a read-only file here, a full disk or a directory
+    // that went away in the field. The pane is the only place that text
+    // exists by then, so it goes beside the file instead of into `qall!`.
+    const REFUSED: &str = "das hier darf nicht verloren gehen";
+    let second = dictation_config(&directory.path().join("unwritable"));
+    let unwritable = second.dictation_dir.join("dictation-2026-09-21-000001.md");
+    std::fs::write(&unwritable, "").expect("create the dictation file");
+    let mut pane = pane_on(&server, &second, &unwritable);
+    put_line(&mut pane, REFUSED);
+    let mut forbid = std::fs::metadata(&unwritable)
+        .expect("the dictation file")
+        .permissions();
+    forbid.set_readonly(true);
+    std::fs::set_permissions(&unwritable, forbid).expect("make the dictation file read-only");
+    drop(pane);
+    let on_disk = std::fs::read_to_string(&unwritable).expect("read the dictation file");
+    assert!(
+        !on_disk.contains(REFUSED),
+        "the file was writable after all, so this proves nothing:\n{on_disk}"
+    );
+    let kept = PathBuf::from(format!("{}.unsaved", unwritable.display()));
+    let rescued = std::fs::read_to_string(&kept).unwrap_or_else(|error| {
+        panic!(
+            "a buffer that could not be written left nothing behind: {} is not there ({error})",
+            kept.display()
+        )
+    });
+    assert!(
+        rescued.contains(REFUSED),
+        "the rescued file does not hold what the buffer did:\n{rescued}"
+    );
+    println!(
+        "a buffer Neovim refused to write was kept in {}",
+        kept.display()
+    );
+
+    // ------------------- (f) and the teardown fits the daemon's budget
+    // The daemon gives its editor thread SHUTDOWN_GRACE and then exits,
+    // which stops the pane thread wherever it had got to. So writing
+    // everything and stopping the editor has to finish inside that even when
+    // the editor answers nothing at all -- otherwise a `systemctl --user
+    // restart spokenpad` at the wrong moment is what loses the text. This
+    // editor is stuck in a shell command and will never reply again.
+    let third = dictation_config(&directory.path().join("stalled"));
+    let stalled = third.dictation_dir.join("dictation-2026-09-21-000002.md");
+    std::fs::write(&stalled, "").expect("create the dictation file");
+    let mut pane = pane_on(&server, &third, &stalled);
+    put_line(&mut pane, "was nie geschrieben wird");
+    let stuck = pane.call(
+        "nvim_exec_lua",
+        vec![
+            Value::from("os.execute('sleep 30')"),
+            Value::Array(Vec::new()),
+        ],
+        Duration::from_millis(250),
+    );
+    assert!(stuck.is_err(), "the editor answered, so it is not stalled");
+    let started = Instant::now();
+    drop(pane);
+    let took = started.elapsed();
+    assert!(
+        took < SHUTDOWN_GRACE,
+        "tearing down a pane whose editor stopped answering took {took:?}, more than the \
+         {SHUTDOWN_GRACE:?} the daemon's shutdown allows: a restart would kill it mid-write"
+    );
+    println!(
+        "a stalled pane tore down in {} ms, inside the daemon's {} ms",
+        took.as_millis(),
+        SHUTDOWN_GRACE.as_millis()
+    );
 }
 
 // ------------------------------------------------------------------ helpers
+
+/// The editor configuration these panes run with: a socket and a dictation
+/// directory under `root`, and the bundled dictation init read from the
+/// repository rather than materialised into the user's state directory.
+fn dictation_config(root: &Path) -> Nvim {
+    let dictation = root.join("dictation");
+    std::fs::create_dir_all(&dictation).expect("make the dictation directory");
+    Nvim {
+        mode: Mode::Attach,
+        socket_path: root.join("nvim.sock"),
+        dictation_dir: dictation,
+        init: Some(PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/lua/dictation_init.lua"
+        ))),
+        ..Nvim::default()
+    }
+}
+
+/// Another pane on the same server, editing `file`. Small: what these later
+/// stages assert happens when it closes, not on its grid.
+fn pane_on(server: &XServer, config: &Nvim, file: &Path) -> Pane {
+    let (command, marker) = pane_launch(config, file).expect("build the nvim command");
+    let mut pane = Pane::open(
+        &Options {
+            display: server.display.clone(),
+            sizing: Sizing::Cells {
+                columns: 40,
+                rows: 8,
+            },
+            size: 16.0,
+            ..Options::default()
+        },
+        command,
+    )
+    .expect("open the pane");
+    pane.show().expect("map the pane");
+    marker.keep();
+    pane
+}
+
+/// Put a line in the buffer without writing it, which is what the user
+/// typing into the pane leaves behind.
+fn put_line(pane: &mut Pane, text: &str) {
+    let lua = format!("vim.api.nvim_buf_set_lines(0, -1, -1, false, {{ {text:?} }})");
+    call(
+        pane,
+        "nvim_exec_lua",
+        vec![Value::from(lua), Value::Array(Vec::new())],
+        PATIENCE,
+    );
+    let modified = call(
+        pane,
+        "nvim_exec_lua",
+        vec![
+            Value::from("return vim.bo.modified"),
+            Value::Array(Vec::new()),
+        ],
+        PATIENCE,
+    );
+    assert_eq!(
+        modified.as_bool(),
+        Some(true),
+        "the buffer is not modified, so closing it would have nothing to write"
+    );
+}
 
 /// One Neovim API call over the pane's own UI channel.
 fn call(pane: &mut Pane, method: &str, arguments: Vec<Value>, timeout: Duration) -> Value {

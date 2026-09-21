@@ -45,7 +45,12 @@ use std::{
 
 /// How long the shutdown waits for a background thread, and therefore how
 /// long queued editor appends have to reach the file.
-const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
+///
+/// It is also the whole budget a pane has to write what is in its buffers and
+/// close: when this runs out the process exits, and a pane thread stops
+/// wherever it had got to. `shell::pane` divides it and checks that its
+/// pieces fit.
+pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
 const LOOP_INTERVAL: Duration = Duration::from_millis(20);
 const DEVICE_POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// Below this a capture that is much shorter than the hold is reported.
