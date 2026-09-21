@@ -16,7 +16,7 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use spokenpad::{
-    config::Nvim,
+    config::{FontFamily, Nvim},
     shell::{
         nvim::pane_launch,
         pane::{Options, Pane, Sizing, Status},
@@ -80,8 +80,15 @@ fn main() -> Result<()> {
         ..Nvim::default()
     };
     let options = Options {
-        display: args.display.clone(),
-        family: args.family.clone(),
+        // The example's own boundary: a display named on the command
+        // line, or the one this shell is on.
+        display: args
+            .display
+            .clone()
+            .or_else(|| std::env::var("DISPLAY").ok())
+            .filter(|name| !name.is_empty())
+            .context("pass --display, or run this where $DISPLAY is set")?,
+        family: FontFamily::try_from(args.family.clone())?,
         size: args.size,
         sizing: Sizing::Cells {
             columns: args.columns,

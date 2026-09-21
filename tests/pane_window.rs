@@ -81,8 +81,8 @@ impl Watched {
     }
 
     fn at(server: &XServer, rect: Rect) -> Self {
-        let window = Pane::open(Some(&server.display), rect, "spokenpad dictation")
-            .expect("open the pane window");
+        let window =
+            Pane::open(&server.display, rect, "spokenpad dictation").expect("open the pane window");
         Self {
             window,
             key_press: 0,

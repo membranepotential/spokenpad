@@ -82,7 +82,7 @@ fn the_pane_draws_what_neovim_draws() {
     let (command, marker) = pane_launch(&config, &file).expect("build the nvim command");
     let mut pane = Pane::open(
         &Options {
-            display: Some(server.display.clone()),
+            display: server.display.clone(),
             sizing: Sizing::Cells {
                 columns: COLUMNS,
                 rows: ROWS,

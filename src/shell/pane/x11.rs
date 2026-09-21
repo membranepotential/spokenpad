@@ -82,13 +82,10 @@ impl Window {
     /// Create the window with the property set above. It is **not** mapped:
     /// the caller decides when it appears, and nothing before [`Self::map`]
     /// can change what the window manager will do with it.
-    pub fn open(display: Option<&str>, rect: Rect, title: &str) -> Result<Self> {
-        let display = display
-            .map(CString::new)
-            .transpose()
-            .context("the display name contains a NUL")?;
-        let (connection, screen) =
-            XCBConnection::connect(display.as_deref()).context("connect to the X display")?;
+    pub fn open(display: &str, rect: Rect, title: &str) -> Result<Self> {
+        let name = CString::new(display).context("the display name contains a NUL")?;
+        let (connection, screen) = XCBConnection::connect(Some(&name))
+            .with_context(|| format!("connect to the X display {display}"))?;
         let connection = Arc::new(connection);
         check_visual(&connection, screen)?;
         let low_byte_first = connection.setup().image_byte_order == ImageOrder::LSB_FIRST;

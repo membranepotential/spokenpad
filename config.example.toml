@@ -323,7 +323,8 @@ window_instance = "spokenpad"
 # corner of the chosen output instead.
 window_fraction = 0.33
 
-# Pane mode only: the font the window draws with, as a fontconfig family name.
+# Pane mode only: the font the window draws with, as a fontconfig family name
+# -- a name, not a pattern, so no colon, comma or backslash.
 # "monospace" is the alias your desktop already points at the font you want,
 # so start there. Name one here if what it resolves to has no bold or italic
 # face -- spokenpad thickens the strokes itself where bold is missing, which

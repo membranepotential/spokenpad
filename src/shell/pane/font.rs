@@ -11,6 +11,7 @@
 //! base letter and its combining marks are rendered onto one bitmap: there is
 //! no shaper here, and stacking the marks at the same pen position is what a
 //! monospace grid wants anyway.
+use crate::config::FontFamily;
 use anyhow::{Context, Result, bail, ensure};
 use std::{collections::HashMap, path::PathBuf, process::Command};
 use swash::{
@@ -32,8 +33,8 @@ impl Face {
     };
 
     /// The fontconfig pattern for this face of the given family.
-    fn pattern(self, family: &str) -> String {
-        let mut pattern = family.to_owned();
+    fn pattern(self, family: &FontFamily) -> String {
+        let mut pattern = family.to_string();
         if self.bold {
             pattern.push_str(":bold");
         }
@@ -122,13 +123,13 @@ pub struct Font {
     context: ScaleContext,
     metrics: CellMetrics,
     size: f32,
-    family: String,
+    family: FontFamily,
 }
 
 impl Font {
     /// Load the family at the given pixel size. `family` is a fontconfig
     /// pattern name; `"monospace"` is the one every desktop defines.
-    pub fn load(family: &str, size: f32) -> Result<Self> {
+    pub fn load(family: &FontFamily, size: f32) -> Result<Self> {
         ensure!(
             (4.0..=400.0).contains(&size),
             "font size {size} is outside 4..400 pixels"
@@ -183,7 +184,7 @@ impl Font {
             fallback_of: HashMap::new(),
             metrics,
             size,
-            family: family.to_owned(),
+            family: family.clone(),
         })
     }
 
@@ -275,7 +276,7 @@ fn covers(face: &Loaded, character: char) -> bool {
 
 /// The font fontconfig picks for one character, preferring the configured
 /// family's own idea of a substitute.
-fn match_character(family: &str, character: char) -> Result<Matched> {
+fn match_character(family: &FontFamily, character: char) -> Result<Matched> {
     read_match(&format!("{family}:charset={:x}", character as u32))
 }
 
@@ -283,11 +284,11 @@ fn match_character(family: &str, character: char) -> Result<Matched> {
 type Matched = (PathBuf, u32);
 
 /// `fc-match`, which is fontconfig's own answer to "which file is this?".
-fn match_face(face: Face, family: &str) -> Result<Matched> {
-    ensure!(
-        !family.is_empty() && !family.contains([':', ',', '-', '\\']),
-        "font family {family:?} is not a plain fontconfig family name"
-    );
+///
+/// The family needs no checking here: [`FontFamily`] is parsed where the
+/// configuration is read, and cannot hold anything fontconfig would take as
+/// pattern syntax.
+fn match_face(face: Face, family: &FontFamily) -> Result<Matched> {
     read_match(&face.pattern(family))
 }
 
@@ -444,7 +445,7 @@ fn rasterise(face: &Loaded, context: &mut ScaleContext, size: f32, text: &str) -
 
 /// Whether the font this pane needs can be found at all.
 pub fn available() -> bool {
-    match_face(Face::PLAIN, "monospace").is_ok()
+    match_face(Face::PLAIN, &FontFamily::default()).is_ok()
 }
 
 #[cfg(test)]
@@ -460,7 +461,7 @@ mod tests {
             );
             return None;
         }
-        Some(Font::load("monospace", 16.0).expect("load the system monospace font"))
+        Some(Font::load(&FontFamily::default(), 16.0).expect("load the system monospace font"))
     }
 
     #[test]
@@ -552,18 +553,8 @@ mod tests {
     }
 
     #[test]
-    fn a_family_name_that_is_a_fontconfig_pattern_is_refused() {
-        for family in ["", "monospace:bold", "mono,serif", "a\\b", "x-y"] {
-            assert!(
-                Font::load(family, 16.0).is_err(),
-                "{family:?} should not be accepted as a family name"
-            );
-        }
-    }
-
-    #[test]
     fn an_unusable_size_is_refused_before_anything_is_loaded() {
-        assert!(Font::load("monospace", 0.0).is_err());
-        assert!(Font::load("monospace", 1e6).is_err());
+        assert!(Font::load(&FontFamily::default(), 0.0).is_err());
+        assert!(Font::load(&FontFamily::default(), 1e6).is_err());
     }
 }

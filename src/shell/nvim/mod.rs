@@ -1463,6 +1463,13 @@ pub fn pane_launch(config: &Nvim, target: &Path) -> Result<(Command, OwnershipMa
     let (program, arguments) = argv.split_first().context("empty nvim command")?;
     let mut command = Command::new(program);
     command.args(arguments);
+    if let Some(display) = &config.display {
+        // The editor is told which display it is on, rather than left to
+        // inherit one. It shares the window's, which is what its own
+        // clipboard provider needs to reach the right selection — and the
+        // daemon's inherited environment need not name the same one.
+        command.env("DISPLAY", display);
+    }
     Ok((command, marker))
 }
 
@@ -1473,23 +1480,21 @@ pub fn pane_launch(config: &Nvim, target: &Path) -> Result<(Command, OwnershipMa
 /// handed to the pane: the pane opens its own, and one short-lived connection
 /// per window is cheaper than threading one through. Returns the display name
 /// too, so the pane opens on the one that was measured.
-fn pane_geometry(config: &Nvim) -> Result<(Rect, Option<String>)> {
+fn pane_geometry(config: &Nvim) -> Result<(Rect, String)> {
     use crate::shell::pane::{place, xkb};
 
-    let display = std::env::var("DISPLAY")
-        .ok()
-        .filter(|value| !value.is_empty())
-        .context(
-            "nvim.mode = \"pane\" needs an X display and $DISPLAY is not set; \
-             on Wayland, import it into the user manager alongside WAYLAND_DISPLAY",
-        )?;
+    let display = config.display.clone().context(
+        "nvim.mode = \"pane\" needs an X display and $DISPLAY was not set when \
+         spokenpad started; on Wayland, import it into the user manager alongside \
+         WAYLAND_DISPLAY",
+    )?;
     xkb::load()?;
     let name =
         std::ffi::CString::new(display.clone()).context("the display name contains a NUL")?;
     let (connection, screen) = x11rb::xcb_ffi::XCBConnection::connect(Some(&name))
         .with_context(|| format!("connect to the X display {display}"))?;
     let rect = place::window(&connection, screen, config.window_fraction)?;
-    Ok((rect, Some(display)))
+    Ok((rect, display))
 }
 
 /// `nvim.init` as the path nvim is given, writing out the bundled one.

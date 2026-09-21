@@ -33,6 +33,7 @@ pub mod ui;
 pub mod x11;
 pub mod xkb;
 
+use crate::config::FontFamily;
 use crate::core::{
     geometry::Rect,
     grid::{Cell, CursorShape, Damage, RedrawEvent, Rgb, Screen, Style, Underline},
@@ -78,10 +79,11 @@ pub enum Sizing {
 /// What the pane is told to be when it opens.
 #[derive(Debug, Clone)]
 pub struct Options {
-    /// The X display, or `None` for `$DISPLAY`.
-    pub display: Option<String>,
+    /// The X display to open on. Named, never looked up: the environment is
+    /// read once where the configuration is, and passed from there.
+    pub display: String,
     /// A fontconfig family name; `monospace` is the one every desktop has.
-    pub family: String,
+    pub family: FontFamily,
     /// Font size in pixels.
     pub size: f32,
     pub sizing: Sizing,
@@ -94,8 +96,8 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Self {
-            display: None,
-            family: "monospace".to_owned(),
+            display: ":0".to_owned(),
+            family: FontFamily::default(),
             size: 16.0,
             sizing: Sizing::Cells {
                 columns: 72,
@@ -178,7 +180,7 @@ impl Pane {
         };
         let (x, y) = options.position.unwrap_or((0, 0));
         let window = Window::open(
-            options.display.as_deref(),
+            &options.display,
             Rect {
                 x,
                 y,
@@ -919,7 +921,7 @@ pub fn requirements(config: &crate::config::Nvim) -> Vec<Requirement> {
             config.font_family, config.font_size, metrics.width, metrics.height
         )
     });
-    let display = display_summary();
+    let display = display_summary(config.display.as_deref());
     vec![
         Requirement {
             what: "X libraries",
@@ -937,11 +939,10 @@ pub fn requirements(config: &crate::config::Nvim) -> Vec<Requirement> {
 }
 
 /// The display a pane would open on, and the monitors it would choose from.
-fn display_summary() -> Result<String> {
-    let name = std::env::var("DISPLAY")
-        .ok()
-        .filter(|value| !value.is_empty())
-        .context("$DISPLAY is not set")?;
+fn display_summary(display: Option<&str>) -> Result<String> {
+    let name = display
+        .context("$DISPLAY was not set when spokenpad started")?
+        .to_owned();
     xkb::load()?;
     let cstring = std::ffi::CString::new(name.clone()).context("the display name has a NUL")?;
     let (connection, screen) = x11rb::xcb_ffi::XCBConnection::connect(Some(&cstring))

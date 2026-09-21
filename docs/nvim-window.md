@@ -154,7 +154,9 @@ non-zero when one is missing.
 ### The font
 
 `nvim.font_family` is a fontconfig family name and defaults to `monospace`,
-the alias your desktop already points at the font you want. `nvim.font_size`
+the alias your desktop already points at the font you want. It is a *name*,
+checked once where the configuration is read, so the pane cannot be handed
+something fontconfig would read as pattern syntax. `nvim.font_size`
 is in **pixels**: the pane rasterises at a pixel size and has no display
 resolution to convert a point size from, so a point size here would be a
 number that means something on paper and nothing on the screen.
@@ -175,7 +177,10 @@ answer there.
 
 - **No `DISPLAY`, or a library missing.** The daemon says which, and the text
   goes to the pending passage, exactly as it does when a terminal is not
-  installed. It does not fail.
+  installed. It does not fail. `$DISPLAY` is read once, when the
+  configuration is loaded, and passed from there to both the window and the
+  editor inside it — so the two always agree about which server they are on,
+  which is what the editor's clipboard provider needs.
 - **You close the window.** The editor inside it is asked to write every
   modified buffer and quit, its socket goes, and the next dictation opens a
   new window on a new file. Same as closing a managed terminal.

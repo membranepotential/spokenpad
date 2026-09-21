@@ -352,6 +352,56 @@ pub enum Mode {
     Pane,
 }
 
+/// A fontconfig family name, checked once where it enters the program.
+///
+/// Not a pattern: the pane appends `:bold` and `:charset=…` to it, so a value
+/// carrying its own colon, comma or backslash would become fontconfig syntax
+/// rather than a name. Parsing it here means the pane cannot be handed one
+/// that would — the check used to live in both places and the two disagreed
+/// about `-`, so `font_family = "JetBrains-Mono"` passed the configuration
+/// and failed when the window opened.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FontFamily(String);
+
+impl FontFamily {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Default for FontFamily {
+    /// The alias every desktop defines, pointing at whatever the user has
+    /// already chosen as their monospace font.
+    fn default() -> Self {
+        Self("monospace".to_owned())
+    }
+}
+
+impl std::fmt::Display for FontFamily {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl TryFrom<String> for FontFamily {
+    type Error = anyhow::Error;
+
+    fn try_from(name: String) -> Result<Self> {
+        ensure!(
+            !name.is_empty() && !name.contains([':', ',', '\\']),
+            "nvim.font_family must be a plain fontconfig family name, \
+             such as \"monospace\" or \"JetBrains Mono\", not a pattern"
+        );
+        Ok(Self(name))
+    }
+}
+
+impl<'de> Deserialize<'de> for FontFamily {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::try_from(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Nvim {
@@ -371,13 +421,23 @@ pub struct Nvim {
     /// every desktop defines and most people have already pointed at the font
     /// they want; naming one here overrides it, which is worth having because
     /// what `monospace` resolves to may have no bold or italic face at all.
-    pub font_family: String,
+    pub font_family: FontFamily,
     /// The pane's font size, in pixels.
     ///
     /// Pixels rather than points because the pane rasterises at a pixel size
     /// and has no display resolution to convert from: a point size would be
     /// a number that means something on paper and nothing here.
     pub font_size: f32,
+    /// The X display a pane opens on, read from `$DISPLAY` when the
+    /// configuration is loaded rather than looked up when a window is wanted.
+    ///
+    /// Not a configuration key: it is the session's, not the user's, and
+    /// reading it once at the boundary is what keeps the environment out of
+    /// the middle of the program. `None` means there is no display, which is
+    /// an ordinary state — the daemon says so and dictation goes to the
+    /// pending passage.
+    #[serde(skip)]
+    pub display: Option<String>,
     pub startup_timeout_s: f64,
     /// Send a desktop notification when dictated text has to go to the
     /// dictation file because no editor is open.
@@ -407,8 +467,11 @@ impl Default for Nvim {
             dictation_dir: state_dir().join("dictation"),
             file_template: "dictation-%Y-%m-%d-%H%M%S.md".into(),
             window_fraction: 0.33,
-            font_family: "monospace".into(),
+            font_family: FontFamily::default(),
             font_size: 16.,
+            // Filled in by `Config::load`; `Default` is what a test builds,
+            // and a test says which display it means.
+            display: None,
             startup_timeout_s: 20.,
             notify: true,
             copy_to_clipboard: false,
@@ -449,6 +512,15 @@ impl Config {
     /// `--config` typo pointed nowhere is how a user loses their settings.
     /// Only the default location may be absent.
     pub fn load(path: Option<&Path>) -> Result<Self> {
+        let mut config = Self::read_from(path)?;
+        // The one place the session's environment is read. Everything below
+        // this takes the display as a value, so nothing has to ask the
+        // environment at the moment it wants a window.
+        config.nvim.display = env::var("DISPLAY").ok().filter(|name| !name.is_empty());
+        Ok(config)
+    }
+
+    fn read_from(path: Option<&Path>) -> Result<Self> {
         let Some(p) = path else {
             let default = env::var_os("XDG_CONFIG_HOME")
                 .map(PathBuf::from)
@@ -582,13 +654,6 @@ impl Config {
                 && self.nvim.window_fraction > 0.
                 && self.nvim.window_fraction <= 1.,
             "nvim.window_fraction must be in (0,1]"
-        );
-        // A fontconfig family name, not a pattern: the pane appends `:bold`
-        // and `:charset=…` to it, and a value carrying its own colon or comma
-        // would become fontconfig syntax.
-        ensure!(
-            !self.nvim.font_family.is_empty() && !self.nvim.font_family.contains([':', ',', '\\']),
-            "nvim.font_family must be a plain fontconfig family name, such as \"monospace\""
         );
         ensure!(
             self.nvim.font_size.is_finite() && (4.0..=400.0).contains(&self.nvim.font_size),
@@ -931,8 +996,13 @@ mod tests {
                 "{bad} should be refused"
             );
         }
-        let good = Config::parse("[nvim]\nfont_family = 'JetBrains Mono'", None).unwrap();
-        assert_eq!(good.nvim.font_family, "JetBrains Mono");
+        // A hyphen is an ordinary character in a family name, and used to be
+        // refused by the pane after the configuration had accepted it.
+        for good in ["JetBrains Mono", "JetBrains-Mono", "Noto Sans Mono CJK JP"] {
+            let config = Config::parse(&format!("[nvim]\nfont_family = '{good}'"), None)
+                .unwrap_or_else(|error| panic!("{good:?} should be accepted: {error:#}"));
+            assert_eq!(config.nvim.font_family.as_str(), good);
+        }
     }
     #[test]
     fn unset_environment_rejected() {

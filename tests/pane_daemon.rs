@@ -13,7 +13,8 @@
 //!   window on a new file;
 //! - stopping the daemon leaves no window and no editor behind.
 //!
-//! One test, in that order, because `DISPLAY` is process-wide.
+//! One test, in that order, because it is one story: the same daemon code
+//! with and without a display to open on.
 mod harness;
 
 use anyhow::Result;
@@ -53,13 +54,11 @@ fn the_daemon_opens_a_pane_dictates_into_it_and_cleans_up() {
     }
 
     // ---------------------------------------- with no display at all
-    // The daemon must say so and keep the text, not fail. This runs before
-    // anything sets DISPLAY, so it is the state a systemd user service is in
-    // when nobody imported it.
-    // SAFETY: this test binary holds one test, and no thread that reads the
-    // environment has been started yet.
-    unsafe { std::env::remove_var("DISPLAY") };
-    let blind = Daemon::start();
+    // The state a systemd user service is in when nobody imported DISPLAY.
+    // Said in the configuration rather than in the environment: the daemon
+    // reads `$DISPLAY` once, where it reads everything else, so a test can
+    // say what it means instead of mutating a process-global.
+    let blind = Daemon::start(None);
     let _ = blind.dictate();
     let pending = wait_for(
         PATIENCE,
@@ -83,10 +82,7 @@ fn the_daemon_opens_a_pane_dictates_into_it_and_cleans_up() {
         i3.node(base).expect("the plain window").focused,
         "the plain window should hold the focus before the pane opens"
     );
-    // SAFETY: as above; the daemon under test is started after this.
-    unsafe { std::env::set_var("DISPLAY", &server.display) };
-
-    let daemon = Daemon::start();
+    let daemon = Daemon::start(Some(server.display.clone()));
     let before = resident_kilobytes();
     let released = daemon.dictate();
     let first = wait_for(PATIENCE, "the transcript to reach a dictation file", || {
@@ -260,12 +256,13 @@ struct Daemon {
 }
 
 impl Daemon {
-    fn start() -> Self {
+    fn start(display: Option<String>) -> Self {
         let directory = tempfile::tempdir().expect("a temporary directory");
         let root = directory.path();
         let mut config = Config::default();
         config.nvim.mode = Mode::Pane;
         config.nvim.notify = false;
+        config.nvim.display = display;
         // The editor's own provider does this — xclip, xsel or wl-copy,
         // inside nvim. It writes to whichever display that nvim is on, which
         // here is the Xvfb this test started.
