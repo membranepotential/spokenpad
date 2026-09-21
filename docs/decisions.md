@@ -505,3 +505,45 @@ equal pieces. **Rejected: Moonshine.** sherpa-onnx 1.13.6 fails on Moonshine
 v2 windows over about ten seconds and returns nothing.
 **Rejected: explicit file paths per model in the config.** Every sherpa-onnx
 release names its files by role, so a directory is enough.
+
+## The dictation editor: attach mode by default, managed on i3 and sway (2026-09-21)
+
+Until now the dictation window worked only with alacritty under i3 on X11:
+the daemon spawned `alacritty --class Floating,spokenpad -e nvim`, refused
+any other terminal argv, proved the `no_focus` rule by running
+`i3-msg -t get_config`, and read the layout from `xrandr`. For a public
+release that excluded every Wayland desktop and most X11 ones.
+
+`nvim.mode` now selects who opens the editor:
+
+- **`attach` (the default).** The user runs `spokenpad editor` in any
+  terminal, which becomes nvim on the dictation socket with spokenpad's
+  ownership marker; the daemon adopts it on the next key-down. It opens no
+  window, so "no window spokenpad opens may take focus" holds by
+  construction, on any desktop and with nothing to install.
+- **`managed`.** Today's behaviour, generalised: five terminals from a typed
+  table (alacritty, kitty, foot, wezterm, ghostty; `headless` for no window)
+  instead of one trusted argv, and i3 or sway spoken to over their shared IPC
+  protocol instead of `i3-msg` and `xrandr`. The rule is proven for the X11
+  instance on i3, and for the `app_id` and the instance under sway, since a
+  terminal there picks Wayland or Xwayland by itself. sway returns only the
+  main config file over IPC, so its `include` lines are followed on disk for
+  the subset `wordexp` would resolve with certainty.
+
+Attach is the default because it is the only mode that works for every new
+user, and the one that cannot fail the focus constraint at all. The author's
+own i3 setup opts into `managed` explicitly.
+
+**Dictating with no editor open** was the new failure to design for. Holding
+the text in memory until an editor appears would lose it to a daemon restart;
+refusing to record would make the key dead with no explanation. So the daemon
+writes each commit straight into a dictation file with the editor's own
+paragraph rule, records it as the pending passage beside the socket, and the
+next editor opens on that file. Decoding is untouched — the file is only a
+different sink — and one desktop notification says where the text went.
+
+Rejected: a headless nvim owned by the daemon with the user attaching a UI
+through `nvim --remote-ui`. It would reuse the RPC path unchanged, but it
+makes the daemon a precondition for opening the editor at all, and the
+remote UI still has rough edges (clipboard, `:q` quitting the server) that a
+plain nvim does not.

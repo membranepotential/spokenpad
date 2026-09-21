@@ -231,9 +231,14 @@ cooperating — a per-window-class paste combo, a target that reads the
 clipboard slowly enough to race the restore, a terminal that swallows
 `ctrl+v`.
 
-**Rule:** the transcript only ever goes to a window spokenpad opened for the
-purpose. The daemon spawns its own neovim and appends to a buffer in it. No
-other window is ever written to, and nothing is pasted anywhere.
+**Rule:** the transcript only ever goes to an editor opened for the purpose,
+over that editor's own socket. In managed mode the daemon spawns that neovim
+itself; in attach mode the user opens it with `spokenpad editor`, which runs
+nvim on the dictation socket and marks it as spokenpad's. No other window is
+ever written to, and nothing is pasted anywhere. With no such editor open,
+the transcript goes to a dictation file on disk — never to a window — and the
+next editor opens on that file (see
+[nvim-window.md](nvim-window.md#dictating-with-no-editor-open)).
 
 ## No window spokenpad opens may take focus
 
@@ -242,14 +247,31 @@ recording, it could take focus away from the application the user was
 dictating into, aborting the transcription in progress.
 
 **Rule:** no window this project opens may receive keyboard focus at any point
-in its lifecycle. Since 2026-09-08 it opens exactly one: the **dictation
-window**, which is refused focus by the window manager via a `no_focus` rule
-keyed on its X11 instance name. There is deliberately no focus call anywhere
-in [`shell/nvim/mod.rs`](../src/shell/nvim/mod.rs) — not even a "restore the
-previous focus" one, which would be a focus change of its own. See
+in its lifecycle. How that holds depends on `nvim.mode`:
+
+- **Attach mode opens no window at all.** The user opens the editor in a
+  terminal of their choosing, and the daemon only ever talks to its socket,
+  so the rule holds by construction, on any desktop.
+- **Managed mode opens exactly one: the dictation window**, and only after
+  proving that the running window manager refuses it focus. The terminal is
+  one of a known table ([`core/terminal.rs`](../src/core/terminal.rs)) that
+  names its window before it exists — the X11 instance on i3, the Wayland
+  `app_id` and the instance under sway — and the daemon reads the loaded
+  configuration over the window manager's IPC socket and refuses to spawn
+  unless it finds a `no_focus` rule for exactly that name
+  ([`shell/wm.rs`](../src/shell/wm.rs)). A terminal outside the table is
+  refused, since its window cannot be named in advance.
+
+There is deliberately no focus call anywhere in
+[`shell/nvim/mod.rs`](../src/shell/nvim/mod.rs) or
+[`shell/wm.rs`](../src/shell/wm.rs) — not even a "restore the previous focus"
+one, which would be a focus change of its own; the only window-manager
+command sent floats, sizes and moves the dictation window by criteria. See
 [nvim-window.md](nvim-window.md). (The Qt status overlay that preceded it was
 non-focusable by construction; it is deleted, see
 [decisions.md](decisions.md#pyside6-over-gtk4).)
 
 Verified live on 2026-09-07: opening the dictation window left the focused
-window unchanged, and i3 reported the new window as `focused: false`.
+window unchanged, and i3 reported the new window as `focused: false`. sway is
+implemented from its documentation and source and tested against a fake IPC
+server, not yet live.

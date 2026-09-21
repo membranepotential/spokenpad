@@ -351,10 +351,23 @@ impl Default for Recording {
     }
 }
 
+/// Who opens the dictation editor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    /// The user does, with `spokenpad editor`, in any terminal on any desktop.
+    /// The daemon never opens a window, so it can never take focus.
+    Attach,
+    /// The daemon does, in `terminal`, on the first key-down, after proving
+    /// the running i3 or sway refuses that window focus.
+    Managed,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Nvim {
-    /// The terminal a spawned editor runs in; see [`Terminal`].
+    pub mode: Mode,
+    /// The terminal a spawned editor runs in (managed mode); see [`Terminal`].
     pub terminal: Terminal,
     pub editor: Vec<String>,
     pub init: Option<PathBuf>,
@@ -366,10 +379,14 @@ pub struct Nvim {
     pub file_template: String,
     pub window_fraction: f64,
     pub startup_timeout_s: f64,
+    /// Send a desktop notification when dictated text has to go to the
+    /// dictation file because no editor is open.
+    pub notify: bool,
 }
 impl Default for Nvim {
     fn default() -> Self {
         Self {
+            mode: Mode::Attach,
             terminal: Terminal::Alacritty,
             editor: vec!["nvim".into()],
             init: None,
@@ -385,6 +402,7 @@ impl Default for Nvim {
             file_template: "dictation-%Y-%m-%d-%H%M%S.md".into(),
             window_fraction: 0.33,
             startup_timeout_s: 20.,
+            notify: true,
         }
     }
 }
@@ -695,6 +713,8 @@ mod tests {
             "[nvim]\nwindow_instance='1st'",
             "[nvim]\nwindow_instance=''",
             "[nvim]\nterminal='xterm'",
+            "[nvim]\nmode='spawn'",
+            "[nvim]\nmode=true",
             "[nvim]\nterminal=['alacritty', '-e']",
             "[recording]\nmax_total_bytes=0",
             "[asr]\ndecoding='typo'",
@@ -814,6 +834,17 @@ mod tests {
             models_dir().join("parakeet-tdt-0.6b-v3-int8")
         );
         assert_eq!(c.vad.model, models_dir().join("silero_vad.onnx"));
+    }
+    #[test]
+    fn the_editor_mode_is_explicit_and_attach_by_default() {
+        assert_eq!(Config::default().nvim.mode, Mode::Attach);
+        let managed = Config::parse("[nvim]\nmode = 'managed'\nterminal = 'foot'", None).unwrap();
+        assert_eq!(managed.nvim.mode, Mode::Managed);
+        assert_eq!(managed.nvim.terminal, Terminal::Foot);
+        // The terminal is read only in managed mode, and harmless otherwise,
+        // so switching modes needs no other edit.
+        let attach = Config::parse("[nvim]\nmode = 'attach'\nterminal = 'kitty'", None).unwrap();
+        assert_eq!(attach.nvim.mode, Mode::Attach);
     }
     #[test]
     fn unset_environment_rejected() {

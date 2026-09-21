@@ -1,5 +1,8 @@
 use super::*;
-use crate::core::session::{Notice, RecordingStatus};
+use crate::{
+    config::Mode,
+    core::session::{Notice, RecordingStatus},
+};
 use std::os::unix::{fs::PermissionsExt, net::UnixListener};
 
 /// The editor tests need a real Neovim. A missing one is a broken environment,
@@ -40,6 +43,7 @@ const TEST_CLIPBOARD_CMD: &str = r#"lua vim.g.clipboard = { name = "spokenpad-te
 
 fn headless(directory: &Path) -> Nvim {
     Nvim {
+        mode: Mode::Managed,
         terminal: Terminal::Headless,
         editor: vec![
             "nvim".to_owned(),
@@ -185,6 +189,145 @@ fn recording(preview: &str) -> IndicatorState {
     }
 }
 
+/// Attach mode's configuration: the same headless editor, which the test
+/// starts itself the way `spokenpad editor` would.
+fn attach(directory: &Path) -> Nvim {
+    let mut config = headless(directory);
+    config.mode = Mode::Attach;
+    config.editor.insert(1, "--headless".to_owned());
+    config
+}
+
+/// The editor a test started as the user would, killed and reaped on drop.
+struct UserEditor(Child);
+
+impl Drop for UserEditor {
+    fn drop(&mut self) {
+        drop(ProcessGroupGuard(self.0.id() as libc::pid_t));
+        let _ = self.0.wait();
+    }
+}
+
+/// What `spokenpad editor` runs, started as a child so the test can reap it.
+fn open_user_editor(config: &Nvim) -> (PathBuf, UserEditor) {
+    let (mut passage, mut command) = editor_command(config).unwrap();
+    passage.keep();
+    let child = command
+        .env("NVIM_LOG_FILE", config.socket_path.with_extension("log"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let guard = UserEditor(child);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while RpcClient::connect(&config.socket_path, deadline).is_err() {
+        assert!(
+            Instant::now() < deadline,
+            "the user's editor never listened"
+        );
+        std::thread::sleep(CONNECT_POLL);
+    }
+    (passage.path().to_owned(), guard)
+}
+
+#[test]
+fn attach_mode_never_spawns_an_editor() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = attach(directory.path());
+    let mut session = NvimSession::new(config.clone());
+    assert_eq!(session.ensure().unwrap(), None);
+    assert!(session.process.is_none());
+    assert!(!config.socket_path.exists());
+    assert!(!config.dictation_dir.exists(), "no file before any text");
+}
+
+#[test]
+fn attach_mode_adopts_the_users_editor_on_the_pending_passage() {
+    if !nvim_or_skip() {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let config = attach(directory.path());
+    let mut session = NvimSession::new(config.clone());
+    assert_eq!(session.ensure().unwrap(), None);
+    let detached = session
+        .append_detached("said with no editor", false)
+        .unwrap();
+    assert!(detached.started);
+    assert_eq!(passage::pending(&config), Some(detached.path.clone()));
+
+    let (opened, _editor) = open_user_editor(&config);
+    assert_eq!(
+        opened, detached.path,
+        "the editor opens the pending passage"
+    );
+    let pinned = session.ensure().unwrap().expect("the user's editor");
+    assert_eq!(pinned, detached.path);
+    assert!(session.process.is_none(), "attach mode spawned an editor");
+    assert_eq!(passage::pending(&config), None, "the pointer is settled");
+    session.append("said into the editor", false).unwrap();
+    assert_eq!(
+        fs::read_to_string(&pinned).unwrap(),
+        "said with no editor\n\nsaid into the editor\n"
+    );
+    // The user's editor is dedicated to dictation, so its chrome comes off.
+    assert_eq!(
+        lua(&mut session, "return vim.o.laststatus").as_i64(),
+        Some(0)
+    );
+}
+
+#[test]
+fn a_second_editor_is_refused_while_one_is_listening() {
+    if !nvim_or_skip() {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let config = attach(directory.path());
+    let (_, _editor) = open_user_editor(&config);
+    let error = editor_command(&config).err().expect("refused").to_string();
+    assert!(error.contains("already open"), "{error}");
+}
+
+/// The pending passage is written by Rust and the editor's paragraphs by
+/// Lua. A file that changes shape depending on which one wrote it would
+/// drift, so both are run on the same inputs.
+#[test]
+fn the_detached_paragraph_rule_matches_the_editors() {
+    if !nvim_or_skip() {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let mut session = NvimSession::new(headless(directory.path()));
+    let path = session.ensure().unwrap().expect("an editor");
+    let _guard = ProcessGroupGuard::for_session(&session);
+    for (existing, text, continued) in [
+        ("", "first", false),
+        ("", "first", true),
+        ("first\n", "second", false),
+        ("first\n", "more", true),
+        ("first\n", "", true),
+        ("first\n\n\n \t\n", "second", false),
+        ("a\nb\n", "c\nd\n", false),
+        ("\n\n", "x", false),
+        ("Grüße\n", "東京", true),
+    ] {
+        fs::write(&path, existing).unwrap();
+        lua(
+            &mut session,
+            "vim.api.nvim_buf_call(Spokenpad.buf, function() vim.cmd('silent edit!') end)",
+        );
+        session.append(text, continued).unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            passage::append_paragraph(existing, text, continued),
+            "{existing:?} + {text:?} (continued: {continued})"
+        );
+    }
+}
+
 #[test]
 fn headless_append_literal_text_and_adopt() {
     if !nvim_or_skip() {
@@ -193,7 +336,7 @@ fn headless_append_literal_text_and_adopt() {
     let directory = tempfile::tempdir().unwrap();
     let config = headless(directory.path());
     let mut first = NvimSession::new(config.clone());
-    let path = first.ensure().unwrap();
+    let path = first.ensure().unwrap().expect("an editor");
     let _guard = ProcessGroupGuard::for_session(&first);
     assert_eq!(
         fs::metadata(&path).unwrap().permissions().mode() & 0o777,
@@ -203,7 +346,7 @@ fn headless_append_literal_text_and_adopt() {
     first.close();
 
     let mut restarted = NvimSession::new(config);
-    assert_eq!(restarted.ensure().unwrap(), path);
+    assert_eq!(restarted.ensure().unwrap().expect("an editor"), path);
     restarted.append("continued", true).unwrap();
     assert_eq!(
         fs::read_to_string(path).unwrap(),
@@ -218,7 +361,7 @@ fn headless_append_preserves_trailing_lf_and_empty_continuation() {
     }
     let directory = tempfile::tempdir().unwrap();
     let mut session = NvimSession::new(headless(directory.path()));
-    let path = session.ensure().unwrap();
+    let path = session.ensure().unwrap().expect("an editor");
     let _guard = ProcessGroupGuard::for_session(&session);
 
     assert_eq!(session.append("first\nsecond\n", false).unwrap(), 3);
@@ -258,7 +401,7 @@ vim.api.nvim_create_autocmd("VimEnter", {
     ];
     config.init = Some(init);
     let mut session = NvimSession::new(config);
-    session.ensure().unwrap();
+    session.ensure().unwrap().expect("an editor");
     let _guard = ProcessGroupGuard::for_session(&session);
 
     let ready = lua(
@@ -276,7 +419,7 @@ fn headless_preview_is_inline_virtual_and_buffer_local() {
     let directory = tempfile::tempdir().unwrap();
     let config = headless(directory.path());
     let mut session = NvimSession::new(config.clone());
-    let path = session.ensure().unwrap();
+    let path = session.ensure().unwrap().expect("an editor");
     let _guard = ProcessGroupGuard::for_session(&session);
     attach_ui(&mut session);
 
@@ -335,7 +478,7 @@ return true
 
     session.close();
     let mut reloaded = NvimSession::new(config);
-    assert_eq!(reloaded.ensure().unwrap(), path);
+    assert_eq!(reloaded.ensure().unwrap().expect("an editor"), path);
     attach_ui(&mut reloaded);
     // `close` pushes the idle indicator as a bounded request, so the editor
     // has applied it by the time `close` returns.
@@ -448,7 +591,7 @@ fn an_idle_phase_deletes_the_preview_and_a_level_push_leaves_the_buffer_alone() 
     }
     let directory = tempfile::tempdir().unwrap();
     let mut session = NvimSession::new(headless(directory.path()));
-    session.ensure().unwrap();
+    session.ensure().unwrap().expect("an editor");
     let _guard = ProcessGroupGuard::for_session(&session);
     session.append("committed", false).unwrap();
     session
@@ -503,7 +646,7 @@ fn re_pinning_mid_recording_moves_the_preview_to_the_new_buffer() {
     }
     let directory = tempfile::tempdir().unwrap();
     let mut session = NvimSession::new(headless(directory.path()));
-    session.ensure().unwrap();
+    session.ensure().unwrap().expect("an editor");
     let _guard = ProcessGroupGuard::for_session(&session);
     session
         .set_indicator(&recording("half a sentence"))
@@ -559,7 +702,7 @@ fn a_notice_is_winbar_text_in_every_phase_and_never_the_preview() {
     let gap = Notice::MicrophoneGap.text();
     let directory = tempfile::tempdir().unwrap();
     let mut session = NvimSession::new(headless(directory.path()));
-    session.ensure().unwrap();
+    session.ensure().unwrap().expect("an editor");
     let _guard = ProcessGroupGuard::for_session(&session);
     session.append("committed", false).unwrap();
 
@@ -634,7 +777,7 @@ fn a_long_notice_keeps_the_phase_label_and_its_headline_in_a_narrow_window() {
     }
     let directory = tempfile::tempdir().unwrap();
     let mut session = NvimSession::new(headless(directory.path()));
-    session.ensure().unwrap();
+    session.ensure().unwrap().expect("an editor");
     let _guard = ProcessGroupGuard::for_session(&session);
     let notice = Notice::MemoryCap(RecordingStatus::Recorded(
         "/tmp/spokenpad/capture-example.wav".into(),
@@ -696,7 +839,7 @@ fn a_window_that_stops_showing_the_buffer_gets_its_winbar_back() {
     }
     let directory = tempfile::tempdir().unwrap();
     let mut session = NvimSession::new(headless(directory.path()));
-    session.ensure().unwrap();
+    session.ensure().unwrap().expect("an editor");
     let _guard = ProcessGroupGuard::for_session(&session);
     session.set_indicator(&recording("")).unwrap();
     let bar = lua(
@@ -729,7 +872,7 @@ fn chrome_globals_are_set_only_in_an_editor_spokenpad_opened() {
     }
     let directory = tempfile::tempdir().unwrap();
     let mut session = NvimSession::new(headless(directory.path()));
-    session.ensure().unwrap();
+    session.ensure().unwrap().expect("an editor");
     let _guard = ProcessGroupGuard::for_session(&session);
     assert_eq!(
         lua(&mut session, "return vim.o.laststatus").as_i64(),
@@ -771,7 +914,7 @@ fn an_append_while_the_user_types_keeps_both_texts_and_saves() {
     }
     let directory = tempfile::tempdir().unwrap();
     let mut session = NvimSession::new(headless(directory.path()));
-    let path = session.ensure().unwrap();
+    let path = session.ensure().unwrap().expect("an editor");
     let _guard = ProcessGroupGuard::for_session(&session);
     attach_ui(&mut session);
 
@@ -816,7 +959,7 @@ fn failed_save_rolls_back_before_the_next_append() {
     }
     let directory = tempfile::tempdir().unwrap();
     let mut session = NvimSession::new(headless(directory.path()));
-    let path = session.ensure().unwrap();
+    let path = session.ensure().unwrap().expect("an editor");
     let _guard = ProcessGroupGuard::for_session(&session);
     session.append("first", false).unwrap();
     lua(&mut session, "vim.bo[Spokenpad.buf].readonly = true");
@@ -826,7 +969,7 @@ fn failed_save_rolls_back_before_the_next_append() {
         !session.connected(),
         "a failed append left its client installed"
     );
-    session.ensure().unwrap();
+    session.ensure().unwrap().expect("an editor");
     lua(&mut session, "vim.bo[Spokenpad.buf].readonly = false");
     session.append("second", false).unwrap();
     assert_eq!(fs::read_to_string(path).unwrap(), "first\n\nsecond\n");
@@ -863,7 +1006,7 @@ fn append_retries_an_ambiguous_timeout_exactly_once() {
     }
     let directory = tempfile::tempdir().unwrap();
     let mut session = NvimSession::new(headless(directory.path()));
-    let path = session.ensure().unwrap();
+    let path = session.ensure().unwrap().expect("an editor");
     let _guard = ProcessGroupGuard::for_session(&session);
     stall_the_next_append(&mut session, "");
 
@@ -878,7 +1021,7 @@ fn a_retry_that_cannot_reconnect_leaves_the_session_disconnected() {
     }
     let directory = tempfile::tempdir().unwrap();
     let mut session = NvimSession::new(headless(directory.path()));
-    let path = session.ensure().unwrap();
+    let path = session.ensure().unwrap().expect("an editor");
     let _guard = ProcessGroupGuard::for_session(&session);
     // The editor stops listening while the reply is in flight, so the retry
     // has nowhere to go. Whatever happens, no half-used client may survive.
@@ -911,7 +1054,7 @@ fn a_retry_that_would_repin_another_file_refuses_to_append_twice() {
     }
     let directory = tempfile::tempdir().unwrap();
     let mut session = NvimSession::new(headless(directory.path()));
-    let path = session.ensure().unwrap();
+    let path = session.ensure().unwrap().expect("an editor");
     let _guard = ProcessGroupGuard::for_session(&session);
     stall_the_next_append(
         &mut session,
@@ -948,7 +1091,7 @@ fn deleting_the_dictation_buffer_repins_on_the_next_ensure() {
     }
     let directory = tempfile::tempdir().unwrap();
     let mut session = NvimSession::new(headless(directory.path()));
-    let first = session.ensure().unwrap();
+    let first = session.ensure().unwrap().expect("an editor");
     let _guard = ProcessGroupGuard::for_session(&session);
     session.append("before", false).unwrap();
 
@@ -956,7 +1099,7 @@ fn deleting_the_dictation_buffer_repins_on_the_next_ensure() {
         &mut session,
         "vim.api.nvim_buf_delete(Spokenpad.buf, { force = true })",
     );
-    let second = session.ensure().unwrap();
+    let second = session.ensure().unwrap().expect("an editor");
     assert_ne!(second, first, "ensure re-used a buffer that is gone");
     session.append("after", false).unwrap();
     assert_eq!(fs::read_to_string(&first).unwrap(), "before\n");
@@ -975,7 +1118,7 @@ fn a_socket_file_with_no_listener_is_replaced_by_a_fresh_editor() {
     assert!(config.socket_path.exists());
 
     let mut session = NvimSession::new(config.clone());
-    let path = session.ensure().unwrap();
+    let path = session.ensure().unwrap().expect("an editor");
     let _guard = ProcessGroupGuard::for_session(&session);
     session.append("after a stale socket", false).unwrap();
     assert_eq!(fs::read_to_string(path).unwrap(), "after a stale socket\n");
@@ -1072,12 +1215,15 @@ fn a_headless_editor_is_told_so_right_after_its_own_command() {
 }
 
 #[test]
-fn ownership_is_parsed_from_exactly_the_four_documented_fields() {
+fn ownership_is_parsed_from_exactly_the_six_documented_fields() {
+    let nil = || Value::Nil;
     let pinned = Value::Array(vec![
         Value::from("a".repeat(64)),
         Value::from("a".repeat(64)),
         Value::from(7),
         Value::from("/home/u/dictation/today.md"),
+        Value::from(2),
+        Value::from("/home/u/dictation/started.md"),
     ]);
     assert_eq!(
         parse_ownership(&pinned).unwrap(),
@@ -1088,25 +1234,32 @@ fn ownership_is_parsed_from_exactly_the_four_documented_fields() {
                 buffer: 7,
                 name: "/home/u/dictation/today.md".to_owned(),
             }),
+            startup: Some(Pinned {
+                buffer: 2,
+                name: "/home/u/dictation/started.md".to_owned(),
+            }),
         }
     );
 
-    let bare = Value::Array(vec![Value::Nil, Value::Nil, Value::Nil, Value::Nil]);
+    let bare = Value::Array(vec![nil(), nil(), nil(), nil(), nil(), nil()]);
     assert_eq!(
         parse_ownership(&bare).unwrap(),
         Ownership {
             marker: None,
             ready: None,
-            pinned: None
+            pinned: None,
+            startup: None,
         }
     );
 
     for malformed in [
         Value::from(1),
-        Value::Array(vec![Value::Nil, Value::Nil]),
-        // A pinned buffer with no name is not an adoptable buffer.
-        Value::Array(vec![Value::Nil, Value::Nil, Value::from(3), Value::Nil]),
-        Value::Array(vec![Value::from(1), Value::Nil, Value::Nil, Value::Nil]),
+        Value::Array(vec![nil(), nil()]),
+        Value::Array(vec![nil(), nil(), nil(), nil()]),
+        // A buffer with no name is not an adoptable buffer.
+        Value::Array(vec![nil(), nil(), Value::from(3), nil(), nil(), nil()]),
+        Value::Array(vec![nil(), nil(), nil(), nil(), Value::from(3), nil()]),
+        Value::Array(vec![Value::from(1), nil(), nil(), nil(), nil(), nil()]),
     ] {
         assert!(
             parse_ownership(&malformed).is_err(),
@@ -1266,7 +1419,7 @@ fn copy_buffer_sets_the_clipboard_to_exactly_the_buffer_text() {
     }
     let directory = tempfile::tempdir().unwrap();
     let mut session = NvimSession::new(headless(directory.path()));
-    session.ensure().unwrap();
+    session.ensure().unwrap().expect("an editor");
     let _guard = ProcessGroupGuard::for_session(&session);
     assert_eq!(
         test_clipboard(&mut session),
@@ -1305,7 +1458,7 @@ fn copy_buffer_leaves_the_clipboard_untouched_on_an_empty_buffer() {
     }
     let directory = tempfile::tempdir().unwrap();
     let mut session = NvimSession::new(headless(directory.path()));
-    session.ensure().unwrap();
+    session.ensure().unwrap().expect("an editor");
     let _guard = ProcessGroupGuard::for_session(&session);
 
     let outcome = session.copy_buffer().unwrap();
@@ -1338,7 +1491,7 @@ fn copy_buffer_reports_a_missing_clipboard_provider() {
     let last = config.editor.len() - 1;
     config.editor[last] = "let g:loaded_clipboard_provider = 1".to_owned();
     let mut session = NvimSession::new(config);
-    session.ensure().unwrap();
+    session.ensure().unwrap().expect("an editor");
     let _guard = ProcessGroupGuard::for_session(&session);
     session.append("text to copy", false).unwrap();
 
@@ -1380,7 +1533,7 @@ fn the_newest_text_stays_visible_across_paragraphs() {
         env!("CARGO_MANIFEST_DIR")
     ));
     let mut session = NvimSession::new(config);
-    session.ensure().unwrap();
+    session.ensure().unwrap().expect("an editor");
     let _guard = ProcessGroupGuard::for_session(&session);
     attach_ui(&mut session);
     lua(

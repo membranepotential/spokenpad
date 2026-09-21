@@ -28,7 +28,8 @@ imperative shell, and `config.rs` sits at the root because both sides read it.
 | `shell/hotkey.rs` | Observe evdev keys read-only: scan, open, poll, read | `/dev/input` |
 | `shell/audio.rs` | Pre-roll, immutable capture chunks, the memory ceiling, stream repair | PortAudio (behind `InputBackend`) |
 | `shell/recorder.rs` | Persist every capture independently of decode, and prune the directory | filesystem |
-| `shell/nvim/mod.rs` | Owned editor lifecycle, ownership proof, transactional appends, indicator | Unix socket, window manager |
+| `shell/nvim/mod.rs` | Editor lifecycle in both modes (attach, managed spawn), ownership proof, transactional appends, indicator, `spokenpad editor` | Unix socket, window manager |
+| `shell/nvim/passage.rs` | With no editor open: append to the pending dictation file, and the pointer the next editor opens | filesystem |
 | `shell/nvim/rpc.rs` | msgpack-RPC transport with absolute deadlines; pure codec | Unix socket |
 | `shell/wm.rs` | i3/sway IPC requests under a deadline, once per spawn; `xdotool` for the pointer on i3 | IPC socket, one subprocess |
 | `shell/logging.rs` | Private 0600 diagnostic log, rotated at 1 MB | filesystem |
@@ -60,7 +61,7 @@ unit-tested without a device, a thread, or a process. Nothing there may import
 - `core/terminal.rs` — the terminal table: window names, focus criteria per
   window manager, argv.
 - one pure half still lives inside a shell module: in `shell/nvim`, the RPC
-  codec, the spawn argv, and ownership parsing.
+  codec, the spawn argv, ownership parsing, and `passage::append_paragraph`.
 
 The shell owns everything that can fail for reasons outside the program:
 `shell::daemon::run` and `shell::daemon::serve`, the audio backends,
@@ -97,8 +98,10 @@ read-only evdev ──► state::step ──► Command
                                       ▼
                        EditorWork::{Ensure, Append, Indicator}
                                       │
-                                      ▼
-                          owned Neovim RPC buffer
+                         ┌────────────┴────────────┐
+                         ▼                         ▼
+          dictation Neovim RPC buffer     pending dictation file
+                                          (no editor open)
 ```
 
 Everything the event loop learns about the microphone arrives as a typed

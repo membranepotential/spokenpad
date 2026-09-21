@@ -3,12 +3,8 @@
 use anyhow::{Context, Result, anyhow, ensure};
 use rmpv::Value;
 use spokenpad::{
-    config::Config,
-    core::{
-        session::Notice,
-        state::IndicatorPhase,
-        wm::{Criterion, Property},
-    },
+    config::{Config, Mode},
+    core::{session::Notice, state::IndicatorPhase},
     shell::{
         nvim::{IndicatorState, NvimSession},
         wm::Wm,
@@ -55,20 +51,22 @@ fn verify(socket_path: &Path, dictation_dir: &Path) -> Result<()> {
     let wm = Wm::connect().context("this check needs a running i3 or sway")?;
     let active_window = || wm.focused_node();
     let before = active_window()?;
-    // Exercise the deployed editor mode, including bundled init/theme choices.
-    // Only the test's socket and transcript location are isolated below.
+    // Exercise the deployed terminal and editor, including bundled init and
+    // theme choices, in managed mode whatever the config says: this checks
+    // the window spokenpad opens itself. Only the test's socket and
+    // transcript location are isolated below.
     let mut config = Config::load(None)?.nvim;
+    config.mode = Mode::Managed;
     ensure!(
         config.window_instance == "spokenpad",
-        "configured window instance no longer matches the smoke test's i3 no_focus rule"
+        "configured window instance no longer matches the packaged no_focus rules"
     );
     // This check opens a window of its own and then kills it. Running it
     // beside a live dictation window would adopt that window's socket and
     // close someone's passage, so refuse before anything is opened.
-    let criteria = [
-        Criterion::new(Property::Instance, &config.window_instance)?,
-        Criterion::new(Property::AppId, &config.window_instance)?,
-    ];
+    let criteria = config
+        .terminal
+        .focus_criteria(&config.window_instance, wm.kind())?;
     ensure!(
         wm.find(&criteria)?.is_none(),
         "a {} window is already open; close the dictation window before running this check",
@@ -80,7 +78,8 @@ fn verify(socket_path: &Path, dictation_dir: &Path) -> Result<()> {
     let mut session = NvimSession::new(config);
     let path = session
         .ensure()
-        .context("open graphical dictation Neovim")?;
+        .context("open graphical dictation Neovim")?
+        .context("managed mode opened no editor")?;
     ensure!(
         active_window()? == before,
         "focused window changed while ensuring the Neovim session"

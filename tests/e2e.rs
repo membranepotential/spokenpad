@@ -14,11 +14,13 @@
 //! process is found by scanning `/proc/*/cmdline` for it and its process group
 //! — `nvim` calls `setsid`, so its pid is its process-group id — is signalled.
 //! Spawning a graphical editor is never attempted: `nvim.terminal` is
-//! `headless`, so the daemon runs `nvim --headless` and opens no window.
+//! `headless`, so the daemon runs `nvim --headless` and opens no window. The
+//! attach-mode tests start "the user's editor" with the real
+//! `spokenpad editor` command, configured to run nvim `--headless` too.
 
 use anyhow::Result;
 use spokenpad::{
-    config::{Audio, Config},
+    config::{Audio, Config, Mode},
     core::{
         decode::{Pipeline, Recognizer, Segment, Segmenter, TrailingSilence, Worker},
         state::Event,
@@ -34,8 +36,9 @@ use spokenpad::{
 use std::{
     collections::VecDeque,
     fs,
+    os::unix::process::CommandExt,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Child, Command, Stdio},
     sync::{
         Arc, Mutex, MutexGuard,
         atomic::{AtomicBool, Ordering},
@@ -223,7 +226,7 @@ impl Segmenter for Fixed {
 // ------------------------------------------------------------------- harness
 
 struct Harness {
-    _directory: TempDir,
+    directory: TempDir,
     microphone: FakeMicrophone,
     keys: Sender<Event>,
     stopping: Arc<AtomicBool>,
@@ -232,9 +235,14 @@ struct Harness {
     dictation: PathBuf,
     recordings: PathBuf,
     served: Option<JoinHandle<Result<()>>>,
+    /// The editor `open_editor` started, reaped when the harness is dropped.
+    user_editor: Option<Child>,
 }
 
 struct Settings {
+    /// Managed spawns a headless editor on the first press; attach leaves
+    /// opening one to the test, as a user running `spokenpad editor` would.
+    mode: Mode,
     preroll_ms: u32,
     postroll_ms: u32,
     interval_ms: u64,
@@ -246,6 +254,7 @@ struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            mode: Mode::Managed,
             preroll_ms: 250,
             postroll_ms: 250,
             interval_ms: 200,
@@ -264,7 +273,9 @@ impl Harness {
         config.audio.preroll_ms = settings.preroll_ms;
         config.audio.postroll_ms = settings.postroll_ms;
         config.recording.dir = root.join("audio");
+        config.nvim.mode = settings.mode;
         config.nvim.terminal = Terminal::Headless;
+        config.nvim.notify = false;
         config.nvim.editor = [
             "nvim",
             "-u",
@@ -317,7 +328,7 @@ impl Harness {
             )
         });
         Self {
-            _directory: directory,
+            directory,
             microphone,
             keys,
             stopping,
@@ -326,6 +337,7 @@ impl Harness {
             dictation,
             recordings,
             served: Some(served),
+            user_editor: None,
         }
     }
 
@@ -451,6 +463,58 @@ impl Harness {
         lock(&self.calls).clone()
     }
 
+    /// Opens the dictation editor the way a user does in attach mode: by
+    /// running `spokenpad editor`, which becomes nvim on the socket. Returns
+    /// once it answers.
+    fn open_editor(&mut self) {
+        let root = self.directory.path();
+        let config = root.join("editor.toml");
+        let toml = format!(
+            "[nvim]\nmode = 'attach'\ninit = 'NONE'\neditor = ['nvim', '--headless', '-i', 'NONE', '--cmd', '{TEST_CLIPBOARD_CMD}']\nsocket_path = '{}'\ndictation_dir = '{}'\n",
+            self.socket.display(),
+            self.dictation.display()
+        );
+        fs::write(&config, toml).expect("write the editor's config");
+        let child = Command::new(env!("CARGO_BIN_EXE_spokenpad"))
+            .env("XDG_STATE_HOME", root)
+            .env("XDG_CONFIG_HOME", root)
+            .env("XDG_RUNTIME_DIR", root)
+            .env("NVIM_LOG_FILE", root.join("nvim.log"))
+            .args(["--log-file", "none", "-c"])
+            .arg(&config)
+            .arg("editor")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            // Its own process group, as `nvim` spawned by the daemon has, so
+            // `kill_editor` finds and reaps it the same way.
+            .process_group(0)
+            .spawn()
+            .expect("run spokenpad editor");
+        self.user_editor = Some(child);
+        // Answering at all is enough: the daemon loads its Lua on attach.
+        assert_eq!(self.ask("1").trim(), "1");
+    }
+
+    /// How many processes are serving this harness's socket: the daemon's
+    /// own editor, or the one `open_editor` started.
+    fn editors(&self) -> usize {
+        let needle = self.socket.as_os_str().as_encoded_bytes().to_vec();
+        fs::read_dir("/proc")
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|entry| fs::read(entry.path().join("cmdline")).ok())
+            .filter(|cmdline| cmdline.split(|byte| *byte == 0).any(|arg| arg == needle))
+            .count()
+    }
+
+    fn dictation_files(&self) -> usize {
+        fs::read_dir(&self.dictation)
+            .map(|entries| entries.flatten().count())
+            .unwrap_or(0)
+    }
+
     /// Stop the daemon and wait for `serve` to return, keeping the harness and
     /// its files alive so a test can inspect what the shutdown delivered.
     #[track_caller]
@@ -482,6 +546,9 @@ impl Drop for Harness {
             let _ = served.join();
         }
         kill_editor(&self.socket);
+        if let Some(mut child) = self.user_editor.take() {
+            let _ = child.wait();
+        }
     }
 }
 
@@ -1010,6 +1077,91 @@ fn a_microphone_restart_marks_the_gap_and_keeps_the_audio() {
 }
 
 /// Run with `cargo test --locked --test e2e -- --ignored`.
+/// Attach mode: the user opened the editor, the daemon writes into it and
+/// opens nothing of its own.
+#[test]
+fn attach_mode_writes_into_the_users_editor_and_spawns_nothing() {
+    if !nvim_available() {
+        return;
+    }
+    let mut h = Harness::start(Settings {
+        mode: Mode::Attach,
+        ..Settings::default()
+    });
+    h.open_editor();
+    assert_eq!(h.editors(), 1);
+    thread::sleep(Duration::from_millis(300));
+    h.press(false);
+    h.say(&tone(1.0));
+    h.release();
+    wait_until("the transcript reaches the user's editor", || {
+        h.text() == "word word\n"
+    });
+    wait_until("the release copies the buffer", || {
+        h.clipboard() == "word word"
+    });
+    assert_eq!(
+        h.ask("luaeval('vim.api.nvim_buf_get_lines(Spokenpad.buf, 0, -1, false)[1]')")
+            .trim(),
+        "word word"
+    );
+    assert_eq!(h.editors(), 1, "the daemon opened an editor of its own");
+    assert_eq!(h.dictation_files(), 1);
+    h.finish();
+}
+
+/// Attach mode with nobody's editor open: nothing is lost, nothing is
+/// decoded twice, and the editor opened afterwards shows it all and keeps
+/// the same file.
+#[test]
+fn attach_mode_without_an_editor_keeps_the_text_for_the_next_one() {
+    if !nvim_available() {
+        return;
+    }
+    let mut h = Harness::start(Settings {
+        mode: Mode::Attach,
+        ..Settings::default()
+    });
+    thread::sleep(Duration::from_millis(300));
+    h.press(false);
+    h.say(&tone(1.0));
+    h.release();
+    wait_until("the first utterance reaches the file", || {
+        h.text() == "word word\n"
+    });
+    h.press(false);
+    h.say(&tone(1.0));
+    h.release();
+    wait_until("the second utterance is its own paragraph", || {
+        h.text() == "word word\n\nword word\n"
+    });
+    assert_eq!(h.editors(), 0, "attach mode must never open an editor");
+    assert_eq!(h.dictation_files(), 1);
+    assert_eq!(
+        h.calls().len(),
+        2,
+        "each capture is decoded exactly once: {:?}",
+        h.calls()
+    );
+
+    h.open_editor();
+    assert_eq!(
+        h.ask("join(getline(1, '$'), '|')").trim(),
+        "word word||word word",
+        "the editor opens on what was said while none was open"
+    );
+    h.press(false);
+    h.say(&tone(1.0));
+    h.release();
+    wait_until("the third utterance lands in the editor", || {
+        h.text() == "word word\n\nword word\n\nword word\n"
+    });
+    assert_eq!(h.dictation_files(), 1, "one passage, one file");
+    assert_eq!(h.editors(), 1);
+    assert_eq!(h.calls().len(), 3);
+    h.finish();
+}
+
 #[test]
 #[ignore = "loads the real CPU models; needs models/ and about ten seconds"]
 fn real_models_transcribe_the_kennedy_sample() {
@@ -1029,6 +1181,7 @@ fn real_models_transcribe_the_kennedy_sample() {
     let root = directory.path();
     let mut config = Config::default();
     config.recording.dir = root.join("audio");
+    config.nvim.mode = Mode::Managed;
     config.nvim.terminal = Terminal::Headless;
     config.nvim.editor = [
         "nvim",

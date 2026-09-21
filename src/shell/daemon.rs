@@ -224,10 +224,13 @@ fn editor_thread(config: crate::config::Nvim, rx: Receiver<EditorWork>) {
             match work {
                 EditorWork::Indicator(next) => indicator = Some(next),
                 EditorWork::Ensure => match nvim.ensure() {
-                    Ok(path) => {
+                    Ok(Some(path)) => {
                         log::info!("dictating into {}", path.display());
                         shown = None;
                     }
+                    Ok(None) => log::info!(
+                        "no dictation editor is open; text goes to the dictation file until `spokenpad editor` opens it"
+                    ),
                     Err(e) => log::error!("could not open dictation window: {e:#}"),
                 },
                 EditorWork::Append { utterance, text } => {
@@ -240,8 +243,33 @@ fn editor_thread(config: crate::config::Nvim, rx: Receiver<EditorWork>) {
                     {
                         log::warn!("could not reattach to the dictation window: {e:#}");
                     }
+                    let continued = paragraph == Some(utterance);
+                    // With no editor at all, the text goes to the file the
+                    // next editor will open on, rather than nowhere.
+                    if !nvim.connected() {
+                        match nvim.append_detached(&text, continued) {
+                            Ok(write) => {
+                                paragraph = Some(utterance);
+                                log::info!(
+                                    "no dictation editor: appended to {}",
+                                    write.path.display()
+                                );
+                                if write.started {
+                                    nvim.notify_detached(&write.path);
+                                }
+                            }
+                            Err(e) => {
+                                paragraph = None;
+                                log::error!(
+                                    "could not write the transcript to a dictation file: {e:#}; recover from the capture WAV if available"
+                                );
+                                log::debug!("undelivered text: {text:?}");
+                            }
+                        }
+                        continue;
+                    }
                     let now = Instant::now();
-                    match nvim.append(&text, paragraph == Some(utterance)) {
+                    match nvim.append(&text, continued) {
                         Ok(line) => {
                             paragraph = Some(utterance);
                             shown = None;

@@ -245,7 +245,37 @@ replacements = {}
 trailing_space = false
 
 [nvim]
-# nvim config for the dictation window.
+# Where the transcript goes: a neovim buffer, appended to over nvim's
+# msgpack-RPC socket and saved after every utterance. Nothing is ever pasted
+# into the window you are working in, and no keystrokes are synthesised
+# anywhere -- see docs/constraints.md and docs/nvim-window.md.
+
+# Who opens that neovim.
+#
+#   "attach"   you do: run `spokenpad editor` in any terminal, on any desktop
+#              (X11 or Wayland, any window manager). The daemon never opens a
+#              window, so it can never take focus. With no editor open,
+#              dictation goes straight into the dictation file, and the next
+#              `spokenpad editor` opens on it.
+#   "managed"  the daemon does, in `terminal` below, on the first key-down.
+#              Needs i3 or sway, and refuses to open a window until the running
+#              window manager's config proves a no_focus rule for it
+#              (packaging/i3/ or packaging/sway/).
+mode = "attach"
+
+# Managed mode only: the terminal the window opens in -- "alacritty",
+# "kitty", "foot" (Wayland only), "wezterm" or "ghostty". spokenpad knows how
+# each one names its window, which is what the no_focus rule keys on, so it
+# can prove that rule before the window exists; any other terminal is
+# refused. "headless" runs nvim with no window at all (attach a UI with
+# `nvim --remote-ui --server <socket_path>`).
+terminal = "alacritty"
+
+# The editor. The init, colourscheme, `--listen <socket>` and the dictation
+# file are appended to this, so anything here comes first.
+editor = ["nvim"]
+
+# nvim config for the dictation editor, in both modes.
 #
 #   unset       your own ~/.config/nvim -- everything you have, and its cost
 #   "bundled"   spokenpad's own: no plugins, chrome off before the first frame
@@ -264,84 +294,73 @@ trailing_space = false
 # cannot reflow a transcript.
 # init = "bundled"
 
-# Colourscheme for the window. With init = "bundled" this is what still makes
+# Colourscheme for the editor. With init = "bundled" this is what still makes
 # it look like your editor: only the one plugin directory providing the named
 # scheme is put on the runtimepath, so the colours arrive without the startup
 # cost of everything around them. Harmless with a full config, where it just
-# switches theme.
+# switches theme. Unset by default.
 # colorscheme = "tokyonight-moon"
 
-# Let the terminal's background show through. On by default, and it is what
-# makes `colorscheme` above look right: a theme loaded straight from its plugin
-# directory is the theme's DEFAULTS, not the theme as you configured it, so one
-# you run with `transparent = true` arrives opaque here and paints a block of
-# its own background inside your terminal's border. Set false to take the
+# Let the terminal's background show through. It is what makes `colorscheme`
+# above look right: a theme loaded straight from its plugin directory is the
+# theme's DEFAULTS, not the theme as you configured it, so one you run with
+# `transparent = true` arrives opaque here and paints a block of its own
+# background inside your terminal's border. Set false to take the
 # colourscheme's own background instead.
-# transparent = true
-# Where the transcript goes: a floating neovim window, appended to over its
-# msgpack-RPC socket. Nothing is ever pasted into the window you are working
-# in, and no keystrokes are synthesised anywhere -- see docs/constraints.md.
+transparent = true
 
-# The terminal the window opens in: "alacritty", "kitty", "foot" (Wayland
-# only), "wezterm" or "ghostty". spokenpad knows how each one names its
-# window, which is what the window manager's no_focus rule keys on, so it can
-# prove that rule before the window exists; any other terminal is refused.
-# "headless" runs nvim with no window at all (attach a UI with
-# `nvim --remote-ui --server <socket_path>`).
-terminal = "alacritty"
-
-# The editor. `--listen <socket>` and the dictation file are appended to
-# this, so anything here comes first: ["nvim", "-u", "NONE"] gets an editor
-# with none of your own config loaded.
-editor = ["nvim"]
-
-# The dictation window's name: its X11 instance on i3, and its Wayland app_id
-# under sway (ghostty's app_id is "spokenpad.<this>", since GTK needs a dot).
-# The rules in packaging/i3/ and packaging/sway/ match "spokenpad".
-#
-# Restricted to [A-Za-z][A-Za-z0-9_-]* because it is interpolated into
-# window-manager criteria, and a config value must not become WM syntax.
+# Managed mode only: the window's name -- its X11 instance on i3, and its
+# Wayland app_id under sway (ghostty's app_id is "spokenpad.<this>", since GTK
+# needs a dot). The rules in packaging/i3/ and packaging/sway/ match
+# "spokenpad". Restricted to [A-Za-z][A-Za-z0-9_-]* because it is
+# interpolated into window-manager criteria.
 window_instance = "spokenpad"
 
-# Size of the dictation window, as a fraction of each screen axis: 0.33 is a
-# third of the width and a third of the height. It opens with its top-left
-# corner at the mouse pointer, clamped fully on screen, so it lands beside
-# whatever you are reading rather than in a fixed corner.
+# Managed mode only: size of the window, as a fraction of each screen axis.
+# On i3 it opens with its top-left corner at the mouse pointer, clamped fully
+# on screen, so it lands beside whatever you are reading; sway cannot tell a
+# client where the pointer is, so there it opens in the bottom-right corner
+# of the focused output.
 window_fraction = 0.33
 
-# Where nvim listens for RPC. spokenpad reattaches to a live socket rather
-# than opening a second window, so restarting the daemon does not litter the
-# desktop with terminals.
+# Where nvim listens for RPC, in both modes. spokenpad reattaches to a live
+# socket rather than opening a second window, and `spokenpad editor` refuses
+# to start a second editor on it.
 #
 # Defaults to $XDG_RUNTIME_DIR/spokenpad-nvim.sock, falling back to the state
-# directory below if that variable is unset. Both ~ and $VAR are expanded
-# here -- but a $VAR that is not actually set is a hard error rather than a
-# literal directory named "$XDG_RUNTIME_DIR" in your home.
+# directory if that variable is unset. Both ~ and $VAR are expanded here --
+# but a $VAR that is not actually set is a hard error rather than a literal
+# directory named "$XDG_RUNTIME_DIR" in your home.
 # socket_path = "$XDG_RUNTIME_DIR/spokenpad-nvim.sock"
 
 # Directory holding the dictation files, and the strftime template for their
-# names -- one file per WINDOW, saved after every single utterance.
+# names -- one file per EDITOR, saved after every single utterance.
 #
-# Closing the dictation window ends the passage: the next time you record,
-# spokenpad opens a new window on a new file rather than appending under
-# everything you said an hour ago. While the window stays open every utterance
-# goes into it, across a daemon restart included. Include a time in the
-# template, not just a date, or two sessions in one day share a page.
+# Closing the editor ends the passage: the next dictation starts a new file
+# rather than appending under everything you said an hour ago. While it stays
+# open every utterance goes into it, across a daemon restart included. With
+# no editor open, utterances go into one file of their own until an editor
+# opens on it. Include a time in the template, not just a date, or two
+# sessions in one day share a page.
 #
 # A real file rather than a scratch buffer, deliberately: a transcript that
 # disappears because a buffer was closed is the same class of failure as one
 # dropped by a streaming decoder, which is the failure this project exists to
-# eliminate.
-# dictation_dir defaults to $XDG_STATE_HOME/spokenpad/dictation, and to
+# eliminate. Defaults to $XDG_STATE_HOME/spokenpad/dictation, and to
 # ~/.local/state/spokenpad/dictation when XDG_STATE_HOME is unset.
 dictation_dir = "~/.local/state/spokenpad/dictation"
 file_template = "dictation-%Y-%m-%d-%H%M%S.md"
 
-# How long to wait for a freshly spawned nvim to be ready: listening on the
-# socket, its ownership nonce set, AND the user's own startup handlers finished.
-# Generous on purpose -- a first-ever open took 13.5s while a plugin manager did
-# one-time work, and killing a healthy editor mid-startup is the worse failure.
+# Managed mode only: how long to wait for a freshly spawned nvim to be ready:
+# listening on the socket, its ownership nonce set, AND your own startup
+# handlers finished. Generous on purpose -- a first-ever open took 13.5s while
+# a plugin manager did one-time work, and killing a healthy editor mid-startup
+# is the worse failure.
 startup_timeout_s = 20.0
+
+# Send a desktop notification (notify-send) when dictation starts going to a
+# file because no editor is open -- once per such file, not per utterance.
+notify = true
 
 [preview]
 # The tick of progressive commit (docs/progressive-commit.md): every

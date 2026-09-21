@@ -9,10 +9,14 @@
 //! transport is in `rpc`. What is left here is the impure middle: spawning
 //! or adopting an editor, proving it belongs to spokenpad, and appending
 //! committed text so that a failure to land it is visible rather than silent.
+//! With no editor to append to, `passage` writes the text to the file itself.
+mod passage;
 mod rpc;
 
+pub use passage::DetachedWrite;
+
 use crate::{
-    config::{self, Nvim},
+    config::{self, Mode, Nvim},
     core::{
         geometry::{Rect, pick_output, placement},
         session::NoticeText,
@@ -20,12 +24,13 @@ use crate::{
         terminal::Terminal,
         wm::Criterion,
     },
-    shell::wm::Wm,
+    shell::wm::{self, Wm},
 };
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use rmpv::Value;
 use rpc::{RpcClient, RpcFailure};
 use std::{
+    convert::Infallible,
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     os::unix::{
@@ -69,8 +74,10 @@ const SPOKENPAD_LUA: &str = include_str!("../../lua/spokenpad.lua");
 const BUNDLED_INIT: &str = include_str!("../../lua/dictation_init.lua");
 
 /// Everything an attaching session needs to know about an editor answering on
-/// the dictation socket: who owns it, whether its startup has finished, and
-/// which buffer — if any — a previous session pinned in it.
+/// the dictation socket: who owns it, whether its startup has finished, which
+/// buffer — if any — a previous session pinned in it, and the buffer of the
+/// file it was started on, which is what an editor opened with
+/// `spokenpad editor` holds before any daemon has pinned anything.
 const OWNERSHIP_QUERY: &str = r#"
 local marker = vim.g.spokenpad_owner
 local ready = vim.g.spokenpad_startup_ready
@@ -78,11 +85,23 @@ local buf = _G.Spokenpad and _G.Spokenpad.buf or nil
 if not (buf and vim.api.nvim_buf_is_valid(buf) and vim.api.nvim_buf_is_loaded(buf)) then
   buf = nil
 end
+local startup, startup_name
+if vim.fn.argc() > 0 then
+  local wanted = vim.fn.fnamemodify(vim.fn.argv(0), ":p")
+  for _, candidate in ipairs(vim.api.nvim_list_bufs()) do
+    if vim.api.nvim_buf_is_loaded(candidate) and vim.api.nvim_buf_get_name(candidate) == wanted then
+      startup, startup_name = candidate, wanted
+      break
+    end
+  end
+end
 return {
   marker or vim.NIL,
   ready or vim.NIL,
   buf or vim.NIL,
   buf and vim.api.nvim_buf_get_name(buf) or vim.NIL,
+  startup or vim.NIL,
+  startup_name or vim.NIL,
 }
 "#;
 
@@ -161,23 +180,61 @@ impl NvimSession {
         self.connection.as_ref().map(|open| open.path.as_path())
     }
 
-    /// Returns the pinned dictation path, reattaching or spawning as needed.
-    pub fn ensure(&mut self) -> Result<PathBuf> {
+    /// Returns the pinned dictation path, reattaching as needed and, in
+    /// managed mode, spawning. `None` in attach mode means no editor is open:
+    /// the user has not run `spokenpad editor`, and text goes to the pending
+    /// passage through [`append_detached`](Self::append_detached) instead.
+    pub fn ensure(&mut self) -> Result<Option<PathBuf>> {
         if let Some(open) = self.connection.as_mut() {
             if still_pinned(open) {
-                return Ok(open.path.clone());
+                return Ok(Some(open.path.clone()));
             }
             self.drop_connection();
         }
 
-        if self.attach_existing()? || self.spawn_and_attach()? {
-            let open = self
-                .connection
-                .as_ref()
-                .context("nvim connected without a dictation path")?;
-            return Ok(open.path.clone());
+        let attached = self.attach_existing()?
+            || match self.config.mode {
+                Mode::Managed => self.spawn_and_attach()?,
+                Mode::Attach => false,
+            };
+        if !attached {
+            return Ok(None);
         }
-        bail!("could not connect to the dictation nvim")
+        let path = self
+            .connection
+            .as_ref()
+            .context("nvim connected without a dictation path")?
+            .path
+            .clone();
+        passage::settle(&self.config, &path);
+        Ok(Some(path))
+    }
+
+    /// Appends committed text straight to the pending passage, for when no
+    /// editor can take it. The next editor opens on that file.
+    pub fn append_detached(&self, text: &str, continued: bool) -> Result<DetachedWrite> {
+        passage::append(&self.config, text, continued)
+    }
+
+    /// Tells the user, through the desktop's notification service, that
+    /// dictation is going to a file no editor shows. Best effort: a desktop
+    /// without `notify-send` or a notification daemon only gets the log line.
+    pub fn notify_detached(&self, path: &Path) {
+        if !self.config.notify {
+            return;
+        }
+        let body = format!(
+            "Saved to {}. Run `spokenpad editor` to see it.",
+            path.display()
+        );
+        if let Err(error) = wm::run(&[
+            "notify-send",
+            "--app-name=spokenpad",
+            "spokenpad: no dictation editor is open",
+            &body,
+        ]) {
+            log::debug!("desktop notification unavailable: {error:#}");
+        }
     }
 
     /// Appends literal text and does not return until Neovim confirms its save.
@@ -396,6 +453,14 @@ impl NvimSession {
             "refusing unrelated nvim socket {}",
             self.config.socket_path.display()
         );
+        // An editor spokenpad started that nothing has pinned yet — one the
+        // user opened with `spokenpad editor` — is adopted on the file it was
+        // started on, when that is a dictation file.
+        let adoptable = match adoptable {
+            Some(adopted) => Some(adopted),
+            None if owned => self.adoptable_buffer(ownership.startup.as_ref())?,
+            None => None,
+        };
 
         client.request(
             "nvim_exec_lua",
@@ -406,7 +471,7 @@ impl NvimSession {
         let (buffer, path) = match adoptable {
             Some(adopted) => adopted,
             None => {
-                let file = fresh.insert(NewFileGuard::create(&self.config)?);
+                let file = fresh.insert(NewFileGuard::claim(&self.config)?);
                 let buffer = open_buffer(&mut client, file.path(), deadline(SETUP_TIMEOUT))?;
                 (buffer, file.path().to_owned())
             }
@@ -466,18 +531,14 @@ impl NvimSession {
         };
         let window_rect = window.as_ref().and_then(|(_, _, rect)| *rect);
 
-        let mut fresh = NewFileGuard::create(&self.config)?;
+        let mut fresh = NewFileGuard::claim(&self.config)?;
         if let Some(parent) = self.config.socket_path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("create socket directory {}", parent.display()))?;
         }
         let marker = new_marker()?;
         write_marker(&marker_path(&self.config.socket_path), &marker)?;
-        let init = match self.config.init.as_deref() {
-            Some(path) if path == Path::new("bundled") => Some(materialize_bundled_init()?),
-            Some(path) => Some(path.to_owned()),
-            None => None,
-        };
+        let init = resolve_init(&self.config)?;
         let argv = spawn_argv(
             &self.config,
             fresh.path(),
@@ -702,6 +763,8 @@ struct Ownership {
     ready: Option<String>,
     /// The buffer a previous session pinned, if it is still loaded.
     pinned: Option<Pinned>,
+    /// The buffer of the file the editor was started on, if still loaded.
+    startup: Option<Pinned>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -725,7 +788,7 @@ pub enum CopyOutcome {
 fn parse_ownership(value: &Value) -> Result<Ownership> {
     let fields = value
         .as_array()
-        .filter(|fields| fields.len() == 4)
+        .filter(|fields| fields.len() == 6)
         .context("nvim ownership query returned malformed data")?;
     let text = |field: &Value| -> Result<Option<String>> {
         if field.is_nil() {
@@ -738,20 +801,23 @@ fn parse_ownership(value: &Value) -> Result<Ownership> {
                 .to_owned(),
         ))
     };
-    let name = text(&fields[3])?;
-    let pinned = match fields[2] {
-        Value::Nil => None,
-        ref handle => Some(Pinned {
-            buffer: handle
-                .as_i64()
-                .context("nvim returned a non-integer buffer handle")?,
-            name: name.context("nvim reported a pinned buffer with no file name")?,
-        }),
+    let buffer = |handle: &Value, name: &Value| -> Result<Option<Pinned>> {
+        let name = text(name)?;
+        Ok(match handle {
+            Value::Nil => None,
+            handle => Some(Pinned {
+                buffer: handle
+                    .as_i64()
+                    .context("nvim returned a non-integer buffer handle")?,
+                name: name.context("nvim reported a buffer with no file name")?,
+            }),
+        })
     };
     Ok(Ownership {
         marker: text(&fields[0])?,
         ready: text(&fields[1])?,
-        pinned,
+        pinned: buffer(&fields[2], &fields[3])?,
+        startup: buffer(&fields[4], &fields[5])?,
     })
 }
 
@@ -952,11 +1018,14 @@ struct NewFileGuard {
 }
 
 impl NewFileGuard {
-    fn create(config: &Nvim) -> Result<Self> {
-        Ok(Self {
-            path: new_file(config)?,
-            keep: false,
-        })
+    /// The pending passage, if dictation went to a file while no editor was
+    /// open, so the new editor shows it; otherwise a new, empty file.
+    fn claim(config: &Nvim) -> Result<Self> {
+        let path = match passage::pending(config) {
+            Some(pending) => pending,
+            None => new_file(config)?,
+        };
+        Ok(Self { path, keep: false })
     }
 
     fn path(&self) -> &Path {
@@ -1136,6 +1205,66 @@ fn write_marker(path: &Path, marker: &str) -> Result<()> {
         .map_err(|error| error.error)
         .with_context(|| format!("persist ownership marker {}", path.display()))?;
     Ok(())
+}
+
+/// `nvim.init` as the path nvim is given, writing out the bundled one.
+fn resolve_init(config: &Nvim) -> Result<Option<PathBuf>> {
+    Ok(match config.init.as_deref() {
+        Some(path) if path == Path::new("bundled") => Some(materialize_bundled_init()?),
+        Some(path) => Some(path.to_owned()),
+        None => None,
+    })
+}
+
+/// `spokenpad editor`: replaces this process with the dictation editor, in
+/// whatever terminal it was run from, listening on the dictation socket.
+///
+/// It opens the pending passage when dictation went to a file while no
+/// editor was open, and a new dictation file otherwise. It writes the
+/// ownership marker the way a spawn does, so the daemon adopts it on the next
+/// key-down. Returns only on failure: a live editor already on the socket, or
+/// an editor that could not be executed.
+pub fn open_editor(config: &Nvim) -> Result<Infallible> {
+    // The guard removes a new file again if the editor never starts.
+    let (_passage, mut command) = editor_command(config)?;
+    let error = command.exec();
+    Err(error).context("start the dictation editor")
+}
+
+/// Everything `spokenpad editor` does before it becomes the editor: the
+/// socket is free, the file is chosen, the marker is written.
+fn editor_command(config: &Nvim) -> Result<(NewFileGuard, Command)> {
+    match fs::symlink_metadata(&config.socket_path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).context("inspect nvim socket path"),
+        Ok(metadata) => {
+            ensure!(
+                metadata.file_type().is_socket(),
+                "refusing non-socket path at {}",
+                config.socket_path.display()
+            );
+            match RpcClient::connect(&config.socket_path, deadline(PROBE_TIMEOUT)) {
+                Err(error) if error.is_stale_socket() => remove_stale_socket(&config.socket_path)?,
+                _ => bail!(
+                    "a dictation editor is already open on {}",
+                    config.socket_path.display()
+                ),
+            }
+        }
+    }
+    let passage = NewFileGuard::claim(config)?;
+    if let Some(parent) = config.socket_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create socket directory {}", parent.display()))?;
+    }
+    let marker = new_marker()?;
+    write_marker(&marker_path(&config.socket_path), &marker)?;
+    let init = resolve_init(config)?;
+    let argv = editor_argv(config, passage.path(), &marker, init.as_deref())?;
+    let (program, arguments) = argv.split_first().context("empty nvim command")?;
+    let mut command = Command::new(program);
+    command.args(arguments);
+    Ok((passage, command))
 }
 
 fn materialize_bundled_init() -> Result<PathBuf> {

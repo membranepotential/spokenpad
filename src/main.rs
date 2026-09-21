@@ -8,7 +8,7 @@ use spokenpad::{
 use std::{io::Write, os::unix::fs::OpenOptionsExt, path::PathBuf, process::ExitCode};
 
 #[derive(Parser)]
-#[command(version, about = "Local push-to-talk dictation for Linux/X11")]
+#[command(version, about = "Local push-to-talk dictation for Linux")]
 struct Args {
     /// Configuration file; must exist if given [default: $XDG_CONFIG_HOME/spokenpad/config.toml]
     #[arg(short, long, global = true, value_name = "PATH")]
@@ -38,6 +38,11 @@ enum Action {
     },
     /// Validate settings and load/warm the CPU models, without opening devices/windows.
     Check,
+    /// Open the dictation editor in this terminal; the daemon writes into it.
+    ///
+    /// Runs nvim on the dictation socket, on the file holding anything
+    /// dictated while no editor was open, or on a new dictation file.
+    Editor,
 }
 fn write_transcript(text: &str, out: Option<&std::path::Path>) -> Result<()> {
     if let Some(path) = out {
@@ -64,6 +69,7 @@ fn run(args: Args) -> Result<u8> {
     }
     config.validate()?;
     match args.command {
+        Some(Action::Editor) => match spokenpad::shell::nvim::open_editor(&config.nvim)? {},
         Some(Action::Transcribe { wav, out }) => {
             let (samples, rate) = match spokenpad::shell::recorder::read_capture(&wav) {
                 Ok(audio) => audio,

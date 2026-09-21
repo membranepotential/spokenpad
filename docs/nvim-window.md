@@ -8,11 +8,83 @@ using nvim at all is in
 [decisions.md](decisions.md#the-sink-is-neovim-not-the-clipboard); the rules
 it must not break are in [constraints.md](constraints.md).
 
-The transcript goes to a neovim the daemon opens itself. Nothing is pasted
-anywhere, and no window the user did not open for this purpose is ever
-written to.
+The transcript goes to a dedicated neovim, over its msgpack-RPC socket.
+Nothing is pasted anywhere, and no window that was not opened for this
+purpose is ever written to.
 
-## What gets spawned
+## Two modes: who opens the editor
+
+`nvim.mode` says who opens that neovim. It is explicit configuration, not
+detection.
+
+| `nvim.mode` | who opens it | where it works | focus |
+|---|---|---|---|
+| `attach` (default) | you, with `spokenpad editor` | any terminal, any desktop: X11 or Wayland, any window manager | the daemon opens no window, so it cannot take focus |
+| `managed` | the daemon, on the first key-down, in `nvim.terminal` | i3 or sway | proven: the running window manager's `no_focus` rule, before the window exists |
+
+`attach` is the default because it is the one that works everywhere with no
+window-manager rules to install: a new user gets a working setup on any
+desktop, and nothing spokenpad does can move focus. `managed` is the
+original behaviour, generalised from alacritty on i3 to five terminals on i3
+and sway; it is worth its setup for a window that appears by itself, beside
+what you are reading.
+
+Everything below the mode is shared: one file per editor, the winbar
+indicator and notices, the live preview, the clipboard copy after a release,
+and reattaching to a live socket after a daemon restart.
+
+## Attach mode
+
+```
+spokenpad editor
+```
+
+runs, in the terminal you typed it in, and replacing that process:
+
+```
+nvim [-u <init>] --cmd "let g:spokenpad_owner = '<marker>'" \
+  --listen <socket> <dictation file>
+```
+
+with the same `nvim.editor`, `nvim.init`, `nvim.colorscheme` and ownership
+marker a managed spawn uses. The daemon finds it on the next key-down: the
+marker file beside the socket proves spokenpad started it, and it is adopted
+on the file it was started on. From then on it is the dictation window,
+exactly as if the daemon had opened it. `spokenpad editor` refuses to start a
+second editor while one is listening on the socket.
+
+### Dictating with no editor open
+
+The key works whether or not an editor is open, and what is said is never
+lost:
+
+- **The text goes to the file.** Each commit is appended to a dictation file
+  directly, with the same paragraph rule the editor applies (one blank line
+  between utterances, a continued utterance extends its paragraph), and the
+  file is on disk before the next commit is taken. The rule exists twice —
+  `transactional_append` in Lua and `passage::append_paragraph` in Rust — and
+  a test runs both on the same inputs.
+- **The next editor shows it.** The file is the *pending passage*, recorded
+  in `<socket>.pending`. Every later dictation with no editor continues it,
+  and the next editor — `spokenpad editor`, or a managed spawn — opens on it
+  rather than on a new file. Once the daemon has pinned it in an editor, the
+  pointer is removed. A pointer that names anything but a regular file inside
+  `nvim.dictation_dir` is ignored.
+- **Decoding is unchanged.** The file is only a different sink for the same
+  commits; each is still decoded exactly once.
+- **You are told.** When a pending passage is started, the daemon sends one
+  desktop notification (`notify-send`, off with `nvim.notify = false`) saying
+  where the text is and to run `spokenpad editor`; every write is also in the
+  log. The winbar cannot say it — there is no winbar.
+
+The pointer lives beside the socket, in `$XDG_RUNTIME_DIR` by default, so a
+reboot forgets it; the file stays in `nvim.dictation_dir`.
+
+The same path catches a managed-mode editor that could not be opened (a
+missing `no_focus` rule, a terminal that is not installed): the text goes to
+the pending passage instead of only to the log.
+
+## Managed mode: what gets spawned
 
 ```
 alacritty --class spokenpad \
@@ -144,9 +216,10 @@ hotkey-capable keyboard during a latched recording — sends `HotkeyLost`, not
 
 ## The file
 
-One markdown file per **window** under `nvim.dictation_dir`, named by
+One markdown file per **editor** under `nvim.dictation_dir`, named by
 `nvim.file_template` (`dictation-%Y-%m-%d-%H%M%S.md`), written after **every**
-utterance with `noautocmd write`.
+utterance with `noautocmd write` — or, with no editor open, by the daemon
+itself into the pending passage (see [attach mode](#dictating-with-no-editor-open)).
 
 A window is a passage. Closing it ends the passage, and the next dictation
 opens a new window on a new file rather than appending under everything said
@@ -394,7 +467,8 @@ init = "NONE"
 
 A live socket is reattached to rather than respawned, so restarting the daemon
 does not litter the desktop with terminals. Quitting nvim simply means the
-next dictation opens a fresh one.
+next dictation opens a fresh one — in managed mode; in attach mode it goes to
+a new pending passage until you run `spokenpad editor` again.
 
 Liveness is checked on every key-down, and a plain `connect` is not enough: a
 socket answers exactly as before the user `:bdelete`s the dictation buffer,

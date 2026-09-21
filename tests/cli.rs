@@ -19,11 +19,79 @@ fn help_and_version_do_not_initialize_devices_or_models() {
     let help = command(&dir).arg("--help").output().unwrap();
     assert_eq!(code(&help), 0);
     assert!(String::from_utf8_lossy(&help.stdout).contains("transcribe"));
+    assert!(String::from_utf8_lossy(&help.stdout).contains("editor"));
     let version = command(&dir).arg("--version").output().unwrap();
     assert_eq!(code(&version), 0);
     assert!(String::from_utf8_lossy(&version.stdout).contains(env!("CARGO_PKG_VERSION")));
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
 }
+/// `spokenpad editor` becomes the editor. With a stand-in that prints its
+/// arguments, the command line it hands nvim can be read back: the socket,
+/// the ownership marker, and the dictation file last.
+#[test]
+fn the_editor_command_runs_nvim_on_the_socket_and_a_dictation_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("run/nvim.sock");
+    let dictation = dir.path().join("dictation");
+    let config = dir.path().join("editor.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "[nvim]\neditor = ['sh', '-c', 'printf \"%s\\n\" \"$@\"', 'nvim']\nsocket_path = '{}'\ndictation_dir = '{}'\n",
+            socket.display(),
+            dictation.display()
+        ),
+    )
+    .unwrap();
+    let output = command(&dir)
+        .arg("-c")
+        .arg(&config)
+        .arg("editor")
+        .output()
+        .unwrap();
+    assert_eq!(
+        code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let argv: Vec<&str> = stdout.lines().collect();
+    let listen = argv
+        .iter()
+        .position(|a| *a == "--listen")
+        .expect("--listen");
+    assert_eq!(argv[listen + 1], socket.to_str().unwrap());
+    assert!(
+        argv.iter()
+            .any(|a| a.starts_with("let g:spokenpad_owner = '"))
+    );
+    let file = std::path::Path::new(argv.last().unwrap());
+    assert_eq!(file.parent(), Some(dictation.as_path()));
+    assert!(
+        file.exists(),
+        "the dictation file is created before nvim starts"
+    );
+    let marker = std::fs::read_to_string(dir.path().join("run/nvim.sock.owner")).unwrap();
+    assert!(
+        stdout.contains(&marker),
+        "the marker file names this editor"
+    );
+
+    // Something that is not a socket at the socket path is refused, untouched.
+    std::fs::remove_file(dir.path().join("run/nvim.sock.owner")).unwrap();
+    std::fs::write(&socket, "not a socket").unwrap();
+    let refused = command(&dir)
+        .arg("-c")
+        .arg(&config)
+        .arg("editor")
+        .output()
+        .unwrap();
+    assert_eq!(code(&refused), 1);
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("refusing non-socket path"));
+    assert_eq!(std::fs::read_to_string(&socket).unwrap(), "not a socket");
+}
+
 #[test]
 fn missing_recording_is_exit_four_and_stdout_stays_empty() {
     let dir = tempfile::tempdir().unwrap();
