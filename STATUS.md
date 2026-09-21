@@ -13,9 +13,9 @@ never takes focus. Fully local, CPU-only. Next milestone: public release.
 - beam-fix — real cause found: blank skips frames for free, so the empty path
   wins; one-line fix gives 9/9 on the lost tail, corpus 1 lost (greedy 0).
   PR #3657 makes it worse. Now: public repro clip + upstream draft — agent
-- own-window — P0-P2 merged (e8c161e): `nvim.mode = "pane"`, own X11 window,
-  X libs loaded at run time, verified headless on i3 only. P2 code review
-  running. P3 (other WMs) waits for packages; P4 = the user's live check.
+- own-window — P0-P2 merged with both review rounds fixed (02b68f1):
+  `nvim.mode = "pane"`, verified headless on i3 only. Waiting for the user:
+  P4 live check on i3; P3 (other WMs) needs packages installed.
 
 ## Done
 - 09-21: sherpa-onnx 1.13.8 (same WER; TDT beam bug NOT fixed by it). Tried
