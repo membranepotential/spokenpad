@@ -100,3 +100,99 @@ Five clips of one speaker on one microphone is a **regression proxy, not an
 accuracy measurement**. Read per-sample movement as the signal; the
 aggregate is for noticing that something moved, not for quoting as this
 tool's word error rate.
+
+# The local corpus
+
+Five clips cannot decide between two decoders: a whole sentence lost on a real
+capture moves the aggregate by a couple of points, which is inside the noise of
+five samples. `examples/corpus.rs` replays every recovery capture in
+`$XDG_STATE_HOME/spokenpad/audio` instead — over an hour of real dictation —
+and reports what WER hides.
+
+```sh
+# every capture, both paths, the committed configuration
+cargo run --release --example=corpus -- --config eval.toml
+
+# one path, no trailing silence, machine-readable output under a name
+cargo run --release --example=corpus -- --config eval.toml --path live \
+    --trailing-silence-ms 0 --jsonl results.jsonl --label greedy-nopad
+
+# only the German captures, every row, two captures decoded at a time
+cargo run --release --example=corpus -- --config eval.toml \
+    --language de --all --jobs 2
+```
+
+Nothing about the model is hard-wired: `--config PATH` is a full spokenpad
+configuration, so another model family, a patched sherpa-onnx or another
+provider is a config file rather than a change here. `--model-dir` and
+`--threads` override single keys of it.
+
+## What it measures
+
+Per capture and in aggregate: WER, reference and hypothesis words, decode
+time, and four counts WER cannot express.
+
+| Column | Meaning |
+|---|---|
+| `lost` | Reference words at the very end the hypothesis has nothing opposite. The dictation whose last sentence never arrived. |
+| `e1` | Speech chunks whose padded decode returned nothing, so the pipeline decoded them again bare. |
+| `e2` | Of those, the ones the bare retry returned nothing for either: speech that is simply gone. |
+| `yeah` | Commits that are nothing but "Yeah." — what beam search invents for clear speech ([k2-fsa/sherpa-onnx#3267](https://github.com/k2-fsa/sherpa-onnx/issues/3267)). |
+
+The aggregate is corpus-level (all edits over all reference words), and the
+per-file distribution is printed beside it, because one capture that loses
+everything and a hundred that are nearly right average to something that
+describes neither. Captures whose reference is empty — an empty press, a
+cancelled take — are counted apart, along with how many of them decoded to
+words anyway.
+
+## The two paths
+
+`--path live` drives `core::decode::Worker` the way `shell/daemon.rs` does: a
+preview tick every `preview.interval_ms`, every settled chunk committed once,
+then the release decoding only the tail. `--path whole` decodes each capture in
+one pass with no segmenter. Both run by default.
+
+The live replay's clock is the capture's own, not the wall clock. The daemon
+ticks on wall time, so a loaded machine ticks over a longer stretch of audio and
+lands on different chunk boundaries; ticking on audio time makes a replay
+reproducible and models an idle machine, where a decode runs ~14x faster than
+real time.
+
+The preview decode is skipped unless `--previews` is given. The preview is
+cosmetic — `Worker::tick` neither commits it nor advances the offset by it — so
+the committed text is identical word for word, while the replay does about a
+tenth of the decodes. With `--previews` the wall time is the daemon's real
+workload; without it, only the decodes that produce text.
+
+## Where the corpus comes from
+
+`scripts/gladia-references.sh` builds `eval-samples/local/references.json` by
+sending each recording to [Gladia](https://gladia.io) and keeping the
+transcript. It is a development tool: **it uploads audio to a third party**, no
+code under `src/` calls it, and the user granting that has to mean it. The raw
+response per capture and the index it builds stay in the git-ignored
+`eval-samples/local/` — the recordings are the author's own speech, and so are
+the transcripts. It is idempotent (a capture already fetched is skipped) and
+deletes each job and its uploaded audio from Gladia after reading the result.
+
+## What an ASR reference is worth
+
+**It is not ground truth.** Gladia's transcripts of the five hand-checked clips
+score 17.6% WER against the human references — those five are the
+technical-vocabulary clips, and Gladia misses exactly what they exist to
+exercise (`udev` as `udef`, `rm -rf` as one word, a spelled-out `s e t` as
+`zset`). A reference like this is systematically friendly to a system that
+writes what Gladia writes.
+
+So:
+
+- A difference of a point or two between two configurations is not a result.
+  Look at whether it moves the same way on both paths, and at the counts
+  beside it — chunks lost, tails lost — which are not reference-relative at all.
+- Absolute WER over this corpus is an upper bound on the error, not the error.
+- A change that improves technical vocabulary will look *worse* here.
+
+The counts (`lost`, `e1`, `e2`, `yeah`) are the reason the corpus is worth
+having: they say what was lost without asking the reference to be right about
+the words.
