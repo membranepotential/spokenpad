@@ -26,7 +26,9 @@
 //! Nothing in the daemon uses this yet: wiring `nvim.mode = "pane"` is the
 //! next phase.
 pub mod font;
+pub mod host;
 pub mod keyboard;
+pub mod place;
 pub mod ui;
 pub mod x11;
 pub mod xkb;
@@ -60,6 +62,19 @@ pub enum Event {
     Editor(FromEditor),
 }
 
+/// How big the pane should be.
+///
+/// Two ways, because there are two callers with two different questions. The
+/// daemon knows how much of the screen the window may take and does not know
+/// the font; a test knows the grid it wants to check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sizing {
+    /// Exactly this many cells, whatever that comes to in pixels.
+    Cells { columns: u16, rows: u16 },
+    /// As many whole cells as fit in this many pixels.
+    Pixels { width: u32, height: u32 },
+}
+
 /// What the pane is told to be when it opens.
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -69,8 +84,7 @@ pub struct Options {
     pub family: String,
     /// Font size in pixels.
     pub size: f32,
-    pub columns: u16,
-    pub rows: u16,
+    pub sizing: Sizing,
     /// Where the top-left corner should go, or `None` to let the window
     /// manager decide.
     pub position: Option<(i32, i32)>,
@@ -83,8 +97,10 @@ impl Default for Options {
             display: None,
             family: "monospace".to_owned(),
             size: 16.0,
-            columns: 72,
-            rows: 12,
+            sizing: Sizing::Cells {
+                columns: 72,
+                rows: 12,
+            },
             position: None,
             title: "spokenpad dictation".to_owned(),
         }
@@ -136,22 +152,26 @@ impl Pane {
     /// `command` must already carry `--embed`, and should carry `--listen` too
     /// so the daemon can append to the same editor.
     pub fn open(options: &Options, command: Command) -> Result<Self> {
-        ensure!(
-            options.columns > 0 && options.rows > 0,
-            "the pane needs at least one cell"
-        );
         let font = Font::load(&options.family, options.size)?;
         let metrics = font.metrics();
-        let width = metrics.width * u32::from(options.columns);
-        let height = metrics.height * u32::from(options.rows);
+        // A window is a whole number of cells: the pane draws cells, and a
+        // partial column at the right edge is a strip nothing ever paints.
+        let (columns, rows) = match options.sizing {
+            Sizing::Cells { columns, rows } => (columns, rows),
+            Sizing::Pixels { width, height } => (
+                (width / metrics.width).clamp(1, u16::MAX.into()) as u16,
+                (height / metrics.height).clamp(1, u16::MAX.into()) as u16,
+            ),
+        };
+        ensure!(columns > 0 && rows > 0, "the pane needs at least one cell");
+        let width = metrics.width * u32::from(columns);
+        let height = metrics.height * u32::from(rows);
         // X11 counts a window's size in 16 bits, so a grid that would not fit
         // on any screen has to be refused rather than silently wrapped.
         let (width, height) = match (u16::try_from(width), u16::try_from(height)) {
             (Ok(width), Ok(height)) => (width, height),
             _ => bail!(
-                "a {}x{} grid of {}x{} pixel cells is larger than any X11 window",
-                options.columns,
-                options.rows,
+                "a {columns}x{rows} grid of {}x{} pixel cells is larger than any X11 window",
                 metrics.width,
                 metrics.height
             ),
@@ -187,15 +207,15 @@ impl Pane {
             watcher: None,
             stopping,
             canvas: Canvas::new(width, height, metrics),
-            columns: options.columns,
-            rows: options.rows,
+            columns,
+            rows,
             pending: Damage::NONE,
             frame_ready: false,
             focused: false,
             dragging: None,
             editor_gone: false,
         };
-        let attach = pane.editor.attach(options.columns, options.rows)?;
+        let attach = pane.editor.attach(columns, rows)?;
         pane.await_response(attach, Duration::from_secs(20))
             .context("attach to the embedded nvim as a UI")?;
         pane.watcher = Some(watch(&pane.window, sender, Arc::clone(&pane.stopping))?);
@@ -205,6 +225,21 @@ impl Pane {
     /// Map the window. It will not take the focus; see [`x11`].
     pub fn show(&mut self) -> Result<()> {
         self.window.map()
+    }
+
+    /// Move the window's top-left corner, keeping the size it was opened at.
+    ///
+    /// The position asked for before the map gets it close; a window manager
+    /// that draws a frame places that frame rather than the window inside it,
+    /// and correcting it afterwards is exact. Measured on i3 in
+    /// `docs/experiments/2026-09-21-own-window-p0-properties.md`.
+    pub fn place_at(&mut self, x: i32, y: i32) -> Result<()> {
+        self.window.place(Rect {
+            x,
+            y,
+            width: u32::from(self.canvas.width),
+            height: u32::from(self.canvas.height),
+        })
     }
 
     pub fn window(&self) -> &Window {
@@ -860,26 +895,68 @@ fn modifier_names(state: KeyButMask) -> String {
     names.join("-")
 }
 
-/// The command that starts the Neovim behind a pane.
-///
-/// It is the same argv every other spokenpad editor gets — the bundled or
-/// configured init, the ownership marker, `--listen` on the dictation socket,
-/// the file — with `--embed` added, which is what turns stdin and stdout into
-/// the UI channel. The marker matters: it is how an `NvimSession` in attach
-/// mode recognises this editor as spokenpad's and appends to it.
-pub fn editor_command(config: &crate::config::Nvim, target: &std::path::Path) -> Result<Command> {
-    use crate::shell::nvim;
-    let marker = nvim::new_marker()?;
-    nvim::write_marker(&nvim::marker_path(&config.socket_path), &marker)?;
-    let init = nvim::resolve_init(config)?;
-    let mut argv = nvim::editor_argv(config, target, &marker, init.as_deref())?;
-    // After the program and whatever the user configured with it, before the
-    // flags this build added.
-    argv.insert(config.editor.len(), "--embed".to_owned());
-    let (program, arguments) = argv.split_first().context("the nvim command is empty")?;
-    let mut command = Command::new(program);
-    command.args(arguments);
-    Ok(command)
+/// One thing `nvim.mode = "pane"` needs, and what was found when it was
+/// looked for. `spokenpad check` prints these, so a machine that cannot open
+/// a pane says which piece is missing before anyone dictates into it.
+pub struct Requirement {
+    pub what: &'static str,
+    pub found: Result<String>,
+}
+
+/// Look for everything a pane needs, without opening one.
+pub fn requirements(config: &crate::config::Nvim) -> Vec<Requirement> {
+    let libraries = xkb::load().map(|()| {
+        xkb::libraries()
+            .iter()
+            .map(|(file, _)| *file)
+            .collect::<Vec<_>>()
+            .join(", ")
+    });
+    let font = Font::load(&config.font_family, config.font_size).map(|font| {
+        let metrics = font.metrics();
+        format!(
+            "{:?} at {} px: {}x{} pixel cells",
+            config.font_family, config.font_size, metrics.width, metrics.height
+        )
+    });
+    let display = display_summary();
+    vec![
+        Requirement {
+            what: "X libraries",
+            found: libraries,
+        },
+        Requirement {
+            what: "font",
+            found: font,
+        },
+        Requirement {
+            what: "display",
+            found: display,
+        },
+    ]
+}
+
+/// The display a pane would open on, and the monitors it would choose from.
+fn display_summary() -> Result<String> {
+    let name = std::env::var("DISPLAY")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .context("$DISPLAY is not set")?;
+    xkb::load()?;
+    let cstring = std::ffi::CString::new(name.clone()).context("the display name has a NUL")?;
+    let (connection, screen) = x11rb::xcb_ffi::XCBConnection::connect(Some(&cstring))
+        .with_context(|| format!("connect to {name}"))?;
+    let rect = place::window(&connection, screen, 1.0)?;
+    let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some_and(|value| !value.is_empty());
+    Ok(format!(
+        "{name}, {}x{} usable{}",
+        rect.width,
+        rect.height,
+        match wayland {
+            true => " (through Xwayland: the pane opens in a corner, not at the pointer)",
+            false => "",
+        }
+    ))
 }
 
 /// Wait for X events on a thread, so the pane's loop can block on one channel.

@@ -6,6 +6,7 @@ use spokenpad::{
     shell::{
         inference::{Transcriber, load_segmenter, model_config},
         models::{FetchEvent, all_present, fetch_models},
+        pane,
     },
 };
 use std::{io::Write, os::unix::fs::OpenOptionsExt, path::PathBuf, process::ExitCode};
@@ -196,6 +197,29 @@ fn run(args: Args) -> Result<u8> {
                     "disabled"
                 }
             );
+            if config.nvim.mode == config::Mode::Pane {
+                // The pane needs three things this machine may not have, and
+                // finding that out at the first dictation — when the text
+                // goes to a file instead of a window — is too late.
+                let mut missing = false;
+                println!("nvim.mode = \"pane\":");
+                for requirement in pane::requirements(&config.nvim) {
+                    match requirement.found {
+                        Ok(detail) => println!("  {}: {detail}", requirement.what),
+                        Err(error) => {
+                            missing = true;
+                            println!("  {}: NOT AVAILABLE: {error:#}", requirement.what);
+                        }
+                    }
+                }
+                if missing {
+                    println!(
+                        "  Dictation still works: text goes to the dictation file \
+                         until a window can be opened."
+                    );
+                    return Ok(2);
+                }
+            }
         }
         None => {
             ensure_default_models(&config);

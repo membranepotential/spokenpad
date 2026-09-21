@@ -24,7 +24,10 @@ use crate::{
         terminal::Terminal,
         wm::Criterion,
     },
-    shell::wm::{self, Wm},
+    shell::{
+        pane::host::PaneHost,
+        wm::{self, Wm},
+    },
 };
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use rmpv::Value;
@@ -159,6 +162,10 @@ pub struct NvimSession {
     process: Option<Child>,
     session_nonce: Option<String>,
     append_sequence: u64,
+    /// The thread that owns the window in `mode = "pane"`, started the first
+    /// time one is needed and stopped when this session closes. In the other
+    /// modes it stays `None` and nothing here touches X at all.
+    pane: Option<PaneHost>,
 }
 
 impl NvimSession {
@@ -169,6 +176,7 @@ impl NvimSession {
             process: None,
             session_nonce: None,
             append_sequence: 0,
+            pane: None,
         }
     }
 
@@ -195,6 +203,7 @@ impl NvimSession {
         let attached = self.attach_existing()?
             || match self.config.mode {
                 Mode::Managed => self.spawn_and_attach()?,
+                Mode::Pane => self.open_pane_and_attach()?,
                 Mode::Attach => false,
             };
         if !attached {
@@ -393,6 +402,11 @@ impl NvimSession {
             );
         }
         self.drop_connection();
+        // A terminal editor outlives the daemon on purpose: the user may
+        // still be reading what they dictated. A pane cannot — its window and
+        // its editor are threads and children of this process — so it is
+        // closed here, which writes every modified buffer on the way out.
+        self.pane = None;
     }
 
     fn push(&mut self, fields: Vec<(Value, Value)>) -> Result<()> {
@@ -563,17 +577,12 @@ impl NvimSession {
         let window_rect = window.as_ref().and_then(|(_, _, rect)| *rect);
 
         let mut fresh = NewFileGuard::claim(&self.config)?;
-        if let Some(parent) = self.config.socket_path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("create socket directory {}", parent.display()))?;
-        }
-        let marker = new_marker()?;
-        write_marker(&marker_path(&self.config.socket_path), &marker)?;
+        let marker = OwnershipMarker::write(&self.config.socket_path)?;
         let init = resolve_init(&self.config)?;
         let argv = spawn_argv(
             &self.config,
             fresh.path(),
-            &marker,
+            marker.value(),
             window_rect,
             init.as_deref(),
         )?;
@@ -614,13 +623,35 @@ impl NvimSession {
         if let Some((wm, criteria, Some(rect))) = &window {
             place_when_mapped(&mut editor, wm, criteria, *rect, deadline);
         }
+        let attached =
+            self.await_editor(&mut fresh, marker.value(), deadline, || editor.exited())?;
+        if attached {
+            self.process = editor.release();
+            marker.keep();
+        }
+        Ok(attached)
+    }
+
+    /// Wait for an editor this session just started to answer on its socket,
+    /// and adopt it. `gone` says whether it has already exited, which is the
+    /// one failure worth giving up on early.
+    ///
+    /// Shared by both spawning modes: a terminal and a pane differ in how the
+    /// editor is started and in nothing that happens after.
+    fn await_editor(
+        &mut self,
+        fresh: &mut NewFileGuard,
+        marker: &str,
+        deadline: Instant,
+        mut gone: impl FnMut() -> bool,
+    ) -> Result<bool> {
         let mut last_error = None;
         // A healthy client is handed back to the next attempt: an editor that
         // is merely still initializing answers the next probe on the same
         // connection, so only a connection that actually broke is remade.
         let mut client = None;
         while Instant::now() < deadline {
-            if editor.exited() {
+            if gone() {
                 bail!("dictation editor exited during startup");
             }
             if self.config.socket_path.exists() {
@@ -628,10 +659,9 @@ impl NvimSession {
                 // an editor still loading a plugin manager answers late, half
                 // ready, or not at all, and treating that as a hard failure
                 // used to SIGKILL a perfectly healthy editor mid-startup.
-                match self.connect_spawned(client.take(), fresh.path(), &marker, deadline) {
+                match self.connect_spawned(client.take(), fresh.path(), marker, deadline) {
                     Ok(Readiness::Ready(open)) => {
                         self.connection = Some(open);
-                        self.process = editor.release();
                         fresh.keep();
                         return Ok(true);
                     }
@@ -652,6 +682,61 @@ impl NvimSession {
                 .map(|error| format!(": {error}"))
                 .unwrap_or_default()
         )
+    }
+
+    /// Open a window spokenpad draws itself, with Neovim embedded in it.
+    ///
+    /// Unlike a terminal this needs no window-manager rule and no proof of
+    /// one: the window carries the properties that make a window manager
+    /// refuse it focus, which `tests/pane_window.rs` checks on i3 against its
+    /// own ablation. What it does need is an X display, and saying so plainly
+    /// is the whole error path — with none, the text goes to the pending
+    /// passage exactly as it does when a terminal is missing.
+    fn open_pane_and_attach(&mut self) -> Result<bool> {
+        use crate::shell::pane::{Options, Sizing, host::Opening};
+
+        let mut fresh = NewFileGuard::claim(&self.config)?;
+        let (command, marker) = pane_launch(&self.config, fresh.path())?;
+        let value = marker.value().to_owned();
+
+        let host = match self.pane.as_ref() {
+            Some(host) => host,
+            None => self.pane.insert(PaneHost::start()?),
+        };
+        let deadline = Instant::now() + Duration::from_secs_f64(self.config.startup_timeout_s);
+        let (rect, display) = pane_geometry(&self.config)?;
+        host.open(
+            Opening {
+                command,
+                options: Options {
+                    display,
+                    family: self.config.font_family.clone(),
+                    size: self.config.font_size,
+                    sizing: Sizing::Pixels {
+                        width: rect.width,
+                        height: rect.height,
+                    },
+                    position: Some((rect.x, rect.y)),
+                    title: "spokenpad dictation".to_owned(),
+                },
+                correct_to: Some((rect.x, rect.y)),
+            },
+            Duration::from_secs_f64(self.config.startup_timeout_s),
+        )?;
+        let attached = self.await_editor(&mut fresh, &value, deadline, || false)?;
+        if attached {
+            marker.keep();
+        } else {
+            self.pane_close();
+        }
+        Ok(attached)
+    }
+
+    /// Close the pane, if this session owns one.
+    fn pane_close(&mut self) {
+        if let Some(host) = self.pane.as_ref() {
+            host.close();
+        }
     }
 
     /// One attempt at adopting the editor this session just spawned, over
@@ -1287,6 +1372,53 @@ fn read_marker(path: &Path) -> Result<Option<String>> {
     Ok(Some(marker))
 }
 
+/// An ownership marker on disk, removed again unless the editor it names
+/// actually started.
+///
+/// The marker is how a later `ensure` recognises an editor as spokenpad's, so
+/// one left behind by a spawn that failed names an editor that never existed.
+pub struct OwnershipMarker {
+    value: String,
+    path: PathBuf,
+    keep: bool,
+}
+
+impl OwnershipMarker {
+    fn write(socket: &Path) -> Result<Self> {
+        if let Some(parent) = socket.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("create socket directory {}", parent.display()))?;
+        }
+        let value = new_marker()?;
+        let path = marker_path(socket);
+        write_marker(&path, &value)?;
+        Ok(Self {
+            value,
+            path,
+            keep: false,
+        })
+    }
+
+    fn value(&self) -> &str {
+        &self.value
+    }
+
+    /// The editor this marker names is answering: leave the file in place.
+    pub fn keep(mut self) {
+        self.keep = true;
+    }
+}
+
+impl Drop for OwnershipMarker {
+    fn drop(&mut self) {
+        if !self.keep
+            && let Err(error) = fs::remove_file(&self.path)
+        {
+            log::debug!("could not remove {}: {error}", self.path.display());
+        }
+    }
+}
+
 pub(crate) fn write_marker(path: &Path, marker: &str) -> Result<()> {
     let parent = path.parent().context("ownership marker has no parent")?;
     fs::create_dir_all(parent)?;
@@ -1301,6 +1433,58 @@ pub(crate) fn write_marker(path: &Path, marker: &str) -> Result<()> {
         .map_err(|error| error.error)
         .with_context(|| format!("persist ownership marker {}", path.display()))?;
     Ok(())
+}
+
+/// The command that starts the Neovim behind a pane, and the ownership marker
+/// that will say it is spokenpad's.
+///
+/// The marker is written here and removed again when it is dropped, unless
+/// [`OwnershipMarker::keep`] says the editor came up. One left behind names an
+/// editor that never existed; nothing reads it while no socket is there, but a
+/// file that claims something untrue should not outlive the attempt that
+/// wrote it. The two are returned separately so that taking the command
+/// cannot quietly drop the marker with it.
+///
+/// `--embed` is what turns the editor's stdin and stdout into the UI channel
+/// the pane draws from; everything else is the argv every other spokenpad
+/// editor gets, so an `NvimSession` recognises it as spokenpad's.
+pub fn pane_launch(config: &Nvim, target: &Path) -> Result<(Command, OwnershipMarker)> {
+    let marker = OwnershipMarker::write(&config.socket_path)?;
+    let init = resolve_init(config)?;
+    let mut argv = editor_argv(config, target, marker.value(), init.as_deref())?;
+    // After the configured command, so an `nvim.editor` with arguments of its
+    // own keeps them.
+    argv.insert(config.editor.len(), "--embed".to_owned());
+    let (program, arguments) = argv.split_first().context("empty nvim command")?;
+    let mut command = Command::new(program);
+    command.args(arguments);
+    Ok((command, marker))
+}
+
+/// Where a pane should open: `nvim.window_fraction` of the monitor under the
+/// pointer, at the pointer, clamped on-screen.
+///
+/// The X connection this asks over is opened and closed here rather than
+/// handed to the pane: the pane opens its own, and one short-lived connection
+/// per window is cheaper than threading one through. Returns the display name
+/// too, so the pane opens on the one that was measured.
+fn pane_geometry(config: &Nvim) -> Result<(Rect, Option<String>)> {
+    use crate::shell::pane::{place, xkb};
+
+    let display = std::env::var("DISPLAY")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .context(
+            "nvim.mode = \"pane\" needs an X display and $DISPLAY is not set; \
+             on Wayland, import it into the user manager alongside WAYLAND_DISPLAY",
+        )?;
+    xkb::load()?;
+    let name =
+        std::ffi::CString::new(display.clone()).context("the display name contains a NUL")?;
+    let (connection, screen) = x11rb::xcb_ffi::XCBConnection::connect(Some(&name))
+        .with_context(|| format!("connect to the X display {display}"))?;
+    let rect = place::window(&connection, screen, config.window_fraction)?;
+    Ok((rect, Some(display)))
 }
 
 /// `nvim.init` as the path nvim is given, writing out the bundled one.

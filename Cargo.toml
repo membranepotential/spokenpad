@@ -33,7 +33,7 @@ toml = { version = "0.8", features = ["preserve_order"] }
 # The pane's window. `allow-unsafe-code` provides `XCBConnection`, the one
 # x11rb connection type xkbcommon's X11 half can read a keymap from, and
 # `dl-libxcb` loads libxcb at run time instead of linking it.
-x11rb = { version = "0.14", features = ["allow-unsafe-code", "dl-libxcb"] }
+x11rb = { version = "0.14", features = ["allow-unsafe-code", "dl-libxcb", "randr"] }
 # The keyboard layout the X server actually loaded, with dead keys and
 # Compose, also loaded at run time. Both of these are `dl`/`dlopen` variants
 # on purpose: dictation's default mode opens no window, and a binary that

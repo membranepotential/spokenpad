@@ -345,6 +345,11 @@ pub enum Mode {
     /// The daemon does, in `terminal`, on the first key-down, after proving
     /// the running i3 or sway refuses that window focus.
     Managed,
+    /// The daemon does, in a window it draws itself, on the first key-down.
+    /// Needs no window-manager rule and no terminal: the window carries the
+    /// properties that make a window manager refuse it focus. X11, and
+    /// Wayland through Xwayland.
+    Pane,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -362,6 +367,17 @@ pub struct Nvim {
     pub dictation_dir: PathBuf,
     pub file_template: String,
     pub window_fraction: f64,
+    /// The pane's font, as a fontconfig family name. `monospace` is the alias
+    /// every desktop defines and most people have already pointed at the font
+    /// they want; naming one here overrides it, which is worth having because
+    /// what `monospace` resolves to may have no bold or italic face at all.
+    pub font_family: String,
+    /// The pane's font size, in pixels.
+    ///
+    /// Pixels rather than points because the pane rasterises at a pixel size
+    /// and has no display resolution to convert from: a point size would be
+    /// a number that means something on paper and nothing here.
+    pub font_size: f32,
     pub startup_timeout_s: f64,
     /// Send a desktop notification when dictated text has to go to the
     /// dictation file because no editor is open.
@@ -391,6 +407,8 @@ impl Default for Nvim {
             dictation_dir: state_dir().join("dictation"),
             file_template: "dictation-%Y-%m-%d-%H%M%S.md".into(),
             window_fraction: 0.33,
+            font_family: "monospace".into(),
+            font_size: 16.,
             startup_timeout_s: 20.,
             notify: true,
             copy_to_clipboard: false,
@@ -564,6 +582,17 @@ impl Config {
                 && self.nvim.window_fraction > 0.
                 && self.nvim.window_fraction <= 1.,
             "nvim.window_fraction must be in (0,1]"
+        );
+        // A fontconfig family name, not a pattern: the pane appends `:bold`
+        // and `:charset=…` to it, and a value carrying its own colon or comma
+        // would become fontconfig syntax.
+        ensure!(
+            !self.nvim.font_family.is_empty() && !self.nvim.font_family.contains([':', ',', '\\']),
+            "nvim.font_family must be a plain fontconfig family name, such as \"monospace\""
+        );
+        ensure!(
+            self.nvim.font_size.is_finite() && (4.0..=400.0).contains(&self.nvim.font_size),
+            "nvim.font_size must be a pixel size in [4,400]"
         );
         ensure!(
             self.nvim.startup_timeout_s.is_finite()
@@ -870,10 +899,40 @@ mod tests {
         let managed = Config::parse("[nvim]\nmode = 'managed'\nterminal = 'foot'", None).unwrap();
         assert_eq!(managed.nvim.mode, Mode::Managed);
         assert_eq!(managed.nvim.terminal, Terminal::Foot);
-        // The terminal is read only in managed mode, and harmless otherwise,
-        // so switching modes needs no other edit.
-        let attach = Config::parse("[nvim]\nmode = 'attach'\nterminal = 'kitty'", None).unwrap();
+        let pane = Config::parse("[nvim]\nmode = 'pane'\nfont_size = 18.0", None).unwrap();
+        assert_eq!(pane.nvim.mode, Mode::Pane);
+        assert_eq!(pane.nvim.font_size, 18.0);
+        // A key another mode reads is harmless here, and the other way round,
+        // so switching modes needs no other edit. That is deliberate: unlike
+        // `[asr]`, where a hotword under a family that cannot use it would
+        // silently do nothing the user expects, a leftover `terminal` or
+        // `font_size` changes nothing at all.
+        let attach = Config::parse(
+            "[nvim]\nmode = 'attach'\nterminal = 'kitty'\nfont_size = 22.0",
+            None,
+        )
+        .unwrap();
         assert_eq!(attach.nvim.mode, Mode::Attach);
+        assert_eq!(attach.nvim.terminal, Terminal::Kitty);
+    }
+
+    #[test]
+    fn the_panes_font_is_a_family_name_and_a_pixel_size() {
+        for bad in [
+            "font_family = ''",
+            "font_family = 'monospace:bold'",
+            "font_family = 'mono,serif'",
+            "font_size = 0.0",
+            "font_size = 1e6",
+            "font_size = 3.9",
+        ] {
+            assert!(
+                Config::parse(&format!("[nvim]\nmode = 'pane'\n{bad}"), None).is_err(),
+                "{bad} should be refused"
+            );
+        }
+        let good = Config::parse("[nvim]\nfont_family = 'JetBrains Mono'", None).unwrap();
+        assert_eq!(good.nvim.font_family, "JetBrains Mono");
     }
     #[test]
     fn unset_environment_rejected() {

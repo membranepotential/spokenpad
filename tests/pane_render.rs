@@ -33,8 +33,9 @@ use spokenpad::{
     config::{Mode, Nvim},
     core::{geometry::Rect, state::IndicatorPhase},
     shell::{
+        nvim::pane_launch,
         nvim::{IndicatorState, NvimSession},
-        pane::{self, Options, Pane, Status},
+        pane::{Options, Pane, Sizing, Status},
     },
 };
 use std::{
@@ -78,12 +79,14 @@ fn the_pane_draws_what_neovim_draws() {
         ))),
         ..Nvim::default()
     };
-    let command = pane::editor_command(&config, &file).expect("build the nvim command");
+    let (command, marker) = pane_launch(&config, &file).expect("build the nvim command");
     let mut pane = Pane::open(
         &Options {
             display: Some(server.display.clone()),
-            columns: COLUMNS,
-            rows: ROWS,
+            sizing: Sizing::Cells {
+                columns: COLUMNS,
+                rows: ROWS,
+            },
             size: 16.0,
             ..Options::default()
         },
@@ -91,6 +94,9 @@ fn the_pane_draws_what_neovim_draws() {
     )
     .expect("open the pane");
     pane.show().expect("map the pane");
+    // The pane is up, so the marker stays: it is what lets an attach-mode
+    // session recognise this editor as spokenpad's.
+    marker.keep();
     i3.wait_until_managed(pane.window().id());
     sleep(SETTLE);
     let focus_before = server.input_focus();

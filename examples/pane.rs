@@ -17,7 +17,10 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use spokenpad::{
     config::Nvim,
-    shell::pane::{Options, Pane, Status},
+    shell::{
+        nvim::pane_launch,
+        pane::{Options, Pane, Sizing, Status},
+    },
 };
 use std::{
     path::PathBuf,
@@ -80,14 +83,17 @@ fn main() -> Result<()> {
         display: args.display.clone(),
         family: args.family.clone(),
         size: args.size,
-        columns: args.columns,
-        rows: args.rows,
+        sizing: Sizing::Cells {
+            columns: args.columns,
+            rows: args.rows,
+        },
         position: None,
         title: "spokenpad dictation".to_owned(),
     };
-    let command = spokenpad::shell::pane::editor_command(&config, &file)?;
+    let (command, marker) = pane_launch(&config, &file)?;
     let mut pane = Pane::open(&options, command)?;
     pane.show()?;
+    marker.keep();
     println!(
         "pane window {} on {} listening at {}",
         pane.window().id(),
