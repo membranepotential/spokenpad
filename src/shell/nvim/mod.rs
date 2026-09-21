@@ -518,12 +518,8 @@ impl NvimSession {
             let wm =
                 Wm::connect().context("a graphical dictation window needs a running i3 or sway")?;
             let criteria = terminal.focus_criteria(&self.config.window_instance, wm.kind())?;
-            if let Some(unproven) = wm.unproven_no_focus(&criteria)? {
-                bail!(
-                    "the running {} configuration does not prove `no_focus {unproven}`, so a {terminal} window could take focus",
-                    wm.kind()
-                );
-            }
+            wm.prove_no_focus(&criteria)
+                .with_context(|| format!("a {terminal} window could take focus"))?;
             let rect = window_placement(&wm, self.config.window_fraction);
             Some((wm, criteria, rect))
         } else {

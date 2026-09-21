@@ -261,6 +261,30 @@ pub fn find_window<'a>(tree: &str, criteria: &'a [Criterion]) -> Result<Option<&
         .find(|criterion| nodes(&tree).any(|node| criterion.selects(node))))
 }
 
+/// Whether the focused workspace holds no window at all, tiled or floating.
+///
+/// i3 and sway both ignore `no_focus` for the first window on a workspace
+/// (i3 userguide, "no_focus"; `sway(5)`), and a new window lands on the
+/// focused one. So a window opened onto an empty focused workspace takes
+/// focus whatever the rules say. A tree with no focused workspace is an
+/// error rather than `false`: nothing then says where the window would land.
+pub fn focused_workspace_is_empty(tree: &str) -> Result<bool> {
+    let tree: Value = serde_json::from_str(tree).context("GET_TREE reply is not JSON")?;
+    let focused = |node: &Value| node.get("focused").and_then(Value::as_bool) == Some(true);
+    let workspace = nodes(&tree)
+        .filter(|node| node.get("type").and_then(Value::as_str) == Some("workspace"))
+        .find(|workspace| nodes(workspace).any(focused))
+        .context("GET_TREE shows no focused workspace")?;
+    // i3 gives every window its X11 id in `window`; sway gives every view a
+    // `pid`, which no split container or workspace has.
+    let is_window = |node: &Value| {
+        ["window", "pid"]
+            .into_iter()
+            .any(|key| node.get(key).is_some_and(Value::is_number))
+    };
+    Ok(!nodes(workspace).skip(1).any(is_window))
+}
+
 /// The id of the focused node, whatever it is. Used to check that opening a
 /// window left focus where it was.
 pub fn focused_node(tree: &str) -> Result<Option<i64>> {
@@ -439,6 +463,52 @@ mod tests {
         assert_eq!(find_window(&tree, &criteria).unwrap(), Some(&criteria[1]));
         assert_eq!(find_window(&tree, &criteria[..1]).unwrap(), None);
         assert_eq!(focused_node(&tree).unwrap(), Some(2));
+    }
+
+    #[test]
+    fn an_empty_focused_workspace_is_found_on_i3_and_sway() {
+        let root = |workspaces: serde_json::Value| {
+            json!({"id": 1, "type": "root", "focused": false, "nodes": [
+                {"id": 2, "type": "output", "focused": false, "nodes": workspaces}
+            ]})
+            .to_string()
+        };
+        // i3: the focused workspace is itself focused when it is empty; a
+        // workspace elsewhere holding windows does not count.
+        let i3_empty = root(json!([
+            {"id": 3, "type": "workspace", "focused": true, "nodes": [], "floating_nodes": []},
+            {"id": 4, "type": "workspace", "focused": false, "nodes": [
+                {"id": 5, "type": "con", "focused": false, "window": 4194305, "nodes": []}
+            ]}
+        ]));
+        assert!(focused_workspace_is_empty(&i3_empty).unwrap());
+        // A floating window is a window: i3 counts it, and so does sway.
+        let i3_floating = root(json!([
+            {"id": 3, "type": "workspace", "focused": false, "nodes": [], "floating_nodes": [
+                {"id": 6, "type": "floating_con", "focused": false, "window": null, "nodes": [
+                    {"id": 7, "type": "con", "focused": true, "window": 4194306, "nodes": []}
+                ]}
+            ]}
+        ]));
+        assert!(!focused_workspace_is_empty(&i3_floating).unwrap());
+        // sway: views carry a pid; a split container alone is no window.
+        let sway_tiled = root(json!([
+            {"id": 3, "type": "workspace", "focused": false, "nodes": [
+                {"id": 8, "type": "con", "focused": false, "nodes": [
+                    {"id": 9, "type": "con", "focused": true, "pid": 4242, "app_id": "foot", "nodes": []}
+                ]}
+            ]}
+        ]));
+        assert!(!focused_workspace_is_empty(&sway_tiled).unwrap());
+        let sway_empty = root(json!([
+            {"id": 3, "type": "workspace", "focused": true, "nodes": [], "floating_nodes": []}
+        ]));
+        assert!(focused_workspace_is_empty(&sway_empty).unwrap());
+        // Nothing focused: where the window would land is unknown.
+        let unfocused = root(json!([
+            {"id": 3, "type": "workspace", "focused": false, "nodes": []}
+        ]));
+        assert!(focused_workspace_is_empty(&unfocused).is_err());
     }
 
     #[test]

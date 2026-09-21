@@ -83,18 +83,34 @@ impl Wm {
         }
     }
 
-    /// The first of `criteria` the loaded configuration does not prove a
-    /// `no_focus` rule for, or `None` when every one is proven. Only the text
-    /// `GET_CONFIG` returns counts — nothing is read from disk — so on sway,
-    /// which returns its main file alone, a rule must be in that file.
-    pub fn unproven_no_focus<'a>(
-        &self,
-        criteria: &'a [Criterion],
-    ) -> Result<Option<&'a Criterion>> {
+    /// Proves that a window matching `criteria`, opened now, will not take
+    /// focus, or says why it cannot.
+    ///
+    /// Two things must hold. The loaded configuration has a `no_focus` rule
+    /// for every one of `criteria`: only the text `GET_CONFIG` returns
+    /// counts, nothing is read from disk, so on sway, which returns its main
+    /// file alone, a rule must be in that file. And the focused workspace,
+    /// where the window lands, already holds a window, because both window
+    /// managers ignore `no_focus` for the first window on a workspace.
+    pub fn prove_no_focus(&self, criteria: &[Criterion]) -> Result<()> {
         let sources = wm::parse_config(&request(&self.socket, Message::GetConfig, "")?)?;
-        Ok(criteria.iter().find(|criterion| {
-            !wm::has_no_focus_rule(sources.iter().map(String::as_str), criterion)
-        }))
+        if let Some(unproven) = criteria
+            .iter()
+            .find(|criterion| !wm::has_no_focus_rule(sources.iter().map(String::as_str), criterion))
+        {
+            bail!(
+                "the running {} configuration does not prove `no_focus {unproven}`",
+                self.kind
+            );
+        }
+        let empty = wm::focused_workspace_is_empty(&request(&self.socket, Message::GetTree, "")?)
+            .context("cannot tell which workspace the window would open on")?;
+        ensure!(
+            !empty,
+            "the focused workspace is empty, and {} gives the first window on a workspace focus despite `no_focus`",
+            self.kind
+        );
+        Ok(())
     }
 
     /// The first of `criteria` that selects a window now on screen.
@@ -357,8 +373,12 @@ mod tests {
             ),
             (
                 Message::GetTree,
-                json!({"id": 1, "nodes": [], "floating_nodes": [
-                    {"id": 9, "focused": false, "window_properties": {"instance": "spokenpad"}}
+                json!({"id": 1, "type": "root", "nodes": [
+                    {"id": 2, "type": "workspace", "focused": false, "nodes": [
+                        {"id": 3, "type": "con", "focused": true, "window": 4194305, "nodes": []}
+                    ], "floating_nodes": [
+                        {"id": 9, "focused": false, "window": 4194306, "window_properties": {"instance": "spokenpad"}}
+                    ]}
                 ]})
                 .to_string(),
             ),
@@ -371,9 +391,13 @@ mod tests {
         assert!(outputs[0].primary);
 
         let instance = [criterion(Property::Instance, "spokenpad")];
-        assert_eq!(wm.unproven_no_focus(&instance).unwrap(), None);
+        wm.prove_no_focus(&instance).unwrap();
         let other = [criterion(Property::Instance, "other")];
-        assert_eq!(wm.unproven_no_focus(&other).unwrap(), Some(&other[0]));
+        let error = format!("{:#}", wm.prove_no_focus(&other).unwrap_err());
+        assert!(
+            error.contains(r#"does not prove `no_focus [instance="other"]`"#),
+            "{error}"
+        );
 
         let found = wm
             .find(&instance)
@@ -390,7 +414,7 @@ mod tests {
             *fake.commands.lock().unwrap(),
             [r#"[instance="spokenpad"] floating enable, resize set 300 200, move position 10 20"#]
         );
-        assert_eq!(wm.focused_node().unwrap(), None);
+        assert_eq!(wm.focused_node().unwrap(), Some(3));
     }
 
     /// sway's `GET_CONFIG` is the main file as loaded, without its includes.
@@ -416,8 +440,12 @@ mod tests {
             (Message::GetConfig, json!({"config": main_text}).to_string()),
             (
                 Message::GetTree,
-                json!({"id": 1, "nodes": [{"id": 4, "focused": true, "app_id": "spokenpad"}]})
-                    .to_string(),
+                json!({"id": 1, "type": "root", "nodes": [
+                    {"id": 2, "type": "workspace", "focused": false, "nodes": [
+                        {"id": 4, "type": "con", "focused": true, "pid": 4242, "app_id": "spokenpad"}
+                    ]}
+                ]})
+                .to_string(),
             ),
             (
                 Message::RunCommand,
@@ -430,8 +458,12 @@ mod tests {
             criterion(Property::AppId, "spokenpad"),
             criterion(Property::Instance, "spokenpad"),
         ];
-        assert_eq!(wm.unproven_no_focus(&both).unwrap(), Some(&both[0]));
-        assert_eq!(wm.unproven_no_focus(&both[1..]).unwrap(), None);
+        let error = format!("{:#}", wm.prove_no_focus(&both).unwrap_err());
+        assert!(
+            error.contains(r#"does not prove `no_focus [app_id="spokenpad"]`"#),
+            "{error}"
+        );
+        wm.prove_no_focus(&both[1..]).unwrap();
 
         assert_eq!(wm.find(&both).unwrap(), Some(&both[0]));
         assert_eq!(wm.focused_node().unwrap(), Some(4));
@@ -452,6 +484,47 @@ mod tests {
             *fake.commands.lock().unwrap(),
             [r#"[app_id="spokenpad"] floating enable, resize set 1 1, move absolute position 0 0"#]
         );
+    }
+
+    /// i3 and sway focus the first window on a workspace whatever `no_focus`
+    /// says, so a proven rule is not enough on an empty focused workspace,
+    /// nor on a tree that does not say which workspace is focused.
+    #[test]
+    fn an_empty_focused_workspace_defeats_a_proven_rule() {
+        for (kind, version) in [
+            (WmKind::I3, json!({"major": 4, "minor": 25})),
+            (WmKind::Sway, json!({"variant": "sway", "major": 1})),
+        ] {
+            for (tree, expected) in [
+                (
+                    json!({"id": 1, "type": "root", "nodes": [
+                        {"id": 2, "type": "workspace", "focused": true, "nodes": [], "floating_nodes": []}
+                    ]}),
+                    "the focused workspace is empty",
+                ),
+                (
+                    json!({"id": 1, "type": "root", "nodes": []}),
+                    "cannot tell which workspace",
+                ),
+            ] {
+                let fake = FakeWm::start(vec![
+                    (Message::GetVersion, version.to_string()),
+                    (
+                        Message::GetConfig,
+                        json!({"config": "no_focus [instance=\"spokenpad\"]\n"}).to_string(),
+                    ),
+                    (Message::GetTree, tree.to_string()),
+                ]);
+                let wm = Wm::at(fake.socket.clone()).unwrap();
+                assert_eq!(wm.kind(), kind);
+                let error = format!(
+                    "{:#}",
+                    wm.prove_no_focus(&[criterion(Property::Instance, "spokenpad")])
+                        .unwrap_err()
+                );
+                assert!(error.contains(expected), "{kind}: {error}");
+            }
+        }
     }
 
     #[test]
