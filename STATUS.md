@@ -28,13 +28,8 @@ never takes focus. Fully local, CPU-only. Next milestone: public release.
 - 09-21: Preview auto-scroll fixed (it hung below the window from the second
   paragraph on); arrow Up/Down move by screen line like j/k. CLAUDE.md now
   commits verified work unasked. 144 lib + 16 e2e green.
-- 09-19: Lost words fixed at two causes found by replaying 128 recovery WAVs:
-  Parakeet returned "" for 4/18 short speech chunks (now retried without
-  trailing silence; also ends the `cd home` Rust/Python mismatch), and speech
-  still sounding at key-up in 22/128 (250 ms post-roll). Whole buffer copied
-  to `+` after every release. Astra audited, critiqued and reviewed; its
-  review found 4 bugs, fixed. 143 lib + 16 e2e (+1 real-model) green, WER
-  17.6% unchanged.
+- 09-19: Lost words fixed (empty-chunk retry without trailing silence; 250 ms
+  post-roll), found by replaying 128 recovery WAVs. WER 17.6% unchanged.
 
 ## Next
 1. Live check after restart: short sentences land first time, word endings
