@@ -189,11 +189,17 @@ session, decode and nvim tests:
    (30 s) is the remaining backstop for a chunk that somehow never settles:
    past it the tick stops decoding the open tail but keeps committing what has
    settled, so the tail shrinks and previews resume by themselves.
-3. **A preview can never make the user wait.** Previews are abandoned the
-   instant a release or a cancel is due: a preview still queued on the single
-   worker is skipped, and one already running stops after its current chunk
-   — which, if that chunk was settled, it has just committed rather than
-   wasted.
+3. **A tick can only make the user wait for bounded work.** Previews are
+   abandoned the instant a release or a cancel is due: one still queued on the
+   single worker is skipped, and one already running stops after its current
+   chunk — which, if that chunk was settled, it has just committed rather than
+   wasted. What a release can still queue behind is the work already inside
+   the tick: one detector pass, and one settled chunk's decode. Neither is
+   interruptible, so both are bounded instead — a tick is handed at most
+   `[preview].max_seconds` of audio however long the tail is, which holds the
+   detector pass to about 0.29 s (measured; 2.4 s over a 270 s tail, which is
+   why the bound is there — see
+   [the experiment](experiments/2026-09-21-constant-ram-recording.md)).
 
 The guard against a preview that came back *shorter* than the last one is
 kept: decoding 4.4 s of a real sample returned `"Okay."` where 3.3 s of the

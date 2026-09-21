@@ -819,10 +819,27 @@ mod long_capture {
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct Window {
         range: Range<usize>,
+        /// Where this chunk's speech ends: what committing it advances the
+        /// offset to, in capture-absolute samples.
+        speech_end: usize,
         /// Decoded for keeps: a settled chunk, or anything the release
         /// decoded. A preview is neither, and is redrawn whenever the tick
         /// cadence happens to fall.
         committed: bool,
+    }
+
+    /// Which bookkeeping a replay runs.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Bookkeeping {
+        /// This change: the capture buffer drops what the worker has
+        /// committed, and settled silence finishes the offset.
+        Dropping,
+        /// The same policy, with the whole capture kept in memory. The
+        /// reference for "dropping it changes nothing".
+        Keeping,
+        /// Before this change: a chunk stays open until a later span closes
+        /// it, silence finishes nothing, and nothing is dropped.
+        Before,
     }
 
     /// Amplitude VAD on Silero's window grid, cutting an unbroken run at
@@ -832,9 +849,11 @@ mod long_capture {
         base: Base,
         releasing: Rc<Cell<bool>>,
         windows: Rc<Cell<Vec<Window>>>,
-        /// Report nothing as finished, which is what the offset did before
-        /// settled silence advanced it.
-        deaf_to_silence: bool,
+        /// Put the pre-change closing rule back: a chunk the speech target
+        /// and the later spans both left open stays open, and silence
+        /// finishes nothing. The windows are untouched — the old code cut
+        /// exactly the same ones, it only left this chunk unsettled.
+        before: bool,
     }
 
     impl Segmenter for Detector {
@@ -854,19 +873,51 @@ mod long_capture {
                 }
             }
             let mut split = merge_spans(&spans, samples.len(), &self.config, RATE);
-            if self.deaf_to_silence {
+            if self.before {
                 split.silent_through = 0;
+                if pending_before_the_change(&spans, &self.config)
+                    && let Some(last) = split.segments.last_mut()
+                {
+                    last.settled = false;
+                }
             }
             let base = self.base.get();
             let releasing = self.releasing.get();
             let mut seen = self.windows.take();
             seen.extend(split.segments.iter().map(|s| Window {
                 range: base + s.window.start..base + s.window.end,
+                speech_end: base + s.speech_end,
                 committed: s.settled || releasing,
             }));
             self.windows.set(seen);
             Ok(split)
         }
+    }
+
+    /// Whether the rule before this change would have left the last chunk
+    /// open. It closed a chunk on the speech target, or when a *later* span
+    /// stood more than the split threshold away — never on the silence at the
+    /// end of the slice. Written out here rather than asked of `merge_spans`,
+    /// so that the reference does not move when the policy does.
+    fn pending_before_the_change(spans: &[Range<usize>], config: &Vad) -> bool {
+        let target = config.chunk_seconds * f64::from(RATE);
+        let threshold = settling_silence(config, RATE);
+        let mut open: Option<usize> = None;
+        let mut previous_end: Option<usize> = None;
+        for span in spans {
+            if let Some(end) = previous_end
+                && span.start.saturating_sub(end) >= threshold
+            {
+                open = None;
+            }
+            let speech = open.get_or_insert(0);
+            *speech += span.end - span.start;
+            if *speech as f64 >= target {
+                open = None;
+            }
+            previous_end = Some(span.end);
+        }
+        open.is_some()
     }
 
     /// Counts what it is given, and records how much of it there was.
@@ -989,10 +1040,9 @@ mod long_capture {
         frames: usize,
     }
 
-    /// Replays `seconds` of capture through a worker, ticking on the preview
-    /// interval and releasing at the end. `trimming` off is the bookkeeping
-    /// before this change: nothing is dropped and silence never settles.
-    fn replay(seconds: usize, trimming: bool) -> Run {
+    /// Replays `seconds` of capture through a worker, ticking every `step`
+    /// samples of audio and releasing at the end.
+    fn replay(seconds: usize, step: usize, mode: Bookkeeping) -> Run {
         let spans = schedule(seconds);
         let base: Base = Rc::new(Cell::new(0));
         let releasing = Rc::new(Cell::new(false));
@@ -1005,19 +1055,19 @@ mod long_capture {
                 base: Rc::clone(&base),
                 releasing: Rc::clone(&releasing),
                 windows: Rc::clone(&windows),
-                deaf_to_silence: !trimming,
+                before: mode == Bookkeeping::Before,
             }),
         });
         let mut held = Held {
             buffers: VecDeque::new(),
             start: 0,
             end: 0,
-            whole: (!trimming).then(|| spans.clone()),
+            whole: (mode != Bookkeeping::Dropping).then(|| spans.clone()),
         };
         let utterance = Utterance::new(1);
         let mut through = 0_usize;
         let mut peak_retained = 0;
-        let mut next_tick = INTERVAL;
+        let mut next_tick = step;
         let frames = seconds * RATE as usize;
         for start in (0..frames).step_by(BUFFER) {
             held.push(audio(&spans, start..start + BUFFER));
@@ -1025,7 +1075,7 @@ mod long_capture {
             if held.end < next_tick {
                 continue;
             }
-            next_tick += INTERVAL;
+            next_tick += step;
             let kind = if held.end - through > PREVIEW_MAX {
                 TickKind::Commits
             } else {
@@ -1038,7 +1088,7 @@ mod long_capture {
                     through = c.through.get()
                 })
                 .expect("tick");
-            if trimming {
+            if mode == Bookkeeping::Dropping {
                 held.discard_before(through);
             }
         }
@@ -1065,7 +1115,7 @@ mod long_capture {
     /// that arrived while the tick was running.
     #[test]
     fn thirty_minutes_of_capture_holds_a_bounded_tail() {
-        let run = replay(1_800, true);
+        let run = replay(1_800, INTERVAL, Bookkeeping::Dropping);
         let bound = 45 * RATE as usize;
         assert!(
             run.peak_retained <= bound,
@@ -1085,53 +1135,72 @@ mod long_capture {
     /// the same capture-absolute samples, in the same order.
     #[test]
     fn dropping_committed_audio_decodes_exactly_the_same_windows() {
-        let trimmed = replay(900, true);
-        let reference = replay(900, false);
-        let committed = |run: &Run| -> Vec<Range<usize>> {
-            run.windows
-                .iter()
-                .filter(|w| w.committed)
-                .map(|w| w.range.clone())
-                .collect()
-        };
-        assert_eq!(committed(&trimmed), committed(&reference));
-        assert!(
-            !committed(&trimmed).is_empty(),
-            "the comparison has to have something to compare"
-        );
-        // The cosmetic previews are the one thing that does move: a tail the
-        // committed offset has walked out of is a tail worth redrawing.
-        assert!(
-            trimmed.calls.len() >= reference.calls.len(),
-            "trimmed {} calls, reference {}",
-            trimmed.calls.len(),
-            reference.calls.len()
-        );
-        assert!(
-            reference.peak_retained > 20 * trimmed.peak_retained,
-            "the reference run is the one that grows: {} vs {}",
-            reference.peak_retained,
-            trimmed.peak_retained
-        );
+        for step in cadences() {
+            let dropping = replay(900, step, Bookkeeping::Dropping);
+            let keeping = replay(900, step, Bookkeeping::Keeping);
+            assert_eq!(
+                committed(&dropping),
+                committed(&keeping),
+                "the windows moved at a {:.1}s cadence",
+                Frames(step).seconds(RATE)
+            );
+            assert_eq!(dropping.calls, keeping.calls, "the decodes moved");
+            assert!(
+                !committed(&dropping).is_empty(),
+                "the comparison has to have something to compare"
+            );
+            assert!(
+                keeping.peak_retained > 20 * dropping.peak_retained,
+                "the run that keeps everything is the one that grows: {} vs {}",
+                keeping.peak_retained,
+                dropping.peak_retained
+            );
+        }
+    }
+
+    /// The three tick cadences, in samples. 6 s and 9 s are longer than the
+    /// 4 s settle threshold, which is where a chunk can settle with a gap
+    /// behind it — the regime a worker that has fallen behind runs in.
+    fn cadences() -> [usize; 3] {
+        [INTERVAL, 6 * RATE as usize, 9 * RATE as usize]
+    }
+
+    fn committed(run: &Run) -> Vec<Range<usize>> {
+        run.windows
+            .iter()
+            .filter(|w| w.committed)
+            .map(|w| w.range.clone())
+            .collect()
     }
 
     /// No window ever reaches back into audio that was dropped, and every
     /// settled window moves the capture forwards.
     #[test]
     fn no_window_reaches_behind_the_committed_offset() {
-        let run = replay(600, true);
-        let mut committed = 0;
-        for window in &run.windows {
-            assert!(
-                window.range.start >= committed,
-                "window {:?} reaches behind the committed offset {committed}",
-                window.range
-            );
-            if window.committed {
-                committed = window.range.start;
+        for mode in [Bookkeeping::Dropping, Bookkeeping::Before] {
+            for step in cadences() {
+                let run = replay(600, step, mode);
+                // The offset a commit leaves behind is the chunk's speech
+                // end, not where its window began: the window reaches further
+                // back, into the silence before the speech.
+                let mut offset = 0;
+                let mut seen = 0;
+                for window in &run.windows {
+                    assert!(
+                        window.range.start >= offset,
+                        "window {:?} reaches back over speech committed through \
+                         {offset} ({mode:?}, {:.1}s cadence)",
+                        window.range,
+                        Frames(step).seconds(RATE)
+                    );
+                    if window.committed {
+                        offset = window.speech_end;
+                        seen += 1;
+                    }
+                }
+                assert!(seen > 10, "{mode:?} committed only {seen} windows");
             }
         }
-        assert!(committed > 0);
     }
 
     /// Unbroken speech: nothing in the merge policy cuts it, because Silero
@@ -1153,7 +1222,7 @@ mod long_capture {
                 base: Rc::clone(&base),
                 releasing: Rc::new(Cell::new(false)),
                 windows: Rc::clone(&windows),
-                deaf_to_silence: false,
+                before: false,
             }),
         });
         let utterance = Utterance::new(1);

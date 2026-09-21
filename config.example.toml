@@ -53,11 +53,14 @@ postroll_ms = 250
 #
 # Since 2026-09-21 the audio a capture holds in memory is only its open tail:
 # once a chunk is transcribed its audio is dropped, so a recording costs the
-# same at an hour as at ten seconds (measured: 3.6 MiB over half an hour,
+# same at an hour as at ten seconds (measured: 1.7 MiB over half an hour,
 # against 116 MiB before). That incident cannot repeat with a VAD model loaded.
 #
-# The ceiling is still there for the case where nothing ever settles -- no VAD
-# model, or vad.enabled = false -- and is 3600 seconds of *held* audio
+# The ceiling is still there for the cases where nothing is committed while
+# you speak, and so nothing can be dropped: no VAD model, vad.enabled = false,
+# preview.enabled = false (which turns the tick off, not only the visible
+# preview -- see [preview] below), or a preview.interval_ms long enough that
+# few ticks fire. It is 3600 seconds of *held* audio
 # (MAX_UTTERANCE_SECONDS in audio.rs), a compile-time constant rather than a
 # setting: it is a bound on how much of this machine's RAM one capture may
 # occupy (~230 MB/hour at 16 kHz), not a policy. Reaching it says so in the
@@ -368,7 +371,9 @@ copy_to_clipboard = false
 # never written to the file. What reaches the buffer is each chunk decoded
 # exactly once, when it settles or at key release. Turning this off means
 # nothing commits until the key is released, and the whole capture is decoded
-# then.
+# then -- and, because committing is also what lets the daemon drop the audio
+# it has transcribed, that capture is held in memory whole, up to the ceiling
+# in [recording] above (~230 MB/hour).
 enabled = true
 
 # Minimum time between ticks. Must be >= 200. The real gap is

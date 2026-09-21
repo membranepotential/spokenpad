@@ -102,21 +102,34 @@ is clamped to the start of the slice it was cut from, so no decode can read a
 sample before that offset. The recovery WAV is written from the callback
 before any of this and still holds the complete capture.
 
-The retained window is therefore the open tail, bounded by:
+The retained window is therefore the open tail: one unsettled chunk, the
+keep-back, and the audio that arrived while the tick was running.
 
-- one chunk of speech and the pauses inside it — at most one Silero span
-  (`vad.max_speech_seconds`, 20 s) for unbroken speech, and for merged short
-  runs `vad.chunk_seconds` of speech plus the internal gaps, each under the
-  split threshold;
-- one split threshold of silence (4 s with the default padding), kept back so
-  that a later window's lead padding has real audio to use and the detector
-  sees the same windows it would have seen;
-- the audio that arrives while a tick is running: one `preview.interval_ms`
-  plus the decode.
+The worst case is wider than it sounds, because a chunk holds
+`vad.chunk_seconds` of *speech* and the pauses between its spans count for
+nothing. Each of those pauses is under the split threshold, and each span is
+at least `vad.min_speech_seconds`, so with the defaults a chunk can stretch
+over 10 s of speech in about 67 spans of 0.15 s with just under 4 s of silence
+between them:
 
-Measured over half an hour of latched capture: 3.6 MiB above the baseline,
-against 116.5 MiB when the committed audio is kept
-([experiment](experiments/2026-09-21-constant-ram-recording.md)).
+```text
+chunk_seconds + ceil(chunk_seconds / min_speech_seconds) x settling_silence
+  = 10 s + 67 x 4 s = 278 s = 17 MB
+```
+
+plus one split threshold of silence (4 s with the default padding), kept back
+so that a later window's lead padding has real audio to use and the detector
+sees the same windows it would have seen, plus one `preview.interval_ms` and
+the decode of audio arriving meanwhile. Unbroken speech is the easy case: a
+Silero span ends at `vad.max_speech_seconds` (20 s), which closes a chunk on
+its own.
+
+Ordinary speech is nowhere near that. Over half an hour of four-seconds-on,
+six-seconds-off, the measurement is 1.7 MiB above the baseline, against
+116.2 MiB when the committed audio is kept; the policy replay of mixed bursts
+and pauses peaks at 26.0 s of retained audio
+([experiment](experiments/2026-09-21-constant-ram-recording.md)). Both are
+measurements of those schedules, not the bound.
 
 `MAX_UTTERANCE_SECONDS` (3600) is now a ceiling on that retained window, not on
 the length of a capture. With a VAD model loaded nothing comes near it; without

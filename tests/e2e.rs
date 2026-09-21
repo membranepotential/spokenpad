@@ -1607,6 +1607,50 @@ impl DirectMicrophone {
     }
 }
 
+/// How long the real Silero pass over an open tail takes. A `Commits` tick
+/// runs even past `preview.max_seconds`, and `Pipeline::split` has no abandon
+/// check, so whatever this costs is what a release can queue behind.
+///
+///     cargo test --locked --release --test e2e -- --ignored --exact \
+///         silero_split_time_over_a_long_tail --nocapture
+#[test]
+#[ignore = "loads the real Silero model from the default model directory"]
+fn silero_split_time_over_a_long_tail() {
+    let config = Config::default();
+    let sample = config.asr.model_dir.join("test_en.wav");
+    if !sample.is_file() || !config.vad.model.is_file() {
+        eprintln!("skipping: `spokenpad fetch-models` has not been run");
+        return;
+    }
+    let (source, rate) = read_capture(&sample).expect("read the bundled sample");
+    let speech = resample(&source, rate, RATE);
+    let mut segmenter = load_segmenter(&config.vad, RATE).expect("load Silero");
+
+    for seconds in [30, 60, 270] {
+        // Speech and silence in turn, so the detector does the work it would
+        // do on a real tail rather than skating over a flat buffer.
+        let mut tail = Vec::with_capacity(seconds * RATE as usize);
+        while tail.len() < seconds * RATE as usize {
+            tail.extend_from_slice(&speech);
+            tail.extend(std::iter::repeat_n(0.0, RATE as usize / 2));
+        }
+        tail.truncate(seconds * RATE as usize);
+        // One pass to warm the model, three to time.
+        segmenter.split(&tail).expect("split");
+        let mut worst = Duration::ZERO;
+        for _ in 0..3 {
+            let started = Instant::now();
+            let split = segmenter.split(&tail).expect("split");
+            worst = worst.max(started.elapsed());
+            assert!(!split.segments.is_empty());
+        }
+        println!(
+            "Silero split over a {seconds}s tail: {:.0} ms",
+            worst.as_secs_f64() * 1000.0
+        );
+    }
+}
+
 /// Dropping settled silence leaves the audio that follows covered by the
 /// same detector windows, and the keep-back leaves Silero enough silence to
 /// find the same speech in it. The first is arithmetic — the drop is a whole

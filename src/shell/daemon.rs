@@ -643,7 +643,18 @@ where
                     .as_ref()
                     .context("recording has no utterance")?
                     .clone();
-                let audio = capture.snapshot_capture(session.committed_hint);
+                let mut audio = capture.snapshot_capture(session.committed_hint);
+                // One tick chews on at most `preview.max_seconds` of audio,
+                // whatever it is for. The detector pass alone costs 0.29 s
+                // over 30 s of tail and 2.4 s over 270 s, and a release
+                // queued behind it waits for all of it
+                // (docs/experiments/2026-09-21-constant-ram-recording.md).
+                // The rest of the tail is the next tick's business; a preview
+                // tick never reaches this, because it only runs while the
+                // tail is under the same limit.
+                audio
+                    .samples
+                    .truncate(((config.preview.max_seconds * f64::from(rate)) as usize).max(1));
                 session.requested(now);
                 log::debug!(
                     "preview {} requested: {:.2}s audio starting at {}",

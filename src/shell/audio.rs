@@ -613,7 +613,9 @@ impl<B: InputBackend> AudioCapture<B> {
         }
     }
 
-    /// Samples of the current capture held in memory; zero while idle.
+    /// Samples of the current capture held in memory; zero while idle. Only
+    /// the tests ask: the loop drops what it drops without measuring it.
+    #[cfg(test)]
     pub fn retained_frames(&self) -> usize {
         match &*lock(&self.core.state) {
             CaptureState::Capturing { start, frames, .. } => frames.since(*start),

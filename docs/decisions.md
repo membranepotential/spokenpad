@@ -732,7 +732,7 @@ read a sample before that offset.
 So the capture buffer now holds `committed offset .. last frame` and the event
 loop drops whole device buffers behind it as the offset moves
 ([progressive-commit.md](progressive-commit.md#what-is-kept-in-memory)). Half
-an hour of latched capture costs 3.6 MiB instead of 116.5 MiB
+an hour of latched capture costs 1.7 MiB instead of 116.2 MiB
 ([experiment](experiments/2026-09-21-constant-ram-recording.md)).
 
 Two things had to change for the offset to keep moving, and both are the same

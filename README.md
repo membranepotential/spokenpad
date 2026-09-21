@@ -220,9 +220,13 @@ too briefly > preview paused. The log always has the full sentence and paths.
 - **A long recording costs no more memory than a short one.** Audio that has
   been transcribed is dropped as you speak; what is held is the sentence you
   are still in. The recovery WAV keeps the whole recording.
-- **Past the 60-minute in-memory limit** — only reachable with no VAD model,
-  because nothing settles and nothing can be dropped — the capture is decoded
-  and the winbar names the recovery WAV, which keeps recording.
+- **Past the 60-minute in-memory limit** the capture is decoded and the winbar
+  names the recovery WAV, which keeps recording. Text that lands while you
+  speak is what makes the audio droppable, so the limit is reachable only
+  where nothing lands: with no VAD model, with `vad.enabled = false`, with
+  `preview.enabled = false` (which turns the whole progressive tick off, not
+  just the visible preview), or with a `preview.interval_ms` long enough that
+  few ticks fire.
 
 ## Managed window on i3 and sway
 
