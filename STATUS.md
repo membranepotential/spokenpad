@@ -7,17 +7,16 @@ Hold a key (or latch with shift), speak, and text appears in an nvim that
 never takes focus. Fully local, CPU-only. Next milestone: public release.
 
 ## Now
-- corpus — harness + 181 Gladia references done (greedy 11.2% / 0 lost vs
-  beam 11.5% / 2 lost; 21% of the words are German). Now: rebase onto main,
-  before/after run for the lead-padding clamp, doc clean-up — agent, wt
-- beam-fix — real cause found: blank skips frames for free, so the empty path
-  wins; one-line fix gives 9/9 on the lost tail, corpus 1 lost (greedy 0).
-  PR #3657 makes it worse. Now: public repro clip + upstream draft — agent
+- corpus — isolating the one chunk new main loses (e2 0 -> 1) — agent, wt
+- beam-fix — wrapping up (no upstream PR, user 09-21) — agent
 - own-window — P0-P2 merged with both review rounds fixed (02b68f1):
   `nvim.mode = "pane"`, verified headless on i3 only. Waiting for the user:
   P4 live check on i3; P3 (other WMs) needs packages installed.
 
 ## Done
+- 09-21 late: DEPLOYED main d5d7418 (const RAM, pane mode, sherpa 1.13.8,
+  auto-stop). Corpus harness merged: old -> new main 11.20% -> 10.85% WER;
+  the lead-padding clamp changes nothing on 181 captures, kept.
 - 09-21: Auto-stop (6d36c0c, reviewed): a latch with no speech for
   `capture.silence_timeout_s` (300) and no key down ends as a normal stop;
   every capture ends at 4 h; the memory ceiling now really ends it.
@@ -44,7 +43,7 @@ never takes focus. Fully local, CPU-only. Next milestone: public release.
 - 09-21: Portability merged: Python removed, static binary, `[asr] family`.
 
 ## Next
-1. Deploy main after the clamp before/after run, then the user's P4 check.
+1. User: P4 live check of `mode = "pane"` on i3; install P3 packages or skip.
    Decoder stays greedy; no upstream sherpa PR for now (user, 09-21).
 
 ## Known issues / open questions
