@@ -80,7 +80,7 @@ those belongs in `src/shell/`.
 
 ```sh
 cargo build --locked --release
-cargo test --locked --all-targets              # no mic, display, lock or service socket is touched
+cargo test --locked --all-targets              # no mic, user display, lock or service socket is touched
 cargo test --locked --test e2e -- --ignored    # real-model e2e; needs `spokenpad fetch-models` first
 cargo clippy --locked --all-targets -- -D warnings && cargo fmt --check
 cargo run --release --example=eval             # WER on the local eval clips (--whole: no VAD)
@@ -88,8 +88,12 @@ scripts/install.sh                             # deploy: the service runs ~/.loc
 ```
 
 Nvim-dependent tests fail loudly when nvim is missing unless
-`SPOKENPAD_ALLOW_MISSING_NVIM` is set. All tests pass while the user's service is
-running: they use temp dirs and never the real state dir or the daemon lock.
+`SPOKENPAD_ALLOW_MISSING_NVIM` is set; `tests/pane_window.rs` does the same for
+Xvfb and i3 with `SPOKENPAD_ALLOW_MISSING_X11`. That test starts its own X
+server above display `:50` and its own i3 with a generated config; nothing ever
+opens on `:0` or reads the user's i3 configuration. All tests pass while the
+user's service is running: they use temp dirs and never the real state dir or
+the daemon lock.
 
 ## Working conventions
 

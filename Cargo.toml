@@ -38,6 +38,7 @@ ureq = { version = "3.4", default-features = false, features = ["rustls"] }
 # Already a runtime dependency; integration tests need it to reap the editor
 # process group they spawned.
 libc = "0.2"
+x11rb = { version = "0.14", features = ["xtest"] }
 
 [profile.release]
 lto = "thin"
