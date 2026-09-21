@@ -602,8 +602,12 @@ where
                         // editor always writes the append before it reads
                         // the buffer to copy. Sent on every `Finished`,
                         // whatever the release decode did: progressively
-                        // committed text is in the buffer either way.
-                        send(&editor_tx, EditorWork::Copy)?;
+                        // committed text is in the buffer either way. Off by
+                        // default: with `nvim.copy_to_clipboard` false, no
+                        // copy request is ever sent.
+                        if config.nvim.copy_to_clipboard {
+                            send(&editor_tx, EditorWork::Copy)?;
+                        }
                     }
                 }
             }
@@ -688,7 +692,9 @@ where
             // commits were drained from the same channel, in order, by the
             // arm above, on an earlier pass of this same `for`.
             ResultEvent::Finished { .. } => {
-                if let Err(e) = send(&editor_tx, EditorWork::Copy) {
+                if config.nvim.copy_to_clipboard
+                    && let Err(e) = send(&editor_tx, EditorWork::Copy)
+                {
                     log::error!("could not queue a shutdown clipboard copy: {e:#}");
                 }
             }

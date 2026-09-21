@@ -676,3 +676,15 @@ dependency tree.
 
 **`scripts/fetch-models.sh` is deleted**, and `scripts/install.sh`'s closing
 hints point at the subcommand instead.
+
+## The clipboard copy becomes opt-in, off by default (2026-09-21)
+
+The 2026-09-19 clipboard copy (previous entry) ran unconditionally after
+every release. The author found this made every dictation write to the
+system clipboard whether wanted or not, silently overwriting whatever was
+there before — a side effect worth choosing, not assuming. `nvim.copy_to_clipboard`
+(default `false`) now gates it: when off, the daemon never even sends the
+`copy_buffer` request to the editor, rather than sending it and discarding
+the result, so a missing clipboard provider is not probed on every release
+either. The mechanism `copy_buffer` implements in `spokenpad.lua` is
+unchanged; only whether the daemon ever asks for it moved.

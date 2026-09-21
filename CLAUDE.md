@@ -20,7 +20,8 @@ Design history is `docs/decisions.md`; add an entry when you change behaviour.
   daemon is controlled only through its control socket. Never `EVIOCGRAB`,
   uinput, or any input synthesis (`xdotool type`, enigo, XTest). Nothing is
   ever pasted. The only clipboard write is the dictation nvim setting its own
-  `+` register to the whole buffer after a release.
+  `+` register to the whole buffer after a release, and only when
+  `nvim.copy_to_clipboard` is set (off by default).
 - The only network access anywhere in the program is the pinned default
   model download (`spokenpad fetch-models`, or automatically on first launch;
   `core/models.rs`, `shell/models.rs`): fixed URLs, verified against a pinned

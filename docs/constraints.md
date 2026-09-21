@@ -67,11 +67,13 @@ is just text. The clipboard round trip is deleted; see
 [decisions.md](decisions.md#the-sink-is-neovim-not-the-clipboard).
 
 Since 2026-09-19 the clipboard is written again, but only as a copy, never as
-a delivery path: after every release the dictation nvim sets its own `+`
-register to the whole buffer, through nvim's clipboard provider. Nothing is
-pasted, no key is sent, and no other window is written to, so every failure
-above stays impossible. See
-[decisions.md](decisions.md#the-whole-buffer-is-copied-to-the-clipboard-after-a-release).
+a delivery path, and since 2026-09-21 only when `nvim.copy_to_clipboard` is
+set (off by default): after every release the dictation nvim sets its own
+`+` register to the whole buffer, through nvim's clipboard provider. Nothing
+is pasted, no key is sent, and no other window is written to, so every
+failure above stays impossible. See
+[decisions.md](decisions.md#the-whole-buffer-is-copied-to-the-clipboard-after-a-release)
+and [decisions.md](decisions.md#the-clipboard-copy-becomes-opt-in-off-by-default-2026-09-21).
 
 ## Every committed sample is decoded exactly once, never streamed
 

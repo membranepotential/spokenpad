@@ -259,6 +259,9 @@ struct Settings {
     delay: Duration,
     /// Also listen on a control socket, for [`Harness::cli`].
     socket: bool,
+    /// Mirrors `nvim.copy_to_clipboard`, off by default like the setting
+    /// itself; the clipboard tests opt in explicitly.
+    copy_to_clipboard: bool,
 }
 
 impl Default for Settings {
@@ -272,6 +275,7 @@ impl Default for Settings {
             words: true,
             delay: Duration::ZERO,
             socket: false,
+            copy_to_clipboard: false,
         }
     }
 }
@@ -287,6 +291,7 @@ impl Harness {
         config.nvim.mode = settings.mode;
         config.nvim.terminal = Terminal::Headless;
         config.nvim.notify = false;
+        config.nvim.copy_to_clipboard = settings.copy_to_clipboard;
         config.nvim.editor = [
             "nvim",
             "-u",
@@ -679,13 +684,17 @@ fn press_speak_release_lands_text_in_the_file() {
 
 /// The clipboard rule is the whole window, not the utterance that just
 /// finished: a release must copy everything in the buffer, including a
-/// paragraph an earlier utterance already committed.
+/// paragraph an earlier utterance already committed. Opt in explicitly:
+/// `nvim.copy_to_clipboard` is off by default (see the next test).
 #[test]
 fn release_copies_the_whole_buffer_to_the_clipboard() {
     if !nvim_available() {
         return;
     }
-    let h = Harness::start(Settings::default());
+    let h = Harness::start(Settings {
+        copy_to_clipboard: true,
+        ..Settings::default()
+    });
     thread::sleep(Duration::from_millis(300));
     h.press(false);
     h.say(&tone(1.0));
@@ -711,6 +720,31 @@ fn release_copies_the_whole_buffer_to_the_clipboard() {
         h.clipboard(),
         h.text().trim_end(),
         "the clipboard must hold the whole buffer, including the earlier utterance's paragraph"
+    );
+    h.finish();
+}
+
+/// `nvim.copy_to_clipboard` is off by default: a release must reach the
+/// file exactly as it always does, but never touch the clipboard, and never
+/// even ask the editor to.
+#[test]
+fn clipboard_copy_is_off_by_default() {
+    if !nvim_available() {
+        return;
+    }
+    let h = Harness::start(Settings::default());
+    thread::sleep(Duration::from_millis(300));
+    h.press(false);
+    h.say(&tone(1.0));
+    h.release();
+    wait_until("the utterance reaches the file", || !h.text().is_empty());
+    assert_eq!(h.text(), "word word\n");
+    // Give a copy that should never be sent time to have arrived anyway.
+    thread::sleep(Duration::from_millis(500));
+    assert_eq!(
+        h.clipboard(),
+        "",
+        "no copy request must be sent when nvim.copy_to_clipboard is off"
     );
     h.finish();
 }
@@ -1198,6 +1232,7 @@ fn attach_mode_writes_into_the_users_editor_and_spawns_nothing() {
     }
     let mut h = Harness::start(Settings {
         mode: Mode::Attach,
+        copy_to_clipboard: true,
         ..Settings::default()
     });
     h.open_editor();
@@ -1331,7 +1366,7 @@ fn real_models_transcribe_the_kennedy_sample() {
     let mut config = Config::default();
     let sample = config.asr.model_dir.join("test_en.wav");
     if !sample.is_file() || !config.vad.model.is_file() {
-        eprintln!("skipping: scripts/fetch-models.sh has not been run");
+        eprintln!("skipping: `spokenpad fetch-models` has not been run");
         return;
     }
     let (source, rate) = read_capture(&sample).expect("read the bundled sample");

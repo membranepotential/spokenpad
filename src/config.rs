@@ -358,6 +358,12 @@ pub struct Nvim {
     /// Send a desktop notification when dictated text has to go to the
     /// dictation file because no editor is open.
     pub notify: bool,
+    /// After every release, copy the whole dictation buffer to the `+`
+    /// register through the editor's own clipboard provider. Off by
+    /// default: dictation already lands in the file, and a clipboard write
+    /// is a side effect worth opting into rather than assuming. When off,
+    /// no copy request is ever sent.
+    pub copy_to_clipboard: bool,
 }
 impl Default for Nvim {
     fn default() -> Self {
@@ -379,6 +385,7 @@ impl Default for Nvim {
             window_fraction: 0.33,
             startup_timeout_s: 20.,
             notify: true,
+            copy_to_clipboard: false,
         }
     }
 }

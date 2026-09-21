@@ -336,6 +336,14 @@ startup_timeout_s = 20.0
 # file because no editor is open -- once per such file, not per utterance.
 notify = true
 
+# After every release, copy the whole dictation buffer -- every press in
+# this window, plus anything typed by hand -- to the `+` register, through
+# whatever clipboard provider nvim's own `setreg` resolves (wl-copy, xclip
+# or xsel). Off by default: dictation already lands in the file, so a
+# clipboard write is an opt-in convenience, not something to assume it's
+# wanted. With this off, no copy request is ever sent to the editor.
+copy_to_clipboard = false
+
 [preview]
 # The tick of progressive commit (docs/progressive-commit.md): every
 # interval_ms while the key is held, the audio since the committed offset is

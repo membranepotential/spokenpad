@@ -172,9 +172,10 @@ dictation file as its own paragraph and saved after every utterance.
   new file. If you dictate with no editor open, the text goes to a file, one
   desktop notification (`notify-send`) says where, and the next
   `spokenpad editor` opens that file.
-- **Clipboard:** after every release, the dictation Neovim copies the whole
-  buffer to its `+` register, ready to paste wherever you want. This needs a
-  Neovim clipboard provider (`wl-copy`, `xclip` or `xsel`).
+- **Clipboard (opt-in, off by default):** set `nvim.copy_to_clipboard = true`
+  and, after every release, the dictation Neovim copies the whole buffer to
+  its `+` register, ready to paste wherever you want. This needs a Neovim
+  clipboard provider (`wl-copy`, `xclip` or `xsel`).
 - **Files:** one Markdown file per editor, in
   `~/.local/state/spokenpad/dictation/`.
 
@@ -260,6 +261,7 @@ cannot pass silently. Keys are not configured here; see
 | `nvim.mode` | `"attach"` | `attach`: you run `spokenpad editor`; `managed`: the daemon opens a window on i3 or sway |
 | `nvim.terminal` | `"alacritty"` | managed mode only: the terminal for that window |
 | `nvim.init` | your Neovim config | `"bundled"` opens the window about 3× faster; pair it with `nvim.colorscheme` |
+| `nvim.copy_to_clipboard` | `false` | copy the whole buffer to `+` after every release |
 
 Restart the service after a change: `systemctl --user restart spokenpad`.
 

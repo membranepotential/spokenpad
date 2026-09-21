@@ -30,8 +30,8 @@ and sway; it is worth its setup for a window that appears by itself, beside
 what you are reading.
 
 Everything below the mode is shared: one file per editor, the winbar
-indicator and notices, the live preview, the clipboard copy after a release,
-and reattaching to a live socket after a daemon restart.
+indicator and notices, the live preview, the opt-in clipboard copy after a
+release, and reattaching to a live socket after a daemon restart.
 
 ## Attach mode
 
@@ -262,9 +262,11 @@ re-read or edit an earlier passage keeps their place.
 `spokenpad.lua` — one file since 2026-09-11, previously split in two — is
 loaded over RPC on every connection (so a reattach re-applies it) and defines
 `_G.Spokenpad`. The daemon calls exactly four things: `setup`,
-`append_once`, `push`, and `copy_buffer`, which sets `+` to the whole buffer
-after every release (see
-[decisions.md](decisions.md#the-whole-buffer-is-copied-to-the-clipboard-after-a-release)). Reloading is state-preserving by construction: the
+`append_once`, `push`, and, only when `nvim.copy_to_clipboard` is true,
+`copy_buffer`, which sets `+` to the whole buffer after every release (see
+[decisions.md](decisions.md#the-whole-buffer-is-copied-to-the-clipboard-after-a-release)
+and [decisions.md](decisions.md#the-clipboard-copy-becomes-opt-in-off-by-default-2026-09-21)
+for why it is now opt-in). Reloading is state-preserving by construction: the
 chunk keeps the previous module's pinned buffer, indicator state, meter history
 and append de-duplication cache, so restarting the daemon neither blanks the
 indicator nor replays an append whose reply was lost.
