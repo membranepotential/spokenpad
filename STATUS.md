@@ -16,9 +16,11 @@ never takes focus. Fully local, CPU-only. Next milestone: public release.
 - own-window — P0-P2 merged with both review rounds fixed (02b68f1):
   `nvim.mode = "pane"`, verified headless on i3 only. Waiting for the user:
   P4 live check on i3; P3 (other WMs) needs packages installed.
-- auto-stop — a forgotten latched capture ends by itself — agent, wt
 
 ## Done
+- 09-21: Auto-stop (6d36c0c, reviewed): a latch with no speech for
+  `capture.silence_timeout_s` (300) and no key down ends as a normal stop;
+  every capture ends at 4 h; the memory ceiling now really ends it.
 - 09-21: sherpa-onnx 1.13.8 (same WER; TDT beam bug NOT fixed by it). Tried
   parakeet-unified-en (8.2% on 5 clips, beam+hotwords work, but English only:
   16 empty chunks on the corpus) and Qwen3-ASR (loses nothing, reads German,
@@ -39,8 +41,7 @@ never takes focus. Fully local, CPU-only. Next milestone: public release.
   passage, no writes behind an editor, greedy+hotwords rejected. README
   rewritten, docs current. Own setup migrated: models in ~/.local/share,
   `mode = "managed"`, unit on graphical-session.target. 172 lib + 19 e2e.
-- 09-21: Portability merged: Python removed, static binary, `[asr] family`,
-  XDG model dir, install.sh, attach (default) + managed i3/sway mode.
+- 09-21: Portability merged: Python removed, static binary, `[asr] family`.
 
 ## Next
 1. Deploy main after the clamp before/after run, then the user's P4 check.
