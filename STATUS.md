@@ -16,6 +16,7 @@ never takes focus. Fully local, CPU-only. Next milestone: public release.
 - own-window — P0-P2 merged with both review rounds fixed (02b68f1):
   `nvim.mode = "pane"`, verified headless on i3 only. Waiting for the user:
   P4 live check on i3; P3 (other WMs) needs packages installed.
+- auto-stop — a forgotten latched capture ends by itself — agent, wt
 
 ## Done
 - 09-21: sherpa-onnx 1.13.8 (same WER; TDT beam bug NOT fixed by it). Tried
@@ -42,9 +43,8 @@ never takes focus. Fully local, CPU-only. Next milestone: public release.
   XDG model dir, install.sh, attach (default) + managed i3/sway mode.
 
 ## Next
-1. Deploy main after the clamp before/after run. Decoder stays greedy; the
-   user OKs (or not) posting the beam fix upstream.
-2. own-window P4: live checks by the user.
+1. Deploy main after the clamp before/after run, then the user's P4 check.
+   Decoder stays greedy; no upstream sherpa PR for now (user, 09-21).
 
 ## Known issues / open questions
 - Dying input stream: seen once, root cause unknown; the watchdog recovers it
