@@ -7,8 +7,8 @@ Hold a key (or latch with shift), speak, and text appears in an nvim that
 never takes focus. Fully local, CPU-only. Next milestone: public release.
 
 ## Now
-- Rewrite e-mail history (Gmail -> felix@peppert.de), then force push —
-  needs the user's word. Service runs 8f1fea7 from ~/.local/bin (managed).
+- E-mail history rewritten locally (Gmail -> felix@peppert.de); force push —
+  needs the user's word. Service runs 113db5f from ~/.local/bin (managed).
 
 ## Done
 - 09-21: Review fixes: no spawn on an empty workspace, only loaded WM config
