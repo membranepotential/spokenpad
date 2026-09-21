@@ -116,9 +116,78 @@ so different chunk boundaries there are expected rather than surprising.
 
 **One regression, small but real:** one speech chunk is now empty after the
 bare retry that was not before (`e2` 0 → 1), out of the same 5 that decode
-empty at the first try. One chunk of speech is lost where none was. Since the
-clamp changes nothing, it comes from the new chunk closing, the tick bound or
-sherpa 1.13.8, and this batch cannot say which.
+empty at the first try. One chunk of speech is lost where none was. It is
+traced to its cause in the next section.
+
+## Which change loses the chunk (2026-09-22)
+
+The lost chunk is in `capture-2026-09-18-231741.wav` (232 s, 270 reference
+words, 12 committed chunks). Five builds of today's `main`, each with one
+difference reverted in a scratch copy and none of them committed, replayed that
+one capture with every window and decode traced:
+
+| build | e1 | e2 | WER on this capture | committed chunks |
+|---|---|---|---|---|
+| `main` | 2 | **1** | 4.8% | 12 |
+| sherpa-onnx 1.13.6 instead of 1.13.8 | 2 | **1** | 4.8% | 12 |
+| `preview.max_seconds` tick bound reverted | 2 | **1** | 4.8% | 12 |
+| end-of-slice chunk close reverted | 1 | **0** | 7.0% | 12 |
+| settled-silence advance reverted | 1 | **0** | 7.0% | 12 |
+| the recorded baseline, old code | 1 | **0** | 7.0% | — |
+
+So sherpa and the tick bound are innocent, and the two that matter are the
+**end-of-slice chunk close** and the **settled-silence advance** — reverting
+either one alone restores the old behaviour exactly.
+
+The window boundaries say why, in capture-absolute samples:
+
+| build | the window over this speech | length | speech in it |
+|---|---|---|---|
+| `main` | `[1223680, 1497024)` then `[1490400, 1516000)` | 17.08 s + **1.60 s** | 17 s + **0.60 s** |
+| either revert | `[1223744, 1531200)` | 19.22 s | all of it |
+
+The old code decoded that 0.60 s of speech inside a 19 s window and got words
+for it. `main` splits it off into a window of 1.60 s holding 0.60 s of speech,
+and Parakeet returns `""` for that window **both padded and bare**, so the
+retry cannot rescue it.
+
+The split happens because the previous chunk closes at `vad.chunk_seconds` of
+speech, the 0.60 s that follows starts a new pending chunk, and the new
+end-of-slice rule closes that chunk on the 4.75 s of trailing silence in the
+slice instead of leaving it open to merge with the next speech. The silence
+advance is the other half: it moves the committed offset, which moves where the
+next slice starts, which moves the detector's window grid and so where the
+speech target is crossed.
+
+**This is the failure `docs/progressive-commit.md` already names** — "a long
+quiet middle making speech too sparse in one recognizer window, a case in which
+Parakeet can return an empty or truncated transcript" — arriving through a new
+door. A chunk of 0.60 s of speech in a 1.60 s window is exactly the shape the
+project memory records as a knife edge.
+
+Note the direction, which is not what "lost speech" suggests: the build that
+loses the chunk scores **4.8%** on this capture and the builds that keep it
+score **7.0%**. The 19 s window that swallowed the 0.60 s also decoded the rest
+of itself worse.
+
+### Open, not isolated
+
+Work stopped here on the user's instruction, with these questions unanswered:
+
+- **How often it happens.** Over the whole corpus `main` has 5 chunks empty at
+  the first decode and 1 lost; the recorded baseline had 5 and 0. A run of the
+  end-of-slice-close revert over all 181 captures was started to count how many
+  chunks change empty/non-empty status **in either direction** between the two
+  builds, and was killed before it finished. Without that number this is one
+  capture, and one capture cannot say whether the new rule loses speech more
+  often than it saves it.
+- **Whether it is worth fixing.** The obvious guard — refuse to settle a chunk
+  holding less than some minimum of speech, and let it merge with the next —
+  fights the constant-RAM goal the end-of-slice close was written for, since an
+  unsettled chunk is audio that cannot be dropped. No fix is proposed here on
+  the strength of a single capture.
+- Nothing about this is the lead-padding clamp, which the section above shows
+  changes nothing at all.
 
 ### The trailing side of a window is not clamped, and it shows
 

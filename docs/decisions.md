@@ -810,15 +810,25 @@ which is not committed speech and is what padding is for.
 This changes windows relative to the previous behaviour, not only in the case
 that prompted it: any chunk that follows a close with a pause shorter than its
 padding now gets a shorter lead. It removes audio from the recognizer's input,
-so it can move a transcript. The effect on WER has **not** been measured yet;
-the corpus replay is noted as open in
-[the experiment](experiments/2026-09-21-constant-ram-recording.md).
+so it can move a transcript.
+
+**Measured on the corpus, and kept.** Reverting the clamp in a scratch build and
+replaying all 181 captures gives output that is identical capture by capture —
+same words, same error rate, same counts — so at the 1.1 s tick the daemon uses
+it never fires at all. At a 9 s tick, chosen to provoke it, it changes one
+capture of 181, and that capture scores the same either way. It costs nothing
+and removes a way for a word to be written twice, so there is nothing to weigh
+against it:
+[the experiment](experiments/2026-09-21-lead-padding-clamp-corpus.md).
 
 Not fixed here: the same reach exists on the trailing side, where a chunk's
 `pad_seconds` can extend into the *next* chunk's speech (worst case 0.435 s over
-the same 400 captures, 201 windows affected). It predates this work, it is
-bounded by `pad_seconds`, and clamping it would change far more windows than
-this did, so it wants the WER corpus first.
+the same 400 captures, 201 windows affected). It predates this work and is
+bounded by `pad_seconds`. The corpus now measures what it costs in the file:
+4 chunk seams wrote a word twice, 6 words over 333 committed chunks, and the
+clamped and unclamped builds show the same four — so all of them are the
+trailing side. Small, and still waiting on a measurement of what clamping it
+would cost before it is changed.
 
 ## sherpa-onnx moves to 1.13.8 (2026-09-21)
 
