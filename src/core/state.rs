@@ -35,6 +35,22 @@ pub const MINIMUM_HOLD: Duration = Duration::from_millis(120);
 /// keeps recording, which loses nothing.
 pub const REPEAT_WINDOW: Duration = Duration::from_millis(150);
 
+/// How long after the last press a latch counts as having no key down.
+///
+/// A latch made by holding Shift and the key still has a key down, and its
+/// auto-repeat fires the *toggle* binding: every repeat lands inside
+/// [`REPEAT_WINDOW`] and refreshes `last_press`, so such a capture is a held
+/// key wearing a latch's state. The silence rule skips it while the presses
+/// keep coming, because ending it would only let the next repeat start a new
+/// capture — one capture and one WAV per timeout, forever. [`MAX_CAPTURE`]
+/// bounds it instead, as it bounds a stuck plain key.
+///
+/// Well above the repeat interval (40 ms at X11's default 25 Hz, 20 ms at the
+/// fastest common setting), so a slow repeat, a dropped one, or a moment of
+/// scheduling jitter does not read as a release. A real release stops the
+/// repeats, and one second later the capture is a forgotten latch again.
+pub const KEY_SETTLED: Duration = Duration::from_secs(1);
+
 /// The longest any capture may run, whatever is being said into it.
 ///
 /// A capture holds only its uncommitted tail in memory, so its length is
@@ -293,13 +309,15 @@ pub fn step(state: State, event: Event, silence: Option<Duration>) -> (State, Co
             _ if now.saturating_duration_since(started) >= MAX_CAPTURE => {
                 end(started, now, Cause::Length)
             }
-            // A latch only. A held key auto-repeats its binding every few
-            // tens of milliseconds, so ending its capture would start the
-            // next one immediately; a key under a book is bounded by
-            // `MAX_CAPTURE` instead. A latch has no key down at all, which
-            // is the forgotten capture this rule is for.
-            Latched { .. }
-                if silence.is_some_and(|q| now.saturating_duration_since(last_speech) >= q) =>
+            // A latch with no key down, which is the forgotten capture this
+            // rule is for. A key that is still being pressed — a held
+            // push-to-talk key, or a held Shift+key whose auto-repeat fires
+            // the toggle binding and keeps `last_press` fresh — is excluded:
+            // ending its capture would only let the next repeat start the
+            // one after it. See [`KEY_SETTLED`].
+            Latched { last_press }
+                if now.saturating_duration_since(last_press) >= KEY_SETTLED
+                    && silence.is_some_and(|q| now.saturating_duration_since(last_speech) >= q) =>
             {
                 end(started, now, Cause::Silence)
             }
@@ -381,6 +399,36 @@ mod tests {
             .collect()
     }
 
+    /// Every event the table can be handed, stamped at `at`, for the
+    /// exhaustive sweep below. `Event` carries `Instant`s, so this cannot be
+    /// a `const` array; the match instead makes a new variant a *compile*
+    /// error here, pointing at the one place that has to list it.
+    fn all_events(at: Instant) -> [Event; 8] {
+        fn covered(event: Event) {
+            match event {
+                // Adding a variant breaks this match. Add it to the array
+                // below and give every row of `expected` a column for it.
+                Event::Request(_)
+                | Event::Clock { .. }
+                | Event::Speech { .. }
+                | Event::Exhausted { .. }
+                | Event::Finished => {}
+            }
+        }
+        let events = [
+            request(Request::Start, at),
+            request(Request::Stop, at),
+            request(Request::Toggle, at),
+            request(Request::Cancel, at),
+            Event::Clock { now: at },
+            Event::Speech { at },
+            Event::Exhausted { at },
+            Event::Finished,
+        ];
+        events.into_iter().for_each(covered);
+        events
+    }
+
     #[test]
     fn all_state_event_pairs() {
         let t = Instant::now();
@@ -411,16 +459,7 @@ mod tests {
             at(Hold::Latched { last_press: t }),
             transcribing,
         ];
-        let events = [
-            request(Request::Start, later),
-            request(Request::Stop, later),
-            request(Request::Toggle, later),
-            request(Request::Cancel, later),
-            Event::Clock { now: later },
-            Event::Speech { at: later },
-            Event::Exhausted { at: later },
-            Event::Finished,
-        ];
+        let events = all_events(later);
         let begun = |hold| State::Recording {
             started: later,
             last_speech: later,
@@ -506,6 +545,16 @@ mod tests {
                 nothing(State::Idle),
             ],
         ];
+        assert_eq!(
+            events.len(),
+            expected[0].len(),
+            "every event in `all_events` needs a column in `expected`"
+        );
+        assert_eq!(
+            states.len(),
+            expected.len(),
+            "every state needs a row in `expected`"
+        );
         for (i, state) in states.into_iter().enumerate() {
             for (j, event) in events.into_iter().enumerate() {
                 assert_eq!(
@@ -991,24 +1040,26 @@ mod tests {
 
     /// Only a key can tap. A capture that spokenpad ends is never discarded
     /// as too short, however the stamps fall: what it ends is dictation.
+    ///
+    /// The ceiling is the only cause that can fire this early at all. A
+    /// silence stop waits out [`KEY_SETTLED`] and the length limit waits out
+    /// [`MAX_CAPTURE`], both of which are longer than [`MINIMUM_HOLD`], so
+    /// neither can reach the tap rule even with a one-second timeout.
     #[test]
     fn an_auto_stop_is_never_read_as_a_tap() {
+        assert!(KEY_SETTLED > MINIMUM_HOLD && MAX_CAPTURE > MINIMUM_HOLD);
         let t = Instant::now();
         let soon = t + MINIMUM_HOLD / 2;
-        for (event, cause) in [
-            (Event::Exhausted { at: soon }, Cause::Memory),
-            (Event::Clock { now: soon }, Cause::Silence),
-        ] {
-            let silence = Some(MINIMUM_HOLD / 4);
-            let (state, _) = run_with(silence, State::Idle, &requests(&[(Request::Toggle, t)]));
-            let (state, commands) = run_with(silence, state, &[event]);
+        for opening in [Request::Start, Request::Toggle] {
+            let (state, _) = run(State::Idle, &requests(&[(opening, t)]));
+            let (state, commands) = run(state, &[Event::Exhausted { at: soon }]);
             assert_eq!(
                 commands,
                 [Command::Decode {
                     released: soon,
-                    cause
+                    cause: Cause::Memory
                 }],
-                "{cause:?}"
+                "{opening}"
             );
             assert_eq!(
                 state,
@@ -1018,6 +1069,62 @@ mod tests {
                 }
             );
         }
+    }
+
+    /// A latch made by holding Shift and the key: the key is still down, and
+    /// its auto-repeat fires the toggle binding every 40 ms. Ending such a
+    /// capture for silence would let the next repeat start the one after it,
+    /// so the silence rule leaves it alone and `MAX_CAPTURE` bounds it — the
+    /// same answer a stuck plain key gets. A real release stops the repeats,
+    /// and the capture becomes a forgotten latch a second later.
+    #[test]
+    fn a_latch_whose_key_is_still_down_is_not_ended_by_silence() {
+        let t = Instant::now();
+        let ms = |n: u64| t + Duration::from_millis(n);
+        let (mut state, commands) = run(State::Idle, &requests(&[(Request::Toggle, t)]));
+        assert_eq!(commands, [Command::Start]);
+
+        // Shift+key held for twice the timeout, repeating at 25 Hz. Nothing
+        // is said into it: without the freshness rule the first 300 s would
+        // end it and the repeat 40 ms later would open the next capture.
+        let repeats = (QUIET.as_millis() as u64 * 2) / 40;
+        for i in 1..=repeats {
+            let at = ms(40 * i);
+            let (next, commands) = run(
+                state,
+                &[Event::Clock { now: at }, request(Request::Toggle, at)],
+            );
+            assert_eq!(commands, [], "the repeat at {:?} broke the capture", at - t);
+            state = next;
+        }
+        assert!(
+            state.latched(),
+            "still one capture, {repeats} repeats later"
+        );
+
+        // The key finally comes up, so the repeats stop. Nothing was ever
+        // said into this capture, so it has been quiet since the press: the
+        // freshness of the last press is the only thing still holding it,
+        // and it ends as soon as that ages out.
+        let up = ms(40 * repeats);
+        let (state, commands) = run(
+            state,
+            &[Event::Clock {
+                now: up + KEY_SETTLED - Duration::from_millis(1),
+            }],
+        );
+        assert_eq!(commands, [], "the key has only just come up");
+        let ended = up + KEY_SETTLED;
+        let (state, commands) = run(state, &[Event::Clock { now: ended }]);
+        assert_eq!(
+            commands,
+            [Command::Decode {
+                released: ended,
+                cause: Cause::Silence
+            }],
+            "a latch nobody is pressing any more still ends"
+        );
+        assert!(!state.recording());
     }
 
     /// The key the user finally presses after a capture ended itself. A

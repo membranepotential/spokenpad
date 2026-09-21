@@ -162,7 +162,7 @@ is decoded and everything spoken is kept:
 
 | rule | when | setting |
 |---|---|---|
-| `Cause::Silence` | a latch has heard no speech for the timeout | `capture.silence_timeout_s`, 300 s |
+| `Cause::Silence` | a latch with no key down has heard no speech for the timeout | `capture.silence_timeout_s`, 300 s |
 | `Cause::Length` | any capture has run for `MAX_CAPTURE` | none: it keeps the WAV readable |
 | `Cause::Memory` | `AudioCapture` reports the in-memory ceiling | none: it bounds this machine's RAM |
 
@@ -172,7 +172,9 @@ the table a capture is not forgotten is `Event::Speech`, which `Session` raises
 whenever the recognizer produced text — a settled commit or a live preview.
 With no VAD model, or with the progressive tick off, nothing produces text
 before the release, so the silence rule is off and the other two bound the
-capture.
+capture. "No key down" is `last_press` older than `KEY_SETTLED`: auto-repeat
+fires the *toggle* binding for a held Shift+key, so a latch being re-pressed
+is a held key and the length limit is what bounds it.
 
 ## Decode invariants
 

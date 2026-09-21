@@ -941,13 +941,37 @@ stops with the capture, and one ranked notice says which rule it was.
 
 Decisions inside that:
 
-- **Latched only, for silence.** A held push-to-talk key re-fires its binding
+- **No key down, for silence.** A held push-to-talk key re-fires its binding
   every few tens of milliseconds, so ending its capture would start the next
   one 40 ms later — an endless chain of five-minute captures rather than a
-  fix. A latch has no key down at all, which is the forgotten capture this is
-  for. A key left under a book is bounded by the length limit instead, and
-  nothing can do better: spokenpad reads no input device, so it cannot tell a
-  stuck key from a held one.
+  fix. "Latched" is not the test that catches this, because a latch made by
+  holding Shift and the key *also* has a key down: its auto-repeat fires the
+  toggle binding, every repeat lands inside `REPEAT_WINDOW` and refreshes
+  `last_press`, and such a capture would be ended and immediately replaced by
+  the next repeat — exactly the chain. So the rule skips a latch whose
+  `last_press` is younger than `KEY_SETTLED` (1 s, well above the 20–40 ms
+  repeat interval). What is left is a latch with nothing pressing it, which
+  is the forgotten capture this is for. A key left under a book is bounded by
+  the length limit whichever binding it is on, and nothing can do better:
+  spokenpad reads no input device, so it cannot tell a stuck key from a held
+  one.
+- **Two keys that only make sense together.** Only a preview tick produces
+  text, so the earliest a capture can report speech is one tick after the
+  press. `preview.interval_ms` (up to an hour) and `capture.silence_timeout_s`
+  had their own ranges and no relation, so `interval_ms = 600000` with the
+  default 300 s timeout would have ended a capture mid-sentence every five
+  minutes, having given it no chance to say anything. `Config::validate` now
+  requires the timeout to be at least two ticks, naming both keys, and only
+  where the tick exists — with `preview.enabled = false` or
+  `vad.enabled = false` the silence rule is off and the pair says nothing
+  about each other.
+- **The speech clock is stamped on arrival, not on the audio.** `Session::heard`
+  uses the moment the result came back, not the position of the audio it
+  describes. Stamping by audio position is the more accurate number and the
+  more dangerous one: a worker that falls behind by more than the timeout
+  would leave `last_speech` permanently in the past and end a capture the
+  user is still talking into, because the words had not been decoded yet.
+  Arrival time can only delay the stop, by at most one decode.
 - **A stop, not a cancel.** Everything spoken is kept and appended, as after
   any release. Only a key press can be read as a tap: `end` applies the
   `MINIMUM_HOLD` rule to `Cause::KeyPress` alone, because throwing away what
@@ -956,7 +980,14 @@ Decisions inside that:
   `Transcribing` and then `Idle`, where a `stop` and a `cancel` are already
   no-ops; the notice survives both and only the next press clears it. That
   press starts a fresh capture, which is what `toggle` from `Idle` has always
-  meant.
+  meant, and the README says so where a user reads about the latch.
+- **The notice is still cleared by that press**, rather than surviving into
+  the new capture until its first text. It is there for as long as the user
+  is away, which is the case it was written for; keeping it past the press
+  would mean a warning about a finished capture standing beside a live "REC",
+  and it would break "exactly one notice per capture, cleared by the next key
+  press" — an invariant `Session::notify` applies in one place and four
+  documents state. Not worth a second slot and a per-notice lifetime.
 - **Off where there is no silence to measure.** With no VAD model,
   `vad.enabled = false` or `preview.enabled = false`, nothing produces text
   before the release, so `Event::Speech` never arrives and every latch would

@@ -5,7 +5,7 @@
 //! abandoned after a bounded wait without affecting live capture or ASR.
 
 use crate::{
-    config::Recording,
+    config::{MAX_POSTROLL_MS, MAX_PREROLL_MS, Recording},
     core::{session::RecordingStatus, state::MAX_CAPTURE},
 };
 use anyhow::{Context, Result, bail, ensure};
@@ -34,9 +34,10 @@ const MAX_SAME_SECOND: usize = 100;
 const FULL_SCALE: f32 = 32_767.0;
 const WRITER_JOIN: Duration = Duration::from_secs(3);
 const QUEUE_SECONDS: usize = 60;
-/// What a WAV may hold beyond the capture itself: the pre-roll before it and
-/// the post-roll after it, both bounded by `config`.
-const RECOVERY_MARGIN_SECONDS: f64 = 120.0;
+/// What a WAV may hold beyond the capture the state machine ended: the widest
+/// pre-roll `config` allows before it, the widest post-roll after it, and one
+/// second of slack at each end for the device buffer in flight there.
+const RECOVERY_MARGIN_SECONDS: f64 = (MAX_PREROLL_MS + MAX_POSTROLL_MS) as f64 / 1000.0 + 2.0;
 /// Recovery refuses implausibly long WAVs rather than allocating for them.
 /// A WAV this daemon wrote holds one capture, which
 /// [`MAX_CAPTURE`](crate::core::state::MAX_CAPTURE) ends, plus that margin —
@@ -726,13 +727,15 @@ mod tests {
     /// The state machine ends a capture so that its WAV stays readable, which
     /// only holds while recovery accepts everything such a capture can write:
     /// the capture itself plus the widest pre-roll and post-roll allowed.
+    /// The margin is derived from the same two bounds, so this pins that it
+    /// is derived from the right ones and that the slack is real.
     #[test]
     fn the_recovery_limit_covers_a_whole_capture() {
         let longest = MAX_CAPTURE.as_secs_f64()
-            + f64::from(crate::config::MAX_PREROLL_MS) / 1000.
-            + f64::from(crate::config::MAX_POSTROLL_MS) / 1000.;
+            + f64::from(MAX_PREROLL_MS) / 1000.
+            + f64::from(MAX_POSTROLL_MS) / 1000.;
         assert!(
-            MAX_RECOVERY_SECONDS >= longest,
+            MAX_RECOVERY_SECONDS >= longest + 1.0,
             "recovery refuses {longest:.0}s, which a capture may reach, at {MAX_RECOVERY_SECONDS:.0}s"
         );
     }

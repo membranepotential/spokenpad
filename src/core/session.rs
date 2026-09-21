@@ -124,15 +124,17 @@ impl Notice {
             Self::NearlySilent => "check microphone gain and device".into(),
             Self::PreviewPaused => "long uncommitted tail".into(),
             Self::MemoryCap(RecordingStatus::Recorded(path)) => format!(
-                "past 60 minutes; remaining audio is in {} — recover with spokenpad transcribe",
+                "past 60 minutes; the capture ended here and is in {} — recover with spokenpad transcribe",
                 file_name(path)
             )
             .into(),
             Self::MemoryCap(RecordingStatus::Truncated(_)) => {
-                "past 60 minutes AND recording failed; stop and start a new recording".into()
+                "past 60 minutes AND the recording failed; press the key to start a new capture"
+                    .into()
             }
             Self::MemoryCap(RecordingStatus::NotRecorded) => {
-                "past 60 minutes with no recovery recording; new audio is being discarded".into()
+                "past 60 minutes with no recovery recording; press the key to start a new capture"
+                    .into()
             }
             Self::SilenceTimeout => {
                 "no speech for capture.silence_timeout_s; press the key to dictate again".into()
@@ -351,6 +353,16 @@ impl Session {
     /// talking, wherever it came from: a settled commit or a live preview.
     /// Empty text is what settled silence and a silent preview look like, so
     /// it proves nothing and is not reported.
+    ///
+    /// `now` is when the *result arrived*, not when the audio it describes
+    /// was spoken, and that is deliberate. The two differ by however long the
+    /// worker took, so stamping by audio position would be the more accurate
+    /// number and the more dangerous one: a worker that falls behind by more
+    /// than the timeout would leave `last_speech` permanently in the past and
+    /// end a capture the user is still talking into, because the words had
+    /// not been decoded yet. Stamping on arrival can only ever delay the
+    /// stop, by at most one decode. The rule is "no text has come back for
+    /// this long", which is what the user can observe in the winbar.
     ///
     /// No command can follow [`Event::Speech`] (see [`state::step`]), which
     /// is why this returns nothing.

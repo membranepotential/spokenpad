@@ -52,10 +52,20 @@ postroll_ms = 250
 # pauses. 0 turns it off; the limits below still apply. Must be 0, or between
 # 1 and 3600 -- a value of a few seconds ends a capture between sentences.
 #
-# It applies to a latch only. A push-to-talk key that is held down re-fires
-# its binding every few tens of milliseconds, so ending its capture would
-# only start the next one; a key left under a book is bounded by the length
-# limit instead.
+# It must also be at least twice preview.interval_ms, and the daemon refuses
+# to start otherwise, naming both keys. Only a preview tick produces text, so
+# the earliest a capture can report speech is one tick after the key press: a
+# timeout shorter than two ticks would end a capture you are talking into,
+# having given it no chance to say so.
+#
+# It applies to a key that is not down. A push-to-talk key held down re-fires
+# its binding every few tens of milliseconds, and so does the Shift+key that
+# latched a capture -- its repeats fire the toggle binding. Ending such a
+# capture would only let the next repeat start the one after it, so the rule
+# skips a latch that has been re-pressed within the last second
+# (KEY_SETTLED in core/state.rs) and the length limit bounds it instead. A
+# key left under a book is therefore bounded the same way whichever binding
+# it is on.
 #
 # It is off regardless of this setting wherever nothing can report speech: no
 # VAD model, vad.enabled = false, preview.enabled = false. There is no
@@ -68,8 +78,8 @@ silence_timeout_s = 300
 #     A WAV's RIFF sizes are 32-bit and overflow at about 37 hours, and
 #     `spokenpad transcribe` refuses a longer recording rather than
 #     allocating for it; the limit is what keeps the safety net readable.
-#     `shell/recorder.rs` derives its own limit from this one, so the two
-#     cannot drift apart.
+#     `shell/recorder.rs` derives its own limit from this one plus the widest
+#     pre-roll and post-roll this file allows, so the two cannot drift apart.
 #   * The in-memory ceiling ends a capture too (see [recording] below).
 #
 # Both decode the tail and keep what was said, like the silence timeout.
@@ -100,11 +110,13 @@ silence_timeout_s = 300
 # few ticks fire. It is 3600 seconds of *held* audio
 # (MAX_UTTERANCE_SECONDS in audio.rs), a compile-time constant rather than a
 # setting: it is a bound on how much of this machine's RAM one capture may
-# occupy (~230 MB/hour at 16 kHz), not a policy. Reaching it ends the capture
-# and decodes its tail, says so in the winbar and names the WAV; the recovery
-# file is written before the ceiling is consulted, so the cap can never
-# truncate it. Until 2026-09-21 it only stopped the decoding and the daemon
-# kept writing to disk; now it stops the recorder with everything else.
+# occupy (~230 MB/hour at 16 kHz), not a policy. Reaching it ends the capture:
+# the tail is decoded, the winbar says so and names the WAV, and that WAV is
+# finished and closed there like any other capture's -- it is NOT carried on
+# past the ceiling. The recovery file is written before the ceiling is
+# consulted, so the cap can never truncate what it holds. Until 2026-09-21 the
+# ceiling only stopped the decoding and the daemon kept writing to disk with
+# nothing reading it.
 # Every capture is bounded in length as well: see [capture] above.
 enabled = true
 

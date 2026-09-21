@@ -138,9 +138,10 @@ Reaching it is final for that capture: accepting audio again after a hole would
 splice two moments that were never spoken together. So reaching it now *ends*
 the capture — `AudioCapture` reports it, `Session::cap` turns it into
 `Event::Exhausted`, and the state machine answers with the same
-`Command::Decode` a key release produces. Until 2026-09-21 it only marked the
-utterance released, which stopped the decoding and left the recorder writing to
-disk with nothing reading it.
+`Command::Decode` a key release produces, which stops the recorder too: the
+recovery WAV is finished and closed there, not carried on past the ceiling.
+Until 2026-09-21 it only marked the utterance released, which stopped the
+decoding and left the recorder writing to disk with nothing reading it.
 
 ## When a capture ends by itself
 
@@ -149,16 +150,27 @@ in `core/state.rs` give it one, and all three end it the way a release does:
 the tail is decoded, everything spoken is kept, and one notice says which rule
 it was.
 
-- **Silence.** A latched capture that has heard no speech for
-  `capture.silence_timeout_s` (300 s) ends. "Heard speech" is text the
+- **Silence.** A latched capture with no key down that has heard no speech
+  for `capture.silence_timeout_s` (300 s) ends. "Heard speech" is text the
   recognizer produced — a settled commit or a live preview, whichever came
-  last. `Session` raises `Event::Speech` for it, so an empty commit (settled
-  silence) and an empty preview prove nothing, which is exactly what a quiet
-  latch produces every tick. The rule is off where nothing can produce text
-  before the release: no VAD model, `vad.enabled = false`,
-  `preview.enabled = false`. It applies to a latch only; a held key re-fires
-  its binding every few tens of milliseconds, so ending its capture would
-  start the next one immediately.
+  last. `Session` raises `Event::Speech` for it, stamped when the result came
+  back rather than at the position of the audio it describes, so a slow
+  worker can only delay the stop and never end a capture whose words are
+  merely undecoded. An empty commit (settled silence) and an empty preview
+  prove nothing, which is exactly what a quiet latch produces every tick.
+
+  "No key down" is `last_press` older than `KEY_SETTLED` (1 s). A held
+  push-to-talk key re-fires its binding every few tens of milliseconds, and
+  so does the Shift+key that latched a capture — its repeats fire the toggle
+  binding and refresh `last_press` — so ending either would only let the next
+  repeat start the capture after it.
+
+  The rule is off where nothing can produce text before the release: no VAD
+  model, `vad.enabled = false`, `preview.enabled = false`. Only a tick
+  produces text, so `Config::validate` also requires the timeout to be at
+  least two `preview.interval_ms`: the earliest a capture can report speech
+  is one tick after the press, and a shorter timeout would end a capture that
+  was never given the chance.
 - **Length.** Any capture reaching `MAX_CAPTURE` (4 h) ends, whatever is
   being said into it. This is what keeps the recovery WAV readable: a WAV's
   RIFF sizes overflow at about 37 hours, and `read_capture` derives its own

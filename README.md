@@ -171,7 +171,9 @@ dictation file as its own paragraph and saved after every utterance.
 - **Latch:** press Shift with the key (`spokenpad toggle`), then let go and
   keep talking. Press the key again, with or without Shift, to stop. One you
   forget stops by itself after five minutes without speech, keeping
-  everything you said.
+  everything you said. **After any stop, automatic or not, the next press
+  starts a new recording** — it does not resume the old one, and it clears
+  the notice in the winbar, so read that before you press.
 - **Cancel:** press the cancel key (`spokenpad cancel`) while recording. Text
   that already reached the file stays, and the WAV is kept. After release,
   cancel does nothing.
@@ -232,25 +234,33 @@ log always has the full sentence and paths.
 - **A latch you forget stops by itself** after five minutes without speech
   (`capture.silence_timeout_s`). It is an ordinary stop: the tail is decoded,
   everything spoken is kept, and the winbar says "stopped after silence" until
-  your next press. Press the key to dictate again. The timeout runs from the
+  your next press, which starts a new recording. The timeout runs from the
   last text the recogniser produced, so a pause while you think is not
   silence to it — but music or a conversation in the room is speech to the
-  detector, and only the limit below ends such a capture. A push-to-talk key
-  held down is not stopped this way: a held key re-fires its binding every
-  few tens of milliseconds, so stopping it would only start the next capture.
+  detector, and only the limits below end such a capture. A key that is still
+  down is not stopped this way, whether it is the push-to-talk key or the
+  Shift+key that latched: a held key re-fires its binding every few tens of
+  milliseconds, so stopping it would only start the next capture. The
+  four-hour limit bounds those.
 - **No capture runs longer than four hours**, whatever is being said into it.
   This is not a setting: it is what keeps the recovery WAV readable, since a
   WAV's own size field overflows at about 37 hours. The winbar says "reached
   the time limit".
-- **Past the 60-minute in-memory limit** the capture is decoded and ends, and
-  the winbar names the recovery WAV. Text that lands while you speak is what
-  makes the audio droppable, so the limit is reachable only where nothing
-  lands: with no VAD model, with `vad.enabled = false`, with
-  `preview.enabled = false` (which turns the whole progressive tick off, not
-  just the visible preview), or with a `preview.interval_ms` long enough that
-  few ticks fire. Those are the same cases in which nothing can report speech,
-  so the silence timeout is off there and this limit, or the four-hour one, is
-  what ends a forgotten capture.
+- **Past the 60-minute in-memory limit** the capture ends, its tail is
+  decoded, and the winbar names the recovery WAV — which is finished and
+  closed there, like any other capture's, not carried on past the limit. Text
+  that lands while you speak is what makes the audio droppable, so the limit
+  is reachable only where nothing lands: with no VAD model, with
+  `vad.enabled = false`, with `preview.enabled = false` (which turns the whole
+  progressive tick off, not just the visible preview), or with a
+  `preview.interval_ms` long enough that few ticks fire.
+- **The silence timeout is off where nothing can report speech**: no VAD
+  model, `vad.enabled = false`, `preview.enabled = false`. There is no
+  progressive decode in those cases, so there is nothing to measure, and the
+  two limits above are what end a forgotten capture. A `preview.interval_ms`
+  long enough to starve the timeout is not silently ignored: the daemon
+  refuses to start on a configuration whose timeout is under two ticks, and
+  says which two keys disagree.
 
 ## A window that opens by itself
 
@@ -314,7 +324,7 @@ cannot pass silently. Keys are not configured here; see
 
 | key | default | what it does |
 |---|---|---|
-| `capture.silence_timeout_s` | `300` | seconds without speech after which a latched capture ends by itself; `0` turns it off, and the four-hour limit still applies |
+| `capture.silence_timeout_s` | `300` | seconds without speech after which a latched capture ends by itself; `0` turns it off, and the four-hour limit still applies. Must be at least twice `preview.interval_ms` |
 | `asr.family` | `"parakeet"` | model family: `parakeet`, `whisper` or `sense_voice` ([docs/asr.md](docs/asr.md)) |
 | `asr.vocabulary` | `[]` | words to bias Parakeet towards, such as `["kubectl", "nginx"]`; switches to beam search, which sometimes drops a sentence ([docs/asr.md](docs/asr.md)) |
 | `nvim.mode` | `"attach"` | `attach`: you run `spokenpad editor`; `managed`: the daemon opens a terminal on i3 or sway; `pane`: the daemon opens a window it draws itself |

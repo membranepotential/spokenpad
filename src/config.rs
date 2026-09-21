@@ -718,6 +718,24 @@ impl Config {
             self.preview.interval_ms >= 200 && self.preview.interval_ms <= 3_600_000,
             "preview.interval_ms must be in [200,3600000]"
         );
+        // The silence timeout measures the time since the recognizer last
+        // produced text, and only a tick produces any: the earliest a capture
+        // can report speech is one tick after the press. A timeout shorter
+        // than two ticks would end a capture the user is talking into, having
+        // given it no chance to say so, so the two keys are validated against
+        // each other rather than only against their own ranges.
+        if self.preview.enabled
+            && self.vad.enabled
+            && let Some(timeout) = self.capture.silence_timeout()
+        {
+            let tick = Duration::from_millis(self.preview.interval_ms);
+            ensure!(
+                timeout >= tick * 2,
+                "capture.silence_timeout_s ({:.3}s) must be at least twice preview.interval_ms ({}ms): the first text a capture can produce arrives one tick after the key press, so a shorter timeout would end a capture before anything had the chance to report speech",
+                timeout.as_secs_f64(),
+                self.preview.interval_ms
+            );
+        }
         ensure!(
             self.preview.max_seconds.is_finite()
                 && self.preview.max_seconds > 0.
@@ -817,14 +835,25 @@ mod tests {
         };
         assert_eq!(timeout(""), Some(Duration::from_secs(300)));
         assert_eq!(
-            timeout("[capture]\nsilence_timeout_s=1"),
-            Some(Duration::from_secs(1))
-        );
-        assert_eq!(
             timeout("[capture]\nsilence_timeout_s=3600"),
             Some(Duration::from_secs(3600))
         );
         assert_eq!(timeout("[capture]\nsilence_timeout_s=0"), None);
+        // Exactly two ticks is allowed; the rejected side is in
+        // `reject_invalid_boundaries`.
+        assert_eq!(
+            timeout("[capture]\nsilence_timeout_s=1\n[preview]\ninterval_ms=500"),
+            Some(Duration::from_secs(1))
+        );
+        // A tick that can never land is only a contradiction while the tick
+        // exists: with the progressive decode off, the silence rule is off
+        // too and the pair says nothing about each other.
+        for off in [
+            "[capture]\nsilence_timeout_s=300\n[preview]\ninterval_ms=600000\nenabled=false",
+            "[capture]\nsilence_timeout_s=300\n[preview]\ninterval_ms=600000\n[vad]\nenabled=false",
+        ] {
+            assert_eq!(timeout(off), Some(Duration::from_secs(300)), "{off}");
+        }
     }
     #[test]
     fn reject_invalid_boundaries() {
@@ -857,6 +886,11 @@ mod tests {
             "[nvim]\nterminal=['alacritty', '-e']",
             "[recording]\nmax_total_bytes=0",
             "[capture]\nsilence_timeout_s=0.5",
+            // Shorter than two preview ticks: it would end a capture the
+            // user is talking into, before any tick could say so.
+            "[capture]\nsilence_timeout_s=300\n[preview]\ninterval_ms=600000",
+            "[capture]\nsilence_timeout_s=2\n[preview]\ninterval_ms=5000",
+            "[capture]\nsilence_timeout_s=1\n[preview]\ninterval_ms=501",
             "[capture]\nsilence_timeout_s=3601",
             "[capture]\nsilence_timeout_s=-1",
             "[capture]\nsilence_timeout_s=nan",
