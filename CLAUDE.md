@@ -100,8 +100,9 @@ those belongs in `src/shell/`.
   `shell::daemon::serve` in pane mode.
 - `scripts/install.sh` (binary to `~/.local/bin`, user unit; `--uninstall`),
   `scripts/gladia-references.sh` (a development tool that **uploads the
-  recordings to Gladia** to build `eval-samples/local/references.json`; never
-  run by the program). Models (`$XDG_DATA_HOME/spokenpad/models`, pinned
+  recordings to Gladia** to build the frozen dataset in `eval-samples/local/`;
+  never run by the program). `eval-samples/README.md` is tracked and describes
+  both evaluation sets; the dataset carries its own git-ignored README. Models (`$XDG_DATA_HOME/spokenpad/models`, pinned
   sha256) come from `spokenpad fetch-models` or the first launch. `packaging/`
   holds the unit, and the i3/sway window rules with example key bindings.
 
@@ -153,5 +154,7 @@ the daemon lock.
   anywhere or send them to a service. One exception, granted by the user on
   2026-09-21: recordings may be sent to Gladia (`GLADIA_API_KEY` in the
   git-ignored `.env`) to get reference transcripts for evaluation, and
-  nowhere else. Transcripts of the user's own recordings are private too:
-  they live in the git-ignored `eval-samples/local/`, never in a commit.
+  nowhere else. The corpus (`eval-samples/local/`, 144 MB, git-ignored in
+  full) holds copies of those recordings, their transcripts and the run files
+  of every experiment: never commit or quote any of it, counts and error
+  rates only.

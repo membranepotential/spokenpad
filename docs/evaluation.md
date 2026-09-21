@@ -185,9 +185,31 @@ is the daemon's real workload; without it, only the decodes that produce text.
 
 ### Where the corpus comes from
 
-`scripts/gladia-references.sh` builds `eval-samples/local/references.json` by
-sending each recording to [Gladia](https://gladia.io) and keeping the
-transcript. The author's corpus of 2026-09-21 is 181 captures and 75 minutes:
+`eval-samples/local/` is a **frozen dataset**, git-ignored in full: the audio is
+one person's voice and the references are what they said. It carries its own
+`README.md` with the provenance, the JSON schema and how to extend it, and
+[eval-samples/README.md](../eval-samples/README.md) describes it from the
+tracked side. The layout is `audio/` (the wavs), `gladia/` (the raw responses),
+`probes/` (rejected reference settings, kept as evidence) and `runs/` (the
+result files, which hold hypothesis text and so stay inside the ignored
+directory).
+
+It is frozen on purpose: `samples[].path` is relative to the dataset and each
+sample carries the wav's `sha256`, which the harness verifies before it
+decodes. The recordings are **copied** out of the daemon's recovery directory,
+never referenced in place — that directory is pruned by
+`recording.max_total_bytes`, so an index pointing at it would shrink without
+warning and the benchmark would quietly change under you. An absolute `path`
+still works, for an index that deliberately points at recordings where they
+were made.
+
+New recordings get a **new dataset version** (`--version`, a new `--out`
+directory) rather than being mixed into an old one, so numbers stay comparable
+across experiments; the dataset README says how.
+
+`scripts/gladia-references.sh` builds one by copying each wav in, hashing it,
+sending it to [Gladia](https://gladia.io) and keeping the transcript. The
+author's corpus of 2026-09-21 is 181 captures and 75 minutes:
 124 English, 38 German and 19 that nobody spoke in
 ([the experiment](experiments/2026-09-21-gladia-reference-transcripts.md)).
 The harness prints a WER per reference language, and `--language de` scores

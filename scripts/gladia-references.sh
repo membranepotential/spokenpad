@@ -6,11 +6,16 @@
 # reaches the network only for its pinned model download. Run it by hand, only
 # on recordings you are allowed to send, and only with the owner's consent.
 #
-# It transcribes every wav given (or every wav in a directory given), writes
-# the raw Gladia response per file, and builds one references.json the corpus
-# harness reads. It is idempotent: a file whose response already exists is
-# skipped, so an interrupted run resumes. After a result is fetched the job and
-# its uploaded audio are deleted from Gladia.
+# It builds a SELF-CONTAINED DATASET: every wav given (or every wav in a
+# directory given) is COPIED into <out>/audio/, transcribed, and indexed in
+# <out>/references.json with a path relative to the dataset, the wav's sha256
+# and its duration. The raw Gladia response per file goes to <out>/gladia/.
+# Copying is what makes the dataset survive: the daemon prunes its recovery
+# directory (recording.max_total_bytes), so an index pointing there would
+# silently shrink. Nothing in the source directory is ever modified or removed.
+# It is idempotent: a file whose response already exists is skipped, so an
+# interrupted run resumes. After a result is fetched the job and its uploaded
+# audio are deleted from Gladia.
 #
 #   scripts/gladia-references.sh ~/.local/state/spokenpad/audio eval-samples
 #   scripts/gladia-references.sh --out DIR --jobs 3 --language-config JSON DIR...
@@ -35,10 +40,15 @@ jobs=3
 # --language-config to override.
 language_config='{"languages":["en","de"],"code_switching":false}'
 model=
+version=$(date +%F)
 rebuild_only=0
 inputs=()
 
 die() { printf 'gladia-references: %s\n' "$*" >&2; exit 1; }
+# A wav's exact length, from its own header rather than the service's report.
+wav_seconds() {
+  python3 -c 'import sys, wave; w = wave.open(sys.argv[1]); print(round(w.getnframes() / w.getframerate(), 3))' "$1"
+}
 note() { printf '%s\n' "$*" >&2; }
 
 while [[ $# -gt 0 ]]; do
@@ -47,6 +57,7 @@ while [[ $# -gt 0 ]]; do
     --jobs) jobs=$2; shift 2 ;;
     --language-config) language_config=$2; shift 2 ;;
     --model) model=$2; shift 2 ;;
+    --version) version=$2; shift 2 ;;
     --rebuild-index-only) rebuild_only=1; shift ;;
     -h|--help) sed -n '2,/^set -euo/p' "$0" | sed 's/^# \{0,1\}//;$d'; exit 0 ;;
     -*) die "unknown option $1" ;;
@@ -54,14 +65,14 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-for tool in curl jq; do
+for tool in curl jq sha256sum python3; do
   command -v "$tool" >/dev/null || die "$tool is required but not installed"
 done
 [[ $jobs =~ ^[1-9][0-9]*$ ]] || die "--jobs must be a positive integer (Gladia allows 3 concurrent jobs on the free tier)"
 jq -e . >/dev/null <<<"$language_config" || die "--language-config is not valid JSON"
 
 repo_root=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
-mkdir -p "$out_dir/json"
+mkdir -p "$out_dir/audio" "$out_dir/gladia"
 out_dir=$(cd "$out_dir" && pwd)
 
 # -- the key, kept out of argv and out of every output ------------------------
@@ -80,10 +91,24 @@ api() { curl -K "$curl_config" "$@"; }
 
 # -- one file: upload, transcribe, poll, save, delete -------------------------
 transcribe_one() {
-  local wav=$1 name target upload audio_url request id status result raw
+  local wav=$1 name target upload audio_url request id status result raw kept sum
   name=$(basename "$wav")
-  target="$out_dir/json/$name.json"
+  target="$out_dir/gladia/$name.json"
+  kept="$out_dir/audio/$name"
+
+  # Freeze the audio first and transcribe the frozen copy, so what the
+  # reference describes is exactly what the dataset holds.
+  sum=$(sha256sum "$wav" | cut -d" " -f1)
+  if [[ -f $kept ]]; then
+    [[ $(sha256sum "$kept" | cut -d" " -f1) == "$sum" ]] \
+      || { note "$name: a different wav of this name is already in the dataset"; return 1; }
+  else
+    cp --preserve=timestamps "$wav" "$kept"
+    [[ $(sha256sum "$kept" | cut -d" " -f1) == "$sum" ]] \
+      || { note "$name: copy does not match the source"; rm -f "$kept"; return 1; }
+  fi
   [[ -f $target ]] && return 0
+  wav=$kept
 
   upload=$(api -X POST "$BASE/upload" -F "audio=@$wav") \
     || { note "$name: upload failed: $upload"; return 1; }
@@ -108,12 +133,12 @@ transcribe_one() {
   done
   [[ ${status:-} == done ]] || { note "$name: gave up in state ${status:-unknown}"; return 1; }
 
-  result=$(jq -c --arg file "$name" --arg path "$(cd "$(dirname "$wav")" && pwd)/$name" \
-    '{file:$file, path:$path, status, error_code,
+  result=$(jq -c --arg file "$name" --arg path "audio/$name" --arg sum "$sum" \
+    --argjson dur "$(wav_seconds "$kept")" \
+    '{file:$file, path:$path, sha256:$sum, duration_s:$dur, status, error_code,
       reference: (.result.transcription.full_transcript // ""),
       languages: (.result.transcription.languages // []),
       utterance_languages: [.result.transcription.utterances[]?.language],
-      audio_duration: (.file.audio_duration // null),
       request_params: .request_params, version: .version}' <<<"$raw")
   printf '%s\n' "$result" >"$target"
 
@@ -148,8 +173,18 @@ fi
 
 # -- one index the harness reads ---------------------------------------------
 index="$out_dir/references.json"
-jq -s --arg created "$(date -Is)" --argjson lang "$language_config" \
-  '{source:"gladia", created:$created, language_config:$lang,
-    samples: (map({file, path, reference, languages, utterance_languages}) | sort_by(.file))}' \
-  "$out_dir"/json/*.json >"$index"
+jq -s --arg created "$(date -Is)" --arg version "$version" \
+  --argjson lang "$language_config" \
+  '{version: $version,
+    source: "spokenpad recovery recorder; one speaker, 16 kHz mono PCM16",
+    references: {service: "gladia", api: "https://api.gladia.io/v2/pre-recorded",
+                 language_config: $lang, fetched: $created,
+                 built_by: "scripts/gladia-references.sh"},
+    counts: {captures: length,
+             seconds: ((map(.duration_s) | add) * 10 | round / 10),
+             by_language: (map(.languages[0] // "none") | group_by(.)
+                           | map({key: .[0], value: length}) | from_entries)},
+    samples: (map({file, path, sha256, duration_s, languages,
+                   utterance_languages, reference}) | sort_by(.file))}' \
+  "$out_dir"/gladia/*.json >"$index"
 note "wrote $index ($(jq '.samples | length' "$index") samples, $(jq '[.samples[] | select(.reference == "")] | length' "$index") with an empty transcript)"

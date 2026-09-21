@@ -28,6 +28,7 @@
 use anyhow::{Context, Result, bail, ensure};
 use clap::{Parser, ValueEnum};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use spokenpad::{
     config::{Config, Decoding, Model},
     core::{
@@ -42,7 +43,7 @@ use spokenpad::{
 };
 use std::{
     io::Write,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -153,18 +154,49 @@ struct Corpus {
 #[derive(Deserialize, Clone)]
 struct Entry {
     file: String,
+    /// The wav, relative to the dataset directory in a frozen dataset and
+    /// absolute in an index that points at recordings where they were made.
     path: PathBuf,
     reference: String,
     /// What the reference transcriber heard the capture in. Empty for a
     /// capture it found no speech in.
     #[serde(default)]
     languages: Vec<String>,
+    /// Of the wav's bytes. A dataset carries it so a replay can prove it read
+    /// the audio the references were made from.
+    #[serde(default)]
+    sha256: Option<String>,
 }
 impl Entry {
     /// One language per capture, which is how the references are built.
     fn language(&self) -> &str {
         self.languages.first().map_or("--", String::as_str)
     }
+    /// Where the wav is now: a relative `path` belongs to the dataset that
+    /// names it, an absolute one speaks for itself.
+    fn wav(&self, corpus: &Path) -> PathBuf {
+        corpus.join(&self.path)
+    }
+}
+
+/// Hex sha256 of a file's bytes.
+fn digest(path: &Path) -> Result<String> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 1 << 16];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
 }
 
 // -- normalisation, WER and the lost tail --------------------------------------
@@ -457,7 +489,13 @@ struct Row {
     decode_seconds: f64,
 }
 
-fn run_pass(config: &Config, entries: &[Entry], plan: Plan, jobs: usize) -> Result<Vec<Row>> {
+fn run_pass(
+    config: &Config,
+    entries: &[Entry],
+    corpus: &Path,
+    plan: Plan,
+    jobs: usize,
+) -> Result<Vec<Row>> {
     let processor = Processor::new(&config.text)?;
     let rate = config.audio.sample_rate;
     let next = AtomicUsize::new(0);
@@ -466,6 +504,7 @@ fn run_pass(config: &Config, entries: &[Entry], plan: Plan, jobs: usize) -> Resu
         let mut handles = vec![];
         for _ in 0..jobs {
             let (next, rows, processor) = (&next, &rows, &processor);
+            let corpus = &*corpus;
             handles.push(scope.spawn(move || -> Result<()> {
                 let mut worker = engine(config, plan.padding, plan.path)?;
                 loop {
@@ -473,7 +512,17 @@ fn run_pass(config: &Config, entries: &[Entry], plan: Plan, jobs: usize) -> Resu
                     let Some(entry) = entries.get(i) else {
                         return Ok(());
                     };
-                    let (samples, wav_rate) = read_capture(&entry.path)?;
+                    let wav = entry.wav(corpus);
+                    if let Some(want) = &entry.sha256 {
+                        let got = digest(&wav)?;
+                        ensure!(
+                            &got == want,
+                            "{}: sha256 {got} does not match the dataset's {want}; \
+                             the audio is not what the references were made from",
+                            entry.file
+                        );
+                    }
+                    let (samples, wav_rate) = read_capture(&wav)?;
                     ensure!(
                         wav_rate == rate,
                         "{}: {wav_rate}Hz, expected {rate}Hz",
@@ -855,7 +904,7 @@ fn main() -> Result<()> {
     let mut entries: Vec<Entry> = corpus
         .samples
         .into_iter()
-        .filter(|e| e.path.is_file())
+        .filter(|e| e.wav(&args.corpus).is_file())
         .filter(|e| args.language.is_empty() || args.language.iter().any(|l| l == e.language()))
         .collect();
     let dropped = args.limit.map_or(0, |n| entries.len().saturating_sub(n));
@@ -931,7 +980,7 @@ fn main() -> Result<()> {
     for path in paths {
         eprintln!("loading the model for the {} path ...", path.name());
         let started = Instant::now();
-        let rows = run_pass(&config, &entries, plan(path), args.jobs)?;
+        let rows = run_pass(&config, &entries, &args.corpus, plan(path), args.jobs)?;
         let wall = started.elapsed().as_secs_f64();
         let summary = summarize(&rows, args.lost_tail);
         print_report(&rows, &summary, &args, plan(path), wall);
@@ -948,6 +997,29 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_relative_wav_belongs_to_its_dataset_and_an_absolute_one_does_not() {
+        let entry = |path: &str| Entry {
+            file: "c.wav".into(),
+            path: path.into(),
+            reference: String::new(),
+            languages: vec![],
+            sha256: None,
+        };
+        // A frozen dataset names its audio relative to itself, so the same
+        // index works wherever the directory is moved or copied to.
+        assert_eq!(
+            entry("audio/c.wav").wav(Path::new("/data/corpus-2026-09-21")),
+            PathBuf::from("/data/corpus-2026-09-21/audio/c.wav")
+        );
+        // An index that points at recordings where they were made keeps
+        // working: joining an absolute path replaces the base.
+        assert_eq!(
+            entry("/var/state/c.wav").wav(Path::new("/data/corpus")),
+            PathBuf::from("/var/state/c.wav")
+        );
+    }
 
     #[test]
     fn tokenization_matches_the_eval_harness() {
