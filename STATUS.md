@@ -7,7 +7,7 @@ Hold a key (or latch with shift), speak, and text appears in an nvim that
 never takes focus. Fully local, CPU-only. Next milestone: public release.
 
 ## Now
-- review — code review of the merged portability work — agent — fix findings.
+- review-fixes — empty-workspace focus, dropped append, sway proof, stale buffer, greedy hotwords — agent (worktree) — merge.
 - docs — README rewrite, stale docs/CLAUDE.md after the portability merge — agent (worktree) — merge.
 - Then: e-mail rewrite (Gmail -> felix@peppert.de), migrate own setup, force push (needs the user's word).
 
