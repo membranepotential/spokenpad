@@ -40,10 +40,9 @@ const TEST_CLIPBOARD_CMD: &str = r#"lua vim.g.clipboard = { name = "spokenpad-te
 
 fn headless(directory: &Path) -> Nvim {
     Nvim {
-        terminal: Vec::new(),
+        terminal: Terminal::Headless,
         editor: vec![
             "nvim".to_owned(),
-            "--headless".to_owned(),
             "-u".to_owned(),
             "NONE".to_owned(),
             "-i".to_owned(),
@@ -252,7 +251,6 @@ vim.api.nvim_create_autocmd("VimEnter", {
     let mut config = headless(directory.path());
     config.editor = vec![
         "nvim".to_owned(),
-        "--headless".to_owned(),
         "-i".to_owned(),
         "NONE".to_owned(),
         "--cmd".to_owned(),
@@ -1050,7 +1048,7 @@ fn a_failed_spawn_leaves_no_empty_dictation_file() {
     let directory = tempfile::tempdir().unwrap();
     let mut config = headless(directory.path());
     // An "editor" that exits immediately: the spawn succeeds, startup does not.
-    config.editor = vec!["true".to_owned(), "--headless".to_owned()];
+    config.editor = vec!["true".to_owned()];
     config.startup_timeout_s = 2.0;
     let mut session = NvimSession::new(config.clone());
 
@@ -1064,81 +1062,13 @@ fn a_failed_spawn_leaves_no_empty_dictation_file() {
 }
 
 #[test]
-fn graphical_editor_without_a_terminal_is_refused_before_file_creation() {
+fn a_headless_editor_is_told_so_right_after_its_own_command() {
     let directory = tempfile::tempdir().unwrap();
-    let mut config = headless(directory.path());
-    config.editor = vec!["neovide".to_owned()];
-    let mut session = NvimSession::new(config.clone());
-
-    let error = session.ensure().unwrap_err().to_string();
-    assert!(error.contains("explicitly contains --headless"), "{error}");
-    assert!(!config.dictation_dir.exists());
-}
-
-#[test]
-fn graphical_terminal_must_set_the_x11_instance_not_just_a_title() {
-    assert!(alacritty_declares_instance(&[
-        "alacritty".to_owned(),
-        "--class".to_owned(),
-        "Floating,{instance}".to_owned(),
-        "-e".to_owned(),
-    ]));
-    assert!(!alacritty_declares_instance(&[
-        "alacritty".to_owned(),
-        "--title".to_owned(),
-        "{instance}".to_owned(),
-        "-e".to_owned(),
-    ]));
-    assert!(!alacritty_declares_instance(&[
-        "other-terminal".to_owned(),
-        "--class".to_owned(),
-        "Floating,{instance}".to_owned(),
-    ]));
-    for arguments in [
-        vec![
-            "alacritty",
-            "-e",
-            "echo",
-            "--class",
-            "Floating,{instance}",
-            "-e",
-        ],
-        vec![
-            "alacritty",
-            "--class",
-            "Floating,{instance}",
-            "--class",
-            "Other,other",
-            "-e",
-        ],
-        vec![
-            "alacritty",
-            "--class",
-            "Floating,{instance}",
-            "-o",
-            "window.class.instance='other'",
-            "-e",
-        ],
-        // A different config file can carry a class of its own.
-        vec![
-            "alacritty",
-            "--class",
-            "Floating,{instance}",
-            "--config-file",
-            "/tmp/other.toml",
-            "-e",
-        ],
-        vec![
-            "alacritty",
-            "--class",
-            "Floating,{instance}",
-            "--config-file=/tmp/other.toml",
-            "-e",
-        ],
-    ] {
-        let arguments = arguments.into_iter().map(str::to_owned).collect::<Vec<_>>();
-        assert!(!alacritty_declares_instance(&arguments), "{arguments:?}");
-    }
+    let config = headless(directory.path());
+    let argv = spawn_argv(&config, Path::new("/t.md"), "f", None, None).unwrap();
+    assert_eq!(argv[0], "nvim");
+    assert_eq!(argv[config.editor.len()], "--headless");
+    assert_eq!(argv.last().map(String::as_str), Some("/t.md"));
 }
 
 #[test]
@@ -1205,8 +1135,7 @@ fn spawn_argv_interpolates_the_window_and_refuses_an_unquotable_colorscheme() {
         Some(Path::new("/state/private/dictation_init.lua")),
     )
     .unwrap();
-    assert_eq!(argv[0], "alacritty");
-    assert!(argv.contains(&"Floating,spokenpad".to_owned()));
+    assert_eq!(argv[..3], ["alacritty", "--class", "spokenpad"]);
     assert!(argv.contains(&"window.position.x=-1920".to_owned()));
     assert!(argv.contains(&"window.position.y=40".to_owned()));
     assert_eq!(argv[argv.len() - 5], "--listen");

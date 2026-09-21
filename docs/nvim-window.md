@@ -15,16 +15,35 @@ written to.
 ## What gets spawned
 
 ```
-alacritty --class 'Floating,spokenpad' \
+alacritty --class spokenpad \
   -o window.position.x=<x> -o window.position.y=<y> \
   -e nvim -u <bundled dictation_init.lua> --listen <socket> <dated file>
 ```
 
-The X11 **class** is `Floating` and the **instance** is `spokenpad`. Both are
-configurable (`nvim.terminal`, `nvim.window_instance`); the instance is the
-name every window-manager rule keys on, and it is restricted to
-`[A-Za-z0-9_-]` because it is interpolated into an i3 criteria string — a
-config value must not be able to become i3 syntax.
+`nvim.terminal` names the terminal, from a table spokenpad knows rather than
+as an argv it would have to trust. Each row is taken from that terminal's own
+documentation, and says how its window is named for the window manager,
+whether it can be told where to open, and how it takes the command:
+
+| `nvim.terminal` | window name (`I` = `nvim.window_instance`) | initial position | source |
+|---|---|---|---|
+| `alacritty` | `--class I`: X11 class and instance, Wayland `app_id` | `-o window.position.x/y`, X11 only | `alacritty --help`, `alacritty(1)` |
+| `kitty` | `--class I --name I`: X11 class/instance, Wayland `app_id` | `--position XxY`, X11 only, non-negative | `kitty --help` |
+| `foot` | `--app-id=I`; Wayland only | none | `foot(1)` |
+| `wezterm` | `start --always-new-process --class I`: both halves of `WM_CLASS`, Wayland `app_id` | `--position screen:X,Y`, X11 only, non-negative | wezterm.org/cli/start, wezterm's X11 `WM_CLASS` code |
+| `ghostty` | `--class=spokenpad.I` (Wayland `app_id`; GTK needs a dotted id), `--x11-instance-name=I` | none (GTK cannot) | ghostty `Config.zig` |
+| `headless` | no window: `nvim --headless` | — | — |
+
+`wezterm` gets `--always-new-process`, and `ghostty` `--gtk-single-instance=false`:
+without them the window may open inside an already running instance, and the
+process spokenpad started would exit at once. A terminal outside the table
+is refused, because its window name — and so the `no_focus` rule — cannot be
+known before the window exists.
+
+The **instance** is `spokenpad` by default. It is the name every
+window-manager rule keys on, and it is restricted to `[A-Za-z][A-Za-z0-9_-]*`
+because it is interpolated into criteria strings — a config value must not be
+able to become window-manager syntax.
 
 The window is opened lazily, on the **first key-down**, not at daemon start:
 until you dictate there is no reason for a terminal to be sitting on your
@@ -42,31 +61,50 @@ all**: not `xdotool windowfocus`, and not a "remember the focused window and
 restore it afterwards" dance either, since restoring focus is itself a focus
 change and would race anything the user did in between.
 
-Two lines in `~/.config/i3/i3.d/spokenpad.conf` do it properly:
+Two lines in a rules file do it properly. On i3,
+[`packaging/i3/spokenpad.conf`](../packaging/i3/spokenpad.conf):
 
 ```
 for_window [instance="spokenpad"] floating enable
 no_focus   [instance="spokenpad"]
 ```
 
-spokenpad refuses to **spawn** a graphical editor unless it can prove that rule
-is in the *loaded* i3 configuration, include files and all, for this exact
-instance name. The proof is taken at spawn only: reattaching to an editor that
-is already on screen trusts the rule that was proven when it was opened, because
-the window is already mapped and unfocused and a later i3 reload cannot un-steal
-focus that was never stolen.
+and on sway, [`packaging/sway/spokenpad.conf`](../packaging/sway/spokenpad.conf),
+the same for `app_id` *and* `instance`: every supported terminal except foot
+picks Wayland or Xwayland by itself, and a rule for the other would not
+apply.
 
-Verified live on 2026-09-07: the focused window was unchanged across an open,
-and i3 reported the new window as `focused: false`.
+spokenpad refuses to **spawn** a graphical editor unless it can prove those
+rules are in the *loaded* configuration for this exact name. It asks the
+running window manager over its IPC socket (`$SWAYSOCK`, `$I3SOCK`, or
+`i3 --get-socketpath`; `GET_VERSION` says which one answered). i3 returns its
+configuration with every included file. sway returns the main file only, so
+spokenpad follows its `include` lines on disk — resolving `~`, environment
+variables, paths relative to the including file and `*`/`?` in the last
+component, and nothing else, so an include it cannot resolve with certainty
+proves nothing. A rule counts only if its criteria are exactly this one
+property with a literal value.
+
+The proof is taken at spawn only: reattaching to an editor that is already on
+screen trusts the rule that was proven when it was opened, because the window
+is already mapped and unfocused and a later reload cannot un-steal focus that
+was never stolen.
+
+Verified live on i3 on 2026-09-07: the focused window was unchanged across an
+open, and i3 reported the new window as `focused: false`. sway is implemented
+against `sway-ipc(7)`, `sway(5)` and sway's source, and tested against a fake
+IPC server; it has not been run live.
 
 ## Placement
 
-Size and position are spokenpad's, not i3's, so the rule file stays to the two
+Size and position are spokenpad's, not the window manager's, so the rule file stays to the two
 things only a window manager can do.
 
 The window is **a third of the screen on each axis** (`nvim.window_fraction`,
 0.33) with its **top-left corner at the mouse pointer**, on whichever monitor
-the pointer is on — it opens beside what you are reading rather than in a
+the pointer is on (on i3, read with `xdotool`; sway gives a client no way to
+ask, so there the window opens in the bottom-right corner of the focused
+output) — it opens beside what you are reading rather than in a
 fixed corner you have to look away to find. `geometry::pick_output` chooses the
 output and `geometry::placement` clamps the rect fully on-screen — both pure
 functions over output rectangles — so a pointer near an edge tucks the window

@@ -19,6 +19,7 @@ imperative shell, and `config.rs` sits at the root because both sides read it.
 | `core/geometry.rs` | Which output the pointer is on, and the clamped window rect | none |
 | `core/text.rs` | Filler stripping, exact replacements, whitespace repair | none |
 | `core/wm.rs` | i3 IPC framing; parsing outputs, tree, config and `no_focus` rules | none |
+| `core/terminal.rs` | The known terminals: how each names its window, where it opens, its argv | none |
 | `core/session.rs` | Utterance lifecycle, preview cadence, and the one user-visible notice | internal channels |
 | `core/decode.rs` | Committed sample offset, settled commits, release tails, preview isolation | worker messages |
 | `core/segments.rs` | VAD merge/pad/settlement: spans in, decode windows out | none |
@@ -56,6 +57,8 @@ unit-tested without a device, a thread, or a process. Nothing there may import
 - `core/frames.rs`, `core/geometry.rs`, `core/text.rs` — values and arithmetic.
 - `core/wm.rs` — the i3 IPC protocol as values: frames, replies, `no_focus`
   proof, `include` resolution, placement commands.
+- `core/terminal.rs` — the terminal table: window names, focus criteria per
+  window manager, argv.
 - one pure half still lives inside a shell module: in `shell/nvim`, the RPC
   codec, the spawn argv, and ownership parsing.
 

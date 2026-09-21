@@ -282,26 +282,25 @@ trailing_space = false
 # msgpack-RPC socket. Nothing is ever pasted into the window you are working
 # in, and no keystrokes are synthesised anywhere -- see docs/constraints.md.
 
-# The terminal to run the editor in, with the editor's own argv appended.
-# The literal token {instance} is replaced with `window_instance` below.
-#
-# The default asks alacritty for X11 class "Floating" and instance
-# "spokenpad", which is what the window manager rules key on. Rust refuses
-# graphical commands whose instance setting it cannot verify. Set to [] only
-# with an explicitly headless editor (for example ["nvim", "--headless"]).
-terminal = ["alacritty", "--class", "Floating,{instance}", "-o", "window.position.x={x}", "-o", "window.position.y={y}", "-e"]
+# The terminal the window opens in: "alacritty", "kitty", "foot" (Wayland
+# only), "wezterm" or "ghostty". spokenpad knows how each one names its
+# window, which is what the window manager's no_focus rule keys on, so it can
+# prove that rule before the window exists; any other terminal is refused.
+# "headless" runs nvim with no window at all (attach a UI with
+# `nvim --remote-ui --server <socket_path>`).
+terminal = "alacritty"
 
 # The editor. `--listen <socket>` and the dictation file are appended to
 # this, so anything here comes first: ["nvim", "-u", "NONE"] gets an editor
 # with none of your own config loaded.
 editor = ["nvim"]
 
-# X11 instance name of the dictation window. It must match whatever your
-# window manager rules match on. spokenpad writes the i3 rules to
-# ~/.config/i3/i3.d/spokenpad.conf; see docs/nvim-window.md.
+# The dictation window's name: its X11 instance on i3, and its Wayland app_id
+# under sway (ghostty's app_id is "spokenpad.<this>", since GTK needs a dot).
+# The rules in packaging/i3/ and packaging/sway/ match "spokenpad".
 #
-# Restricted to [A-Za-z0-9_-] because it is interpolated into an i3 criteria
-# string, and a config value must not be able to become i3 syntax.
+# Restricted to [A-Za-z][A-Za-z0-9_-]* because it is interpolated into
+# window-manager criteria, and a config value must not become WM syntax.
 window_instance = "spokenpad"
 
 # Size of the dictation window, as a fraction of each screen axis: 0.33 is a

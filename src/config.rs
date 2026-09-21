@@ -1,4 +1,5 @@
 //! TOML is validated once, before starting threads or loading native code.
+use crate::core::terminal::Terminal;
 use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 use std::{
@@ -353,7 +354,8 @@ impl Default for Recording {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Nvim {
-    pub terminal: Vec<String>,
+    /// The terminal a spawned editor runs in; see [`Terminal`].
+    pub terminal: Terminal,
     pub editor: Vec<String>,
     pub init: Option<PathBuf>,
     pub colorscheme: Option<String>,
@@ -368,18 +370,7 @@ pub struct Nvim {
 impl Default for Nvim {
     fn default() -> Self {
         Self {
-            terminal: [
-                "alacritty",
-                "--class",
-                "Floating,{instance}",
-                "-o",
-                "window.position.x={x}",
-                "-o",
-                "window.position.y={y}",
-                "-e",
-            ]
-            .map(str::to_owned)
-            .into(),
+            terminal: Terminal::Alacritty,
             editor: vec!["nvim".into()],
             init: None,
             colorscheme: None,
@@ -536,18 +527,29 @@ impl Config {
             self.recording.max_total_bytes > 0,
             "recording.max_total_bytes must be positive"
         );
+        // A terminal takes the editor as trailing arguments; a first word
+        // starting with `-` would be read as one of the terminal's options.
         ensure!(
-            !self.nvim.editor.is_empty() && !self.nvim.editor[0].is_empty(),
+            self.nvim
+                .editor
+                .first()
+                .is_some_and(|program| !program.is_empty() && !program.starts_with('-')),
             "nvim.editor must name an executable"
         );
+        // Interpolated into window-manager criteria, and the last element of
+        // ghostty's GTK application id, which may not start with a digit.
         ensure!(
-            !self.nvim.window_instance.is_empty()
+            self.nvim
+                .window_instance
+                .bytes()
+                .next()
+                .is_some_and(|b| b.is_ascii_alphabetic())
                 && self
                     .nvim
                     .window_instance
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'),
-            "invalid nvim.window_instance"
+            "nvim.window_instance must match [A-Za-z][A-Za-z0-9_-]*"
         );
         ensure!(
             self.nvim.window_fraction.is_finite()
@@ -688,7 +690,12 @@ mod tests {
             "[nvim]\nfile_template='../x'",
             "[nvim]\nfile_template='%Q'",
             "[nvim]\neditor=[]",
+            "[nvim]\neditor=['--headless']",
             "[nvim]\nwindow_instance='x\" ]'",
+            "[nvim]\nwindow_instance='1st'",
+            "[nvim]\nwindow_instance=''",
+            "[nvim]\nterminal='xterm'",
+            "[nvim]\nterminal=['alacritty', '-e']",
             "[recording]\nmax_total_bytes=0",
             "[asr]\ndecoding='typo'",
             "[asr]\ndecoding='greedy_search'\nvocabulary=['rust']",

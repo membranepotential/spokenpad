@@ -13,8 +13,8 @@
 //! spawned: the editor's socket path is unique to that directory, so the
 //! process is found by scanning `/proc/*/cmdline` for it and its process group
 //! — `nvim` calls `setsid`, so its pid is its process-group id — is signalled.
-//! Spawning a graphical editor is never attempted; `nvim.terminal` is empty and
-//! the editor command is explicitly `--headless`.
+//! Spawning a graphical editor is never attempted: `nvim.terminal` is
+//! `headless`, so the daemon runs `nvim --headless` and opens no window.
 
 use anyhow::Result;
 use spokenpad::{
@@ -22,6 +22,7 @@ use spokenpad::{
     core::{
         decode::{Pipeline, Recognizer, Segment, Segmenter, TrailingSilence, Worker},
         state::Event,
+        terminal::Terminal,
     },
     shell::{
         audio::{AudioCapture, CallbackCore, InputBackend, InputStream, Teardown},
@@ -263,10 +264,9 @@ impl Harness {
         config.audio.preroll_ms = settings.preroll_ms;
         config.audio.postroll_ms = settings.postroll_ms;
         config.recording.dir = root.join("audio");
-        config.nvim.terminal = Vec::new();
+        config.nvim.terminal = Terminal::Headless;
         config.nvim.editor = [
             "nvim",
-            "--headless",
             "-u",
             "NONE",
             "-i",
@@ -1029,10 +1029,9 @@ fn real_models_transcribe_the_kennedy_sample() {
     let root = directory.path();
     let mut config = Config::default();
     config.recording.dir = root.join("audio");
-    config.nvim.terminal = Vec::new();
+    config.nvim.terminal = Terminal::Headless;
     config.nvim.editor = [
         "nvim",
-        "--headless",
         "-u",
         "NONE",
         "-i",

@@ -17,7 +17,8 @@ use crate::{
         geometry::{Rect, pick_output, placement},
         session::NoticeText,
         state::IndicatorPhase,
-        wm::{Criterion, Property},
+        terminal::Terminal,
+        wm::Criterion,
     },
     shell::wm::Wm,
 };
@@ -444,38 +445,24 @@ impl NvimSession {
     }
 
     fn spawn_and_attach(&mut self) -> Result<bool> {
-        if self.config.terminal.is_empty() {
-            ensure!(
-                self.config
-                    .editor
-                    .iter()
-                    .any(|argument| argument == "--headless"),
-                "terminal=[] is safe only with an editor command that explicitly contains --headless"
-            );
-        }
-        // Only a window manager can be asked where the window should go, and
-        // only a graphical editor has one. The headless path asks nothing.
-        let window = if self.config.terminal.is_empty() {
-            None
-        } else {
-            ensure!(
-                alacritty_declares_instance(&self.config.terminal),
-                "graphical nvim requires alacritty --class GENERAL,{{instance}} so its X11 instance is provable before mapping"
-            );
+        let terminal = self.config.terminal;
+        // Only a graphical terminal has a window, and only a window manager
+        // can refuse it focus and say where it should go. Everything about
+        // the window is settled here, before the dictation file exists.
+        let window = if terminal.is_graphical() {
             let wm =
                 Wm::connect().context("a graphical dictation window needs a running i3 or sway")?;
-            let criteria = [Criterion::new(
-                Property::Instance,
-                &self.config.window_instance,
-            )?];
+            let criteria = terminal.focus_criteria(&self.config.window_instance, wm.kind())?;
             if let Some(unproven) = wm.unproven_no_focus(&criteria)? {
                 bail!(
-                    "the running {} configuration does not prove `no_focus {unproven}`",
+                    "the running {} configuration does not prove `no_focus {unproven}`, so a {terminal} window could take focus",
                     wm.kind()
                 );
             }
             let rect = window_placement(&wm, self.config.window_fraction);
             Some((wm, criteria, rect))
+        } else {
+            None
         };
         let window_rect = window.as_ref().and_then(|(_, _, rect)| *rect);
 
@@ -506,7 +493,7 @@ impl NvimSession {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         #[cfg(test)]
-        if self.config.terminal.is_empty() {
+        if !terminal.is_graphical() {
             let log = self
                 .config
                 .socket_path
@@ -791,9 +778,9 @@ fn parse_copy_outcome(value: &Value) -> Result<CopyOutcome> {
     }
 }
 
-/// The argv for a fresh editor. Pure: the caller materializes `init` and
-/// resolves the window rect, so what is left is a total function of the
-/// configuration and can be read — and tested — as one.
+/// The argv for a fresh editor inside its terminal. Pure: the caller
+/// materializes `init` and resolves the window rect, so what is left is a
+/// total function of the configuration and can be read — and tested — as one.
 fn spawn_argv(
     config: &Nvim,
     target: &Path,
@@ -801,15 +788,26 @@ fn spawn_argv(
     rect: Option<Rect>,
     init: Option<&Path>,
 ) -> Result<Vec<String>> {
-    let (x, y) = rect.map_or((0, 0), |rect| (rect.x, rect.y));
-    let substitute = |argument: &str| {
-        argument
-            .replace("{instance}", &config.window_instance)
-            .replace("{x}", &x.to_string())
-            .replace("{y}", &y.to_string())
-    };
-    let mut argv: Vec<String> = config.terminal.iter().map(|arg| substitute(arg)).collect();
-    argv.extend(config.editor.iter().cloned());
+    let mut argv = config
+        .terminal
+        .argv(&config.window_instance, rect.map(|rect| (rect.x, rect.y)));
+    let program = argv.len() + config.editor.len();
+    argv.extend(editor_argv(config, target, marker, init)?);
+    if config.terminal == Terminal::Headless {
+        argv.insert(program, "--headless".to_owned());
+    }
+    Ok(argv)
+}
+
+/// The editor's own argv: the configured command, the init and colourscheme,
+/// the ownership marker, the socket, the readiness flag and the file.
+fn editor_argv(
+    config: &Nvim,
+    target: &Path,
+    marker: &str,
+    init: Option<&Path>,
+) -> Result<Vec<String>> {
+    let mut argv = config.editor.clone();
     if let Some(init) = init {
         argv.extend(["-u".to_owned(), utf8_path(init)?.to_owned()]);
     }
@@ -850,43 +848,6 @@ fn lua_colorscheme_literal(name: &str) -> Result<String> {
         "nvim.colorscheme must match [A-Za-z0-9_.-]+, got {name:?}"
     );
     Ok(format!("'{name}'"))
-}
-
-fn alacritty_declares_instance(arguments: &[String]) -> bool {
-    let Some(program) = arguments
-        .first()
-        .and_then(|argument| Path::new(argument).file_name())
-        .and_then(|argument| argument.to_str())
-    else {
-        return false;
-    };
-    let Some((command, options)) = arguments.split_last() else {
-        return false;
-    };
-    // The editor is appended after this template. A class flag inside the
-    // child command, a second class override, an alternative config file that
-    // could carry one, or embedding in another window all make the identity of
-    // the window we are about to open unprovable.
-    if program != "alacritty"
-        || !matches!(command.as_str(), "-e" | "--command")
-        || options.iter().any(|argument| {
-            matches!(
-                argument.as_str(),
-                "-e" | "--command" | "--embed" | "--config-file"
-            ) || argument.starts_with("--class=")
-                || argument.starts_with("--embed=")
-                || argument.starts_with("--config-file=")
-                || argument.contains("window.class")
-        })
-    {
-        return false;
-    }
-    let mut classes = options.windows(2).filter(|pair| pair[0] == "--class");
-    classes.next().is_some_and(|pair| {
-        pair[1]
-            .split_once(',')
-            .is_some_and(|(general, instance)| !general.is_empty() && instance == "{instance}")
-    }) && classes.next().is_none()
 }
 
 fn indicator_fields(state: &IndicatorState) -> Vec<(Value, Value)> {
