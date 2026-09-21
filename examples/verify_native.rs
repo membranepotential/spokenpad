@@ -1,4 +1,6 @@
-//! Local differential harness. JSON on stdout; never uploads audio or transcripts.
+//! Prints the segments, transcripts and a simulated progressive passage of
+//! each WAV as JSON, for inspection by hand. Local only; never uploads audio
+//! or transcripts.
 use anyhow::{Context, Result, ensure};
 use serde_json::json;
 use spokenpad::{

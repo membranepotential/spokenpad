@@ -526,9 +526,9 @@ release that excluded every Wayland desktop and most X11 ones.
   instead of one trusted argv, and i3 or sway spoken to over their shared IPC
   protocol instead of `i3-msg` and `xrandr`. The rule is proven for the X11
   instance on i3, and for the `app_id` and the instance under sway, since a
-  terminal there picks Wayland or Xwayland by itself. sway returns only the
-  main config file over IPC, so its `include` lines are followed on disk for
-  the subset `wordexp` would resolve with certainty.
+  terminal there picks Wayland or Xwayland by itself. (Superseded the
+  same day, see the next entry: sway `include` lines were first followed on
+  disk.)
 
 Attach is the default because it is the only mode that works for every new
 user, and the one that cannot fail the focus constraint at all. The author's
@@ -547,3 +547,28 @@ through `nvim --remote-ui`. It would reuse the RPC path unchanged, but it
 makes the daemon a precondition for opening the editor at all, and the
 remote UI still has rough edges (clipboard, `:q` quitting the server) that a
 plain nvim does not.
+
+## Review fixes to the editor modes (2026-09-21)
+
+A review of the new modes found four ways to break the constraints; each is
+fixed with a test that failed before.
+
+- **Empty workspace.** i3 and sway focus the first window on a workspace
+  whatever `no_focus` says, so a proven rule was not proof. Managed mode now
+  also reads the tree and does not spawn while the focused workspace is
+  empty; the text goes to the pending passage.
+- **Only loaded config counts.** sway's `GET_CONFIG` returns the main file
+  only. Following `include` lines on disk could count a rule sway never
+  loaded (no reload yet, or variables that differ between sway's environment
+  and the daemon's). Now only the text the window manager returns counts: on
+  sway the rules belong in the main config file.
+- **An editor that exits mid-dictation.** An append that could not be sent
+  now goes to the pending passage; an append with a lost reply still does
+  not, since it may have landed. A later commit of the same utterance
+  continues its line only where the previous one went, never across files.
+- **No writes behind an editor's back.** `spokenpad editor` takes the pending
+  passage under a lock before nvim reads it, so the daemon never replaces a
+  file an editor holds (nvim would block on "file changed since reading").
+  Reloading at adopt was rejected: `:checktime` resets nvim's change check,
+  and unsaved edits could then silently overwrite the direct write.
+- `hotwords_score` with `greedy_search` is now an error instead of ignored.

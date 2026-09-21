@@ -178,7 +178,9 @@ In managed mode the daemon opens the dictation window itself, on the first
 key-down, as a floating window at the mouse pointer (on sway, in the
 bottom-right corner). It refuses to open it until the running window manager's
 config contains a `no_focus` rule for it, which it reads over the i3 or sway
-IPC socket.
+IPC socket. It also does not open it while the focused workspace is empty,
+because i3 and sway focus the first window on a workspace despite the rule;
+the text then goes to a file that the next editor opens.
 
 1. Set the mode and your terminal in `~/.config/spokenpad/config.toml`:
    ```toml
@@ -186,10 +188,11 @@ IPC socket.
    mode = "managed"
    terminal = "kitty"   # alacritty (default), kitty, foot, wezterm or ghostty
    ```
-2. Include the rules file in your window manager config:
-   [`packaging/i3/spokenpad.conf`](packaging/i3/spokenpad.conf) or
-   [`packaging/sway/spokenpad.conf`](packaging/sway/spokenpad.conf). Each file
-   says how, in its header.
+2. Add the rules to your window manager config:
+   [`packaging/i3/spokenpad.conf`](packaging/i3/spokenpad.conf) (include it)
+   or [`packaging/sway/spokenpad.conf`](packaging/sway/spokenpad.conf) (paste
+   it into the main config; sway reports only that file). Each file's header
+   says how. Then reload the window manager.
 3. Import the session environment into systemd (install step 5) and restart
    the service.
 

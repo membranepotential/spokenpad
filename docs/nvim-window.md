@@ -67,9 +67,17 @@ lost:
 - **The next editor shows it.** The file is the *pending passage*, recorded
   in `<socket>.pending`. Every later dictation with no editor continues it,
   and the next editor — `spokenpad editor`, or a managed spawn — opens on it
-  rather than on a new file. Once the daemon has pinned it in an editor, the
-  pointer is removed. A pointer that names anything but a regular file inside
+  rather than on a new file. `spokenpad editor` *takes* the passage: it
+  removes the pointer before the editor reads the file, under a lock
+  (`<socket>.pending.lock`) that every direct write also holds, so nothing
+  is ever written behind an open editor's back; until the daemon reaches
+  that editor, text goes to a new pending passage. An editor the daemon opens
+  itself settles the pointer once it holds the file. A pointer that names anything but a regular file inside
   `nvim.dictation_dir` is ignored.
+- **An editor that exits mid-dictation loses nothing.** A request that
+  could not be sent to the editor certainly did not land, so its text goes to
+  the pending passage. An append whose reply is lost is not redirected,
+  since it may have landed; writing it again elsewhere could write it twice.
 - **Decoding is unchanged.** The file is only a different sink for the same
   commits; each is still decoded exactly once.
 - **You are told.** When a pending passage is started, the daemon sends one
@@ -159,12 +167,18 @@ spokenpad refuses to **spawn** a graphical editor unless it can prove those
 rules are in the *loaded* configuration for this exact name. It asks the
 running window manager over its IPC socket (`$SWAYSOCK`, `$I3SOCK`, or
 `i3 --get-socketpath`; `GET_VERSION` says which one answered). i3 returns its
-configuration with every included file. sway returns the main file only, so
-spokenpad follows its `include` lines on disk — resolving `~`, environment
-variables, paths relative to the including file and `*`/`?` in the last
-component, and nothing else, so an include it cannot resolve with certainty
-proves nothing. A rule counts only if its criteria are exactly this one
+configuration with every included file, as loaded. sway returns the main file
+only, and spokenpad reads nothing from disk, since a file on disk may never
+have been loaded: on sway the rules must be in the main config file itself
+(`~/.config/sway/config`), not in a file it includes. A rule counts only if its criteria are exactly this one
 property with a literal value.
+
+The rules are not enough on an empty workspace: i3 and sway both give the
+first window on a workspace focus, whatever `no_focus` says. So spokenpad also
+reads the tree and does not spawn while the focused workspace holds no
+window; the text then goes to the pending passage. The tree is read just
+before the spawn, so switching to an empty workspace in the ~200 ms before
+the window maps is the one remaining gap.
 
 The proof is taken at spawn only: reattaching to an editor that is already on
 screen trusts the rule that was proven when it was opened, because the window

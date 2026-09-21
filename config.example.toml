@@ -136,8 +136,8 @@ num_threads = 6
 # (slightly slower, required for `vocabulary` below).
 decoding = "modified_beam_search"
 
-# Per-token bias applied to each phrase in `vocabulary`; ignored under
-# greedy_search. Measured on Parakeet: 1.5 fixes "mkir" -> "mkdir"; above
+# Per-token bias applied to each phrase in `vocabulary`. Only with
+# modified_beam_search; set together with greedy_search it is an error. Measured on Parakeet: 1.5 fixes "mkir" -> "mkdir"; above
 # ~3.0 it starts firing on unrelated audio; 6.0 rewrites ordinary words.
 hotwords_score = 1.5
 

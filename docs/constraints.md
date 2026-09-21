@@ -260,7 +260,9 @@ in its lifecycle. How that holds depends on `nvim.mode`:
   `app_id` and the instance under sway — and the daemon reads the loaded
   configuration over the window manager's IPC socket and refuses to spawn
   unless it finds a `no_focus` rule for exactly that name
-  ([`shell/wm.rs`](../src/shell/wm.rs)). A terminal outside the table is
+  ([`shell/wm.rs`](../src/shell/wm.rs)), and unless the focused workspace
+  already holds a window, since both window managers focus the first window
+  on a workspace despite `no_focus`. A terminal outside the table is
   refused, since its window cannot be named in advance.
 
 There is deliberately no focus call anywhere in
