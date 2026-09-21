@@ -107,10 +107,7 @@ impl Default for Asr {
             model_dir: models_dir().join("parakeet-tdt-0.6b-v3-int8"),
             num_threads: 6,
             model: Model::Parakeet {
-                decoding: Decoding::ModifiedBeamSearch {
-                    vocabulary: vec![],
-                    hotwords_score: 1.5,
-                },
+                decoding: Decoding::GreedySearch,
             },
         }
     }
@@ -180,8 +177,19 @@ impl TryFrom<RawAsr> for Asr {
         }
         let model = match family {
             Family::Parakeet => Model::Parakeet {
-                decoding: match raw.decoding {
-                    Some(SearchMethod::GreedySearch) => {
+                // Greedy unless hotwords are asked for: sherpa-onnx's beam
+                // search on Parakeet TDT returns "" or "Yeah." for clear
+                // speech about one time in five (k2-fsa/sherpa-onnx#3267).
+                decoding: match raw.decoding.unwrap_or(
+                    if raw.vocabulary.as_ref().is_some_and(|v| !v.is_empty())
+                        || raw.hotwords_score.is_some()
+                    {
+                        SearchMethod::ModifiedBeamSearch
+                    } else {
+                        SearchMethod::GreedySearch
+                    },
+                ) {
+                    SearchMethod::GreedySearch => {
                         ensure!(
                             raw.vocabulary.is_none_or(|v| v.is_empty()),
                             "asr.vocabulary requires decoding = \"modified_beam_search\""
@@ -193,7 +201,7 @@ impl TryFrom<RawAsr> for Asr {
                         );
                         Decoding::GreedySearch
                     }
-                    Some(SearchMethod::ModifiedBeamSearch) | None => {
+                    SearchMethod::ModifiedBeamSearch => {
                         let vocabulary = raw.vocabulary.unwrap_or_default();
                         let hotwords_score = raw.hotwords_score.unwrap_or(1.5);
                         ensure!(
@@ -771,6 +779,34 @@ mod tests {
         );
         let c = Config::parse("[asr]\nfamily='sense_voice'\nmodel_dir='s'", None).unwrap();
         assert_eq!(c.asr.model, Model::SenseVoice { language: None });
+        // Greedy by default: beam search is taken only for hotwords.
+        assert_eq!(
+            Config::parse("", None).unwrap().asr.model,
+            Model::Parakeet {
+                decoding: Decoding::GreedySearch
+            }
+        );
+        assert_eq!(
+            Config::parse("[asr]\nvocabulary=[]", None)
+                .unwrap()
+                .asr
+                .model,
+            Model::Parakeet {
+                decoding: Decoding::GreedySearch
+            }
+        );
+        assert_eq!(
+            Config::parse("[asr]\nhotwords_score=2.0", None)
+                .unwrap()
+                .asr
+                .model,
+            Model::Parakeet {
+                decoding: Decoding::ModifiedBeamSearch {
+                    vocabulary: vec![],
+                    hotwords_score: 2.0
+                }
+            }
+        );
         let c = Config::parse("[asr]\ndecoding='greedy_search'", None).unwrap();
         assert_eq!(
             c.asr.model,

@@ -39,12 +39,16 @@ zero otherwise.
 For each sample: **WER** (word error rate), decode time, and real-time
 factor (clip duration ÷ decode time — higher is faster).
 
-Current aggregate, measured 2026-09-21 on the five local clips:
-**17.6%** WER through the VAD-segmented path (the one the daemon uses) —
-reproduces the historical figure exactly. The `--whole` (no-VAD) run
-currently measures **18.7%**, not the previously reported 13.9%; see
-[decisions.md](decisions.md#the-python-reference-implementation-is-dropped)
-for why that number moved and why it is not a regression in this harness.
+Current aggregate, measured 2026-09-21 on the five local clips with the
+default `greedy_search` and the corrected `shell-commands` reference:
+**18.7%** WER through the VAD-segmented path (the one the daemon uses) and
+**14.3%** through `--whole`. With `decoding = "modified_beam_search"` the
+same clips score 15.4% and 16.5%: beam search gets a few words right that
+greedy misses here, but it drops whole speech chunks on real captures, which
+these five clips do not show — see
+[decisions.md](decisions.md#greedy-decoding-by-default-beam-search-drops-speech-2026-09-21).
+Figures before 2026-09-21 were measured with beam search and the old
+reference, and are not comparable.
 
 WER needs normalisation to mean anything; `examples/eval.rs` does, exactly:
 

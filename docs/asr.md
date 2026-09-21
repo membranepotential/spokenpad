@@ -40,9 +40,14 @@ punctuation.
 
 | model | size | WER | wall time, 100 s of audio |
 |---|---|---|---|
-| `sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8` (default) | 670 MB | 17.6% | ~20 s |
+| `sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8` (default) | 670 MB | 18.7% | ~20 s |
 | `sherpa-onnx-whisper-tiny.en` | 100 MB (int8) | 23.0% | ~9 s |
 | `sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2025-09-09`, `language = "en"` | 240 MB | 29.4% | ~10 s |
+
+Parakeet's row is greedy decoding against the corrected `shell-commands`
+reference (2026-09-21); the Whisper and SenseVoice rows were measured the same
+day before that correction, against a reference with one sentence the clip
+does not contain, so they read slightly high.
 
 Wall time is five `spokenpad transcribe` runs, each loading the model, on a
 machine busy with parallel builds; it compares the models, not the decode
@@ -113,9 +118,16 @@ overhead. Measure on an idle machine: under load (a parallel build, load
 average ~19) these figures degrade by roughly 5×, which is easy to mistake
 for a scaling problem in the model.
 
-`modified_beam_search` is marginally slower than `greedy_search` on this
-checkpoint but is required for hotword biasing (next section), so it is the
-default (`asr.decoding`).
+`greedy_search` is the default (`asr.decoding`). `modified_beam_search` is
+only needed for hotword biasing (next section), and on Parakeet TDT it is
+unreliable: it returns `""` or an invented "Yeah." for clear speech in about
+one request in five (upstream
+[k2-fsa/sherpa-onnx#3267](https://github.com/k2-fsa/sherpa-onnx/issues/3267),
+open). Replaying the author's 170 recovery captures through the daemon's VAD
+path, beam search left 19 speech chunks empty (2 still empty after the
+retry without trailing silence) and greedy 4 (all recovered by the retry).
+Setting a non-empty `vocabulary` switches to beam search and accepts that
+cost.
 
 ## Hotwords: biasing the beam, not rewriting the output
 
@@ -158,7 +170,8 @@ built with that `bpe_vocab`, `modeling_unit = "bpe"` and a `hotwords_file`.
 
 `asr.hotwords_score` is a single global per-token bias applied to every
 configured hotword (`asr.vocabulary`). It only takes effect with
-`decoding = "modified_beam_search"`; the config rejects a vocabulary under
+`modified_beam_search`, which a non-empty vocabulary selects when `decoding`
+is left out; the config rejects a vocabulary under an explicit
 `greedy_search`.
 
 Measured against the same eval clip, biasing `mkdir` after the model

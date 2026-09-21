@@ -152,10 +152,9 @@ chunk holds `vad.chunk_seconds` (10 s) of speech, and each chunk is padded by
 boundaries clip word onsets and endings. Measured on the eval samples at the
 time, per-run 33.7% → 37.7% WER, merged-and-padded 33.4%. Measured on
 2026-09-21 with `cargo run --release --example=eval`, the VAD path spokenpad
-actually uses scores **17.6%** aggregate WER; the whole-buffer path (`--whole`)
-scores **18.7%**, because it lacks the empty-chunk retry and loses words of its
-own (see [evaluation.md](evaluation.md)). Before those whole-buffer losses
-appeared it scored 13.9%, so splitting is not free in principle — it is bought
+actually uses scores **18.7%** aggregate WER and the whole-buffer path
+(`--whole`) **14.3%** (see [evaluation.md](evaluation.md)), so splitting is
+not free — it is bought
 for incremental delivery and for the empty-transcript failure above. Anyone
 lowering `chunk_seconds` for faster text is spending more of it, and should
 re-run that harness.

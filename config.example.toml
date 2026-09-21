@@ -101,19 +101,23 @@ num_threads = 6
 # The next three keys apply to "parakeet" only; remove them for another
 # family, which rejects them.
 #
-# "greedy_search" (faster, no hotword biasing) or "modified_beam_search"
-# (slightly slower, required for `vocabulary` below).
-decoding = "modified_beam_search"
+# "greedy_search" or "modified_beam_search". Left out, it is greedy_search,
+# unless `vocabulary` below is set: hotwords exist only in beam search.
+# Beam search on Parakeet TDT returns nothing, or an invented "Yeah.", for
+# clear speech about one time in five (upstream sherpa-onnx issue #3267);
+# replaying 170 real captures, it left 19 speech chunks empty against 4 for
+# greedy. Use it only if you need `vocabulary`.
+# decoding = "greedy_search"
 
-# Per-token bias applied to each phrase in `vocabulary`. Only with
-# modified_beam_search; set together with greedy_search it is an error. Measured on Parakeet: 1.5 fixes "mkir" -> "mkdir"; above
-# ~3.0 it starts firing on unrelated audio; 6.0 rewrites ordinary words.
-hotwords_score = 1.5
+# Per-token bias applied to each phrase in `vocabulary`; implies beam search.
+# Measured on Parakeet: 1.5 fixes "mkir" -> "mkdir"; above ~3.0 it starts
+# firing on unrelated audio; 6.0 rewrites ordinary words.
+# hotwords_score = 1.5
 
 # Words and phrases to bias the decoder toward, e.g. project names or
-# commands that are otherwise misheard. Needs decoding = "modified_beam_search".
+# commands that are otherwise misheard. Setting it switches to
+# modified_beam_search, with the failure rate described above.
 # vocabulary = ["kubectl", "spokenpad", "nginx"]
-vocabulary = []
 
 # "whisper" and "sense_voice" only: the spoken language as a code such as
 # "en" or "de". Left out, the model detects it.
@@ -139,8 +143,8 @@ vocabulary = []
 # against 11.0-11.7x segmented. What it changes is WHEN text appears: the first
 # chunk lands after ~1s instead of after the whole recording, so a five-minute
 # latched passage starts arriving immediately rather than all at once at the
-# end. On the five reference clips it scores 17.6% aggregate WER against
-# 18.7% whole-buffer, measured with Parakeet (`cargo run --release
+# end. On the five reference clips it scores 18.7% aggregate WER against
+# 14.3% whole-buffer, measured with Parakeet (`cargo run --release
 # --example=eval`, and `-- --whole` for the whole-buffer path).
 #
 # It also decides what NOT to decode: a capture this finds no speech in is not

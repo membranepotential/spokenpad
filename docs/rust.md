@@ -231,11 +231,11 @@ WER moved from 13.4% before that change to 13.9% after it. A shorter 0.5-second
 pad was rejected because it made the short command decode empty.
 
 **Current accuracy figures**, re-measured 2026-09-21 with `cargo run --release
---example=eval` on the five verified references: **17.6%** aggregate WER
-through the VAD path the daemon uses, reproducing the figure above exactly.
-The whole-buffer number has since moved to **18.7%** (previously 13.9%) —
-see [decisions.md](decisions.md#the-python-reference-implementation-is-dropped)
-for the two pre-existing behaviours this traces to. Five clips of one speaker
+--example=eval` on the five verified references, with the default
+`greedy_search`: **18.7%** aggregate WER through the VAD path the daemon uses
+and **14.3%** whole-buffer. Earlier figures used beam search, which drops
+speech on real captures; see
+[decisions.md](decisions.md#greedy-decoding-by-default-beam-search-drops-speech-2026-09-21). Five clips of one speaker
 are a regression proxy, not a general accuracy guarantee — see
 [evaluation.md](evaluation.md).
 

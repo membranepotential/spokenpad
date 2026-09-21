@@ -14,7 +14,7 @@
       "file": "shell-commands.wav",
       "duration_s": 20.4,
       "verified": true,
-      "reference": "So, this is a test. Let's try some commands here. Let's make a dir with the command mkdir named test and touch a new file test_file and then rm -rf this whole folder again.",
+      "reference": "Let's try some commands here. Let's make a dir with the command mkdir named test and touch a new file test_file and then rm -rf this whole folder again.",
       "exercises": [
         "commands -> comments: technical word lost to a common English neighbour",
         "a dir -> there: context error, hotword biasing cannot fix this",

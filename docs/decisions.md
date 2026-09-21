@@ -688,3 +688,34 @@ there before — a side effect worth choosing, not assuming. `nvim.copy_to_clipb
 the result, so a missing clipboard provider is not probed on every release
 either. The mechanism `copy_buffer` implements in `spokenpad.lua` is
 unchanged; only whether the daemon ever asks for it moved.
+
+## Greedy decoding by default: beam search drops speech (2026-09-21)
+
+The user lost the end of a dictation: "…evaluate if we should change it"
+never arrived. The daemon log showed the release decode of the last 10.6 s
+(3.5 s of clear speech in two runs) returning `""`, and the retry without
+trailing silence returning `""` too. The recovery WAV decoded whole gave the
+sentence, so the audio was fine, and a live replay of the capture (a tick
+every 1.1 s, then the release) reproduced the empty tail exactly.
+
+Sweeping the window over that tail: `modified_beam_search` produced text for
+1 of 9 start offsets, often an invented "Yeah."; `greedy_search` for 9 of 9
+without padding and 7 of 9 with the 1 s of zeros the recogniser appends.
+This is upstream [k2-fsa/sherpa-onnx#3267](https://github.com/k2-fsa/sherpa-onnx/issues/3267)
+(open): beam search on NeMo TDT returns `""` or "Yeah." about one time in
+five, while greedy works. Replaying all 170 recovery captures through the
+VAD path, beam search left 19 speech chunks empty (17 rescued by the retry,
+2 lost) and greedy 4 (all rescued), and greedy produced 121 more words.
+
+So Parakeet decodes greedily unless hotwords are asked for: a non-empty
+`vocabulary` (or a `hotwords_score`) with no explicit `decoding` still
+selects beam search, since sherpa-onnx has hotwords only there. The
+"knife edge" of 2026-09-19 (entry above) was mostly this bug; the retry stays
+as a cheap guard. The 1 s of zero padding also hurt greedy on the sweep; it
+stays until a corpus replay shows removing it loses no final words.
+
+The same investigation found that the `shell-commands` eval clip does not
+contain its reference's first sentence ("So, this is a test."): Parakeet,
+Whisper and SenseVoice all hear the clip start at "Let's try". The recording
+tool of the time had cut it; the reference is corrected, and the STATUS note
+about first words lost was largely this artifact.

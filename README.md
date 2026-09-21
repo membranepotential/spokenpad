@@ -257,7 +257,7 @@ cannot pass silently. Keys are not configured here; see
 | key | default | what it does |
 |---|---|---|
 | `asr.family` | `"parakeet"` | model family: `parakeet`, `whisper` or `sense_voice` ([docs/asr.md](docs/asr.md)) |
-| `asr.vocabulary` | `[]` | words to bias Parakeet towards, such as `["kubectl", "nginx"]` |
+| `asr.vocabulary` | `[]` | words to bias Parakeet towards, such as `["kubectl", "nginx"]`; switches to beam search, which sometimes drops a sentence ([docs/asr.md](docs/asr.md)) |
 | `nvim.mode` | `"attach"` | `attach`: you run `spokenpad editor`; `managed`: the daemon opens a window on i3 or sway |
 | `nvim.terminal` | `"alacritty"` | managed mode only: the terminal for that window |
 | `nvim.init` | your Neovim config | `"bundled"` opens the window about 3× faster; pair it with `nvim.colorscheme` |
@@ -305,7 +305,7 @@ the service after `2`.
 
 ## Accuracy and speed
 
-On five local test clips of one speaker, the default model scores 17.6% word
+On five local test clips of one speaker, the default model scores 18.7% word
 error rate through the same VAD path the daemon uses. On one laptop CPU
 (i7-9850H, 6 threads) it decodes clips of 5 s and longer 13–17× faster than
 real time. Five clips are
