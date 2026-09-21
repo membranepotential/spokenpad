@@ -9,6 +9,8 @@
 //!   pending passage, which is what happens when a terminal is missing too;
 //! - an editor that dies on startup is noticed at once rather than waited
 //!   out, and its text goes to the pending passage too;
+//! - a pane that opens after its caller has given up is closed by the thread
+//!   rather than left standing on the dictation socket;
 //! - with one, a dictation opens a window that i3 does not focus, and the
 //!   text lands in the dictation file;
 //! - closing that window ends the passage: the next dictation opens a new
@@ -22,7 +24,7 @@ mod harness;
 use anyhow::Result;
 use harness::{I3, SETTLE, XServer, close_window, wait_for};
 use spokenpad::{
-    config::{Config, Mode},
+    config::{Config, Mode, Nvim},
     core::{
         control::{Received, Request},
         decode::{Pipeline, Recognizer, Segmenter, TrailingSilence, Worker},
@@ -30,6 +32,11 @@ use spokenpad::{
     shell::{
         audio::{AudioCapture, CallbackCore, InputBackend, InputStream, Teardown},
         daemon::{Devices, serve},
+        nvim::pane_launch,
+        pane::{
+            Options, Sizing,
+            host::{Opening, PaneHost},
+        },
     },
 };
 use std::{
@@ -116,29 +123,30 @@ fn the_daemon_opens_a_pane_dictates_into_it_and_cleans_up() {
     );
     broken.stop();
 
-    // ------------------------- a window that opens after the wait gave up
-    // A budget too small to open anything in. Whether the window loses the
-    // race or wins it a moment too late, it must not be left standing: an
-    // abandoned one is a live editor on the dictation socket that no session
-    // owns, and every later key-down would refuse it rather than replace it.
-    let impatient = Daemon::with(Some(server.display.clone()), |config| {
-        config.nvim.startup_timeout_s = 0.25;
+    // ------------------------- a window nobody is waiting for any more
+    // The daemon's budget can run out while a pane is still opening — a cold
+    // font cache and a slow nvim are enough — and the window then appears
+    // after the last thing that wanted it has gone. It must not be left
+    // standing: an abandoned pane is a live editor on the dictation socket
+    // that no session owns, and every later key-down would refuse that
+    // socket rather than replace it.
+    //
+    // Asked for with a deadline that has already passed, rather than with a
+    // budget hoped to be too small: the caller then gives up before the
+    // thread has begun, so the case is reached every time instead of on a
+    // machine that happens to be slow that morning.
+    let (host, socket, orphan_root) = abandoned_pane(&server);
+    wait_for(PATIENCE, "the abandoned editor to come up", || {
+        UnixStream::connect(&socket).ok().map(drop)
     });
-    let _ = impatient.dictate();
-    std::thread::sleep(SETTLE * 4);
-    assert!(
-        pane_window(&i3).is_none(),
-        "a pane that opened after the daemon stopped waiting was left behind"
+    wait_for(
+        PATIENCE,
+        "the abandoned pane to be closed by its thread",
+        || (UnixStream::connect(&socket).is_err() && pane_window(&i3).is_none()).then_some(()),
     );
-    let kept = wait_for(PATIENCE, "the transcript to survive the hurry", || {
-        impatient
-            .dictation_files()
-            .into_iter()
-            .find(|path| contains(path, SPOKEN))
-    });
-    assert!(contains(&kept, SPOKEN));
-    println!("a window that could not open in time left nothing behind");
-    impatient.stop();
+    println!("a pane that opened after its caller gave up was closed rather than orphaned");
+    drop(host);
+    drop(orphan_root);
     let base = server.plain_window();
     i3.wait_until_managed(base);
     std::thread::sleep(SETTLE);
@@ -273,6 +281,58 @@ fn resident_kilobytes() -> u64 {
 
 fn contains(path: &Path, text: &str) -> bool {
     std::fs::read_to_string(path).is_ok_and(|content| content.contains(text))
+}
+
+/// Ask a pane thread for a pane with a deadline that has already passed, and
+/// hand back the thread, the socket the editor inside it listens on, and the
+/// directory both live in — which the caller holds until the thread is done
+/// with it, because the pane is still writing there while it closes.
+///
+/// The thread opens it all the same: it hears the request before it hears
+/// that nobody wants the answer. So this is the orphan case with none of its
+/// timing — the caller gave up before the window existed.
+fn abandoned_pane(server: &XServer) -> (PaneHost, PathBuf, tempfile::TempDir) {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let root = directory.path();
+    let dictation = root.join("dictation");
+    std::fs::create_dir_all(&dictation).expect("make the dictation directory");
+    let config = Nvim {
+        mode: Mode::Pane,
+        socket_path: root.join("nvim.sock"),
+        dictation_dir: dictation.clone(),
+        display: Some(server.display.clone()),
+        init: Some(PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/lua/dictation_init.lua"
+        ))),
+        ..Nvim::default()
+    };
+    let file = dictation.join("dictation-2026-09-21-000000.md");
+    std::fs::write(&file, "").expect("create the dictation file");
+    let (command, marker) = pane_launch(&config, &file).expect("build the nvim command");
+    marker.keep();
+    let mut host = PaneHost::start().expect("start the pane thread");
+    let asked = host.open(
+        Opening {
+            command,
+            options: Options {
+                display: server.display.clone(),
+                sizing: Sizing::Cells {
+                    columns: 40,
+                    rows: 8,
+                },
+                size: 16.0,
+                ..Options::default()
+            },
+            correct_to: None,
+        },
+        Instant::now(),
+    );
+    assert!(
+        asked.is_err(),
+        "a deadline that has already passed must not report a pane as open"
+    );
+    (host, config.socket_path, directory)
 }
 
 /// The pane's window, as i3 sees it. The pane names itself
