@@ -28,6 +28,9 @@ and verification. Historical measurements are labelled where retained.
    the keys' codes, CPU, audio, displays and window manager.
 8. **[decisions.md](decisions.md)** — an ADR-style log of what was chosen,
    what was rejected, and why.
+9. **[experiments/](experiments/README.md)** — one file per experiment:
+   benchmarks, corpus replays, model comparisons and spikes, with their
+   numbers, including the ones that led nowhere.
 
 ## Scope
 

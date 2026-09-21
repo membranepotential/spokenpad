@@ -7,8 +7,14 @@ Hold a key (or latch with shift), speak, and text appears in an nvim that
 never takes focus. Fully local, CPU-only. Next milestone: public release.
 
 ## Now
-- own-window — plan written, approved "phased": .claude/plans/own-window.md
-  (+ research beside it, git-ignored). Next: P0 headless spike. Compact first.
+- corpus — Gladia references for the ~176 captures (private, eval-samples/
+  local/) + corpus WER harness; greedy vs beam vs zero padding — agent, wt
+- beam-fix — build sherpa-onnx with upstream PR #3657, test the lost tail and
+  the empty-chunk replay — agent, scratch build
+- gpu-models — research: other models and GPU (GTX 1650, 4 GB) — agent
+- const-ram — constant RAM while recording (latched: 230 MB/h today) — agent, wt
+- own-window P0 — headless x11rb property spike (.claude/plans/own-window.md)
+  — agent, wt. Then P1..P3 in sequence.
 
 ## Done
 - 09-21: Lost tail fixed: Parakeet now decodes greedy by default (beam search
@@ -35,24 +41,19 @@ never takes focus. Fully local, CPU-only. Next milestone: public release.
   post-roll), found by replaying 128 recovery WAVs. WER 17.6% unchanged.
 
 ## Next
-1. Best of both decoders: beam search, and a greedy re-decode only for a
-   chunk beam returns empty or bare "Yeah." (a second exception to decode-
-   once). Needs a bigger WER set than 5 clips first; greedy's 3-point loss
-   there is a few words. Upstream fix (#3267) is the long route.
-2. Measure removing the 1 s zero padding (hurt greedy 2/9 on the lost tail;
-   0.5 s once made `cd home` empty) with a corpus replay.
-3. Decide whether a "no speech detected" notice is wanted.
+1. Decide the decoder from the corpus numbers: patched beam, another model,
+   or GPU (would lift the "CPU only" constraint on purpose).
+2. own-window P4: live checks by the user.
 
 ## Known issues / open questions
-- Post-roll length (250 ms) is unproven live; a mic stalling at key-up only logs.
-- Dying input stream: root cause unknown; the watchdog recovers it and a gap
-  is now shown to the user. Latched capture ~230 MB RAM/hour, capped at 3600s.
-- LLM cleanup / technical vocabulary still open; no fuzzy replacements.
+- Dying input stream: seen once, root cause unknown; the watchdog recovers it
+  and shows the gap.
 
 ## Decided
 - Hard constraints: docs/constraints.md. No input device is read: keys are
-  bound in the WM to the control socket CLI. Rust-only since 09-21; Parakeet/Silero, TOML, nvim Lua UI and the tested
-  progressive-commit policy stay. No overlay, no paste path.
+  bound in the WM to the control socket CLI. Rust-only since 09-21; TOML,
+  nvim Lua UI and the tested progressive-commit policy stay. No paste path.
 - Cancel only while recording; a tap under 120ms is discarded with a notice;
-  silence is not
-  decoded; notices are ranked and shown in the winbar. See docs/decisions.md.
+  silence is not decoded; notices are ranked, shown in the winbar.
+- 09-21 (user): post-roll 250 ms stays; no "no speech" notice; no LLM
+  transcript cleanup; every experiment is written up in docs/experiments/.

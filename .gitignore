@@ -1,9 +1,16 @@
 target/
 nvim.log
 
-# ASR model weights, when kept in the checkout; scripts/fetch-models.sh
+# ASR model weights, when kept in the checkout; `spokenpad fetch-models`
 # downloads them to $XDG_DATA_HOME/spokenpad/models.
 models/
 
 # Voice recordings: biometric data, kept local only.
 eval-samples/*.wav
+
+# Private evaluation corpus: reference transcripts of the user's own
+# recordings, and other local-only evaluation data.
+eval-samples/local/
+
+# API keys for development tools (reference transcripts); never committed.
+.env

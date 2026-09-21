@@ -106,8 +106,18 @@ running: they use temp dirs and never the real state dir or the daemon lock.
   verified build (`scripts/install.sh`, then `systemctl --user restart
   spokenpad`) is always allowed; in managed mode it closes the user's
   dictation window, so say that you did it.
+- Experiments: every experiment (a benchmark, a corpus replay, a model or
+  parameter comparison, a spike) gets its own file
+  `docs/experiments/YYYY-MM-DD-slug.md` in the same change: question, method,
+  data, numbers, conclusion. Record negative and inconclusive results too.
+  Format: `docs/experiments/README.md`. A decision that follows still gets
+  its `docs/decisions.md` entry, linking the experiment.
 - `.agents/` and `.codex/` are untracked directories used by other tools.
   Leave them alone even when empty.
 - The models (`~/.local/share/spokenpad/models`, ~670 MB) and
   `eval-samples/*.wav` (the user's voice) are local only; never copy them
-  anywhere or send them to a service.
+  anywhere or send them to a service. One exception, granted by the user on
+  2026-09-21: recordings may be sent to Gladia (`GLADIA_API_KEY` in the
+  git-ignored `.env`) to get reference transcripts for evaluation, and
+  nowhere else. Transcripts of the user's own recordings are private too:
+  they live in the git-ignored `eval-samples/local/`, never in a commit.
