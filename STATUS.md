@@ -7,8 +7,10 @@ Hold M4 (or latch with shift), speak, and text appears in a floating nvim
 without taking focus. Fully local, CPU-only; the GTX 1650 stays free.
 
 ## Now
-- Nothing in flight. Service runs 8f24ce7 (09-21); 4 commits on main not
-  pushed — next: the user's live check (Next 1).
+- rust-only — drop Python, Rust eval example, generic eval-samples — agent (worktree) — merge.
+- model-install — static sherpa, model families, XDG model dir, service w/o checkout — agent (worktree) — merge.
+- window-portability — attach mode, terminal table, i3+sway IPC — agent (worktree) — merge.
+- Then: README rewrite, e-mail history rewrite, force push (needs the user's word).
 
 ## Done
 - 09-21: Preview auto-scroll fixed (it hung below the window from the second
@@ -39,8 +41,6 @@ without taking focus. Fully local, CPU-only; the GTX 1650 stays free.
 3. Investigate the Rust/Python ASR divergence (Known issues) by comparing the
    onnxruntime linked by the Python wheel with the sherpa prebuilt libs.
 4. `ruff format` on the three pre-existing unformatted Python files.
-5. Public release: README rewrite, Python out of `src/`, WM/terminal
-   portability (evaluated 09-21; awaiting the user's decisions).
 
 ## Known issues / open questions
 - Rust/Python ASR divergence: `um z E T` vs `um Z S E T` on one clip, and
