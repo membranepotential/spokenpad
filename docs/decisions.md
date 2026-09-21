@@ -396,3 +396,71 @@ shipping without it, all visible in `uv run scripts/eval.py`:
   words, and the one sample where Handy clearly beats us
 - `commands` → `comments`, which biasing might fix; `a dir` → `there`, which
   it cannot, since that one is a context error rather than a rare word
+
+## The Python reference implementation is dropped
+
+**2026-09-21.** `src/spokenpad/` (ASR/VAD/decode/config/text reference),
+its pytest suite, and the scripts that depended on it
+(`scripts/eval.py`, `verify_rust.py`, `verify_references.py`,
+`build_hotwords.py`) are deleted, along with the `uv` project files
+(`pyproject.toml`, `uv.lock`, `.python-version`).
+
+Nothing at runtime ever called it: the Rust daemon and `transcribe`
+command reimplemented ASR/VAD/decode natively from the start (see
+[rust.md](rust.md)), and the Python package's only remaining job was
+serving as the other half of `scripts/verify_rust.py`'s differential
+check and `scripts/eval.py`'s WER harness. For a project going public,
+one language to maintain beats two with a reference/differential
+relationship that exists only to validate a port that has been the sole
+implementation for weeks. `examples/eval.rs` replaces `eval.py`,
+decoding through the same `core::decode::Pipeline` the daemon uses
+rather than a second implementation of it — closer to what the harness
+is meant to answer, not further from it.
+
+`scripts/build_hotwords.py`'s two jobs — regenerating `bpe.vocab` from
+`tokens.txt`, and rendering `asr.vocabulary` to a hotwords file — are
+both already covered by `generate_bpe()` and the plain `\n`-joined
+vocabulary write in
+[`shell/inference.rs`](../src/shell/inference.rs), which `Transcriber::new`
+runs on every construction. The only thing lost is the standalone CLI
+for dumping those two generated files to disk for manual inspection; it
+was explicitly off the hot path and had no other caller.
+
+Dropped along with the differential check itself: the two known,
+long-standing Rust/Python mismatches this project carried as accepted,
+non-regression noise (`docs/rust.md`'s `um z E T` vs `um Z S E T` on one
+clip, and punctuation-only differences in some progressive commits).
+There is no longer a second implementation for them to be a mismatch
+against.
+
+**The `--whole` (no-VAD) WER moved from the previously reported 13.9% to
+18.7%, measured with `examples/eval.rs` on 2026-09-21.** This surfaced
+while reproducing the historical numbers for this change, not from an
+intentional edit to the decode path (out of scope here; `src/shell/inference.rs`
+and `src/config.rs` belong to a parallel workstream). Root-caused by
+running the identical audio through the actual `spokenpad transcribe`
+binary, not just the new harness:
+
+- `cd-home.wav` (formerly `handy-1787827474.wav`) now decodes to empty
+  text with no VAD loaded. The retry-without-trailing-silence fix
+  (`TrailingSilence::Bare`, see
+  [constraints.md](constraints.md#every-committed-sample-is-decoded-exactly-once-never-streamed))
+  only fires on the VAD path by design — `core/decode.rs`:
+  `Pipeline::transcribe_speech` skips the retry whenever
+  `self.segmenter.is_none()`, since nothing has claimed the window holds
+  speech. Two reference tokens at 100% WER move the corpus-level
+  aggregate by roughly two points on this five-clip set.
+- `shell-commands.wav` (formerly `handy-1787827422.wav`) loses its
+  opening sentence ("So, this is a test.") in whole-buffer decode. This
+  is the "first words lost on long dictations" failure STATUS.md already
+  lists under Known issues as unreproduced on the Rust runtime; this is
+  the first time it was reproduced there, incidentally, while chasing
+  this number.
+
+Both are pre-existing behaviours of the no-VAD decode path, not artifacts
+of the Rust port: the VAD-segmented number (17.6%) reproduces the
+historical figure exactly, and neither behaviour is unique to
+`examples/eval.rs` — the plain `transcribe` CLI shows the same text.
+Whoever next touches `src/shell/inference.rs` or `src/core/decode.rs`
+should treat 18.7% as the current `--whole` baseline, not 13.9%, and may
+want to open an issue for the reproduced first-words-lost case above.

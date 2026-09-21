@@ -1,11 +1,12 @@
 # Rust implementation
 
-The Rust runtime implements the daemon and the `transcribe` command.
-It keeps the same Parakeet TDT checkpoint, CPU provider, six inference threads,
-Silero segmentation, TOML sections, read-only evdev input, and nvim Lua UI.
-The Python package retains only ASR/VAD/decode reference functions and shared
-evaluation helpers; it is not an executable daemon and is never called by the
-Rust runtime. Setup/evaluation scripts remain Python.
+The Rust runtime implements the daemon and the `transcribe` command. There
+is no other implementation: the Python reference that mirrored ASR/VAD/decode
+during the port, and the differential check that compared against it, are
+both retired — see
+[decisions.md](decisions.md#the-python-reference-implementation-is-dropped).
+Model setup (`scripts/fetch_model.py`, `scripts/install.py`) stays Python;
+evaluation is now `examples/eval.rs` (see [evaluation.md](evaluation.md)).
 
 ## Ownership and ordering
 
@@ -43,8 +44,7 @@ the root because both sides read it. Nothing under `core/` may import `evdev`,
   FFI bindings, and native runtime are pinned together; startup checks the
   native version. Both models explicitly use the CPU provider. The merge,
   padding and settlement policy it applies to the detector's spans is pure and
-  lives in `core/segments.rs`, which is what the offline differential check
-  compares against the Python splitter.
+  lives in `core/segments.rs`.
 - `shell/audio.rs` maintains pre-roll and immutable callback chunks behind an
   `InputBackend` seam, so the capture arithmetic is driven deterministically in
   tests; PortAudio is one implementation of it. Snapshots copy sample data
@@ -95,7 +95,7 @@ buffer, and successful saves are silent; write errors still propagate and roll
 back. Ordinary editor buffers and the user's Neovim configuration are unchanged.
 
 Live ticks and recovery use the same segmentation and decode implementation.
-Padding can overlap around silence, as it did in Python; committed speech is
+Padding can overlap around silence; committed speech is
 not decoded again on release. The existing whole-buffer retry after *every*
 segment returns empty remains an explicit recovery exception. Preview inference
 is cosmetic and may repeat the open tail; it cannot become file content.
@@ -145,11 +145,10 @@ lifetime, never unlinked) reports.
 
 Run `cargo build --locked --release`. The official sherpa build script obtains
 the pinned native libraries, or uses `SHERPA_ONNX_LIB_DIR`. They are copied next
-to the executable and located using an origin-relative runpath. No build-machine
-Python path is needed at runtime. The systemd unit executes
+to the executable and located using an origin-relative runpath. No Python is
+needed at runtime. The systemd unit executes
 `target/release/spokenpad`; the per-user lock above rejects a second Rust
-daemon. The Python reference predates that lock and must be stopped before
-switching.
+daemon.
 
 The installed i3 `no_focus` rule remains required. The Rust adapter checks
 the active configuration, including loaded include files, before opening a
@@ -191,17 +190,19 @@ cargo test --locked --test e2e -- --ignored
 The nvim-dependent tests **fail** when nvim is missing rather than reporting a
 green suite; `SPOKENPAD_ALLOW_MISSING_NVIM=1` skips them deliberately.
 
-`scripts/verify_rust.py` compares Rust with the Python reference using the
-locally held WAVs. It checks exact segment start/end/padding/settlement,
-transcripts, progressive commit offsets, and the final release remainder.
-The native executable is `examples/verify_native.rs`. Audio and text stay local.
-
-Initial-port verification on 2026-09-09, before the endpoint-padding fix: all
-five evaluation WAVs produced exactly the same segments and raw transcripts in
-Rust and Python. A 102.5s simulated live passage also matched all six
-progressive commits, their offsets, and the final transcript. Its final
-remainder was 1.8s of audio, decoded by Rust in 0.43s on that run. These figures
-are historical evidence, not validation of the later endpoint-padding change.
+A Rust/Python differential check (`scripts/verify_rust.py`) compared exact
+segment start/end/padding/settlement, transcripts, progressive commit
+offsets, and the final release remainder against the Python reference through
+the port and several fixes after it; both are retired now — see
+[decisions.md](decisions.md#the-python-reference-implementation-is-dropped).
+While it ran it validated the initial port (2026-09-09: all five evaluation
+WAVs produced exactly the same segments and raw transcripts in Rust and
+Python; a 102.5s simulated live passage matched all six progressive commits,
+their offsets, and the final transcript) and, on 2026-09-19, confirmed that
+the empty-decode retry fix (see
+[decisions.md](decisions.md#an-empty-speech-chunk-is-decoded-again-without-trailing-silence))
+brought the `cd home` clip back into agreement with the Python decode after a
+2026-09-11 edge-case divergence.
 
 The follow-up regression reproduced the invisible first preview and delayed
 scrolling on an attached 40×10 Neovim grid. It now checks visible first-preview
@@ -218,30 +219,19 @@ while one previously matching recording gained a word error (3.4%). Without VAD,
 WER moved from 13.4% before that change to 13.9% after it. A shorter 0.5-second
 pad was rejected because it made the short command decode empty.
 
-**Current accuracy figures**, re-measured 2026-09-11 with `uv run
-scripts/eval.py` on the five verified references: **17.6%** aggregate WER
-through the VAD path the daemon uses, **13.9%** whole-buffer, against Handy
-0.9.6's **48.7%** on the same five, all five scored. Five clips of one speaker
+**Current accuracy figures**, re-measured 2026-09-21 with `cargo run --release
+--example=eval` on the five verified references: **17.6%** aggregate WER
+through the VAD path the daemon uses, reproducing the figure above exactly.
+The whole-buffer number has since moved to **18.7%** (previously 13.9%) —
+see [decisions.md](decisions.md#the-python-reference-implementation-is-dropped)
+for the two pre-existing behaviours this traces to. Five clips of one speaker
 are a regression proxy, not a general accuracy guarantee — see
 [evaluation.md](evaluation.md).
 
-Final post-fix differential verification on 2026-09-09 passed all five
-recordings with exact segment and transcript parity. Re-run on 2026-09-11,
-the short `cd home` clip (`handy-1787827474.wav`) decodes to an empty string in
-Rust while the Python reference still yields `C D home.`; the VAD segments are
-identical and the build at commit b1159ec reproduces the same empty result, so
-this is a native-runtime difference on an edge case, not a regression of the
-2026-09-11 changes. On 2026-09-19 it turned out to be the empty-decode edge
-case described in [decisions.md](decisions.md#an-empty-speech-chunk-is-decoded-again-without-trailing-silence):
-with the retry, Rust and Python agree on this clip. The 102.5-second progressive passage matched
-all six commits and its final transcript; its 1.8-second release remainder
-decoded in 0.53 seconds in that run.
-
-The native suite and the focused offline Python reference suite are both part
-of verification. As of 2026-09-11, `cargo test --locked --all-targets` passes
-**132 library, 1 binary, 4 CLI and 12 end-to-end tests**, with the one real-model
-e2e test ignored by default, and the retained Python suite collects and passes
-**69** tests. Strict all-target clippy, rustfmt, Ruff, and mypy checks apply.
+`cargo test --locked --all-targets` passes **143 library, 1 binary, 4 CLI and
+16 end-to-end tests**, with the one real-model e2e test ignored by default,
+plus 5 unit tests in `examples/eval.rs`. Strict all-target clippy and rustfmt
+checks apply.
 The optional `cargo run --example verify_window` smoke harness opened a real
 dedicated editor, saved multiline Unicode exactly, confirmed unchanged X11
 focus after opening and appending, and closed its temporary editor. Run this
