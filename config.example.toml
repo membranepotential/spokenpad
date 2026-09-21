@@ -253,6 +253,13 @@ trailing_space = false
 #              Needs i3 or sway, and refuses to open a window until the running
 #              window manager's config proves a no_focus rule for it
 #              (packaging/i3/ or packaging/sway/).
+#   "pane"     the daemon does, in a window it draws itself, on the first
+#              key-down. No terminal, and no window-manager rule to install:
+#              the window carries the properties that make a window manager
+#              refuse it focus. Needs an X display -- on Wayland, through
+#              Xwayland, so import DISPLAY into the user manager. New in
+#              2026-09; verified on i3 only so far, so try it before you rely
+#              on it. `spokenpad check` says whether this machine can.
 mode = "attach"
 
 # Managed mode only: the terminal the window opens in -- "alacritty",
@@ -267,7 +274,7 @@ terminal = "alacritty"
 # file are appended to this, so anything here comes first.
 editor = ["nvim"]
 
-# nvim config for the dictation editor, in both modes.
+# nvim config for the dictation editor, in every mode.
 #
 #   unset       your own ~/.config/nvim -- everything you have, and its cost
 #   "bundled"   spokenpad's own: no plugins, chrome off before the first frame
@@ -308,14 +315,29 @@ transparent = true
 # interpolated into window-manager criteria.
 window_instance = "spokenpad"
 
-# Managed mode only: size of the window, as a fraction of each screen axis.
-# On i3 it opens with its top-left corner at the mouse pointer, clamped fully
-# on screen, so it lands beside whatever you are reading; sway cannot tell a
-# client where the pointer is, so there it opens in the bottom-right corner
-# of the focused output.
+# Managed and pane modes: size of the window, as a fraction of each screen
+# axis. It opens with its top-left corner at the mouse pointer, clamped fully
+# on screen, so it lands beside whatever you are reading. Under Wayland the
+# pointer cannot be read -- sway tells a client nothing, and Xwayland answers
+# with where the pointer last was over an X window -- so there it opens in a
+# corner of the chosen output instead.
 window_fraction = 0.33
 
-# Where nvim listens for RPC, in both modes. spokenpad reattaches to a live
+# Pane mode only: the font the window draws with, as a fontconfig family name.
+# "monospace" is the alias your desktop already points at the font you want,
+# so start there. Name one here if what it resolves to has no bold or italic
+# face -- spokenpad thickens the strokes itself where bold is missing, which
+# is close but not the same thing. `fc-match monospace` says what you have.
+font_family = "monospace"
+
+# Pane mode only: that font's size, in PIXELS, not points. The window
+# rasterises at a pixel size and has no display resolution to convert a point
+# size from, so this is the honest unit. 16 is about what a terminal at 12pt
+# on a 96dpi screen gives you. The window's size in cells follows from this
+# and window_fraction above.
+font_size = 16.0
+
+# Where nvim listens for RPC, in every mode. spokenpad reattaches to a live
 # socket rather than opening a second window, and `spokenpad editor` refuses
 # to start a second editor on it.
 #

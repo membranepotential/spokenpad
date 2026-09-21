@@ -281,6 +281,33 @@ dictating into, aborting the transcription in progress.
 **Rule:** no window this project opens may receive keyboard focus at any point
 in its lifecycle. How that holds depends on `nvim.mode`:
 
+- **Pane mode opens exactly one: a window spokenpad draws itself**, and it
+  needs no rule and no window manager's cooperation. The window carries
+  `_NET_WM_USER_TIME = 0` — the EWMH value for "do not focus this window when
+  it is mapped" — together with `_NET_WM_WINDOW_TYPE_UTILITY`,
+  `WM_HINTS input = True` and a `WM_CLASS` of `spokenpad-pane`, all written
+  before the window is first mapped, which is when a window manager reads
+  them. Three rules hold this in place, and each is asserted:
+  - **`_NET_WM_USER_TIME` is written once, as zero, and never again.** The
+    EWMH contract is that a toolkit keeps it at the timestamp of the last user
+    interaction, and a window manager re-reads it at every map — so a window
+    that kept it current would steal focus the next time it appeared. The
+    window type exposes no way to write it a second time, and the test checks
+    both halves: the value is still zero after a click and two keystrokes, and
+    a rewritten value focus-steals.
+  - **`WM_TAKE_FOCUS` is not announced.** With `input = True` and a user time
+    of zero it changes nothing, and announcing it would oblige spokenpad to
+    answer a protocol whose whole purpose is taking focus.
+  - **There is no focus call**, as everywhere else in this project.
+
+  The proof is `tests/pane_window.rs`, which opens the shipped window on an
+  i3 it starts itself and checks the i3 tree and the X input focus, on a
+  workspace that already has a focused window *and* on an empty one — where
+  `no_focus` fails and this does not. It runs an ablation beside it, so
+  "unfocused" is known to mean something: drop the user time and the same
+  window is focused. **Verified on i3 only.** Mutter, KWin, Openbox, xfwm4,
+  bspwm and Hyprland are read from their source and not run; sway and awesome
+  are known to need more. Pane mode is new and says so wherever it is offered.
 - **Attach mode opens no window at all.** The user opens the editor in a
   terminal of their choosing, and the daemon only ever talks to its socket,
   so the rule holds by construction, on any desktop.

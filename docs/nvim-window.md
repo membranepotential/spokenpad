@@ -12,7 +12,7 @@ The transcript goes to a dedicated neovim, over its msgpack-RPC socket.
 Nothing is pasted anywhere, and no window that was not opened for this
 purpose is ever written to.
 
-## Two modes: who opens the editor
+## Three modes: who opens the editor
 
 `nvim.mode` says who opens that neovim. It is explicit configuration, not
 detection.
@@ -21,13 +21,17 @@ detection.
 |---|---|---|---|
 | `attach` (default) | you, with `spokenpad editor` | any terminal, any desktop: X11 or Wayland, any window manager | the daemon opens no window, so it cannot take focus |
 | `managed` | the daemon, on the first key-down, in `nvim.terminal` | i3 or sway | proven: the running window manager's `no_focus` rule, before the window exists |
+| `pane` | the daemon, on the first key-down, in a window it draws itself | X11, and Wayland through Xwayland | the window's own properties, which any window manager reads |
 
 `attach` is the default because it is the one that works everywhere with no
 window-manager rules to install: a new user gets a working setup on any
 desktop, and nothing spokenpad does can move focus. `managed` is the
 original behaviour, generalised from alacritty on i3 to five terminals on i3
 and sway; it is worth its setup for a window that appears by itself, beside
-what you are reading.
+what you are reading. `pane` is that same window without the setup and
+without the terminal: spokenpad owns it, so the rule, the terminal table and
+the empty-workspace gap all go away — and so does the window's independence
+from the daemon.
 
 Everything below the mode is shared: one file per editor, the winbar
 indicator and notices, the live preview, the opt-in clipboard copy after a
@@ -92,6 +96,119 @@ The same path catches a managed-mode editor that could not be opened (a
 missing `no_focus` rule, a terminal that is not installed): the text goes to
 the pending passage instead of only to the log.
 
+## Pane mode: the window spokenpad draws
+
+```
+nvim --embed --listen <socket> -u <init> <dated file>
+```
+
+No terminal. The daemon creates an X11 window, starts that nvim as a child
+with its stdin and stdout as the channel, and attaches to it as a UI with
+`nvim_ui_attach(columns, rows, { ext_linegrid = true, rgb = true })`. Neovim
+then describes its display as redraw events instead of drawing to a terminal,
+and spokenpad turns them into pixels. The editor is otherwise the same one
+every mode gets — same argv, same init, same ownership marker, same
+`--listen` socket — so the daemon appends to it exactly as it does to a
+terminal editor. **Committed text does not travel over the drawing channel**:
+the pane draws, and never writes to the buffer.
+
+### Why it needs no rule
+
+The window carries four properties, all set before it is first mapped, which
+is when a window manager reads them:
+
+| property | what it does |
+|---|---|
+| `_NET_WM_USER_TIME = 0` | "do not focus this window when it is mapped" (EWMH). On i3 this is the whole guarantee, and unlike `no_focus` it holds for the first window on an empty workspace. |
+| `_NET_WM_WINDOW_TYPE_UTILITY` | floats it on tiling window managers, and is what refuses focus on those that ignore user time (bspwm, Hyprland's Xwayland). |
+| `WM_HINTS input = True` | the ICCCM "passive input" model, so the window manager may give it focus *later* — which is how you click in and type. |
+| `WM_CLASS = spokenpad-pane` | a name no rule written for the managed-mode terminal can match, because this window needs none. |
+
+`_NET_WM_USER_TIME` is written **once, as zero, and never again**. The EWMH
+contract is that a toolkit updates it to the timestamp of the last user
+interaction, and a window manager re-reads it at every map, so a window that
+kept it current would steal focus the next time it appeared. That is measured,
+along with everything in the table:
+[2026-09-21-own-window-p0-properties.md](experiments/2026-09-21-own-window-p0-properties.md).
+`WM_TAKE_FOCUS` is deliberately absent: with `input = True` and a user time of
+zero it changes nothing, and announcing it would oblige spokenpad to answer
+it.
+
+**Verified on i3 only.** The other window managers are read from their source
+(the experiment's table says which), not run. Try pane mode before you rely on
+it, and say what you find.
+
+### What it costs to run
+
+| | |
+|---|---|
+| processor time while the window is open and nothing happens | none: the loop blocks on one channel fed by two threads, with no timer and no polling |
+| resident memory the window adds | about 5.5 MB, for the framebuffer, the rasterised glyphs and the editor's client |
+| key-up to the transcript in the file, opening the window on the way | about 300 ms |
+| system libraries | `libxcb`, `libxkbcommon`, `libxkbcommon-x11`, opened when a pane opens rather than linked, so the binary starts without them in the other modes |
+| programs | `fc-match`, from fontconfig, once per font at startup |
+
+`spokenpad check` reports all of those before anyone dictates, and exits
+non-zero when one is missing.
+
+### The font
+
+`nvim.font_family` is a fontconfig family name and defaults to `monospace`,
+the alias your desktop already points at the font you want. `nvim.font_size`
+is in **pixels**: the pane rasterises at a pixel size and has no display
+resolution to convert a point size from, so a point size here would be a
+number that means something on paper and nothing on the screen.
+
+Bold is thickened by hand where fontconfig has no bold face — which is what
+`monospace` resolves to on some machines — and italic falls back to the plain
+face, because a synthetic slant looks worse than none. A character the family
+does not cover is fetched from whichever font fontconfig names for it, so a
+transcript that contains `漢` or `✓` shows them rather than blank cells.
+
+There is no input method: dead keys and Compose work, because they are
+xkbcommon's and spokenpad reads the layout the X server has loaded, but IBus
+and Fcitx are not clients of this window. For German and English dictation
+that is not a gap; for CJK input it is, and `attach` or `managed` is the
+answer there.
+
+### What happens when
+
+- **No `DISPLAY`, or a library missing.** The daemon says which, and the text
+  goes to the pending passage, exactly as it does when a terminal is not
+  installed. It does not fail.
+- **You close the window.** The editor inside it is asked to write every
+  modified buffer and quit, its socket goes, and the next dictation opens a
+  new window on a new file. Same as closing a managed terminal.
+- **You `:q` in it.** The same, from the other end.
+- **The daemon restarts.** The window goes with it — it is a thread of that
+  process and the editor is its child. This is the one real difference from
+  managed mode, where your terminal outlives the daemon and is reattached to.
+  Nothing is lost: dictated text is written to the file after every utterance,
+  and the pane writes every modified buffer before it quits, so a restart
+  costs the window and not the transcript. The next dictation opens a new one.
+- **You run `spokenpad editor` anyway.** It opens an editor in your terminal
+  and the daemon adopts it, rather than opening a pane — the socket is the
+  contract, not the mode. Close it and the next dictation opens a pane again.
+
+### Where it opens
+
+`nvim.window_fraction` of the monitor under the pointer, with its top-left
+corner at the pointer, clamped fully on-screen — the same rule managed mode
+uses and the same pure functions in `core/geometry.rs` decide it. The
+monitors come from RandR and the pointer from the X server itself, rather
+than from a window manager's IPC socket, so this works under a window manager
+spokenpad has never heard of.
+
+Under Xwayland the pointer is **not** asked for: `QueryPointer` there answers
+with wherever the pointer last was over an X window, which is not where it is,
+and a window at a stale position looks deliberate in a way a corner does not.
+With `WAYLAND_DISPLAY` set the window goes to the corner instead.
+
+The position is asked for in `WM_NORMAL_HINTS` before the window is mapped, so
+it appears in about the right place, and corrected once afterwards — a window
+manager that draws a frame places the frame rather than the window inside it,
+which on i3 is four pixels across and eighteen down.
+
 ## Managed mode: what gets spawned
 
 ```
@@ -145,8 +262,12 @@ to it, and the append that follows simply queues behind it.
 The window must never take focus — it appears while you are reading something
 else, and you keep reading.
 
-That is the window manager's job, and spokenpad contains **no focus call at
-all**: not `xdotool windowfocus`, and not a "remember the focused window and
+Who enforces that differs by mode. In `managed` it is the window manager's
+job, through a rule the user installs and spokenpad proves. In `pane` it is
+the window's own properties, which every window manager reads without being
+told anything ([above](#why-it-needs-no-rule)). What both have in common, and
+what the rest of this section is about, is that spokenpad contains **no focus
+call at all**: not `xdotool windowfocus`, and not a "remember the focused window and
 restore it afterwards" dance either, since restoring focus is itself a focus
 change and would race anything the user did in between.
 
@@ -195,11 +316,17 @@ IPC server; it has not been run live.
 Size and position are spokenpad's, not the window manager's, so the rule file stays to the two
 things only a window manager can do.
 
+Both window modes follow the same rule with the same code; where they differ
+is only who is asked. Managed mode asks the window manager over its IPC
+socket, because it has to talk to i3 or sway anyway to prove the rule; pane
+mode asks X directly ([above](#where-it-opens)).
+
 The window is **a third of the screen on each axis** (`nvim.window_fraction`,
 0.33) with its **top-left corner at the mouse pointer**, on whichever monitor
-the pointer is on (on i3, read with `xdotool`; sway gives a client no way to
-ask, so there the window opens in the bottom-right corner of the focused
-output) — it opens beside what you are reading rather than in a
+the pointer is on (on i3, read with `xdotool` in managed mode and with
+`QueryPointer` in pane mode; sway gives a client no way to ask, and Xwayland
+answers with a stale position, so on Wayland the window opens in a corner of
+the chosen output) — it opens beside what you are reading rather than in a
 fixed corner you have to look away to find. `geometry::pick_output` chooses the
 output and `geometry::placement` clamps the rect fully on-screen — both pure
 functions over output rectangles — so a pointer near an edge tucks the window

@@ -29,7 +29,17 @@ imperative shell, and `config.rs` sits at the root because both sides read it.
 | `shell/control.rs` | Listen on the control socket, stamp and forward each request; the client the CLI uses | Unix socket |
 | `shell/audio.rs` | Pre-roll, immutable capture chunks, dropping committed audio, the memory ceiling, stream repair | PortAudio (behind `InputBackend`) |
 | `shell/recorder.rs` | Persist every capture independently of decode, and prune the directory | filesystem |
-| `shell/nvim/mod.rs` | Editor lifecycle in both modes (attach, managed spawn), ownership proof, transactional appends, indicator, `spokenpad editor` | Unix socket, window manager |
+| `core/grid.rs` | Neovim's `ext_linegrid` redraw events, typed, and the screen they fold into; which rows each one changed | none |
+| `core/keys.rs` | A keysym, its modifiers and the text a layout produced, as the notation `nvim_input` reads | none |
+| `shell/nvim/mod.rs` | Editor lifecycle in all three modes (attach, managed spawn, pane), ownership proof, transactional appends, indicator, `spokenpad editor` | Unix socket, window manager |
+| `shell/pane/mod.rs` | The pane: its loop, the renderer, and what `spokenpad check` looks for | X11 |
+| `shell/pane/host.rs` | The pane's thread, and the two things the daemon tells it | internal channels |
+| `shell/pane/x11.rs` | The window, the properties that keep a window manager from focusing it, and `PutImage` | X11 |
+| `shell/pane/ui.rs` | `nvim --embed` over stdio, `nvim_ui_attach`, and the thread that decodes its redraw stream | a child process |
+| `shell/pane/font.rs` | `fc-match` for the face, swash for hinted glyphs, per-grapheme caching and per-character fallback | fontconfig, filesystem |
+| `shell/pane/keyboard.rs` | The layout the X server has loaded, dead keys and Compose | X11, libxkbcommon |
+| `shell/pane/place.rs` | The monitors from RandR and the pointer from X, fed to `core/geometry.rs` | X11 |
+| `shell/pane/xkb.rs` | libxcb and libxkbcommon, opened with `dlopen` when a pane opens | shared libraries |
 | `shell/nvim/passage.rs` | With no editor open: append to the pending dictation file, and the pointer the next editor opens | filesystem |
 | `shell/nvim/rpc.rs` | msgpack-RPC transport with absolute deadlines; pure codec | Unix socket |
 | `shell/wm.rs` | i3/sway IPC requests under a deadline, once per spawn; `xdotool` for the pointer on i3 | IPC socket, one subprocess |
@@ -170,6 +180,22 @@ of it.
 Four owners: the main loop (session state), the control socket thread, the
 inference worker, and the editor thread; `shell::recorder` owns disk I/O on a thread of
 its own.
+
+In `nvim.mode = "pane"` there is a fifth, and only then: the pane thread owns
+the window, the embedded editor and everything drawn. It exists because a pane
+has to be *driven* — Neovim reports its display whenever it has something to
+say, and nothing is drawn until the pane applies it — and the editor thread is
+busy blocking on transcripts. Two more threads sit under it, one waiting for X
+events and one decoding the editor's redraw stream; both feed the pane's
+single channel, so its loop blocks in one place and costs nothing while
+nothing happens.
+
+The daemon tells that thread two things, open and stop, and is never told a
+window closed. It does not need to be: the editor dies with the window, its
+socket goes with it, and the next key-down finds a dead socket and asks for a
+new pane — which is exactly what happens when a user closes a managed
+terminal. Committed text never travels over the drawing channel; it goes over
+the editor's own socket, as in every other mode.
 
 Capture callbacks do bounded work — one allocation, one lock, no I/O — and hand
 immutable chunks to the recording and decode consumers. One inference worker

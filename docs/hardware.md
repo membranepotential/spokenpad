@@ -33,12 +33,20 @@ spokenpad never touches an input device
 
 ## Displays
 
-Only managed mode places a window. On i3 it opens on whichever output holds
-the mouse pointer; sway gives a client no way to read the pointer, so there
-it opens on the focused output ([nvim-window.md](nvim-window.md#placement)).
+Attach mode places no window. The two that do — managed and pane — both open
+on whichever output holds the mouse pointer, and both fall back to a corner
+where the pointer cannot be read: sway gives a client no way to ask, and
+Xwayland answers with where the pointer last was over an X window
+([nvim-window.md](nvim-window.md#placement)).
 [`core/geometry.rs`](../src/core/geometry.rs) picks the output as a pure
-function over the output rectangles the window manager reports over IPC, so
-any number and arrangement of outputs works.
+function over output rectangles, so any number and arrangement works. Where
+those rectangles come from differs: managed mode reads them from the window
+manager over IPC, pane mode from RandR, falling back to the root window's
+size on a server with no RandR.
+
+Pane mode also needs a display it can rasterise into: a 24- or 32-bit visual
+with the usual channel masks, which is every X server anyone runs. It refuses
+anything else by name rather than drawing wrong colours.
 
 ## CPU
 
@@ -72,3 +80,10 @@ opens the editor in any terminal. Managed mode needs i3 or sway, where the
 dictation window must float and must never take focus; the window manager
 enforces both through the rules in `packaging/i3/` or `packaging/sway/`
 ([nvim-window.md](nvim-window.md)).
+
+Pane mode needs no rule and no named window manager: the window it draws
+carries the properties that make a window manager float it and refuse it
+focus, and every window manager reads those without being told. It needs an X
+display, which on Wayland means Xwayland. **Verified on i3 only so far** —
+the rest is read from source, and sway and awesome are known to want more
+([constraints.md](constraints.md#no-window-spokenpad-opens-may-take-focus)).

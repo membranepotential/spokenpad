@@ -6,8 +6,10 @@ manager to `spokenpad start`/`stop` (push-to-talk), `toggle` (latch) and
 (`$XDG_RUNTIME_DIR/spokenpad.sock`); the transcript lands in a dictation
 Neovim over msgpack-RPC.
 `nvim.mode = "attach"` (default): the user runs `spokenpad editor` in any
-terminal; `"managed"`: the daemon opens a floating window on i3 or sway. Rust
-only, CPU only (sherpa-onnx linked statically: Parakeet TDT by default, Whisper
+terminal; `"managed"`: the daemon opens a floating terminal on i3 or sway;
+`"pane"`: the daemon opens a window it draws itself, with `nvim --embed` in
+it, needing no window-manager rule (X11 and Xwayland; verified on i3 only).
+Rust only, CPU only (sherpa-onnx linked statically: Parakeet TDT by default, Whisper
 or SenseVoice via `asr.family`; Silero VAD).
 
 Read first: `STATUS.md` (live dashboard, keep it true, ≤ 60 lines),
@@ -29,7 +31,10 @@ Design history is `docs/decisions.md`; add an entry when you change behaviour.
   downloaded.
 - No window spokenpad opens may take focus. Attach mode opens no window;
   managed mode proves the i3/sway `no_focus` rule over IPC before it spawns a
-  graphical editor. The code contains no focus call.
+  graphical editor; pane mode sets `_NET_WM_USER_TIME = 0` (once, never
+  again), `_NET_WM_WINDOW_TYPE_UTILITY` and `WM_HINTS input = True` before the
+  first map, and announces no `WM_TAKE_FOCUS`. The code contains no focus
+  call.
 - Committed speech is decoded exactly once; the release decodes only the tail.
   The one exception: a VAD chunk that decodes to "" is decoded once more
   without trailing silence (`TrailingSilence::Bare`).
@@ -64,14 +69,16 @@ those belongs in `src/shell/`.
   `shell/nvim/mod.rs` (editor lifecycle, both modes, `spokenpad editor`),
   `shell/nvim/passage.rs` (text dictated with no editor open), `shell/wm.rs`
   (i3/sway IPC socket), `shell/logging.rs`.
-- The pane (`shell/pane/`, the dictation window spokenpad draws itself;
-  nothing in the daemon uses it yet): `mod.rs` (the run loop, the renderer
-  and `editor_command`), `x11.rs` (the window, the properties that keep a
-  window manager from focusing it, `PutImage`), `ui.rs` (`nvim --embed` over
-  stdio, `nvim_ui_attach`), `font.rs` (`fc-match` plus swash glyphs),
-  `keyboard.rs` (the user's real layout, dead keys, Compose), `xkb.rs`
-  (libxcb and libxkbcommon opened with `dlopen` when a pane opens, so the
-  binary starts without them in the other modes).
+- The pane (`shell/pane/`, the dictation window spokenpad draws itself,
+  reached through `nvim.mode = "pane"`): `mod.rs` (the loop, the renderer,
+  `requirements` for `spokenpad check`), `host.rs` (its thread, and the two
+  things the daemon tells it), `x11.rs` (the window, the properties that keep
+  a window manager from focusing it, `PutImage`), `ui.rs` (`nvim --embed`
+  over stdio, `nvim_ui_attach`), `font.rs` (`fc-match` plus swash glyphs and
+  per-character fallback), `keyboard.rs` (the user's real layout, dead keys,
+  Compose), `place.rs` (RandR monitors and the X pointer, fed to
+  `core/geometry.rs`), `xkb.rs` (libxcb and libxkbcommon opened with `dlopen`
+  when a pane opens, so the binary starts without them in the other modes).
 - Editor UI: `src/lua/spokenpad.lua` (winbar, preview extmark, transactional
   `append_once`) and `src/lua/dictation_init.lua` (bundled init).
 - Tests: unit tests in-module; `src/shell/nvim/tests.rs` (real
@@ -82,9 +89,12 @@ those belongs in `src/shell/`.
   i3/sway window smoke check), `examples/verify_native.rs` (JSON dump of
   segments and progressive commits), `examples/pane.rs` (opens the pane on a
   given display, and can write a screenshot).
-- `tests/pane_window.rs` opens the pane window on an Xvfb and i3 it starts
-  itself and proves it never takes focus; `tests/pane_render.rs` runs a real
-  embedded nvim in it and checks the drawing against nvim's own screen.
+- `tests/harness/mod.rs` is the headless desktop the pane tests share (its own
+  Xvfb above `:50`, its own i3, XTEST input that refuses any other display).
+  `tests/pane_window.rs` proves the window never takes focus;
+  `tests/pane_render.rs` runs a real embedded nvim in it and checks the
+  drawing against nvim's own screen; `tests/pane_daemon.rs` drives the real
+  `shell::daemon::serve` in pane mode.
 - `scripts/install.sh` (binary to `~/.local/bin`, user unit; `--uninstall`).
   Models (`$XDG_DATA_HOME/spokenpad/models`, pinned sha256) come from
   `spokenpad fetch-models` or the first launch. `packaging/` holds the unit,

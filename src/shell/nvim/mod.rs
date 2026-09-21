@@ -10,6 +10,11 @@
 //! or adopting an editor, proving it belongs to spokenpad, and appending
 //! committed text so that a failure to land it is visible rather than silent.
 //! With no editor to append to, `passage` writes the text to the file itself.
+//!
+//! Three modes differ only in who starts that editor: nobody (`attach`), a
+//! terminal (`managed`), or a window spokenpad draws itself (`pane`, in
+//! [`shell::pane`](crate::shell::pane)). Everything after it answers on its
+//! socket is the same code, which is why the wait for that socket is shared.
 mod passage;
 pub(crate) mod rpc;
 

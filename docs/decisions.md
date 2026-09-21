@@ -832,3 +832,65 @@ with and without trailing silence, while greedy returns the words. The
 decision above stands: greedy by default, and no hotwords on the current
 model. Measurements in
 [experiments/2026-09-21-sherpa-1.13.8-upgrade.md](experiments/2026-09-21-sherpa-1.13.8-upgrade.md).
+
+## spokenpad draws its own dictation window (`nvim.mode = "pane"`, 2026-09-21)
+
+Managed mode buys one thing — a window that appears beside what you are
+reading — and charges a lot for it. It needs i3 or sway, a `no_focus` rule the
+user installs, a terminal from a table spokenpad has to know how to name a
+window in, and it still cannot open on an empty workspace, because both window
+managers focus the first window on one whatever the rule says. Every one of
+those costs exists because the window belongs to someone else.
+
+So spokenpad opens its own. An X11 window with four properties set before it
+is first mapped, `nvim --embed` inside it, and a renderer that turns Neovim's
+`ext_linegrid` redraw stream into pixels. `_NET_WM_USER_TIME = 0` is the whole
+of the focus guarantee on i3, and unlike `no_focus` it holds on an empty
+workspace; `_NET_WM_WINDOW_TYPE_UTILITY` floats it, and is what refuses focus
+on the window managers that ignore user time. No rule, no terminal table, no
+IPC proof, no empty-workspace gap — and it works under a window manager
+spokenpad has never heard of, because it asks nothing of one. Measured, with
+an ablation, in
+[2026-09-21-own-window-p0-properties.md](experiments/2026-09-21-own-window-p0-properties.md)
+and [2026-09-21-own-window-p1-renderer.md](experiments/2026-09-21-own-window-p1-renderer.md).
+
+What it costs, stated plainly:
+
+- **The window cannot outlive the daemon.** It is a thread of that process and
+  its editor is a child; a managed terminal is neither. Nothing is lost when
+  the daemon restarts — the file is written after every utterance and the pane
+  writes every modified buffer before it quits — but the window goes, and the
+  next dictation opens a new one. Managed mode stays for people who want the
+  other trade.
+- **No input method.** Dead keys and Compose work, because spokenpad reads the
+  layout the X server has loaded; IBus and Fcitx are not clients of a
+  hand-rolled window. Fine for German and English, a gap for CJK.
+- **Text rendering is spokenpad's problem now**, and a terminal has had
+  decades of work on it. Bold is thickened by hand where fontconfig has no
+  bold face, italic falls back to plain, and a character the family does not
+  cover is fetched from whichever font fontconfig names for it.
+- **Verified on i3 only.** The rest is read from source.
+
+Rejected on the way:
+
+- **winit** cannot set `WM_HINTS input` or `_NET_WM_USER_TIME`, which are the
+  two properties the whole approach rests on, and has no layer-shell either.
+- **GTK4** would bring Pango, IBus and layer-shell, and with them a toolkit
+  main loop that wants its own thread, a large runtime dependency and an X11
+  backend GTK is moving away from. It is the right answer if input methods
+  ever become a requirement, and the wrong one for a pane of monospace text in
+  a daemon that values a small core.
+- **nvim-rs** needs tokio or async-std and a second msgpack codec beside the
+  one this project already has. The redraw stream is about three hundred lines
+  to decode against the existing one.
+- **fontdb** answers "which file is monospace?" by parsing five thousand faces
+  at every start, a question fontconfig has already answered with the user's
+  own rules applied. `fc-match` is one short-lived process.
+- **Linking libxcb and libxkbcommon.** The default mode opens no window, and a
+  binary that listed those libraries as needed would refuse to *start* on a
+  machine without them, for a feature that user never selected. They are
+  opened with `dlopen` when a pane opens, and a missing one is an error naming
+  the package.
+
+The default stays `attach`. Whether `pane` should replace `managed` is a
+question for after it has been used on a real desktop.

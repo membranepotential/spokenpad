@@ -60,7 +60,7 @@ fn the_daemon_opens_a_pane_dictates_into_it_and_cleans_up() {
     // environment has been started yet.
     unsafe { std::env::remove_var("DISPLAY") };
     let blind = Daemon::start();
-    blind.dictate();
+    let _ = blind.dictate();
     let pending = wait_for(
         PATIENCE,
         "the transcript to reach the pending passage",
@@ -87,13 +87,22 @@ fn the_daemon_opens_a_pane_dictates_into_it_and_cleans_up() {
     unsafe { std::env::set_var("DISPLAY", &server.display) };
 
     let daemon = Daemon::start();
-    daemon.dictate();
+    let before = resident_kilobytes();
+    let released = daemon.dictate();
     let first = wait_for(PATIENCE, "the transcript to reach a dictation file", || {
         daemon
             .dictation_files()
             .into_iter()
             .find(|path| contains(path, SPOKEN))
     });
+    let landed = released.elapsed();
+    let after = resident_kilobytes();
+    println!(
+        "key-up to the first transcript in the file, opening a pane on the way: {} ms; \
+         resident memory {before} kB -> {after} kB ({} kB for the window, its font and its editor's client)",
+        landed.as_millis(),
+        after.saturating_sub(before)
+    );
     let pane = wait_for(PATIENCE, "i3 to manage the pane", || pane_window(&i3));
     std::thread::sleep(SETTLE);
     let node = i3.node(pane).expect("the pane");
@@ -138,7 +147,7 @@ fn the_daemon_opens_a_pane_dictates_into_it_and_cleans_up() {
     wait_for(PATIENCE, "the pane to go away", || {
         pane_window(&i3).is_none().then_some(())
     });
-    daemon.dictate();
+    let _ = daemon.dictate();
     let second = wait_for(PATIENCE, "a second dictation file", || {
         daemon
             .dictation_files()
@@ -189,6 +198,17 @@ fn clipboard(display: &str) -> Option<String> {
         }
         thread::sleep(Duration::from_millis(100));
     }
+}
+
+/// This process's resident set, in kilobytes, from `/proc`.
+fn resident_kilobytes() -> u64 {
+    let statm = std::fs::read_to_string("/proc/self/statm").unwrap_or_default();
+    let pages: u64 = statm
+        .split_whitespace()
+        .nth(1)
+        .and_then(|value| value.parse().ok())
+        .unwrap_or_default();
+    pages * 4
 }
 
 fn contains(path: &Path, text: &str) -> bool {
@@ -303,14 +323,16 @@ impl Daemon {
         }
     }
 
-    /// One push-to-talk: press, speak, release.
-    fn dictate(&self) {
+    /// One push-to-talk: press, speak, release. Returns the moment the key
+    /// came up, which is when the daemon starts working.
+    fn dictate(&self) -> Instant {
         self.send(Request::Start);
         self.microphone.speak(&vec![0.4_f32; 16_000]);
         wait_for(PATIENCE, "the microphone to be drained", || {
             self.microphone.spoken().then_some(())
         });
         self.send(Request::Stop);
+        Instant::now()
     }
 
     fn send(&self, request: Request) {

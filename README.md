@@ -35,6 +35,12 @@ applications.
   downloads sherpa-onnx's prebuilt static libraries from GitHub.
 - About 700 MB of disk for the default model, and about 1.2 GB of RAM while it
   runs.
+- Only for `nvim.mode = "pane"`, the window spokenpad draws itself: an X
+  display (Wayland works through Xwayland), `fontconfig` for `fc-match`, and
+  `libxcb`, `libxkbcommon` and `libxkbcommon-x11`. These are opened when a
+  pane opens rather than linked, so the daemon starts and dictates without
+  them in the other two modes; `spokenpad check` reports whether this machine
+  has them.
 
 ## Install
 
@@ -63,8 +69,8 @@ applications.
    exec "systemctl --user import-environment DISPLAY XAUTHORITY; systemctl --user start spokenpad"
    ```
    On sway, import `SWAYSOCK WAYLAND_DISPLAY DISPLAY` instead. The import only
-   matters for the [managed window](#managed-window-on-i3-and-sway); the
-   default mode needs no environment from your session.
+   matters for [a window that opens by itself](#a-window-that-opens-by-itself);
+   the default mode needs no environment from your session.
 4. [Bind your keys](#bind-your-keys).
 5. Open the dictation editor in any terminal: `spokenpad editor`. Then hold
    your push-to-talk key and speak.
@@ -228,15 +234,24 @@ too briefly > preview paused. The log always has the full sentence and paths.
   just the visible preview), or with a `preview.interval_ms` long enough that
   few ticks fire.
 
-## Managed window on i3 and sway
+## A window that opens by itself
 
-In managed mode the daemon opens the dictation window itself, on the first
-key-down, as a floating window at the mouse pointer (on sway, in the
-bottom-right corner). It refuses to open it until the running window manager's
-config contains a `no_focus` rule for it, which it reads over the i3 or sway
-IPC socket. It also does not open it while the focused workspace is empty,
-because i3 and sway focus the first window on a workspace despite the rule;
-the text then goes to a file that the next editor opens.
+By default you open the editor (`spokenpad editor`) and the daemon writes into
+it. Two modes have the daemon open it for you instead, on the first key-down,
+as a floating window at the mouse pointer. Neither may take focus, and neither
+does.
+
+| | `mode = "managed"` | `mode = "pane"` |
+|---|---|---|
+| what opens | your terminal, running nvim | a window spokenpad draws itself |
+| where it works | i3 or sway | X11, and Wayland through Xwayland |
+| setup | a `no_focus` rule in your window manager config | none |
+| how focus is refused | that rule, proven over IPC before the window exists | the window's own properties, read by any window manager |
+| empty workspace | will not open: i3 and sway focus the first window on one | opens, unfocused |
+| survives a daemon restart | yes, it is your terminal | no, the window belongs to the daemon |
+| verified on | i3, live | i3, headless — **new, try it before you rely on it** |
+
+**Managed:**
 
 1. Set the mode and your terminal in `~/.config/spokenpad/config.toml`:
    ```toml
@@ -252,6 +267,23 @@ the text then goes to a file that the next editor opens.
 3. Import the session environment into systemd (install step 4) and restart
    the service.
 
+**Pane:**
+
+1. ```toml
+   [nvim]
+   mode = "pane"
+   # font_family = "monospace"   # whatever `fc-match monospace` gives
+   # font_size = 16.0            # pixels
+   ```
+2. Import `DISPLAY` (and `XAUTHORITY`) into systemd, as in install step 4 —
+   the window is X11 even on Wayland.
+3. `spokenpad check` says whether the libraries, the font and the display are
+   all there, and names what is missing. Then restart the service.
+
+With no display, or with a library missing, dictation still works: the text
+goes to a dictation file and the next editor opens on it. Nothing is lost and
+the daemon does not fail.
+
 Details, the terminal table and placement: [docs/nvim-window.md](docs/nvim-window.md).
 
 ## Configuration
@@ -266,8 +298,9 @@ cannot pass silently. Keys are not configured here; see
 |---|---|---|
 | `asr.family` | `"parakeet"` | model family: `parakeet`, `whisper` or `sense_voice` ([docs/asr.md](docs/asr.md)) |
 | `asr.vocabulary` | `[]` | words to bias Parakeet towards, such as `["kubectl", "nginx"]`; switches to beam search, which sometimes drops a sentence ([docs/asr.md](docs/asr.md)) |
-| `nvim.mode` | `"attach"` | `attach`: you run `spokenpad editor`; `managed`: the daemon opens a window on i3 or sway |
+| `nvim.mode` | `"attach"` | `attach`: you run `spokenpad editor`; `managed`: the daemon opens a terminal on i3 or sway; `pane`: the daemon opens a window it draws itself |
 | `nvim.terminal` | `"alacritty"` | managed mode only: the terminal for that window |
+| `nvim.font_family`, `nvim.font_size` | `"monospace"`, `16.0` | pane mode only: the font it draws with, sized in pixels |
 | `nvim.init` | your Neovim config | `"bundled"` opens the window about 3× faster; pair it with `nvim.colorscheme` |
 | `nvim.copy_to_clipboard` | `false` | copy the whole buffer to `+` after every release |
 
