@@ -7,11 +7,15 @@ Hold a key (or latch with shift), speak, and text appears in an nvim that
 never takes focus. Fully local, CPU-only. Next milestone: public release.
 
 ## Now
-- review-fixes — empty-workspace focus, dropped append, sway proof, stale buffer, greedy hotwords — agent (worktree) — merge.
-- docs — README rewrite, stale docs/CLAUDE.md after the portability merge — agent (worktree) — merge.
-- Then: e-mail rewrite (Gmail -> felix@peppert.de), migrate own setup, force push (needs the user's word).
+- Rewrite e-mail history (Gmail -> felix@peppert.de), then force push —
+  needs the user's word. Service runs 8f1fea7 from ~/.local/bin (managed).
 
 ## Done
+- 09-21: Review fixes: no spawn on an empty workspace, only loaded WM config
+  proves no_focus (sway: main file), unsent appends go to the pending
+  passage, no writes behind an editor, greedy+hotwords rejected. README
+  rewritten, docs current. Own setup migrated: models in ~/.local/share,
+  `mode = "managed"`, unit on graphical-session.target. 172 lib + 19 e2e.
 - 09-21: Portability for the public release merged (13 commits): Python removed,
   eval is examples/eval.rs; static sherpa binary; `[asr] family` parakeet /
   whisper / sense_voice; models in $XDG_DATA_HOME; install.sh/fetch-models.sh;
@@ -27,9 +31,7 @@ never takes focus. Fully local, CPU-only. Next milestone: public release.
   to `+` after every release. Astra audited, critiqued and reviewed; its
   review found 4 bugs, fixed. 143 lib + 16 e2e (+1 real-model) green, WER
   17.6% unchanged.
-- 09-11: Astra review: core/shell layout, ranked winbar notices, silence not
-  decoded, ownership-probe retry (ended a 1-in-10 flake), CLAUDE.md added.
-- 09-08/09: progressive commit, recovery WAV, Rust rewrite deployed.
+- 09-08..11: progressive commit, recovery WAV, Rust rewrite, Astra review.
 
 ## Next
 1. Live check after restart: short sentences land first time, word endings
