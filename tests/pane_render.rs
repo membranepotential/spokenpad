@@ -49,6 +49,7 @@ use spokenpad::{
 };
 use std::{
     path::{Path, PathBuf},
+    sync::{Mutex, MutexGuard},
     thread::sleep,
     time::{Duration, Instant},
 };
@@ -58,8 +59,22 @@ const PATIENCE: Duration = Duration::from_secs(10);
 const COLUMNS: u16 = 72;
 const ROWS: u16 = 14;
 
+/// Held by every test in this file for its whole run, so they run one after
+/// another. `idle_cost` reads the processor time of the whole test process,
+/// and a test running beside it on a two-core CI runner was measured as the
+/// pane's own (210 ms in 2 s, against 0 when alone).
+static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+
+fn one_at_a_time() -> MutexGuard<'static, ()> {
+    // A test that panicked while holding it proves nothing about the next.
+    ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[test]
 fn the_pane_draws_what_neovim_draws() {
+    let _one_at_a_time = one_at_a_time();
     if !harness::tools_or_skip(&["Xvfb", "i3", "nvim", "setxkbmap", "fc-match"]) {
         return;
     }
@@ -499,6 +514,7 @@ fn the_pane_draws_what_neovim_draws() {
 /// found in the live check of 2026-09-22.
 #[test]
 fn the_winbar_background_is_continuous_after_a_stop() {
+    let _one_at_a_time = one_at_a_time();
     if !harness::tools_or_skip(&["Xvfb", "nvim", "fc-match"]) {
         return;
     }
@@ -583,6 +599,7 @@ fn the_winbar_background_is_continuous_after_a_stop() {
 /// the margin.
 #[test]
 fn the_grid_sits_in_a_margin_of_the_default_background() {
+    let _one_at_a_time = one_at_a_time();
     if !harness::tools_or_skip(&["Xvfb", "nvim", "fc-match"]) {
         return;
     }
@@ -685,6 +702,7 @@ fn the_grid_sits_in_a_margin_of_the_default_background() {
 /// ends.
 #[test]
 fn the_pane_says_when_the_daemon_waits_for_the_editor() {
+    let _one_at_a_time = one_at_a_time();
     if !harness::tools_or_skip(&["Xvfb", "nvim", "fc-match"]) {
         return;
     }
@@ -726,6 +744,7 @@ fn the_pane_says_when_the_daemon_waits_for_the_editor() {
 /// the number and put its character in.
 #[test]
 fn closing_mid_command_writes_no_trace_of_the_cancelling_escape() {
+    let _one_at_a_time = one_at_a_time();
     if !harness::tools_or_skip(&["Xvfb", "nvim", "fc-match"]) {
         return;
     }
@@ -786,6 +805,7 @@ fn closing_mid_command_writes_no_trace_of_the_cancelling_escape() {
 /// registered once they have, and `:q` is then the user's close.
 #[test]
 fn a_prompt_at_startup_does_not_keep_the_pane_from_opening() {
+    let _one_at_a_time = one_at_a_time();
     if !harness::tools_or_skip(&["Xvfb", "i3", "nvim", "fc-match"]) {
         return;
     }
@@ -839,6 +859,7 @@ fn a_prompt_at_startup_does_not_keep_the_pane_from_opening() {
 /// the editor dies, so the daemon does not cancel the capture.
 #[test]
 fn a_restart_is_not_the_users_close() {
+    let _one_at_a_time = one_at_a_time();
     if !harness::tools_or_skip(&["Xvfb", "nvim", "fc-match"]) {
         return;
     }
@@ -950,6 +971,7 @@ impl Drop for KillNaming {
 /// the window has.
 #[test]
 fn the_pane_is_sized_in_cells_and_cut_to_the_monitor() {
+    let _one_at_a_time = one_at_a_time();
     if !harness::tools_or_skip(&["Xvfb", "nvim", "fc-match"]) {
         return;
     }
