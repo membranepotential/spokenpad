@@ -364,15 +364,23 @@ fn reconfigure(
 }
 
 /// Owns the editor connection. It runs until its channel says to stop, never
-/// on a shared flag: text already queued must reach the file even while the
+/// on a shared flag: text already queued must reach a file even while the
 /// daemon is shutting down or the capture it came from was cancelled.
+///
+/// The session's [`quitting`](NvimSession::quitting) flag changes only how:
+/// once it is set, a call Neovim holds behind a half-typed command is given
+/// up on (its text is reported as undelivered, and may still land when the
+/// command ends), and an editor that is not connected is not reattached or
+/// opened, so what is still queued goes to the pending passage within the
+/// shutdown grace instead of waiting on an editor.
 fn editor_thread(
+    mut nvim: NvimSession,
     running: Config,
     mut reload: Reload,
     rx: Receiver<EditorWork>,
     events: Sender<ResultEvent>,
 ) {
-    let mut nvim = NvimSession::new(running.nvim.clone());
+    let quitting = nvim.quitting();
     let mut reported = Vec::new();
     let mut paragraph: Option<(UtteranceId, Sink)> = None;
     let mut shown: Option<IndicatorState> = None;
@@ -389,6 +397,7 @@ fn editor_thread(
         for work in first.into_iter().chain(rx.try_iter()) {
             match work {
                 EditorWork::Indicator(next) => indicator = Some(next),
+                EditorWork::Ensure if quitting.load(Ordering::Acquire) => {}
                 EditorWork::Ensure => {
                     // A window about to open, or an editor about to be
                     // attached, takes the settings the file has now.
@@ -412,6 +421,7 @@ fn editor_thread(
                     // is owed to the file reattaches rather than waiting for
                     // the next key-down to do it.
                     if !nvim.connected()
+                        && !quitting.load(Ordering::Acquire)
                         && let Err(e) = nvim.ensure()
                     {
                         log::warn!("could not reattach to the dictation window: {e:#}");
@@ -790,9 +800,11 @@ where
         .spawn(move || engine_thread(pipeline, window, rate, &work_rx, &result_tx))?;
     let (editor_tx, editor_rx) = mpsc::channel();
     let running = config.clone();
+    let nvim = NvimSession::new(running.nvim.clone());
+    let editor_quitting = nvim.quitting();
     let editor = thread::Builder::new()
         .name("spokenpad-nvim".into())
-        .spawn(move || editor_thread(running, reload, editor_rx, editor_events))?;
+        .spawn(move || editor_thread(nvim, running, reload, editor_rx, editor_events))?;
 
     let mut next_device_poll = Instant::now();
     let result = (|| -> Result<()> {
@@ -1218,7 +1230,10 @@ where
         }
     }
     // Sent last: everything the editor still has to write is already queued
-    // ahead of it, and the bounded join gives it time to land.
+    // ahead of it, and the bounded join gives it time to land. The flag first,
+    // so a call Neovim is holding behind a half-typed command is given up on
+    // rather than waited out past the grace.
+    editor_quitting.store(true, Ordering::Release);
     let _ = editor_tx.send(EditorWork::Quit);
     join_bounded(editor, "editor");
     result

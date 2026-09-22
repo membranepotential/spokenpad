@@ -18,6 +18,9 @@
 //!   lands once, in the window, the moment the command is cancelled. It used
 //!   to time out after two seconds, reconnect, and time out again, which
 //!   diverted the following text away from the window.
+//! - **Stopping while a call is held.** Setting the session's `quitting`
+//!   flag ends the wait at once, the append is reported as not confirmed,
+//!   and it is never written twice.
 //! - **Closing the window mid-command.** Everything typed by hand is written,
 //!   although the write, too, waits behind a pending command.
 //!
@@ -185,18 +188,51 @@ fn typing_into_the_pane_during_a_latched_dictation() {
     );
     run(&mut pane, Duration::from_millis(1_500));
 
-    // --------------------------------- closing the window mid-command
-    let appended = daemon.stop();
+    // ------------------------------------ stopping while a call is held
+    let held_from = Instant::now();
+    press(&mut server, u32::from(b'2'));
+    // Long enough that an append has passed its deadline and is held.
+    run(&mut pane, Duration::from_secs(3));
+    let stopped = Instant::now();
+    let appended = daemon.quit();
+    let stopping = stopped.elapsed();
+    let unconfirmed: Vec<&Appended> = appended
+        .iter()
+        .filter(|piece| piece.sent >= held_from && !piece.landed)
+        .collect();
+    println!(
+        "stopping: the thread holding an append for {} ms stopped {} ms after the flag",
+        unconfirmed
+            .first()
+            .map_or(0, |piece| (stopped - piece.sent).as_millis()),
+        stopping.as_millis()
+    );
+    assert_eq!(
+        unconfirmed.len(),
+        1,
+        "exactly the held append should be unconfirmed: {appended:?}"
+    );
+    assert!(
+        stopping < Duration::from_millis(1_500),
+        "a stop waited {stopping:?} for a held call"
+    );
+    press(&mut server, ESCAPE);
+    run(&mut pane, Duration::from_millis(500));
     let buffer = buffer_text(&mut pane);
     for piece in &appended {
-        assert!(piece.landed, "an append failed: {piece:?}");
-        assert_eq!(
-            buffer.matches(&piece.word).count(),
-            1,
-            "{} should be in the window exactly once:\n{buffer}",
-            piece.word
-        );
+        let times = buffer.matches(&piece.word).count();
+        match piece.landed {
+            true => assert_eq!(times, 1, "{} once in the window:\n{buffer}", piece.word),
+            // Unconfirmed: it may land when the command ends, but never twice.
+            false => assert!(times <= 1, "{} twice in the window:\n{buffer}", piece.word),
+        }
     }
+    println!(
+        "the unconfirmed append is in the window {} time(s) once the command ended",
+        buffer.matches(&unconfirmed[0].word).count()
+    );
+
+    // --------------------------------- closing the window mid-command
     const BY_HAND: &str = "von Hand";
     press(&mut server, u32::from(b'o'));
     assert!(type_text(&mut server, BY_HAND));
@@ -215,7 +251,11 @@ fn typing_into_the_pane_during_a_latched_dictation() {
         "closing the window mid-command lost what was typed:\n{on_disk}"
     );
     for piece in &appended {
-        assert_eq!(on_disk.matches(&piece.word).count(), 1, "{piece:?}");
+        assert_eq!(
+            on_disk.matches(&piece.word).count(),
+            buffer.matches(&piece.word).count(),
+            "{piece:?}"
+        );
     }
     let files: Vec<PathBuf> = std::fs::read_dir(&config.dictation_dir)
         .expect("the dictation directory")
@@ -239,6 +279,8 @@ struct Appended {
 /// and a committed piece every second continuing the same paragraph.
 struct Dictation {
     stop: Arc<AtomicBool>,
+    /// The session's own flag, which the daemon sets when it stops.
+    quitting: Arc<AtomicBool>,
     tick: Arc<AtomicU64>,
     appended: Arc<Mutex<Vec<Appended>>>,
     thread: JoinHandle<()>,
@@ -249,10 +291,11 @@ impl Dictation {
         let stop = Arc::new(AtomicBool::new(false));
         let tick = Arc::new(AtomicU64::new(0));
         let appended = Arc::new(Mutex::new(Vec::new()));
+        let mut session = NvimSession::new(config);
+        let quitting = session.quitting();
         let thread = {
             let (stop, tick, appended) = (stop.clone(), tick.clone(), appended.clone());
             std::thread::spawn(move || {
-                let mut session = NvimSession::new(config);
                 session
                     .ensure()
                     .expect("attach to the pane's editor")
@@ -291,6 +334,7 @@ impl Dictation {
         };
         Self {
             stop,
+            quitting,
             tick,
             appended,
             thread,
@@ -313,7 +357,9 @@ impl Dictation {
         self.tick.load(Ordering::Acquire)
     }
 
-    fn stop(self) -> Vec<Appended> {
+    /// Stop the way the daemon does: the session's flag, then the thread.
+    fn quit(self) -> Vec<Appended> {
+        self.quitting.store(true, Ordering::Release);
         self.stop.store(true, Ordering::Release);
         self.thread.join().expect("the dictation thread");
         self.appended.lock().expect("the log").clone()

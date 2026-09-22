@@ -1709,3 +1709,15 @@ return true"#,
         failures.as_str().unwrap()
     );
 }
+
+#[test]
+fn a_held_call_is_waited_for_up_to_the_cap_and_never_while_stopping() {
+    assert_eq!(held_verdict(Duration::ZERO, false), HeldVerdict::Wait);
+    assert_eq!(
+        held_verdict(HELD_AT_MOST - Duration::from_millis(1), false),
+        HeldVerdict::Wait
+    );
+    assert_eq!(held_verdict(HELD_AT_MOST, false), HeldVerdict::GiveUp);
+    assert_eq!(held_verdict(Duration::ZERO, true), HeldVerdict::Abandon);
+    assert_eq!(held_verdict(HELD_AT_MOST, true), HeldVerdict::Abandon);
+}

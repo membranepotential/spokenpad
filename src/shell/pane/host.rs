@@ -5,7 +5,9 @@
 //! editor thread cannot do that, because it blocks on its own channel waiting
 //! for transcripts. So the pane gets a thread, and this is the handle to it.
 //!
-//! The daemon says only two things: open one, and stop. It is never told that
+//! The daemon says only two things: open one, and stop — and, while Neovim
+//! holds one of its calls behind a command the user left half typed, that it
+//! is waiting ([`PaneHost::show_held`]). It is never told that
 //! a window closed, because it does not need to be — the editor inside the
 //! pane dies with it, its socket goes with it, and the next key-down finds a
 //! dead socket and asks for a new pane. That is exactly what managed mode
@@ -58,6 +60,9 @@ struct Shared {
     alive: Arc<AtomicBool>,
     /// How to interrupt the open pane's loop.
     waker: Mutex<Option<x11::Waker>>,
+    /// Whether the daemon is waiting for a call Neovim holds behind a
+    /// half-typed command, which the pane then says in its last row.
+    held: AtomicBool,
 }
 
 impl Shared {
@@ -138,6 +143,14 @@ impl PaneHost {
         }
     }
 
+    /// Say in the pane, or stop saying, that the daemon is waiting for a call
+    /// Neovim holds behind a command half typed in it. Neovim cannot draw
+    /// that itself: it is the one not running.
+    pub fn show_held(&self, held: bool) {
+        self.shared.held.store(held, Ordering::Release);
+        self.shared.knock();
+    }
+
     /// Close the pane, if one is open. The editor inside it is asked to write
     /// what it has and quit.
     pub fn close(&self) {
@@ -191,7 +204,13 @@ fn serve(work: Receiver<Work>, shared: Arc<Shared>) {
     loop {
         let next = match pane.as_mut() {
             Some(open) => {
-                match open.step(BACKSTOP) {
+                let stepped = open.step(BACKSTOP).and_then(|status| match status {
+                    Status::Running => open
+                        .show_held(shared.held.load(Ordering::Acquire))
+                        .map(|()| status),
+                    Status::Finished => Ok(status),
+                });
+                match stepped {
                     Ok(Status::Running) => {}
                     Ok(Status::Finished) => {
                         log::info!("the dictation pane closed");

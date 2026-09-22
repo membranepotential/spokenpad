@@ -663,6 +663,47 @@ fn the_grid_sits_in_a_margin_of_the_default_background() {
     );
 }
 
+/// While the daemon waits for a call Neovim holds behind a half-typed
+/// command, the pane says so over the start of its last row, where Neovim
+/// cannot draw: it is the one not running. The notice goes when the call
+/// ends.
+#[test]
+fn the_pane_says_when_the_daemon_waits_for_the_editor() {
+    if !harness::tools_or_skip(&["Xvfb", "nvim", "fc-match"]) {
+        return;
+    }
+    let server = XServer::start();
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let config = dictation_config(directory.path());
+    let file = config.dictation_dir.join("dictation-2026-09-22-000003.md");
+    std::fs::write(&file, "").expect("create the dictation file");
+    let mut pane = pane_on(&server, &config, &file);
+    let _ = pane.step(Duration::from_millis(500));
+    let last_row = |pane: &Pane| {
+        let (pixels, width, _) = pane.framebuffer();
+        let metrics = pane.metrics();
+        let top = pane.padding() + u32::from(pane.size().1 - 1) * metrics.height;
+        let row = (top + 1) * u32::from(width);
+        let left = pane.padding();
+        pixels[(row + left) as usize..(row + left + 10 * metrics.width) as usize].to_vec()
+    };
+    let background = pane.screen().defaults().background.0;
+    let foreground = pane.screen().defaults().foreground.0;
+    assert!(last_row(&pane).iter().all(|pixel| *pixel == background));
+    pane.show_held(true).expect("draw the notice");
+    shoot(&pane, "pane-held-notice.png");
+    let shown = last_row(&pane);
+    assert!(
+        shown.iter().filter(|pixel| **pixel == foreground).count() > shown.len() / 2,
+        "the notice should be drawn in the default colours swapped"
+    );
+    pane.show_held(false).expect("clear the notice");
+    assert!(
+        last_row(&pane).iter().all(|pixel| *pixel == background),
+        "the notice should go when the call ends"
+    );
+}
+
 // ------------------------------------------------------------------ helpers
 
 /// The editor configuration these panes run with: a socket and a dictation

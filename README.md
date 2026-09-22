@@ -274,8 +274,12 @@ caught up. The log always has the full sentence and paths.
   the level meter and the text stop moving. The waiting keys show in the
   bottom-right corner with the bundled init (`showcmd`); press <kbd>Esc</kbd>
   and everything catches up. Text dictated meanwhile waits and lands once, in
-  the window. Closing the window with a command half typed cancels it, and
-  what you typed is written as usual.
+  the window, and the dictation window says "waiting for the editor: finish
+  or <Esc> the pending command" in its last row. After two minutes (a prompt
+  nobody sees) spokenpad stops waiting: that piece of text is in the log and
+  the recording, and later ones go on as if no editor were open. Closing the
+  window with a command half typed cancels it, and what you typed is written
+  as usual.
 - **Recording continues for a quarter second after you let go**
   (`audio.postroll_ms`), so a word still sounding at key-up is not cut off.
   Pressing the key again within the first 150 ms continues the same

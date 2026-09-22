@@ -851,9 +851,30 @@ unanswered after 3 s; after `d` alone, or in Insert mode, it came back in
 20 ms. On an editor it is already attached to, the daemon therefore asks why a
 reply is late (`Patience::WhileTyping` in `rpc.rs`): `nvim_get_mode` is one of
 the few calls Neovim answers at once even then, and while it says `blocking`
-the call is waited for, asking again every half second, and the log says once
-why. This covers the liveness check, the append and its retry, and the
-clipboard copy. Before, the append gave up after 2 s, the reconnection's
+the call is waited for, asking again every half second. This covers the
+liveness check, the append and its retry, and the clipboard copy. While a call
+is held:
+
+- **the log says so every 10 s**, with how long it has been held;
+- **the pane says so** in its last row ("waiting for the editor: finish or
+  <Esc> the pending command", shorter in a narrow window), drawn by the pane
+  itself because Neovim is the one not running; `showcmd` keeps the right
+  end. A terminal editor gets the log only;
+- **the wait ends after 2 minutes** (`HELD_AT_MOST`). A person mid-command
+  finishes within seconds; what outlasts that is a hit-enter prompt or a
+  plugin's `input()` in an editor nobody is looking at, which would hold the
+  call for hours while every later utterance queued behind it. The call then
+  takes the timeout path of an editor that stopped answering: one repeat on a
+  fresh connection with the same operation id, then "append failed", the
+  text in the log and the recording, and the next utterance to a pending
+  passage. Neovim drops what a closed connection had queued, so the held text
+  never lands twice;
+- **a daemon stop ends it at once.** The daemon sets the session's
+  `quitting` flag before its last message to the editor thread, the wait sees
+  it within half a second, and the thread reports the text as undelivered
+  instead of spending its shutdown grace on it. Once the flag is set, the
+  thread neither reattaches nor opens an editor: what is still queued goes to
+  the pending passage. Before, the append gave up after 2 s, the reconnection's
 probe after 2 more, and the utterance was reported as failed while its
 request still sat in Neovim's queue; the next one went to a pending passage
 instead of the open window. Startup, attach and the last idle push on detach

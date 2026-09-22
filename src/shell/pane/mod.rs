@@ -150,7 +150,24 @@ pub struct Pane {
     dragging: Option<&'static str>,
     /// Whether the editor has already exited, so nothing tries to talk to it.
     editor_gone: bool,
+    /// Whether the last row says that the daemon is waiting for a call
+    /// Neovim holds behind a half-typed command ([`HELD_NOTICES`]).
+    held: bool,
 }
+
+/// What the pane draws over the start of its last row while the daemon waits
+/// for a call Neovim holds. Neovim's own `showcmd` keeps the right end, which
+/// shows the keys it is waiting on.
+///
+/// The longest that fits is drawn, whole: half a sentence ending mid-word
+/// says less than a shorter one.
+const HELD_NOTICES: [&str; 3] = [
+    " waiting for the editor: finish or <Esc> the pending command ",
+    " waiting for the editor: finish or <Esc> it ",
+    " waiting: <Esc> ",
+];
+/// The columns `showcmd` draws in at the right end of the last row.
+const SHOWCMD_COLUMNS: usize = 11;
 
 impl Pane {
     /// Open the window and start the editor. The window is **not** mapped yet:
@@ -234,6 +251,7 @@ impl Pane {
             focused: false,
             dragging: None,
             editor_gone: false,
+            held: false,
         };
         let attach = pane.editor.attach(columns, rows)?;
         pane.await_response(attach, options.attach_timeout)
@@ -328,6 +346,18 @@ impl Pane {
             self.draw()?;
         }
         Ok(status)
+    }
+
+    /// Say, or stop saying, that the daemon is waiting for a call Neovim holds
+    /// behind a half-typed command. Drawn at once: Neovim, which would
+    /// otherwise end the frame, is the one not running.
+    pub fn show_held(&mut self, held: bool) -> Result<()> {
+        if held == self.held {
+            return Ok(());
+        }
+        self.held = held;
+        self.damage(Damage::row(self.rows.saturating_sub(1)));
+        self.draw()
     }
 
     /// Call a Neovim API function over the pane's own UI channel and wait for
@@ -640,6 +670,40 @@ impl Pane {
         }
         if screen.cursor().row == row {
             paint_cursor(canvas, font, screen, row, *columns, *focused);
+        }
+        if self.held && row == self.rows.saturating_sub(1) {
+            self.paint_held_notice(row);
+        }
+    }
+
+    /// The longest of [`HELD_NOTICES`] that leaves `showcmd` its columns, over
+    /// the start of `row`, in the default colours swapped.
+    fn paint_held_notice(&mut self, row: u16) {
+        let defaults = self.screen.defaults();
+        let style = Style {
+            foreground: defaults.background,
+            background: defaults.foreground,
+            special: defaults.special,
+            bold: false,
+            italic: false,
+            strikethrough: false,
+            underline: None,
+        };
+        let room = usize::from(self.columns).saturating_sub(SHOWCMD_COLUMNS);
+        let mut buffer = [0; 4];
+        let Some(notice) = HELD_NOTICES
+            .into_iter()
+            .find(|notice| notice.chars().count() <= room)
+        else {
+            return;
+        };
+        for (column, character) in notice.chars().enumerate() {
+            let (left, top) = self.canvas.origin(row, column as u16);
+            let metrics = self.metrics;
+            self.canvas
+                .fill(left, top, metrics.width, metrics.height, style.background);
+            let text: &str = character.encode_utf8(&mut buffer);
+            self.canvas.cell(&mut self.font, text, style, left, top);
         }
     }
 }

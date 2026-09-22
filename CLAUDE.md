@@ -80,7 +80,7 @@ those belongs in `src/shell/`.
   (i3/sway IPC socket), `shell/logging.rs`.
 - The pane (`shell/pane/`, the dictation window spokenpad draws itself,
   reached through `nvim.mode = "pane"`): `mod.rs` (the loop, the renderer,
-  `requirements` for `spokenpad check`), `host.rs` (its thread, and the two
+  `requirements` for `spokenpad check`), `host.rs` (its thread, and the three
   things the daemon tells it), `x11.rs` (the window, the properties that keep
   a window manager from focusing it, `PutImage`), `ui.rs` (`nvim --embed`
   over stdio, `nvim_ui_attach`), `font.rs` (`fc-match` plus swash glyphs, and a

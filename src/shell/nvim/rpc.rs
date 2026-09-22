@@ -5,9 +5,10 @@
 //! bytes must not be able to extend the call indefinitely by staying just
 //! inside a per-read timeout. The editor thread is on the dictation path, so
 //! no call here may block without a way out — with one exception, chosen per
-//! call: a [`Patience::WhileTyping`] call outlives its deadline for as long as
-//! Neovim says it is holding the call until its user finishes typing a
-//! command, because the call is not lost then, only late.
+//! call: a [`Patience::WhileTyping`] call outlives its deadline while Neovim
+//! says it is holding the call until its user finishes typing a command,
+//! because the call is not lost then, only late. Its caller still bounds that
+//! wait.
 use anyhow::{Result, anyhow, ensure};
 use rmpv::Value;
 use std::{
@@ -125,6 +126,10 @@ pub(super) enum RpcFailure {
     Timeout(String),
     /// The socket file exists but nothing is listening on it.
     StaleSocket(std::io::Error),
+    /// The caller stopped waiting for a call Neovim was holding, because the
+    /// daemon is stopping. Like a timeout, the outcome is unknown: the call is
+    /// still in Neovim's queue.
+    Abandoned(String),
     /// The connection was accepted, then the peer closed it before answering.
     /// Linux queues a Unix-socket connect on the listener before anyone calls
     /// accept, so a listener that is closed in that window (an editor exiting,
@@ -165,7 +170,7 @@ impl RpcFailure {
 impl std::fmt::Display for RpcFailure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Timeout(message) => formatter.write_str(message),
+            Self::Timeout(message) | Self::Abandoned(message) => formatter.write_str(message),
             Self::StaleSocket(error) => error.fmt(formatter),
             Self::PeerGone(error) => write!(formatter, "nvim closed the connection: {error}"),
             Self::Other(error) => error.fmt(formatter),
@@ -176,7 +181,7 @@ impl std::fmt::Display for RpcFailure {
 impl From<RpcFailure> for anyhow::Error {
     fn from(value: RpcFailure) -> Self {
         match value {
-            RpcFailure::Timeout(message) => anyhow!(message),
+            RpcFailure::Timeout(message) | RpcFailure::Abandoned(message) => anyhow!(message),
             RpcFailure::StaleSocket(error) => error.into(),
             RpcFailure::PeerGone(error) => {
                 anyhow::Error::from(error).context("nvim closed the connection before answering")
@@ -193,16 +198,20 @@ const MODE_ANSWER: Duration = Duration::from_millis(250);
 const MODE_POLL: Duration = Duration::from_millis(500);
 
 /// What a call whose reply misses its deadline has to conclude.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Patience {
+pub(super) enum Patience<'a> {
     /// The call timed out, and its outcome is unknown.
     Deadline,
     /// Ask Neovim whether it is only waiting for the rest of a command the
-    /// user is typing in its window, and keep waiting for as long as it is:
-    /// the call runs the moment that command is finished or cancelled. For
-    /// calls on an editor already attached to, where timing out would divert
-    /// text from a window that is alive and only waiting for its user.
-    WhileTyping,
+    /// user is typing in its window: the call runs the moment that command
+    /// is finished or cancelled. For calls on an editor already attached to,
+    /// where timing out would divert text from a window that is alive and
+    /// only waiting for its user.
+    ///
+    /// While Neovim says it is, the call asks this, every half second, with
+    /// how long Neovim has held it so far: `Ok` waits on, and an error ends
+    /// the wait with that error. The transport has no opinion on how long is
+    /// too long; the session does.
+    WhileTyping(&'a mut dyn FnMut(Duration) -> Result<(), RpcFailure>),
 }
 
 /// Why no response arrived.
@@ -253,7 +262,7 @@ impl RpcClient {
         method: &str,
         arguments: Vec<Value>,
         deadline: Instant,
-        patience: Patience,
+        patience: Patience<'_>,
     ) -> Result<Value, RpcFailure> {
         let id = self.send_request(method, arguments, deadline)?;
         self.reply(id, method, deadline, patience)
@@ -289,18 +298,20 @@ impl RpcClient {
         id: u64,
         method: &str,
         deadline: Instant,
-        patience: Patience,
+        mut patience: Patience<'_>,
     ) -> Result<Value, RpcFailure> {
         let timed_out = || RpcFailure::Timeout(format!("nvim RPC {method} timed out"));
+        let patient = matches!(patience, Patience::WhileTyping(_));
         let mut deadline = deadline;
         // The `nvim_get_mode` asked once the deadline passed, while it is
         // unanswered.
         let mut asked: Option<u64> = None;
-        let mut told = false;
+        // When Neovim first said it was holding the call.
+        let mut held_since: Option<Instant> = None;
         loop {
             let (answered, outcome) = match self.next_response(deadline) {
                 Ok(response) => response,
-                Err(Late::Between) if patience == Patience::WhileTyping && asked.is_none() => {
+                Err(Late::Between) if patient && asked.is_none() => {
                     // `nvim_get_mode` is one of the few calls Neovim answers
                     // at once even while it waits for a key, so a live editor
                     // answers it within milliseconds whatever it is doing.
@@ -326,13 +337,11 @@ impl RpcClient {
             // Neovim holds every other call while the user has half a
             // command typed in its window -- a count, `g`, `"`, `f` -- and
             // runs them the moment the command is finished. The call is not
-            // lost, so giving up on it would only make its outcome unknown.
-            if !told {
-                log::info!(
-                    "nvim is waiting for the rest of a command typed in its window; \
-                     {method} runs once that command is finished or cancelled"
-                );
-                told = true;
+            // lost, so giving up on it would only make its outcome unknown;
+            // the caller decides how long that is worth.
+            let since = *held_since.get_or_insert_with(Instant::now);
+            if let Patience::WhileTyping(watch) = &mut patience {
+                watch(since.elapsed())?;
             }
             deadline = Instant::now() + MODE_POLL;
         }
@@ -859,16 +868,24 @@ mod tests {
         let mut client =
             RpcClient::connect(&socket, Instant::now() + Duration::from_secs(1)).unwrap();
         let started = Instant::now();
+        let mut asked = Vec::new();
         let value = client
             .request(
                 "nvim_exec_lua",
                 vec![Value::from("return 1")],
                 Instant::now() + Duration::from_millis(100),
-                Patience::WhileTyping,
+                Patience::WhileTyping(&mut |held| {
+                    asked.push(held);
+                    Ok(())
+                }),
             )
             .expect("an editor waiting for its user is waited for");
         assert_eq!(value.as_str(), Some("done"));
         assert!(started.elapsed() >= Duration::from_millis(1_200));
+        assert!(
+            asked.len() >= 2 && asked.windows(2).all(|pair| pair[0] < pair[1]),
+            "the caller should be asked on every repeat, with the time held so far: {asked:?}"
+        );
         drop(client);
         let seen = peer.join().unwrap();
         assert_eq!(seen.first().map(String::as_str), Some("nvim_exec_lua"));
@@ -894,11 +911,36 @@ mod tests {
                 "nvim_exec_lua",
                 vec![Value::from("return 1")],
                 Instant::now() + Duration::from_millis(100),
-                Patience::WhileTyping,
+                Patience::WhileTyping(&mut |_| panic!("an editor that is not held asks nothing")),
             )
             .unwrap_err();
         assert!(matches!(error, RpcFailure::Timeout(_)), "{error}");
         assert!(started.elapsed() < Duration::from_millis(100) + MODE_ANSWER);
+        drop(client);
+        peer.join().unwrap();
+    }
+
+    #[test]
+    fn a_patient_call_ends_when_its_caller_says_so() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("given-up.sock");
+        let peer = held_editor(&socket, true, Duration::from_secs(3));
+        let mut client =
+            RpcClient::connect(&socket, Instant::now() + Duration::from_secs(1)).unwrap();
+        let started = Instant::now();
+        let error = client
+            .request(
+                "nvim_exec_lua",
+                vec![Value::from("return 1")],
+                Instant::now() + Duration::from_millis(100),
+                Patience::WhileTyping(&mut |held| match held >= Duration::from_millis(600) {
+                    true => Err(RpcFailure::Abandoned("stopping".to_owned())),
+                    false => Ok(()),
+                }),
+            )
+            .unwrap_err();
+        assert!(matches!(error, RpcFailure::Abandoned(_)), "{error}");
+        assert!(started.elapsed() < Duration::from_millis(1_500));
         drop(client);
         peer.join().unwrap();
     }

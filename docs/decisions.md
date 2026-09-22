@@ -1629,3 +1629,31 @@ before the grid is fitted to it; clicks are mapped through it.
   every resolution, not only at whole multiples of 96 dpi.
 - Rejected: a setting. One fixed value was asked for, and a setting with one
   user is a choice nobody has to make.
+
+## A call held behind a half-typed command is waited for two minutes at most (2026-09-22)
+
+Follow-up to [typing into the window while
+dictating](#typing-into-the-window-while-dictating-2026-09-22). `nvim_get_mode`
+says `blocking` for a hit-enter prompt or a plugin's `input()` as much as for
+a count or `g`, so an attach-mode editor nobody looks at could hold one
+append for hours, with every later utterance queued behind it and a daemon
+stop never reaching its report of undelivered text.
+
+- Chosen: a cap of 2 minutes (`HELD_AT_MOST`), then the path of an editor
+  that stopped answering, where the operation id keeps the append from
+  landing twice. Twenty times any pause a person takes mid-command, and short
+  enough that a prompt nobody sees costs one piece of text's place in the
+  window, not a whole session's.
+- Chosen: a `quitting` flag on the session, set by the daemon before its
+  last message to the editor thread, which ends the wait within half a
+  second (measured in `tests/pane_typing.rs`: 514 ms after the flag, with an
+  append held for 2.6 s). Once it is set, nothing reattaches or opens an
+  editor, so what is still queued goes to the pending passage within the
+  shutdown grace.
+- Chosen: the log repeats every 10 s while a call is held, and the pane
+  draws a notice in its last row itself.
+- Measured: Neovim 0.12.5 dropped the held request when its connection
+  closed; after `<Esc>` the abandoned text was not in the buffer. Given up
+  means reported, never written twice.
+- Rejected: a shorter cap. Someone who typed `"` and went to read something
+  would lose the text of the utterance they were dictating from the window.

@@ -47,6 +47,10 @@ use std::{
     },
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -77,6 +81,21 @@ const CONNECT_POLL: Duration = Duration::from_millis(25);
 /// Ownership probes retried when the peer closes the connection unanswered.
 const PROBE_ATTEMPTS: usize = 3;
 const MAP_TIMEOUT: Duration = Duration::from_secs(3);
+/// How long a call on an attached editor is waited for while Neovim holds it
+/// behind a half-typed command, before it is given up on as if the editor
+/// had stopped answering.
+///
+/// Someone who typed `g` or `"` and stopped to think finishes or cancels it
+/// within seconds, so two minutes gives that pause twenty times over and the
+/// text still lands, once, in the window. What outlasts it is almost never a
+/// person mid-command: a hit-enter prompt or a plugin's `input()` in an
+/// editor nobody is looking at, which would otherwise hold this one call for
+/// hours while every utterance after it queues behind it. Those then take
+/// the path any silent editor takes; the held call keeps its operation id,
+/// so it is never written twice.
+const HELD_AT_MOST: Duration = Duration::from_secs(120);
+/// How often the log repeats that a call is still held.
+const HELD_LOG_EVERY: Duration = Duration::from_secs(10);
 
 const SPOKENPAD_LUA: &str = include_str!("../../lua/spokenpad.lua");
 const BUNDLED_INIT: &str = include_str!("../../lua/dictation_init.lua");
@@ -178,6 +197,9 @@ pub struct NvimSession {
     /// Whether the user has been told, this session, that a tiled pane
     /// opens floating under their window manager: once, not every window.
     told_tiled_floats: bool,
+    /// Set when the daemon is stopping, so a call Neovim is holding behind a
+    /// half-typed command is given up on at once rather than waited for.
+    quitting: Arc<AtomicBool>,
 }
 
 impl NvimSession {
@@ -191,7 +213,14 @@ impl NvimSession {
             pane: None,
             refused: None,
             told_tiled_floats: false,
+            quitting: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// The flag that says the daemon is stopping. Setting it ends the wait
+    /// for a call Neovim is holding within half a second.
+    pub fn quitting(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.quitting)
     }
 
     pub fn connected(&self) -> bool {
@@ -203,10 +232,16 @@ impl NvimSession {
     /// `false` means the next [`ensure`](Self::ensure) opens or attaches a
     /// window afresh.
     pub fn attached(&mut self) -> bool {
-        let Some(open) = self.connection.as_mut() else {
+        let Self {
+            connection,
+            pane,
+            quitting,
+            ..
+        } = self;
+        let Some(open) = connection.as_mut() else {
             return false;
         };
-        let pinned = still_pinned(open);
+        let pinned = still_pinned(open, &mut Held::new("the liveness check", pane, quitting));
         if !pinned {
             self.drop_connection();
         }
@@ -375,13 +410,22 @@ impl NvimSession {
     /// Waits for the reply to append request `id`, which was sent whole, and
     /// handles a lost reply by repeating the same operation once.
     fn confirm_append(&mut self, id: u64, arguments: Vec<Value>) -> Result<usize> {
-        let open = self.connection.as_mut().context("not connected to nvim")?;
-        let value = match open.client.reply(
+        let Self {
+            connection,
+            pane,
+            quitting,
+            ..
+        } = self;
+        let open = connection.as_mut().context("not connected to nvim")?;
+        let mut held = Held::new("an append", pane, quitting);
+        let replied = open.client.reply(
             id,
             "nvim_exec_lua",
             deadline(APPEND_TIMEOUT),
-            Patience::WhileTyping,
-        ) {
+            Patience::WhileTyping(&mut |time| held.watch(time)),
+        );
+        drop(held);
+        let value = match replied {
             Ok(value) => value,
             Err(RpcFailure::Timeout(reason)) => {
                 // The request may have completed after its reply was lost.
@@ -443,7 +487,14 @@ impl NvimSession {
     /// transport failure, exactly like any other request, and the connection
     /// is dropped the same way `request_append` drops it.
     pub fn copy_buffer(&mut self) -> Result<CopyOutcome> {
-        let open = self.connection.as_mut().context("not connected to nvim")?;
+        let Self {
+            connection,
+            pane,
+            quitting,
+            ..
+        } = self;
+        let open = connection.as_mut().context("not connected to nvim")?;
+        let mut held = Held::new("the clipboard copy", pane, quitting);
         let result = open.client.request(
             "nvim_exec_lua",
             vec![
@@ -451,8 +502,9 @@ impl NvimSession {
                 Value::Array(Vec::new()),
             ],
             deadline(APPEND_TIMEOUT),
-            Patience::WhileTyping,
+            Patience::WhileTyping(&mut |time| held.watch(time)),
         );
+        drop(held);
         match result {
             Ok(value) => parse_copy_outcome(&value),
             Err(error) => {
@@ -503,15 +555,21 @@ impl NvimSession {
     }
 
     fn request_append(&mut self, arguments: Vec<Value>) -> Result<Value, RpcFailure> {
-        let open = self
-            .connection
+        let Self {
+            connection,
+            pane,
+            quitting,
+            ..
+        } = self;
+        let open = connection
             .as_mut()
             .ok_or_else(|| RpcFailure::Other(anyhow!("not connected to nvim")))?;
+        let mut held = Held::new("an append", pane, quitting);
         open.client.request(
             "nvim_exec_lua",
             append_call(arguments),
             deadline(APPEND_TIMEOUT),
-            Patience::WhileTyping,
+            Patience::WhileTyping(&mut |time| held.watch(time)),
         )
     }
 
@@ -1341,7 +1399,7 @@ impl Drop for NewFileGuard {
     }
 }
 
-fn still_pinned(open: &mut Connected) -> bool {
+fn still_pinned(open: &mut Connected, held: &mut Held<'_>) -> bool {
     // A bare `nvim_eval "1"` proves only that the editor answers. After the
     // user `:bdelete`s the dictation buffer it answers exactly as before, and
     // every append of that utterance failed against a buffer that was gone.
@@ -1351,13 +1409,103 @@ fn still_pinned(open: &mut Connected) -> bool {
     query_ownership(
         &mut open.client,
         deadline(PROBE_TIMEOUT),
-        Patience::WhileTyping,
+        Patience::WhileTyping(&mut |time| held.watch(time)),
     )
     .is_ok_and(|ownership| {
         ownership
             .pinned
             .is_some_and(|pin| pin.buffer == open.buffer)
     })
+}
+
+/// One call Neovim is holding behind a command half typed in its window,
+/// watched from the session: how long it may be held, what the log says
+/// meanwhile, and the notice in the pane while it lasts.
+struct Held<'a> {
+    what: &'static str,
+    pane: Option<&'a PaneHost>,
+    quitting: &'a AtomicBool,
+    /// How long it had been held when the log last said so.
+    logged: Option<Duration>,
+    shown: bool,
+}
+
+/// What to do about a call held for so long, with the daemon stopping or not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeldVerdict {
+    Wait,
+    /// The daemon is stopping: give up now, so it can say what is undelivered.
+    Abandon,
+    /// Held past [`HELD_AT_MOST`]: treat it like an editor that stopped
+    /// answering.
+    GiveUp,
+}
+
+fn held_verdict(held: Duration, quitting: bool) -> HeldVerdict {
+    match (quitting, held >= HELD_AT_MOST) {
+        (true, _) => HeldVerdict::Abandon,
+        (false, true) => HeldVerdict::GiveUp,
+        (false, false) => HeldVerdict::Wait,
+    }
+}
+
+impl<'a> Held<'a> {
+    fn new(what: &'static str, pane: &'a Option<PaneHost>, quitting: &'a AtomicBool) -> Self {
+        Self {
+            what,
+            pane: pane.as_ref(),
+            quitting,
+            logged: None,
+            shown: false,
+        }
+    }
+
+    /// Asked every half second while Neovim holds the call.
+    fn watch(&mut self, held: Duration) -> Result<(), RpcFailure> {
+        let seconds = held.as_secs();
+        match held_verdict(held, self.quitting.load(Ordering::Acquire)) {
+            HeldVerdict::Abandon => {
+                return Err(RpcFailure::Abandoned(format!(
+                    "the daemon is stopping while nvim holds {} behind a half-typed command",
+                    self.what
+                )));
+            }
+            HeldVerdict::GiveUp => {
+                return Err(RpcFailure::Timeout(format!(
+                    "nvim held {} behind a half-typed command or a prompt for {seconds}s; \
+                     giving up on it",
+                    self.what
+                )));
+            }
+            HeldVerdict::Wait => {}
+        }
+        if self.logged.is_none_or(|last| held >= last + HELD_LOG_EVERY) {
+            log::warn!(
+                "nvim has held {} for {seconds}s: a command or a prompt in its window is \
+                 waiting for keys; finish it or press <Esc> (given up on after {}s)",
+                self.what,
+                HELD_AT_MOST.as_secs()
+            );
+            self.logged = Some(held);
+        }
+        if !self.shown
+            && let Some(pane) = self.pane
+        {
+            pane.show_held(true);
+            self.shown = true;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for Held<'_> {
+    fn drop(&mut self) {
+        if self.shown
+            && let Some(pane) = self.pane
+        {
+            pane.show_held(false);
+        }
+    }
 }
 
 enum Probe {
