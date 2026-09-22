@@ -320,7 +320,7 @@ impl Segmenter for SpeechSegmenter {
         );
         self.detector.reset();
         let mut spans = vec![];
-        for chunk in samples.chunks_exact(VAD_WINDOW) {
+        for chunk in samples.as_chunks::<VAD_WINDOW>().0 {
             self.detector.accept_waveform(chunk);
             self.drain(&mut spans, samples.len())?;
         }

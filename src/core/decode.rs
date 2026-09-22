@@ -903,7 +903,7 @@ mod long_capture {
         fn split(&mut self, samples: &[f32]) -> Result<Split> {
             let longest = (self.config.max_speech_seconds * f64::from(RATE)) as usize;
             let mut spans: Vec<Range<usize>> = vec![];
-            for (i, window) in samples.chunks_exact(VAD_WINDOW).enumerate() {
+            for (i, window) in samples.as_chunks::<VAD_WINDOW>().0.iter().enumerate() {
                 if !window.iter().any(|s| s.abs() > 0.1) {
                     continue;
                 }
