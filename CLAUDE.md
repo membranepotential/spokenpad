@@ -81,8 +81,8 @@ those belongs in `src/shell/`.
   `shell/logging.rs`.
 - The pane (`shell/pane/`, the dictation window spokenpad draws itself,
   reached through `nvim.mode = "pane"`): `mod.rs` (the loop, the renderer,
-  `requirements` for `spokenpad check`), `host.rs` (its thread, and the three
-  things the daemon tells it), `x11.rs` (the window, the properties that keep
+  `requirements` for `spokenpad check`), `host.rs` (its thread, the three
+  things the daemon tells it, and whether the user closed the last pane), `x11.rs` (the window, the properties that keep
   a window manager from focusing it, `PutImage`), `ui.rs` (`nvim --embed`
   over stdio, `nvim_ui_attach`), `font.rs` (`fc-match` plus swash glyphs, and a
   character fallback kept off the drawing path), `keyboard.rs` (the user's real layout, dead keys,

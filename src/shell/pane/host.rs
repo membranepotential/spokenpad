@@ -7,18 +7,19 @@
 //!
 //! The daemon says only two things: open one, and stop — and, while Neovim
 //! holds one of its calls behind a command the user left half typed, that it
-//! is waiting ([`PaneHost::show_held`]). It is never told that
-//! a window closed, because it does not need to be — the editor inside the
-//! pane dies with it, its socket goes with it, and the next key-down finds a
-//! dead socket and asks for a new pane, which is why closing the window ends
-//! the passage. What the daemon *can* ask is whether one is open at all
+//! is waiting ([`PaneHost::show_held`]). A window that closes needs no word
+//! to end the passage: the editor inside the pane dies with it, its socket
+//! goes with it, and the next key-down finds a dead socket and asks for a new
+//! pane. What the daemon *can* ask is whether one is open at all
 //! ([`PaneHost::alive`]), which is how a wait for a dead editor ends early
-//! instead of running out its clock.
+//! instead of running out its clock, and whether the user closed the last
+//! one ([`PaneHost::take_closed_by_user`]), which cancels the capture it was
+//! showing.
 //!
 //! The thread blocks with no deadline. A command does not wait to be noticed:
 //! whoever sends one also knocks on the window ([`x11::Waker`]), which makes
 //! the blocked `step` return at once.
-use super::{Options, Pane, Status, x11};
+use super::{Ending, Options, Pane, Status, x11};
 use anyhow::{Context, Result, bail};
 use std::{
     process::Command,
@@ -62,6 +63,10 @@ struct Shared {
     /// Whether the daemon is waiting for a call Neovim holds behind a
     /// half-typed command, which the pane then says in its last row.
     held: AtomicBool,
+    /// When the user closed the last pane, until the daemon asks. Set before
+    /// `alive` goes false, so that a caller who finds the pane gone and no
+    /// close recorded knows it did not end by the user's hand.
+    closed_by_user: Mutex<Option<Instant>>,
 }
 
 impl Shared {
@@ -142,6 +147,16 @@ impl PaneHost {
         }
     }
 
+    /// When the user closed the last pane — its window, or `:q` in it — if
+    /// they did since the last time this was asked.
+    pub fn take_closed_by_user(&self) -> Option<Instant> {
+        self.shared
+            .closed_by_user
+            .lock()
+            .expect("the pane's close")
+            .take()
+    }
+
     /// Say in the pane, or stop saying, that the daemon is waiting for a call
     /// Neovim holds behind a command half typed in it. Neovim cannot draw
     /// that itself: it is the one not running.
@@ -207,12 +222,24 @@ fn serve(work: Receiver<Work>, shared: Arc<Shared>) {
                     Status::Running => open
                         .show_held(shared.held.load(Ordering::Acquire))
                         .map(|()| status),
-                    Status::Finished => Ok(status),
+                    Status::Finished(_) => Ok(status),
                 });
                 match stepped {
                     Ok(Status::Running) => {}
-                    Ok(Status::Finished) => {
-                        log::info!("the dictation pane closed");
+                    Ok(Status::Finished(ending)) => {
+                        match ending {
+                            Ending::ByUser => {
+                                log::info!("the dictation pane closed: the user closed it");
+                                *shared.closed_by_user.lock().expect("the pane's close") =
+                                    Some(Instant::now());
+                            }
+                            Ending::EditorFailed(status) => log::warn!(
+                                "the dictation pane closed: its editor exited with {status}"
+                            ),
+                            Ending::Lost => log::warn!(
+                                "the dictation pane closed: its editor went away without saying how"
+                            ),
+                        }
                         // Dropping it writes every modified buffer and reaps
                         // the editor; the next key-down opens a new one.
                         pane = None;

@@ -26,7 +26,7 @@ use crate::{
         control::{ControlServer, Socket, refuse_until},
         inference::{SpeechSegmenter, Transcriber, load_segmenter},
         models::{Repair, ensure_defaults, repair_defaults},
-        nvim::{AppendFailure, CopyOutcome, Detached, IndicatorState, NvimSession},
+        nvim::{AppendFailure, CopyOutcome, Detached, IndicatorState, NvimSession, Want},
         recorder::{CaptureReader, Unfinished},
     },
 };
@@ -251,6 +251,11 @@ enum ResultEvent {
     /// The config file did not load when a window opened, for this reason.
     /// Sent by the editor thread.
     ConfigInvalid(String),
+    /// The user closed the dictation pane at `at`. Sent by the editor thread,
+    /// which asks the pane after every piece of work and every 66 ms.
+    WindowClosed {
+        at: Instant,
+    },
     Commit(Commit),
     Tick {
         id: UtteranceId,
@@ -290,6 +295,9 @@ enum EditorWork {
     /// `serve`, for why every `Append` of that utterance is already ahead of
     /// it in this same queue.
     Copy,
+    /// Closing the window cancelled the capture it showed: say so, since the
+    /// window that would have is gone.
+    ClosedMidCapture,
     Quit,
 }
 
@@ -393,10 +401,14 @@ fn editor_thread(
             Err(mpsc::RecvTimeoutError::Timeout) => None,
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         };
+        report_user_close(&mut nvim, &events);
         // Drain what is already queued, keeping only the newest indicator:
         // the loop offers one 50 times a second and only the last is true.
         let mut indicator = None;
         for work in first.into_iter().chain(rx.try_iter()) {
+            // Before each piece of work, so that text arriving just after
+            // the user closed the pane does not open another.
+            report_user_close(&mut nvim, &events);
             match work {
                 EditorWork::Indicator(next) => indicator = Some(next),
                 EditorWork::Ensure if quitting.load(Ordering::Acquire) => {}
@@ -406,7 +418,7 @@ fn editor_thread(
                     if !nvim.attached() {
                         reconfigure(&mut nvim, &running, &mut reload, &mut reported, &events);
                     }
-                    match nvim.ensure() {
+                    match nvim.ensure(Want::Press) {
                         Ok(Some(path)) => {
                             log::info!("dictating into {}", path.display());
                             shown = None;
@@ -424,7 +436,7 @@ fn editor_thread(
                     // the next key-down to do it.
                     if !nvim.connected()
                         && !quitting.load(Ordering::Acquire)
-                        && let Err(e) = nvim.ensure()
+                        && let Err(e) = nvim.ensure(Want::Text)
                     {
                         log::warn!("could not reattach to the dictation window: {e:#}");
                     }
@@ -507,6 +519,7 @@ fn editor_thread(
                         }
                     }
                 }
+                EditorWork::ClosedMidCapture => nvim.notify_closed_mid_capture(),
                 EditorWork::Quit => {
                     quit = true;
                     break;
@@ -534,6 +547,35 @@ fn editor_thread(
         }
     }
     nvim.close();
+}
+
+/// Tells the event loop that the user closed the dictation pane, if they did
+/// since the last time the pane was asked, so it can cancel the capture that
+/// pane showed.
+fn report_user_close(nvim: &mut NvimSession, events: &Sender<ResultEvent>) {
+    if let Some(at) = nvim.take_user_close() {
+        log::info!("the user closed the dictation pane; the next text opens no window of its own");
+        // The loop is gone only while this thread is being stopped.
+        let _ = events.send(ResultEvent::WindowClosed { at });
+    }
+}
+
+/// Ends a capture that is thrown away rather than decoded. Its recovery WAV
+/// is kept, whatever the reason.
+fn discard<B: InputBackend>(capture: &mut AudioCapture<B>, reason: DiscardReason) {
+    capture.stop_capture();
+    match reason {
+        DiscardReason::TooShort => log::info!(
+            "capture held under {}ms; discarded, WAV retained",
+            crate::core::state::MINIMUM_HOLD.as_millis()
+        ),
+        DiscardReason::Cancelled => {
+            log::info!("capture cancelled; settled text and WAV retained")
+        }
+        DiscardReason::WindowClosed => log::info!(
+            "capture cancelled: the user closed the dictation window; settled text and WAV retained"
+        ),
+    }
 }
 
 /// Another daemon of this user holds the lock. A daemon started by hand
@@ -931,18 +973,7 @@ where
                             );
                         }
                     }
-                    Command::Discard(reason) => {
-                        capture.stop_capture();
-                        match reason {
-                            DiscardReason::TooShort => log::info!(
-                                "capture held under {}ms; discarded, WAV retained",
-                                crate::core::state::MINIMUM_HOLD.as_millis()
-                            ),
-                            DiscardReason::Cancelled => {
-                                log::info!("capture cancelled; settled text and WAV retained")
-                            }
-                        }
-                    }
+                    Command::Discard(reason) => discard(&mut capture, reason),
                     Command::Nothing => {}
                 }
             }
@@ -958,6 +989,16 @@ where
                     }
                     ResultEvent::ConfigInvalid(reason) => {
                         session.notify(Notice::ConfigInvalid(reason));
+                    }
+                    // As `spokenpad cancel`: what is committed stays, the tail
+                    // is not decoded, the WAV is kept. Only a capture that was
+                    // running when the window closed.
+                    ResultEvent::WindowClosed { at } => {
+                        if let Command::Discard(reason) = session.event(Event::WindowClosed { at })
+                        {
+                            discard(&mut capture, reason);
+                            send(&editor_tx, EditorWork::ClosedMidCapture)?;
+                        }
                     }
                     ResultEvent::Unavailable(reason) => {
                         log::error!(
@@ -1196,7 +1237,8 @@ where
             | ResultEvent::Preparing(_)
             | ResultEvent::Ready { .. }
             | ResultEvent::Unavailable(_)
-            | ResultEvent::ConfigInvalid(_) => {}
+            | ResultEvent::ConfigInvalid(_)
+            | ResultEvent::WindowClosed { .. } => {}
         }
     }
     // The next start transcribes the rest; only if it cannot know about them

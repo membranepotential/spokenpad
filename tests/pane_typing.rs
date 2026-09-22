@@ -38,7 +38,7 @@ use spokenpad::{
     config::{Mode, Nvim},
     core::{font::Points, geometry::Dimensions, state::IndicatorPhase},
     shell::{
-        nvim::{IndicatorState, NvimSession, pane_launch},
+        nvim::{IndicatorState, NvimSession, Want, pane_launch},
         pane::{Options, Pane, Status},
     },
 };
@@ -256,7 +256,11 @@ fn typing_into_the_pane_during_a_latched_dictation() {
     run(&mut pane, Duration::from_millis(500));
     close_window(&server, pane.window().id());
     wait_for(PATIENCE, "the pane to notice the window closed", || {
-        matches!(pane.step(Duration::from_millis(50)), Ok(Status::Finished)).then_some(())
+        matches!(
+            pane.step(Duration::from_millis(50)),
+            Ok(Status::Finished(_))
+        )
+        .then_some(())
     });
     drop(pane);
     let on_disk = std::fs::read_to_string(&file).expect("read the dictation file");
@@ -311,7 +315,7 @@ impl Dictation {
             let (stop, tick, appended) = (stop.clone(), tick.clone(), appended.clone());
             std::thread::spawn(move || {
                 session
-                    .ensure()
+                    .ensure(Want::Press)
                     .expect("attach to the pane's editor")
                     .expect("the pane's editor is there");
                 let mut pieces = 0;

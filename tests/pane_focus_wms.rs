@@ -55,7 +55,7 @@ use spokenpad::{
     config::{Mode, Nvim, PaneLayout},
     core::{font::Points, geometry::Rect},
     shell::{
-        nvim::NvimSession,
+        nvim::{NvimSession, Want},
         pane::x11::{self, Display, INSTANCE, Window as PaneWindow},
     },
 };
@@ -130,7 +130,7 @@ fn the_pane_finds_sway_without_swaysock() {
     ));
     let sampler = FocusSampler::start(&sway.server.display, sway.view());
     session
-        .ensure()
+        .ensure(Want::Press)
         .expect("open the pane with sway found from the display")
         .expect("the pane attached");
     let pane = pane_window(&sway);
@@ -188,7 +188,7 @@ fn the_pane_refuses_a_sway_it_cannot_reach() {
         let error = format!(
             "{:#}",
             session
-                .ensure()
+                .ensure(Want::Press)
                 .expect_err("the pane opened with sway unreachable")
         );
         sleep(SETTLE);
@@ -243,7 +243,7 @@ fn a_tiled_pane_opens_floating_where_it_is_not_proven() {
         PaneLayout::Tiled,
     ));
     session
-        .ensure()
+        .ensure(Want::Press)
         .expect("open the pane")
         .expect("the pane attached");
     let pane = wait_for(PATIENCE, "the pane window", || {
@@ -466,7 +466,7 @@ fn story(desktop: &mut dyn Desktop, layout: PaneLayout) -> Report {
         layout,
     ));
     let sampler = FocusSampler::start(&desktop.server().display, desktop.view());
-    let opened = session.ensure().expect("open the pane");
+    let opened = session.ensure(Want::Press).expect("open the pane");
     assert!(opened.is_some(), "the pane did not attach");
     let pane = pane_window(desktop);
     desktop.wait_until_managed(pane);
@@ -557,7 +557,7 @@ fn story(desktop: &mut dyn Desktop, layout: PaneLayout) -> Report {
     });
     make_focused(desktop, holder);
     let sampler = FocusSampler::start(&desktop.server().display, desktop.view());
-    session.ensure().expect("open the next pane");
+    session.ensure(Want::Press).expect("open the next pane");
     let next = pane_window(desktop);
     desktop.wait_until_managed(next);
     session
@@ -624,7 +624,7 @@ fn story(desktop: &mut dyn Desktop, layout: PaneLayout) -> Report {
     sleep(SETTLE);
     let before = desktop.server().input_focus();
     let sampler = FocusSampler::start(&desktop.server().display, desktop.view());
-    let lone = session.ensure();
+    let lone = session.ensure(Want::Press);
     if desktop.sway_socket().is_some() {
         // sway focuses the first window on a workspace whatever the rules
         // say, so the pane must not open there at all.

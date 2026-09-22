@@ -18,16 +18,20 @@
 //! - stopping the daemon leaves no window and no editor behind.
 //!
 //! One test, in that order, because it is one story: the same daemon code
-//! with and without a display to open on.
+//! with and without a display to open on. A second one is about a latched
+//! capture whose window closes under it: closed by the user — through the
+//! window manager, or with `:q` — it cancels the capture, keeps what was
+//! committed and opens nothing; an editor that dies does not, and the next
+//! text opens a new pane.
 mod harness;
 
 use anyhow::Result;
-use harness::{I3, SETTLE, XServer, close_window, wait_for};
+use harness::{I3, SETTLE, XServer, click, close_window, press_keysym, type_text, wait_for};
 use spokenpad::{
     config::{Config, Mode, Nvim},
     core::{
         control::{Received, Request},
-        decode::{Pipeline, Recognizer, Segmenter, TrailingSilence},
+        decode::{Pipeline, Recognizer, Segment, Segmenter, Split, TrailingSilence},
         font::Points,
         geometry::Dimensions,
     },
@@ -60,6 +64,7 @@ const PATIENCE: Duration = Duration::from_secs(20);
 /// What the daemon under test allows an editor to start in. A dead one must
 /// cost a fraction of this, not all of it.
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
+const RETURN: u32 = 0xff0d;
 
 #[test]
 fn the_daemon_opens_a_pane_dictates_into_it_and_cleans_up() {
@@ -247,6 +252,88 @@ fn the_daemon_opens_a_pane_dictates_into_it_and_cleans_up() {
     println!("stopping the daemon left no window and no editor behind");
 }
 
+/// A latched capture whose pane closes under it. Three closes, each on a
+/// capture that has already committed text:
+///
+/// - the window manager closes the window (`WM_DELETE_WINDOW`): the capture
+///   is cancelled — the recording stops growing, and speech after the close
+///   is never transcribed — the committed text stays in its file, and no
+///   window or file opens;
+/// - `:q` typed into the pane: the same;
+/// - the editor killed: not the user's doing, so the capture goes on, and
+///   its next text opens a new pane rather than being lost.
+#[test]
+fn closing_the_pane_cancels_the_capture_it_showed() {
+    if !harness::tools_or_skip(&["Xvfb", "i3", "nvim", "fc-match"]) {
+        return;
+    }
+    let mut server = XServer::start();
+    let i3 = I3::start(&server);
+    let base = server.plain_window();
+    i3.wait_until_managed(base);
+    std::thread::sleep(SETTLE);
+    let daemon = Daemon::with_chunks(&server.display);
+    let speech = vec![0.4_f32; 32_000];
+
+    // ----------------------------------------- the window manager closes it
+    daemon.send(Request::Toggle);
+    daemon.say(&speech);
+    let first = daemon.wait_for_text(1, "the first capture's text");
+    let pane = wait_for(PATIENCE, "i3 to manage the pane", || pane_window(&i3));
+    close_window(&server, pane);
+    let recorded = daemon.wait_until_cancelled("closing the window");
+    assert_eq!(daemon.dictation_files(), std::slice::from_ref(&first));
+    let kept = std::fs::read_to_string(&first).expect("the first file");
+    assert!(
+        kept.contains(SPOKEN),
+        "the committed text was lost: {kept:?}"
+    );
+    daemon.assert_nothing_more(&i3, &recorded, "the window manager's close");
+    assert_eq!(
+        std::fs::read_to_string(&first).expect("the first file"),
+        kept,
+        "text reached the closed window's file after the close"
+    );
+    println!("closing the window cancelled the capture and opened nothing");
+
+    // ---------------------------------------------------- `:q` in the pane
+    daemon.send(Request::Toggle);
+    daemon.say(&speech);
+    let second = daemon.wait_for_text(2, "the second capture's text");
+    assert_ne!(second, first, "a new press opens a new file");
+    let pane = wait_for(PATIENCE, "i3 to manage the second pane", || {
+        pane_window(&i3)
+    });
+    let (x, y) = wait_for(PATIENCE, "the second pane's place", || {
+        pane_centre(&i3, pane)
+    });
+    click(&mut server, x, y);
+    wait_for(PATIENCE, "the click to focus the pane", || {
+        i3.node(pane).filter(|node| node.focused).map(drop)
+    });
+    assert!(type_text(&mut server, ":q"), "the layout types `:q`");
+    assert!(press_keysym(&mut server, RETURN), "the layout has Return");
+    let recorded = daemon.wait_until_cancelled("`:q`");
+    assert_eq!(daemon.dictation_files(), [first.clone(), second.clone()]);
+    daemon.assert_nothing_more(&i3, &recorded, "`:q`");
+    println!("`:q` cancelled the capture and opened nothing");
+
+    // ------------------------------------------------ the editor is killed
+    daemon.send(Request::Toggle);
+    daemon.say(&speech);
+    daemon.wait_for_text(3, "the third capture's text");
+    wait_for(PATIENCE, "i3 to manage the third pane", || pane_window(&i3));
+    let before = daemon.spoken_count();
+    kill_editor(&daemon.socket);
+    daemon.say(&speech);
+    wait_for(PATIENCE, "the capture to go on into a new pane", || {
+        (daemon.spoken_count() > before && pane_window(&i3).is_some()).then_some(())
+    });
+    println!("an editor that died left the capture running, and its text opened a new pane");
+    daemon.send(Request::Toggle);
+    daemon.stop();
+}
+
 /// What the clipboard selection holds on one display, when a tool to read it
 /// is installed. Never the user's display: the caller passes the one this
 /// test started.
@@ -333,6 +420,54 @@ fn abandoned_pane(server: &XServer) -> (PaneHost, PathBuf, tempfile::TempDir) {
     (host, config.socket_path, directory)
 }
 
+/// The middle of the pane's window on the screen, as i3 placed it.
+fn pane_centre(i3: &I3, window: x11rb::protocol::xproto::Window) -> Option<(i16, i16)> {
+    fn walk(node: &serde_json::Value, window: u64) -> Option<(i64, i64)> {
+        if node.get("window").and_then(serde_json::Value::as_u64) == Some(window) {
+            let rect = node.get("rect")?;
+            let number = |key| rect.get(key).and_then(serde_json::Value::as_i64);
+            return Some((
+                number("x")? + number("width")? / 2,
+                number("y")? + number("height")? / 2,
+            ));
+        }
+        ["nodes", "floating_nodes"]
+            .into_iter()
+            .filter_map(|key| node.get(key).and_then(serde_json::Value::as_array))
+            .flatten()
+            .find_map(|child| walk(child, window))
+    }
+    let (x, y) = walk(&i3.tree(), u64::from(window))?;
+    Some((i16::try_from(x).ok()?, i16::try_from(y).ok()?))
+}
+
+/// Kill the editor listening on `socket`, as a crash would: `SIGKILL`, found
+/// by its command line, which names the socket in this test's directory.
+fn kill_editor(socket: &Path) {
+    let needle = socket.as_os_str().as_encoded_bytes().to_vec();
+    let killed = std::fs::read_dir("/proc")
+        .expect("read /proc")
+        .flatten()
+        .filter_map(|entry| {
+            let pid = entry.file_name().to_str()?.parse::<libc::pid_t>().ok()?;
+            let cmdline = std::fs::read(entry.path().join("cmdline")).ok()?;
+            cmdline
+                .split(|byte| *byte == 0)
+                .any(|argument| argument == needle)
+                .then_some(pid)
+        })
+        // SAFETY: `kill` signals one process this test found by its own
+        // socket path; it touches no memory.
+        .filter(|pid| unsafe { libc::kill(*pid, libc::SIGKILL) } == 0)
+        .count();
+    assert_eq!(
+        killed,
+        1,
+        "exactly one editor listens on {}",
+        socket.display()
+    );
+}
+
 /// The pane's window, as i3 sees it. The pane names itself
 /// `spokenpad-pane`, which no rule of the user's can match.
 fn pane_window(i3: &I3) -> Option<x11rb::protocol::xproto::Window> {
@@ -374,6 +509,7 @@ struct Daemon {
     served: Option<JoinHandle<Result<()>>>,
     dictation: PathBuf,
     socket: PathBuf,
+    recordings: PathBuf,
     _directory: tempfile::TempDir,
 }
 
@@ -381,7 +517,7 @@ impl Daemon {
     /// A daemon whose editor attaches as a UI and then raises while sourcing
     /// its configuration, which is what a broken `init.lua` looks like.
     fn broken_init(display: &str) -> Self {
-        Self::with(Some(display.to_owned()), |config| {
+        Self::with(Some(display.to_owned()), None, |config| {
             config.nvim.init = None;
             config.nvim.editor = [
                 "nvim",
@@ -398,10 +534,24 @@ impl Daemon {
     }
 
     fn start(display: Option<String>) -> Self {
-        Self::with(display, |_| {})
+        Self::with(display, None, |_| {})
     }
 
-    fn with(display: Option<String>, adjust: impl FnOnce(&mut Config)) -> Self {
+    /// A daemon that commits while the capture runs: a second of speech is a
+    /// chunk, settled once the next one begins, and each is recorded.
+    fn with_chunks(display: &str) -> Self {
+        Self::with(Some(display.to_owned()), Some(Chunks(16_000)), |config| {
+            config.recording.enabled = true;
+            config.preview.enabled = true;
+            config.preview.interval_ms = 200;
+        })
+    }
+
+    fn with(
+        display: Option<String>,
+        segmenter: Option<Chunks>,
+        adjust: impl FnOnce(&mut Config),
+    ) -> Self {
         let directory = tempfile::tempdir().expect("a temporary directory");
         let root = directory.path();
         let mut config = Config::default();
@@ -435,13 +585,14 @@ impl Daemon {
         );
         let pipeline = PipelineSource::Ready(Pipeline {
             recognizer: Fixed,
-            segmenter: None::<Never>,
+            segmenter,
         });
         let (requests, received) = mpsc::channel();
         let stopping = Arc::new(AtomicBool::new(false));
         let stop = Arc::clone(&stopping);
         let dictation = config.nvim.dictation_dir.clone();
         let socket = config.nvim.socket_path.clone();
+        let recordings = config.recording.dir.clone();
         let served = thread::spawn(move || {
             serve(
                 &config,
@@ -465,8 +616,106 @@ impl Daemon {
             served: Some(served),
             dictation,
             socket,
+            recordings,
             _directory: directory,
         }
+    }
+
+    /// Speak `samples` into the microphone and wait until it has taken them.
+    fn say(&self, samples: &[f32]) {
+        self.microphone.speak(samples);
+        wait_for(PATIENCE, "the microphone to be drained", || {
+            self.microphone.spoken().then_some(())
+        });
+    }
+
+    /// How many times the stand-in recogniser's sentence is written, in all
+    /// the dictation files together.
+    fn spoken_count(&self) -> usize {
+        self.dictation_files()
+            .iter()
+            .filter_map(|path| std::fs::read_to_string(path).ok())
+            .map(|text| text.matches(SPOKEN).count())
+            .sum()
+    }
+
+    /// Wait until the `nth` dictation file holds text and no more is coming —
+    /// every chunk of what was said is committed, so nothing is still being
+    /// decoded when the test closes the window — and return it.
+    fn wait_for_text(&self, nth: usize, what: &str) -> PathBuf {
+        let file = wait_for(PATIENCE, what, || {
+            let files = self.dictation_files();
+            (files.len() == nth)
+                .then(|| files.last().cloned())
+                .flatten()
+                .filter(|path| contains(path, SPOKEN))
+        });
+        // Five ticks without a new commit.
+        let mut last = self.spoken_count();
+        let mut quiet = 0;
+        wait_for(PATIENCE, &format!("{what} to be complete"), || {
+            std::thread::sleep(Duration::from_millis(200));
+            let now = self.spoken_count();
+            quiet = if now == last { quiet + 1 } else { 0 };
+            last = now;
+            (quiet >= 5).then_some(())
+        });
+        file
+    }
+
+    /// The recovery WAVs, oldest first.
+    fn wavs(&self) -> Vec<PathBuf> {
+        let mut wavs: Vec<PathBuf> = std::fs::read_dir(&self.recordings)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|extension| extension == "wav"))
+            .collect();
+        wavs.sort();
+        wavs
+    }
+
+    /// Wait until the pane is gone and the newest recording has stopped
+    /// growing, which is what a cancelled capture leaves; return its size.
+    fn wait_until_cancelled(&self, how: &str) -> (PathBuf, u64) {
+        let pane_gone = || UnixStream::connect(&self.socket).is_err();
+        wait_for(PATIENCE, &format!("the pane to go after {how}"), || {
+            pane_gone().then_some(())
+        });
+        let wav = self.wavs().pop().expect("a recording");
+        let size = || std::fs::metadata(&wav).map(|meta| meta.len()).unwrap_or(0);
+        let mut last = size();
+        wait_for(
+            PATIENCE,
+            &format!("the recording to stop after {how}"),
+            || {
+                std::thread::sleep(Duration::from_millis(300));
+                let now = size();
+                let settled = now == last;
+                last = now;
+                settled.then_some(())
+            },
+        );
+        (wav, last)
+    }
+
+    /// Speech after a close the user made reaches nothing: the recording
+    /// does not grow, no text is written anywhere, and no window opens.
+    fn assert_nothing_more(&self, i3: &I3, (wav, size): &(PathBuf, u64), how: &str) {
+        let files = self.dictation_files();
+        let count = self.spoken_count();
+        self.say(&vec![0.4_f32; 32_000]);
+        // Five ticks, and the time for a pane to open.
+        std::thread::sleep(Duration::from_millis(1_500));
+        assert_eq!(
+            std::fs::metadata(wav).map(|meta| meta.len()).ok(),
+            Some(*size),
+            "the capture went on recording after {how}"
+        );
+        assert_eq!(self.dictation_files(), files, "a file opened after {how}");
+        assert_eq!(self.spoken_count(), count, "text was written after {how}");
+        assert!(pane_window(i3).is_none(), "a pane opened after {how}");
     }
 
     /// One push-to-talk: press, speak, release. Returns the moment the key
@@ -603,12 +852,31 @@ impl Recognizer for Fixed {
     }
 }
 
-/// No segmenter: the whole capture is decoded when the key comes up, which is
-/// the simplest path through the pipeline.
-struct Never;
+/// Fixed chunks of this many samples, every one but the last settled, and
+/// none where nothing was said: what a voice activity detector reports for a
+/// steady tone, without loading one. Without it the whole capture is decoded
+/// when the key comes up, which is the simplest path through the pipeline.
+struct Chunks(usize);
 
-impl Segmenter for Never {
-    fn split(&mut self, _samples: &[f32]) -> Result<spokenpad::core::decode::Split> {
-        unreachable!("this test runs without a segmenter")
+impl Segmenter for Chunks {
+    fn split(&mut self, samples: &[f32]) -> Result<Split> {
+        if !samples.iter().any(|sample| sample.abs() > 0.1) {
+            return Ok(Split::default());
+        }
+        let Self(size) = *self;
+        Ok(Split {
+            segments: (0..samples.len())
+                .step_by(size)
+                .map(|start| {
+                    let end = (start + size).min(samples.len());
+                    Segment {
+                        window: start..end,
+                        speech_end: end,
+                        settled: end < samples.len(),
+                    }
+                })
+                .collect(),
+            silent_through: 0,
+        })
     }
 }

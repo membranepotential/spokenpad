@@ -43,7 +43,7 @@ use spokenpad::{
     shell::{
         daemon::SHUTDOWN_GRACE,
         nvim::pane_launch,
-        nvim::{IndicatorState, NvimSession},
+        nvim::{IndicatorState, NvimSession, Want},
         pane::{Options, Pane, Status, place::Target},
     },
 };
@@ -178,7 +178,7 @@ fn the_pane_draws_what_neovim_draws() {
     );
     let mut session = NvimSession::new(config.clone());
     let attached = session
-        .ensure()
+        .ensure(Want::Press)
         .expect("attach to the pane's editor")
         .expect("attach mode found the pane's editor");
     assert_eq!(
@@ -404,7 +404,11 @@ fn the_pane_draws_what_neovim_draws() {
     );
     close_window(&server, pane.window().id());
     wait_for(PATIENCE, "the pane to notice the window closed", || {
-        matches!(pane.step(Duration::from_millis(50)), Ok(Status::Finished)).then_some(())
+        matches!(
+            pane.step(Duration::from_millis(50)),
+            Ok(Status::Finished(_))
+        )
+        .then_some(())
     });
     drop(pane);
     let on_disk = std::fs::read_to_string(&file).expect("read the dictation file");
@@ -520,7 +524,7 @@ fn the_winbar_background_is_continuous_after_a_stop() {
     );
     let mut session = NvimSession::new(config.clone());
     session
-        .ensure()
+        .ensure(Want::Press)
         .expect("attach to the pane's editor")
         .expect("attach mode found the pane's editor");
     session

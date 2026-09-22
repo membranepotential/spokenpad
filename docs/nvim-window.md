@@ -311,10 +311,29 @@ that is not a gap; for CJK input it is, and `attach` is the answer there.
   which is what the editor's clipboard provider needs.
 - **You close the window.** The editor inside it is asked to write every
   modified buffer and quit, its socket goes, and the next dictation opens a
-  new window on a new file.
-- **You `:q` in it.** The same, from the other end. `:q` always writes and
-  quits: the dictation file is saved on every change, and before `:quit`,
-  `:wq` or `:qall` looks at what is unsaved ([The file](#the-file)).
+  new window on a new file. **A recording running at that moment is
+  cancelled**, as `spokenpad cancel` would: committed text stays in the
+  file, the tail is not decoded, the WAV is kept, and one desktop
+  notification ("recording cancelled") says so, since the window that would
+  have is gone. Until the next key press no window opens again: text still
+  arriving from before the close — a chunk that was being decoded, or the
+  tail of a recording already released — goes to the pending passage, which
+  the next pane opens on. The pane tells the daemon (`PaneHost::take_closed_by_user`,
+  asked by the editor thread after every piece of work and every 66 ms), and
+  the state machine cancels only a capture that started before the close
+  (`Event::WindowClosed`), so a key pressed right after closing starts a
+  recording that goes on.
+- **You `:q` in it.** The same, from the other end, a running recording
+  cancelled included: Neovim exiting with status 0 (`:q`, `:wq`, `:qa`) is
+  your close. `:q` always writes and quits: the dictation file is saved on
+  every change, and before `:quit`, `:wq` or `:qall` looks at what is unsaved
+  ([The file](#the-file)).
+- **The editor dies.** Killed, crashed, or exiting with another status
+  (`:cq` too): not your close. The pane goes, a recording goes on, and its
+  next text opens a new pane on the pending passage — nothing is lost to a
+  crash. In attach mode the daemon cannot tell `:q` in an editor it did not
+  start from that editor dying, so there quitting the editor never cancels
+  a recording.
 - **The daemon restarts.** The window goes with it — it is a thread of that
   process and the editor is its child. An editor you opened in attach mode
   outlives the daemon and is reattached to; a pane cannot. Nothing is lost: dictated text is written to the file after every utterance,

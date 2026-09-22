@@ -33,7 +33,7 @@ imperative shell, and `config.rs` sits at the root because both sides read it.
 | `core/keys.rs` | A keysym, its modifiers and the text a layout produced, as the notation `nvim_input` reads | none |
 | `shell/nvim/mod.rs` | Editor lifecycle in both modes (pane, attach), ownership proof, transactional appends, indicator, `spokenpad editor` | Unix socket |
 | `shell/pane/mod.rs` | The pane: its loop, the renderer, and what `spokenpad check` looks for | X11 |
-| `shell/pane/host.rs` | The pane's thread: the two things the daemon tells it, whether a pane is open, and restarting after a panic | internal channels |
+| `shell/pane/host.rs` | The pane's thread: the two things the daemon tells it, whether a pane is open, whether the user closed the last one, and restarting after a panic | internal channels |
 | `shell/pane/x11.rs` | The window, the properties that keep a window manager from focusing it, `PutImage`, and `Xft.dpi` from x11rb's resource database, as winit reads it | X11, `~/.Xresources` |
 | `shell/pane/ui.rs` | `nvim --embed` over stdio, `nvim_ui_attach`, and the thread that decodes its redraw stream | a child process |
 | `shell/pane/font.rs` | `fc-match` for the face, swash for hinted glyphs, per-grapheme caching, and a character fallback kept off the drawing path: loaded faces first, one answer per Unicode page, a budget per frame and a timeout per process | fontconfig, filesystem |
@@ -63,7 +63,8 @@ unit-tested without a device, a thread, or a process. Nothing there may import
   which request starts, continues, latches or ends a capture; when the clock
   closes a release's repeat window; and when the clock ends a capture nobody
   is ending. Every ending carries a `Cause`, and the three that are not
-  `KeyPress` are what the user reads in the winbar.
+  `KeyPress` are what the user reads in the winbar. Closing the dictation
+  window cancels the capture it showed, as a cancel request does.
 - `core/control.rs` — the control protocol as values.
 - `core/session.rs` — what a capture means: which utterance is current, whether
   a preview is due, which notice is showing.
@@ -252,11 +253,19 @@ and checked against the grace at compile time. Text Neovim will not write
 comes back with the failure and is kept beside its file as `.unsaved`, rather
 than discarded along with the editor.
 
-The daemon tells that thread two things, open and stop, and is never told a
-window closed. It does not need to be: the editor dies with the window, its
-socket goes with it, and the next key-down finds a dead socket and asks for a
-new pane. Committed text never travels over the drawing channel; it goes over
-the editor's own socket, as in attach mode.
+The daemon tells that thread two things, open and stop. A window that closes
+needs no word to end the passage: the editor dies with the window, its socket
+goes with it, and the next key-down finds a dead socket and asks for a new
+pane. What the thread does record is whether the user closed it — the window
+manager's `WM_DELETE_WINDOW`, or Neovim exiting with status 0 — and when. The
+editor thread asks after every piece of work and every 66 ms, stops opening
+panes for text until the next key press, and sends the time to the event
+loop as `ResultEvent::WindowClosed`, which becomes `state::Event::WindowClosed`:
+a capture running since before that time is cancelled like `spokenpad
+cancel`. A pane whose editor died by any other exit is not a close: the
+capture goes on and its next text opens a new pane. Committed text never
+travels over the drawing channel; it goes over the editor's own socket, as in
+attach mode.
 
 Capture callbacks do bounded work — one allocation, one lock, no I/O — and hand
 immutable chunks to the recording and decode consumers. One inference worker

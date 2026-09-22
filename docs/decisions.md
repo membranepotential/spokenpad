@@ -1819,3 +1819,48 @@ typed into failed with E37; only the pane's own close wrote first.
   wrote and quit, and the user's `BufWritePre` ran on the transcript.
 - Rejected: `'autowriteall'` in an editor spokenpad only adopted, where the
   globals are the user's, as with the chrome.
+
+## Closing the pane cancels the capture it showed (2026-09-22)
+
+Reported live: during a latched capture the user closed the pane; the log
+said "the dictation pane closed", the capture went on for another seventy
+seconds, and its next commit opened a new window on a new file. The user
+wants closing the window to cancel the recording.
+
+- Chosen: a close by the user is a new input to the transition table,
+  `state::Event::WindowClosed { at }`, with the same outcome as a cancel
+  request (`DiscardReason::WindowClosed`): committed text stays in its file,
+  the tail is not decoded, the recovery WAV is kept. It cancels only a
+  capture that started before `at`, so a key pressed right after the close,
+  before the close is reported, starts a capture that goes on. Released and
+  decoding, it changes nothing, as a cancel does not.
+- A close by the user is the window manager's `WM_DELETE_WINDOW` (i3's
+  `kill`, a title-bar button), or Neovim exiting with status 0 (`:q`, `:wq`,
+  `:qa`). The pane reads the exit status once Neovim's channel closes
+  (`Ending` in `shell/pane`), waiting up to 0.5 s for the process to go.
+  Only a pane the daemon had attached to counts: an editor that quits with
+  status 0 while it starts (a configuration that runs `qall!`) is a pane
+  that failed to open, and its capture's text goes to the pending passage
+  as before.
+- Kept: a crash is not a close. Neovim killed, dying, or exiting with
+  another status (`:cq` included), or the X connection failing, leaves the
+  capture running, and its next text opens a new pane on the pending
+  passage, as before. Nothing may be lost to a crash.
+- Chosen: after the user's close, text opens no pane until the next key
+  press (`nvim::Want::Text`); it goes to the pending passage, which the next
+  pane opens on. Without this, a chunk already being decoded at the close,
+  or the tail of a capture released just before it, would open a window the
+  user had just closed. Text also opens no pane while the last one is still
+  closing, since that may be a close not yet recorded.
+- Chosen: one desktop notification per such close ("recording cancelled"):
+  the winbar that shows every other notice is gone with the window, and the
+  next key press would clear a notice before any window could show it.
+- Attach mode is left as it is: the daemon did not start that editor, so it
+  cannot read its exit status, and a socket that closes looks the same for
+  `:q` and for a crash. Quitting an attached editor never cancels a capture.
+- Tests: the transition table's sweep and a test of the rule; in
+  `tests/pane_daemon.rs`, a latched capture on a real daemon and pane,
+  closed once through the window manager and once with `:q` typed into it
+  (the recording stops growing, speech after the close is never written
+  anywhere, no file or window opens), and once with its editor killed (the
+  capture goes on and a new pane opens with its text).

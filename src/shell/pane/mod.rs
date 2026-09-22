@@ -50,7 +50,7 @@ use std::{
     io::Write,
     os::unix::fs::OpenOptionsExt,
     path::PathBuf,
-    process::Command,
+    process::{Command, ExitStatus},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -115,9 +115,29 @@ impl Default for Options {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
     Running,
-    /// Neovim exited, or the window manager closed the window.
-    Finished,
+    Finished(Ending),
 }
+
+/// Why a pane finished, which decides what becomes of the capture it showed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ending {
+    /// The user closed it: the window manager asked (`WM_DELETE_WINDOW`), or
+    /// Neovim exited with status 0 (`:q`, `:wq`, `:qa`). The daemon cancels a
+    /// capture that was running.
+    ByUser,
+    /// Neovim exited with another status or was killed by a signal. Nothing
+    /// the user meant: the capture goes on, and its next text opens a new
+    /// pane.
+    EditorFailed(ExitStatus),
+    /// Neovim's channel closed and the process had not exited a moment later,
+    /// or the pane lost its sources of events. Treated as a failure.
+    Lost,
+}
+
+/// How long a pane waits, after Neovim's channel closed, for the process to
+/// say how it exited: long enough for an exit that is under way, short
+/// enough that a wedged one does not hold the pane's thread.
+const EXIT_WAIT: Duration = Duration::from_millis(500);
 
 pub struct Pane {
     window: Window,
@@ -330,13 +350,13 @@ impl Pane {
         let first = match self.events.recv_timeout(timeout) {
             Ok(event) => Some(event),
             Err(RecvTimeoutError::Timeout) => None,
-            Err(RecvTimeoutError::Disconnected) => return Ok(Status::Finished),
+            Err(RecvTimeoutError::Disconnected) => return Ok(Status::Finished(Ending::Lost)),
         };
         let queued: Vec<Event> = self.events.try_iter().collect();
         let mut status = Status::Running;
         for event in first.into_iter().chain(queued) {
-            if self.handle(event)? == Status::Finished {
-                status = Status::Finished;
+            if let finished @ Status::Finished(_) = self.handle(event)? {
+                status = finished;
             }
         }
         // Nothing is drawn into a window that is gone: the X requests would
@@ -424,7 +444,11 @@ impl Pane {
             }
             Event::Editor(FromEditor::Gone) => {
                 self.editor_gone = true;
-                Ok(Status::Finished)
+                Ok(Status::Finished(match self.editor.exit_status(EXIT_WAIT) {
+                    Some(status) if status.success() => Ending::ByUser,
+                    Some(status) => Ending::EditorFailed(status),
+                    None => Ending::Lost,
+                }))
             }
             Event::Window(event) => self.window_event(event),
         }
@@ -459,7 +483,7 @@ impl Pane {
                 }
             }
             X::ClientMessage(event) if self.window.is_close_request(&event) => {
-                return Ok(Status::Finished);
+                return Ok(Status::Finished(Ending::ByUser));
             }
             _ => {}
         }

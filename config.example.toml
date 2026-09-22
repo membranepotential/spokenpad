@@ -461,7 +461,8 @@ file_template = "dictation-%Y-%m-%d-%H%M%S.md"
 startup_timeout_s = 20.0
 
 # Send a desktop notification (notify-send) when dictation starts going to a
-# file because no editor is open -- once per such file, not per utterance.
+# file because no editor is open -- once per such file, not per utterance --
+# and when closing the dictation window cancelled the recording it showed.
 notify = true
 
 # After every release, copy the whole dictation buffer -- every press in

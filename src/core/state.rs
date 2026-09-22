@@ -14,7 +14,8 @@
 //!   capture ignores every `stop`; the next `start` or `toggle` ends it.
 //!
 //! The clock also ends a capture nobody is ending: see [`MAX_CAPTURE`] and
-//! the `silence` argument of [`step`].
+//! the `silence` argument of [`step`]. And closing the dictation window
+//! cancels the capture it was showing ([`Event::WindowClosed`]).
 use crate::core::control::{Received, Request};
 use std::time::{Duration, Instant};
 
@@ -117,6 +118,15 @@ pub enum Event {
     Exhausted {
         at: Instant,
     },
+    /// The user closed the dictation window at `at`: the pane's own close,
+    /// or `:q` in it. A capture that was running then is cancelled as
+    /// `spokenpad cancel` cancels it — the user is done with that window,
+    /// and a recording going on into a window nobody looks at would only
+    /// open another one with its next text. A capture that started after
+    /// `at` is a new press, and goes on.
+    WindowClosed {
+        at: Instant,
+    },
     Finished,
 }
 
@@ -127,6 +137,8 @@ pub enum DiscardReason {
     TooShort,
     /// `spokenpad cancel`.
     Cancelled,
+    /// The user closed the dictation window ([`Event::WindowClosed`]).
+    WindowClosed,
 }
 
 /// What ended a capture. Everything but [`Cause::KeyPress`] is spokenpad
@@ -341,10 +353,19 @@ pub fn step(state: State, event: Event, silence: Option<Duration>) -> (State, Co
             Nothing,
         ),
         (Recording { started, .. }, Event::Exhausted { at }) => end(started, at, Cause::Memory),
+        // Like a cancel, whatever holds the capture: the window it was
+        // dictating into is gone, and so is the user's interest in it.
+        (Recording { started, .. }, Event::WindowClosed { at }) if at >= started => {
+            (Idle, Command::Discard(DiscardReason::WindowClosed))
+        }
         (Transcribing { .. }, Event::Finished) => (Idle, Nothing),
         (
             _,
-            Event::Clock { .. } | Event::Speech { .. } | Event::Exhausted { .. } | Event::Finished,
+            Event::Clock { .. }
+            | Event::Speech { .. }
+            | Event::Exhausted { .. }
+            | Event::WindowClosed { .. }
+            | Event::Finished,
         ) => (state, Nothing),
     }
 }
@@ -403,7 +424,7 @@ mod tests {
     /// exhaustive sweep below. `Event` carries `Instant`s, so this cannot be
     /// a `const` array; the match instead makes a new variant a *compile*
     /// error here, pointing at the one place that has to list it.
-    fn all_events(at: Instant) -> [Event; 8] {
+    fn all_events(at: Instant) -> [Event; 9] {
         fn covered(event: Event) {
             match event {
                 // Adding a variant breaks this match. Add it to the array
@@ -412,6 +433,7 @@ mod tests {
                 | Event::Clock { .. }
                 | Event::Speech { .. }
                 | Event::Exhausted { .. }
+                | Event::WindowClosed { .. }
                 | Event::Finished => {}
             }
         }
@@ -423,6 +445,7 @@ mod tests {
             Event::Clock { now: at },
             Event::Speech { at },
             Event::Exhausted { at },
+            Event::WindowClosed { at },
             Event::Finished,
         ];
         events.into_iter().for_each(covered);
@@ -469,6 +492,7 @@ mod tests {
         let latched_new = begun(Hold::Latched { last_press: later });
         let latched_now = at(Hold::Latched { last_press: later });
         let cancelled = (State::Idle, Command::Discard(Cancelled));
+        let closed = (State::Idle, Command::Discard(WindowClosed));
         let ended = (
             State::Transcribing {
                 started: t,
@@ -498,6 +522,7 @@ mod tests {
                 nothing(State::Idle),
                 nothing(State::Idle),
                 nothing(State::Idle),
+                nothing(State::Idle),
             ],
             // Held
             [
@@ -508,6 +533,7 @@ mod tests {
                 nothing(at(Hold::Held)),
                 nothing(spoke(Hold::Held)),
                 exhausted,
+                closed,
                 nothing(at(Hold::Held)),
             ],
             // Releasing, window exactly at its edge: still open.
@@ -519,6 +545,7 @@ mod tests {
                 nothing(states[2]),
                 nothing(spoke(releasing)),
                 exhausted,
+                closed,
                 nothing(states[2]),
             ],
             // Latched
@@ -530,6 +557,7 @@ mod tests {
                 nothing(states[3]),
                 nothing(spoke(Hold::Latched { last_press: t })),
                 exhausted,
+                closed,
                 nothing(states[3]),
             ],
             // Transcribing
@@ -541,6 +569,9 @@ mod tests {
                 nothing(transcribing),
                 nothing(transcribing),
                 nothing(transcribing),
+                nothing(transcribing),
+                // Nor can closing the window: the tail is decoded as for any
+                // release, and lands in the passage it belongs to.
                 nothing(transcribing),
                 nothing(State::Idle),
             ],
@@ -564,6 +595,52 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Closing the window cancels the capture it was showing, held or
+    /// latched, exactly as `spokenpad cancel` would; a capture pressed after
+    /// the close is a new one and goes on, and one already released is
+    /// decoded as usual.
+    #[test]
+    fn closing_the_window_cancels_the_capture_it_was_showing() {
+        let t = Instant::now();
+        let ms = |n| t + Duration::from_millis(n);
+        let closed = |at| Event::WindowClosed { at };
+        for (latch, name) in [(Request::Toggle, "latched"), (Request::Start, "held")] {
+            let (state, commands) = run(
+                State::Idle,
+                &[requests(&[(latch, t)]), vec![closed(ms(20_000))]].concat(),
+            );
+            assert_eq!(
+                commands,
+                [Command::Start, Command::Discard(WindowClosed)],
+                "{name}"
+            );
+            assert_eq!(state, State::Idle, "{name}");
+        }
+        // The window closed, and the next press came before the close was
+        // reported: that capture is not the one the window showed.
+        let (state, commands) = run(
+            State::Idle,
+            &[
+                requests(&[(Request::Toggle, ms(500))]),
+                vec![closed(ms(400))],
+            ]
+            .concat(),
+        );
+        assert_eq!(commands, [Command::Start]);
+        assert!(state.latched());
+        // Released and decoding: the close changes nothing.
+        let (state, commands) = run(
+            State::Idle,
+            &[
+                requests(&[(Request::Toggle, t), (Request::Toggle, ms(1000))]),
+                vec![closed(ms(1100))],
+            ]
+            .concat(),
+        );
+        assert_eq!(commands, [Command::Start, decode(ms(1000))]);
+        assert!(matches!(state, State::Transcribing { .. }));
     }
 
     #[test]

@@ -21,7 +21,8 @@ the root because both sides read it. Nothing under `core/` may import
 - `core/state.rs` contains the pure state machine over the four control
   requests and the clock, including the 120 ms minimum hold, the 150 ms
   repeat window that tells a held key's auto-repeat from a new press, and the
-  rule that a cancel after release is a no-op. `core/control.rs` is the
+  rule that a cancel after release is a no-op; closing the dictation pane
+  cancels as a cancel request does. `core/control.rs` is the
   one-line wire protocol. `core/session.rs`
   handles utterance identity, cancellation, preview scheduling, and the single
   user-visible notice, which the next key press clears — `Notice::priority`

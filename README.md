@@ -208,6 +208,13 @@ dictation file as its own paragraph and saved after every utterance.
 - **Cancel:** press the cancel key (`spokenpad cancel`) while recording. Text
   that already reached the file stays, and the WAV is kept. After release,
   cancel does nothing.
+- **Closing the window cancels the recording.** Close the pane while a
+  recording runs — through your window manager, or with `:q` in it — and
+  the recording is cancelled as if you had pressed the cancel key: what was
+  already transcribed stays in the file, the rest is not transcribed, the
+  WAV is kept, and one desktop notification says so. No window opens again
+  until you press the key. An editor that crashes is different: the
+  recording goes on, and its next text opens a new window.
 - **The editor:** `spokenpad editor` runs Neovim in the current terminal on
   the dictation socket. Close it to end the passage: the next editor starts a
   new file. If you dictate with no editor open, the text goes to a file, one

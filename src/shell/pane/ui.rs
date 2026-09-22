@@ -21,7 +21,7 @@ use rmpv::Value;
 use std::{
     io::{BufReader, Write},
     os::unix::process::CommandExt,
-    process::{Child, ChildStdin, Command, Stdio},
+    process::{Child, ChildStdin, Command, ExitStatus, Stdio},
     sync::mpsc::Sender,
     thread::JoinHandle,
     time::{Duration, Instant},
@@ -59,10 +59,10 @@ impl Editor {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
-        // Its own session. A daemon run in
-        // the foreground shares its process group with whatever started it,
-        // and a Ctrl-C there would otherwise reach nvim first — before the
-        // pane has had the chance to write what is in the buffer.
+        // Its own session. A daemon run in the foreground shares its process
+        // group with whatever started it, and a Ctrl-C there would otherwise
+        // reach nvim first — before the pane has had the chance to write
+        // what is in the buffer.
         //
         // SAFETY: this closure calls only the async-signal-safe `setsid`
         // between fork and exec, and does not capture or allocate.
@@ -180,6 +180,22 @@ impl Editor {
             .context("the pane's channel to nvim is closed")?;
         stdin.write_all(&bytes).context("write to nvim")?;
         stdin.flush().context("flush the channel to nvim")
+    }
+
+    /// How Neovim exited, once its channel has ended: waited for up to
+    /// `within`, since the channel closes a moment before the process is
+    /// gone. `None` if it is still running by then.
+    pub fn exit_status(&mut self, within: Duration) -> Option<ExitStatus> {
+        let deadline = Instant::now() + within;
+        loop {
+            match self.process.try_wait() {
+                Ok(Some(status)) => return Some(status),
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Ok(None) | Err(_) => return None,
+            }
+        }
     }
 
     /// Closing stdin is the polite half: `--embed` treats the channel closing

@@ -23,7 +23,7 @@ fn a_pane_without_a_display_says_to_use_attach_mode() {
     };
     assert_eq!(config.mode, Mode::Pane, "the pane is the default mode");
     let mut session = NvimSession::new(config);
-    let error = format!("{:#}", session.ensure().unwrap_err());
+    let error = format!("{:#}", session.ensure(Want::Press).unwrap_err());
     assert!(error.contains("needs an X display"), "{error}");
     assert!(error.contains("nvim.mode = \"attach\""), "{error}");
     assert_eq!(session.refused.as_deref(), Some(error.as_str()));
@@ -282,7 +282,10 @@ fn open_user_editor(config: &Nvim) -> (PathBuf, UserEditor) {
 fn dictating(config: &Nvim) -> (NvimSession, PathBuf, UserEditor) {
     let (opened, editor) = open_user_editor(config);
     let mut session = NvimSession::new(config.clone());
-    let path = session.ensure().unwrap().expect("the user's editor");
+    let path = session
+        .ensure(Want::Press)
+        .unwrap()
+        .expect("the user's editor");
     assert_eq!(
         path, opened,
         "the session pinned the file the editor opened"
@@ -325,7 +328,7 @@ fn attach_mode_never_spawns_an_editor() {
     let directory = tempfile::tempdir().unwrap();
     let config = headless(directory.path());
     let mut session = NvimSession::new(config.clone());
-    assert_eq!(session.ensure().unwrap(), None);
+    assert_eq!(session.ensure(Want::Press).unwrap(), None);
     assert!(!config.socket_path.exists());
     assert!(!config.dictation_dir.exists(), "no file before any text");
 }
@@ -338,7 +341,7 @@ fn attach_mode_adopts_the_users_editor_on_the_pending_passage() {
     let directory = tempfile::tempdir().unwrap();
     let config = headless(directory.path());
     let mut session = NvimSession::new(config.clone());
-    assert_eq!(session.ensure().unwrap(), None);
+    assert_eq!(session.ensure(Want::Press).unwrap(), None);
     let detached = session
         .append_detached("said with no editor", false)
         .unwrap();
@@ -350,7 +353,10 @@ fn attach_mode_adopts_the_users_editor_on_the_pending_passage() {
         opened, detached.path,
         "the editor opens the pending passage"
     );
-    let pinned = session.ensure().unwrap().expect("the user's editor");
+    let pinned = session
+        .ensure(Want::Press)
+        .unwrap()
+        .expect("the user's editor");
     assert_eq!(pinned, detached.path);
     assert_eq!(passage::pending(&config), None, "the pointer is settled");
     session.append("said into the editor", false).unwrap();
@@ -397,7 +403,10 @@ fn a_passage_an_editor_opened_is_never_written_behind_its_back() {
         "said with no editor\n"
     );
 
-    assert_eq!(session.ensure().unwrap(), Some(first.path.clone()));
+    assert_eq!(
+        session.ensure(Want::Press).unwrap(),
+        Some(first.path.clone())
+    );
     session.append("said into the editor", false).unwrap();
     assert_eq!(
         fs::read_to_string(&first.path).unwrap(),
@@ -493,7 +502,10 @@ fn headless_append_literal_text_and_adopt() {
     first.close();
 
     let mut restarted = NvimSession::new(config);
-    assert_eq!(restarted.ensure().unwrap().expect("an editor"), path);
+    assert_eq!(
+        restarted.ensure(Want::Press).unwrap().expect("an editor"),
+        path
+    );
     restarted.append("continued", true).unwrap();
     assert_eq!(
         fs::read_to_string(path).unwrap(),
@@ -624,7 +636,10 @@ return true
 
     session.close();
     let mut reloaded = NvimSession::new(config);
-    assert_eq!(reloaded.ensure().unwrap().expect("an editor"), path);
+    assert_eq!(
+        reloaded.ensure(Want::Press).unwrap().expect("an editor"),
+        path
+    );
     attach_ui(&mut reloaded);
     // `close` pushes the idle indicator as a bounded request, so the editor
     // has applied it by the time `close` returns.
@@ -1218,7 +1233,7 @@ fn failed_save_rolls_back_before_the_next_append() {
         !session.connected(),
         "a failed append left its client installed"
     );
-    session.ensure().unwrap().expect("an editor");
+    session.ensure(Want::Press).unwrap().expect("an editor");
     lua(&mut session, "vim.bo[Spokenpad.buf].readonly = false");
     session.append("second", false).unwrap();
     assert_eq!(fs::read_to_string(path).unwrap(), "first\n\nsecond\n");
@@ -1361,7 +1376,7 @@ fn deleting_the_dictation_buffer_repins_on_the_next_ensure() {
         &mut session,
         "vim.api.nvim_buf_delete(Spokenpad.buf, { force = true })",
     );
-    let second = session.ensure().unwrap().expect("an editor");
+    let second = session.ensure(Want::Press).unwrap().expect("an editor");
     assert_ne!(second, first, "ensure re-used a buffer that is gone");
     session.append("after", false).unwrap();
     assert_eq!(fs::read_to_string(&first).unwrap(), "before\n");
@@ -1380,13 +1395,13 @@ fn a_socket_file_with_no_listener_is_cleared_for_the_next_editor() {
     assert!(config.socket_path.exists());
 
     let mut session = NvimSession::new(config.clone());
-    assert_eq!(session.ensure().unwrap(), None);
+    assert_eq!(session.ensure(Want::Press).unwrap(), None);
     assert!(
         !config.socket_path.exists(),
         "the stale socket is still there"
     );
     let (path, _editor) = open_user_editor(&config);
-    assert_eq!(session.ensure().unwrap(), Some(path.clone()));
+    assert_eq!(session.ensure(Want::Press).unwrap(), Some(path.clone()));
     session.append("after a stale socket", false).unwrap();
     assert_eq!(fs::read_to_string(path).unwrap(), "after a stale socket\n");
 }
@@ -1414,7 +1429,7 @@ fn unrelated_socket_is_rejected_without_mutation() {
         std::thread::sleep(CONNECT_POLL);
     }
     let mut session = NvimSession::new(config);
-    let error = session.ensure().unwrap_err().to_string();
+    let error = session.ensure(Want::Press).unwrap_err().to_string();
     assert!(error.contains("unrelated nvim socket"), "{error}");
 }
 
@@ -1425,7 +1440,7 @@ fn ordinary_file_at_socket_path_is_refused_and_preserved() {
     fs::write(&config.socket_path, b"not a socket").unwrap();
     let mut session = NvimSession::new(config.clone());
 
-    let error = session.ensure().unwrap_err().to_string();
+    let error = session.ensure(Want::Press).unwrap_err().to_string();
     assert!(error.contains("refusing non-socket path"), "{error}");
     assert_eq!(fs::read(&config.socket_path).unwrap(), b"not a socket");
     assert!(!config.dictation_dir.exists());
@@ -1440,7 +1455,7 @@ fn symlink_at_socket_path_is_refused_and_its_target_untouched() {
     std::os::unix::fs::symlink(&target, &config.socket_path).unwrap();
     let mut session = NvimSession::new(config.clone());
 
-    let error = session.ensure().unwrap_err().to_string();
+    let error = session.ensure(Want::Press).unwrap_err().to_string();
     assert!(error.contains("refusing non-socket path"), "{error}");
     assert!(
         fs::symlink_metadata(&config.socket_path)

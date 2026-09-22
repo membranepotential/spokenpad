@@ -196,6 +196,16 @@ pub struct NvimSession {
     /// Whether the user has been told, this session, that a tiled pane
     /// opens floating under their window manager: once, not every window.
     told_tiled_floats: bool,
+    /// Set while the user has closed the last pane themselves and not
+    /// pressed the key since. Text that arrives meanwhile goes to the pending
+    /// passage rather than into a new pane: only a key press opens one after
+    /// the user closed one.
+    closed_by_user: Option<ClosedByUser>,
+    /// Whether the pane that is open, or last was, became the dictation
+    /// window: its editor answered and this session attached to it. Only
+    /// such a pane's close is the user's close of the dictation window; a
+    /// pane whose editor quit while it started is a failed open.
+    pane_attached: bool,
     /// Set when the daemon is stopping, so a call Neovim is holding behind a
     /// half-typed command is given up on at once rather than waited for.
     quitting: Arc<AtomicBool>,
@@ -211,6 +221,8 @@ impl NvimSession {
             pane: None,
             refused: None,
             told_tiled_floats: false,
+            closed_by_user: None,
+            pane_attached: false,
             quitting: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -262,10 +274,14 @@ impl NvimSession {
     }
 
     /// Returns the pinned dictation path, reattaching as needed and, in pane
-    /// mode, opening a pane. `None` in attach mode means no editor is open:
-    /// the user has not run `spokenpad editor`, and text goes to the pending
-    /// passage through [`append_detached`](Self::append_detached) instead.
-    pub fn ensure(&mut self) -> Result<Option<PathBuf>> {
+    /// mode, opening a pane when `want` allows one. `None` means no editor is
+    /// open: in attach mode the user has not run `spokenpad editor`, in pane
+    /// mode none could or may open, and text goes to the pending passage
+    /// through [`append_detached`](Self::append_detached) instead.
+    pub fn ensure(&mut self, want: Want) -> Result<Option<PathBuf>> {
+        if want == Want::Press {
+            self.closed_by_user = None;
+        }
         if self.attached()
             && let Some(open) = &self.connection
         {
@@ -274,6 +290,7 @@ impl NvimSession {
 
         let attached = self.attach_existing()?
             || match self.config.mode {
+                Mode::Pane if want == Want::Text && !self.may_open_for_text() => Ok(false),
                 Mode::Pane => self.open_pane_and_attach(),
                 Mode::Attach => Ok(false),
             }
@@ -290,6 +307,64 @@ impl NvimSession {
             .clone();
         passage::settle(&self.config, &path);
         Ok(Some(path))
+    }
+
+    /// Whether text, arriving with no editor attached, may open a pane: not
+    /// after the user closed the last one, and not while the last one is
+    /// still closing — its editor gone, its window not yet — since that may
+    /// be the user's close, not yet recorded. A pane that failed on its own
+    /// is replaced, so that the capture it showed has a window again.
+    fn may_open_for_text(&self) -> bool {
+        self.closed_by_user.is_none()
+            && !self
+                .pane
+                .as_ref()
+                .is_some_and(|pane| pane.alive().load(Ordering::Acquire))
+    }
+
+    /// When the user closed the pane — its window, or `:q` in it — if they
+    /// did since the last time this was asked. From then until the next key
+    /// press, text no longer opens a pane ([`Want::Text`]). Always `None` in
+    /// attach mode: the daemon cannot tell `:q` in an editor it did not start
+    /// from that editor dying.
+    pub fn take_user_close(&mut self) -> Option<Instant> {
+        let at = self.pane.as_ref()?.take_closed_by_user()?;
+        if !std::mem::take(&mut self.pane_attached) {
+            return None;
+        }
+        self.closed_by_user = Some(ClosedByUser {
+            file: self.connection.take().map(|open| open.path),
+        });
+        Some(at)
+    }
+
+    /// Tells the user, through the desktop's notification service, that
+    /// closing the dictation window stopped the recording it was showing:
+    /// the window that would have said so is gone. Once per close.
+    pub fn notify_closed_mid_capture(&self) {
+        if !self.config.notify {
+            return;
+        }
+        let file = match self
+            .closed_by_user
+            .as_ref()
+            .and_then(|closed| closed.file.as_ref())
+        {
+            Some(path) => format!(" What was already transcribed is in {}.", path.display()),
+            None => String::new(),
+        };
+        let body = format!(
+            "You closed the dictation window, so the recording in progress was cancelled \
+             and the rest of it is not transcribed.{file} The recording itself is kept."
+        );
+        if let Err(error) = wm::run(&[
+            "notify-send",
+            "--app-name=spokenpad",
+            "spokenpad: recording cancelled",
+            &body,
+        ]) {
+            log::debug!("desktop notification unavailable: {error:#}");
+        }
     }
 
     /// Appends committed text straight to the pending passage, for when no
@@ -311,6 +386,14 @@ impl NvimSession {
                 format!(
                     "The dictation window did not confirm it received the last text, \
                      so it is saved to {} as well. If the window shows it too, it is in both.",
+                    path.display()
+                ),
+            ),
+            (Detached::NoEditor, _) if self.closed_by_user.is_some() => (
+                "spokenpad: text saved after the window closed",
+                format!(
+                    "You closed the dictation window before this text arrived, so it is saved \
+                     to {}. The next dictation opens a window on it.",
                     path.display()
                 ),
             ),
@@ -784,6 +867,9 @@ impl NvimSession {
     fn try_open_pane(&mut self) -> Result<bool> {
         use crate::shell::pane::{Options, host::Opening};
 
+        // Whatever pane was there is replaced; this one counts once it is
+        // attached.
+        self.pane_attached = false;
         // One deadline for the whole thing: the window, and the editor
         // answering inside it. Two would let a slow window spend the
         // editor's budget as well as its own.
@@ -828,6 +914,7 @@ impl NvimSession {
         })?;
         if attached {
             marker.keep();
+            self.pane_attached = true;
         }
         Ok(attached)
     }
@@ -920,6 +1007,23 @@ enum Readiness {
         reason: &'static str,
         keep: RpcClient,
     },
+}
+
+/// The user closed the last pane themselves.
+struct ClosedByUser {
+    /// The file it showed, if the session was attached to it.
+    file: Option<PathBuf>,
+}
+
+/// Why the daemon wants an editor, which decides whether a pane may open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Want {
+    /// A key press: open a pane if none is attached.
+    Press,
+    /// Text to deliver: reattach, but open a pane only where the last one
+    /// did not close by the user's hand. After the user closed it, text goes
+    /// to the pending passage until the next press.
+    Text,
 }
 
 /// What an editor answering on the dictation socket says about itself.

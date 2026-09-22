@@ -127,7 +127,10 @@ fn main() -> Result<()> {
             None => Duration::from_secs(3600),
         };
         if timeout.is_zero()
-            || pane.step(timeout.min(Duration::from_millis(100)))? == Status::Finished
+            || matches!(
+                pane.step(timeout.min(Duration::from_millis(100)))?,
+                Status::Finished(_)
+            )
         {
             break;
         }
