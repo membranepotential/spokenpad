@@ -380,6 +380,21 @@ pub enum Mode {
     Pane,
 }
 
+/// How the pane sits among the other windows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PaneLayout {
+    /// Above the others, at the pointer (`_NET_WM_WINDOW_TYPE_UTILITY`):
+    /// tiling window managers float it.
+    #[default]
+    Floating,
+    /// An ordinary window (`_NET_WM_WINDOW_TYPE_NORMAL`): tiling window
+    /// managers tile it beside the window you are typing in. Stacking window
+    /// managers have no tiles, and treat it as an ordinary window at the
+    /// pointer.
+    Tiled,
+}
+
 /// A fontconfig family name, checked once where it enters the program.
 ///
 /// Not a pattern: the pane appends `:bold` and `:charset=…` to it, so a value
@@ -451,6 +466,8 @@ pub struct Nvim {
     /// Pane mode: the pane's size in cells, as Alacritty's
     /// `window.dimensions`, cut down to what fits on the monitor.
     pub pane_dimensions: Dimensions,
+    /// Pane mode: floating (the default) or tiled.
+    pub pane_layout: PaneLayout,
     /// The pane's font, as a fontconfig family name. `monospace` is the alias
     /// every desktop defines and most people have already pointed at the font
     /// they want; naming one here overrides it, which is worth having because
@@ -512,6 +529,7 @@ impl Default for Nvim {
             file_template: "dictation-%Y-%m-%d-%H%M%S.md".into(),
             window_fraction: 0.33,
             pane_dimensions: Dimensions::DEFAULT,
+            pane_layout: PaneLayout::Floating,
             font_family: FontFamily::default(),
             font_size: Points::DEFAULT,
             // Filled in by `Config::load`; `Default` is what a test builds,
@@ -1186,6 +1204,10 @@ mod tests {
         assert_eq!(pane.nvim.mode, Mode::Pane);
         assert_eq!(pane.nvim.font_size.get(), 13.5);
         assert_eq!(pane.nvim.pane_dimensions, Dimensions::DEFAULT);
+        assert_eq!(pane.nvim.pane_layout, PaneLayout::Floating);
+        let tiled = Config::parse("[nvim]\npane_layout = 'tiled'", None).unwrap();
+        assert_eq!(tiled.nvim.pane_layout, PaneLayout::Tiled);
+        assert!(Config::parse("[nvim]\npane_layout = 'tabbed'", None).is_err());
         let sized = Config::parse(
             "[nvim]\nmode = 'pane'\npane_dimensions = { columns = 100, lines = 30 }",
             None,

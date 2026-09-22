@@ -339,6 +339,20 @@ says where, at error level. The only case that loses anything is an editor
 that stops answering entirely: then there is no way to ask it what is in the
 buffer, and the log says that too.
 
+### Floating or tiled
+
+`nvim.pane_layout = "floating"`, the default, opens the pane above your
+windows at the pointer. `"tiled"` makes it an ordinary window
+(`_NET_WM_WINDOW_TYPE_NORMAL` instead of `_UTILITY`): i3 and sway tile it
+beside the window you are typing in, at the size of its tile, and the pane
+follows the tile's size. Openbox and KWin have no tiles; there it is an
+ordinary window at the pointer, kept above like the floating one. Everything
+that keeps the pane from taking the focus is the same in both layouts, and a
+tiled pane never took the focus on i3, sway, Openbox or KWin (Wayland and
+X11), so no window manager refuses it
+([experiment](experiments/2026-09-22-tiled-pane-focus.md)). On sway an empty
+workspace refuses both layouts alike.
+
 ### Where it opens
 
 `nvim.pane_dimensions` cells — `{ columns = 72, lines = 20 }` by default, as

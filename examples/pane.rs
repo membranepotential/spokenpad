@@ -16,7 +16,7 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use spokenpad::{
-    config::{FontFamily, Nvim},
+    config::{FontFamily, Nvim, PaneLayout},
     core::{font::Points, geometry::Dimensions},
     shell::{
         nvim::pane_launch,
@@ -101,6 +101,7 @@ fn main() -> Result<()> {
         dimensions: Dimensions::new(args.columns, args.rows).expect("a grid of at least one cell"),
         attach_timeout: Duration::from_secs_f64(config.startup_timeout_s),
         target: None,
+        layout: PaneLayout::Floating,
         title: "spokenpad dictation".to_owned(),
     };
     let (command, marker) = pane_launch(&config, &file)?;

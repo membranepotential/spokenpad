@@ -1,14 +1,15 @@
-//! Does the pane stay unfocused, and on top, under window managers other
-//! than i3?
+//! Does the pane stay unfocused, and on top, on every window manager, floating
+//! and tiled?
 //!
-//! Verdicts: sway (given the pane's `no_focus` rule over IPC), Openbox, KWin
-//! on Wayland and KWin on X11 never focus it, and every one shows it above
-//! the window the user is typing in.
+//! Verdicts: i3, sway (given the pane's `no_focus` rule over IPC), Openbox,
+//! KWin on Wayland and KWin on X11 never focus it, floating or tiled; a
+//! floating pane is shown above the window the user is typing in, and a tiled
+//! one is tiled where the window manager tiles.
 //!
-//! `tests/pane_window.rs` proves it on i3. This asks the same of sway (with
-//! Xwayland), Openbox, KWin (Wayland, with Xwayland) and KWin (X11), each in
-//! a headless session the test starts itself (`harness::desktops`), and each
-//! with the same story:
+//! `tests/pane_window.rs` takes the window's properties apart on i3. This
+//! runs the daemon's own open path on i3, sway (with Xwayland), Openbox, KWin
+//! (Wayland, with Xwayland) and KWin (X11), each in a headless session the
+//! test starts itself (`harness::desktops`), and each with the same story:
 //!
 //! 1. A window of the test's own holds the focus, the way the application the
 //!    user is dictating into does.
@@ -45,13 +46,13 @@ mod harness;
 use harness::{
     SETTLE, XServer, close_window,
     desktops::{
-        Desktop, FocusSampler, FocusStealingPrevention, KwinWayland, KwinX11, Openbox, SCREEN,
+        Desktop, FocusSampler, FocusStealingPrevention, I3, KwinWayland, KwinX11, Openbox, SCREEN,
         Samples, Sway, ewmh_stacking_above, find_by_instance, screen_rect, with_frames,
     },
     wait_for,
 };
 use spokenpad::{
-    config::{Mode, Nvim},
+    config::{Mode, Nvim, PaneLayout},
     core::{font::Points, geometry::Rect},
     shell::{
         nvim::NvimSession,
@@ -103,7 +104,7 @@ fn the_pane_never_takes_focus_on_sway() {
         return;
     }
     let mut sway = Sway::start();
-    let report = story(&mut sway);
+    let report = story(&mut sway, PaneLayout::Floating);
     report.assert_never_focused();
 }
 
@@ -125,6 +126,7 @@ fn the_pane_finds_sway_without_swaysock() {
         &sway.server.display,
         None,
         sway.runtime_dir(),
+        PaneLayout::Floating,
     ));
     let sampler = FocusSampler::start(&sway.server.display, sway.view());
     session
@@ -176,6 +178,7 @@ fn the_pane_refuses_a_sway_it_cannot_reach() {
             &sway.server.display,
             socket,
             None,
+            PaneLayout::Floating,
         ));
         let sampler = FocusSampler::start(&sway.server.display, sway.view());
         let error = format!(
@@ -197,13 +200,82 @@ fn the_pane_refuses_a_sway_it_cannot_reach() {
     }
 }
 
+/// The same story on i3, through the daemon's own open path; the window's
+/// properties alone, with ablations, are `tests/pane_window.rs`.
+#[test]
+fn the_pane_never_takes_focus_on_i3() {
+    if !harness::tools_or_skip(&["Xvfb", "i3", "nvim", "fc-match"]) {
+        return;
+    }
+    let mut i3 = I3::start();
+    let report = story(&mut i3, PaneLayout::Floating);
+    report.assert_never_focused();
+}
+
+// ------------------------------------------------------------ the tiled pane
+//
+// `nvim.pane_layout = "tiled"` makes the pane an ordinary window
+// (`_NET_WM_WINDOW_TYPE_NORMAL`): tiled on i3 and sway, an ordinary window
+// at the pointer on Openbox and KWin. It must never take the focus either.
+
+#[test]
+fn the_tiled_pane_never_takes_focus_on_i3() {
+    if !harness::tools_or_skip(&["Xvfb", "i3", "nvim", "fc-match"]) {
+        return;
+    }
+    let mut i3 = I3::start();
+    story(&mut i3, PaneLayout::Tiled).assert_never_focused();
+}
+
+#[test]
+fn the_tiled_pane_never_takes_focus_on_sway() {
+    if !harness::tools_or_skip(&["sway", "Xwayland", "nvim", "fc-match"]) {
+        return;
+    }
+    let mut sway = Sway::start();
+    story(&mut sway, PaneLayout::Tiled).assert_never_focused();
+}
+
+#[test]
+fn the_tiled_pane_never_takes_focus_on_openbox() {
+    if !harness::tools_or_skip(&["Xvfb", "openbox", "nvim", "fc-match"]) {
+        return;
+    }
+    let mut openbox = Openbox::start();
+    story(&mut openbox, PaneLayout::Tiled).assert_never_focused();
+}
+
+#[test]
+fn the_tiled_pane_never_takes_focus_on_kwin_wayland() {
+    if !harness::tools_or_skip(&[
+        "kwin_wayland",
+        "Xwayland",
+        "dbus-daemon",
+        "nvim",
+        "fc-match",
+    ]) {
+        return;
+    }
+    let mut kwin = KwinWayland::start(FocusStealingPrevention::None);
+    story(&mut kwin, PaneLayout::Tiled).assert_never_focused();
+}
+
+#[test]
+fn the_tiled_pane_never_takes_focus_on_kwin_x11() {
+    if !harness::tools_or_skip(&["Xvfb", "kwin_x11", "dbus-daemon", "nvim", "fc-match"]) {
+        return;
+    }
+    let mut kwin = KwinX11::start(FocusStealingPrevention::None);
+    story(&mut kwin, PaneLayout::Tiled).assert_never_focused();
+}
+
 #[test]
 fn the_pane_never_takes_focus_on_openbox() {
     if !harness::tools_or_skip(&["Xvfb", "openbox", "nvim", "fc-match"]) {
         return;
     }
     let mut openbox = Openbox::start();
-    let report = story(&mut openbox);
+    let report = story(&mut openbox, PaneLayout::Floating);
     report.assert_never_focused();
 }
 
@@ -219,7 +291,7 @@ fn the_pane_never_takes_focus_on_kwin_wayland() {
         return;
     }
     let mut kwin = KwinWayland::start(FocusStealingPrevention::Low);
-    let report = story(&mut kwin);
+    let report = story(&mut kwin, PaneLayout::Floating);
     report.assert_never_focused();
 }
 
@@ -237,7 +309,7 @@ fn the_pane_never_takes_focus_on_kwin_wayland_without_focus_stealing_prevention(
         return;
     }
     let mut kwin = KwinWayland::start(FocusStealingPrevention::None);
-    let report = story(&mut kwin);
+    let report = story(&mut kwin, PaneLayout::Floating);
     report.assert_never_focused();
 }
 
@@ -247,7 +319,7 @@ fn the_pane_never_takes_focus_on_kwin_x11() {
         return;
     }
     let mut kwin = KwinX11::start(FocusStealingPrevention::Low);
-    let report = story(&mut kwin);
+    let report = story(&mut kwin, PaneLayout::Floating);
     report.assert_never_focused();
 }
 
@@ -257,7 +329,7 @@ fn the_pane_never_takes_focus_on_kwin_x11_without_focus_stealing_prevention() {
         return;
     }
     let mut kwin = KwinX11::start(FocusStealingPrevention::None);
-    let report = story(&mut kwin);
+    let report = story(&mut kwin, PaneLayout::Floating);
     report.assert_never_focused();
 }
 
@@ -305,8 +377,8 @@ impl Report {
     }
 }
 
-fn story(desktop: &mut dyn Desktop) -> Report {
-    let mut report = Report::new(desktop.describe());
+fn story(desktop: &mut dyn Desktop, layout: PaneLayout) -> Report {
+    let mut report = Report::new(format!("{}, pane {layout:?}", desktop.describe()));
     // The pane's cells follow `Xft.dpi`, which the display carries; without
     // it the pane would read the user's own `~/.Xresources`. 96 makes the
     // default 72x20 pane the 648x360 pixels it is on a stock display.
@@ -340,6 +412,7 @@ fn story(desktop: &mut dyn Desktop) -> Report {
         &desktop.server().display,
         desktop.sway_socket(),
         None,
+        layout,
     ));
     let sampler = FocusSampler::start(&desktop.server().display, desktop.view());
     let opened = session.ensure().expect("open the pane");
@@ -384,7 +457,7 @@ fn story(desktop: &mut dyn Desktop) -> Report {
         "the pane is not wholly on the screen: {:?}",
         opened.rect
     );
-    opened.assert_above("after the open");
+    opened.assert_shown(desktop, layout, "after the open");
 
     // 5. Selecting the pane is the user asking for the focus, and it must
     // get it; selecting the holder hands it back. Neither is a steal.
@@ -421,7 +494,7 @@ fn story(desktop: &mut dyn Desktop) -> Report {
     );
     let reselected = placement(desktop, pane, holder);
     report.row(reselected.row("after the user selected the holder again"));
-    reselected.assert_above("after the user selected the holder again");
+    reselected.assert_shown(desktop, layout, "after the user selected the holder again");
 
     // 6a. The next passage: the user closed the pane, the next dictation
     // opens another.
@@ -450,7 +523,7 @@ fn story(desktop: &mut dyn Desktop) -> Report {
     );
     let placed = placement(desktop, next, holder);
     report.row(placed.row("the next passage's pane"));
-    placed.assert_above("the next passage's pane");
+    placed.assert_shown(desktop, layout, "the next passage's pane");
     session.close();
     wait_for(PATIENCE, "the pane to close", || {
         find_by_instance(desktop.server(), INSTANCE)
@@ -691,6 +764,7 @@ fn pane_config(
     display: &str,
     sway_socket: Option<PathBuf>,
     runtime_dir: Option<PathBuf>,
+    pane_layout: PaneLayout,
 ) -> Nvim {
     let dictation = root.join("dictation");
     std::fs::create_dir_all(&dictation).expect("make the dictation directory");
@@ -701,6 +775,7 @@ fn pane_config(
         display: Some(display.to_owned()),
         sway_socket,
         runtime_dir,
+        pane_layout,
         init: Some(PathBuf::from(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/src/lua/dictation_init.lua"
@@ -748,6 +823,27 @@ impl Placement {
             self.ewmh_above
                 .map_or_else(|| "not published".to_owned(), |value| value.to_string())
         )
+    }
+
+    /// Floating, or on a window manager that does not tile: above the
+    /// focused window. Tiled on one that tiles: in a tile of its own.
+    fn assert_shown(&self, desktop: &dyn Desktop, layout: PaneLayout, stage: &str) {
+        if layout == PaneLayout::Tiled && desktop.tiles() {
+            assert_eq!(
+                self.floating,
+                Some(false),
+                "{stage}: the tiled pane was not tiled"
+            );
+            return;
+        }
+        if desktop.tiles() {
+            assert_eq!(
+                self.floating,
+                Some(true),
+                "{stage}: the floating pane was not floated"
+            );
+        }
+        self.assert_above(stage);
     }
 
     fn assert_above(&self, stage: &str) {
@@ -846,6 +942,7 @@ fn control(desktop: &mut dyn Desktop, report: &mut Report) -> bool {
                 height: 200,
             },
             "spokenpad control",
+            PaneLayout::Floating,
         )
         .expect("open the control window");
         sleep(REWRITE_PAUSE);
@@ -922,6 +1019,7 @@ fn ablate(
             height: 200,
         },
         "spokenpad ablation",
+        PaneLayout::Floating,
     )
     .expect("open the ablation window");
     sleep(REWRITE_PAUSE);

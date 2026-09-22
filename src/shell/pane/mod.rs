@@ -33,7 +33,7 @@ pub mod ui;
 pub mod x11;
 pub mod xkb;
 
-use crate::config::FontFamily;
+use crate::config::{FontFamily, PaneLayout};
 use crate::core::{
     font::{Dpi, Points},
     geometry::{self, Dimensions, Rect},
@@ -81,6 +81,8 @@ pub struct Options {
     /// The grid, in cells. With a `target`, it is cut down to what fits on
     /// the target's monitor.
     pub dimensions: Dimensions,
+    /// Floating or tiled; see [`x11`] for what each sets on the window.
+    pub layout: PaneLayout,
     /// How long the editor inside it has to answer `nvim_ui_attach`. The
     /// daemon passes what is left of the one deadline it gave the whole
     /// open, so this cannot outlive it.
@@ -98,6 +100,7 @@ impl Default for Options {
             family: FontFamily::default(),
             size: Points::DEFAULT,
             dimensions: Dimensions::DEFAULT,
+            layout: PaneLayout::Floating,
             attach_timeout: Duration::from_secs(20),
             target: None,
             title: "spokenpad dictation".to_owned(),
@@ -194,6 +197,7 @@ impl Pane {
                 height: size.1,
             }),
             &options.title,
+            options.layout,
         )?;
         let keyboard = Keyboard::new(window.connection())?;
         let (sender, events) = channel();

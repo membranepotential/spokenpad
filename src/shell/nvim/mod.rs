@@ -773,6 +773,7 @@ impl NvimSession {
                     family: self.config.font_family.clone(),
                     size: self.config.font_size,
                     dimensions: self.config.pane_dimensions,
+                    layout: self.config.pane_layout,
                     attach_timeout: deadline.saturating_duration_since(Instant::now()),
                     target: Some(target),
                     title: "spokenpad dictation".to_owned(),

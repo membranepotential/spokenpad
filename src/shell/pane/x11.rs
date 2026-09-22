@@ -7,7 +7,7 @@
 //! | property | what it does |
 //! |---|---|
 //! | `_NET_WM_USER_TIME = 0` | "do not focus this window when it is mapped" (EWMH). On i3 this is the whole guarantee, and it holds even for the first window on an empty workspace. |
-//! | `_NET_WM_WINDOW_TYPE_UTILITY` | floats the window on tiling window managers, and blocks focus on the ones that ignore user time (bspwm, Hyprland's Xwayland). |
+//! | `_NET_WM_WINDOW_TYPE_UTILITY` | floats the window on tiling window managers, and blocks focus on the ones that ignore user time (bspwm, Hyprland's Xwayland). With `nvim.pane_layout = "tiled"` it is `_NET_WM_WINDOW_TYPE_NORMAL` instead, which tiling window managers tile; the user time, the sway rule and KWin's refusal of a user time of 0 hold it unfocused there, as `tests/pane_focus_wms.rs` proves per window manager. |
 //! | `_NET_WM_STATE_ABOVE` | stacks the window above the one the user is typing in. KWin stacks a window it refused focus *below* the active one otherwise. It gives no focus anywhere measured. |
 //! | `WM_HINTS input = True` | the ICCCM "passive input" model: the window manager may give the window the focus *later*, when the user clicks it, so they can type into it. |
 //! | `WM_CLASS = spokenpad-pane` | a name no rule written for the managed-mode terminal can match, and the name the `no_focus` rule matches that spokenpad adds to sway before the map (`shell::wm::Wm::refuse_focus`): sway reads none of the properties above. |
@@ -22,6 +22,7 @@
 //!
 //! `WM_TAKE_FOCUS` is deliberately absent: with `input = True` and a user time
 //! of 0 it changes nothing, and announcing it would oblige us to answer it.
+use crate::config::PaneLayout;
 use crate::core::{
     font::{Dpi, XftDpi},
     geometry::Rect,
@@ -61,6 +62,7 @@ x11rb::atom_manager! {
         _NET_WM_USER_TIME,
         _NET_WM_WINDOW_TYPE,
         _NET_WM_WINDOW_TYPE_UTILITY,
+        _NET_WM_WINDOW_TYPE_NORMAL,
         _NET_WM_STATE,
         _NET_WM_STATE_ABOVE,
         // Not a standard property: the pane sends itself a client message of
@@ -203,7 +205,7 @@ impl Window {
     /// Create the window with the property set above. It is **not** mapped:
     /// the caller decides when it appears, and nothing before [`Self::map`]
     /// can change what the window manager will do with it.
-    pub fn open(display: Display, rect: Rect, title: &str) -> Result<Self> {
+    pub fn open(display: Display, rect: Rect, title: &str, layout: PaneLayout) -> Result<Self> {
         let Display { connection, screen } = display;
         let connection = Arc::new(connection);
         check_visual(&connection, screen)?;
@@ -259,12 +261,12 @@ impl Window {
             context,
             low_byte_first,
         };
-        window.set_properties(rect, title)?;
+        window.set_properties(rect, title, layout)?;
         window.connection.flush()?;
         Ok(window)
     }
 
-    fn set_properties(&self, rect: Rect, title: &str) -> Result<()> {
+    fn set_properties(&self, rect: Rect, title: &str, layout: PaneLayout) -> Result<()> {
         let connection = &self.connection;
         // Written once, as zero, and never again: see the module comment.
         connection.change_property32(
@@ -279,7 +281,10 @@ impl Window {
             self.id,
             self.atoms._NET_WM_WINDOW_TYPE,
             AtomEnum::ATOM,
-            &[self.atoms._NET_WM_WINDOW_TYPE_UTILITY],
+            &[match layout {
+                PaneLayout::Floating => self.atoms._NET_WM_WINDOW_TYPE_UTILITY,
+                PaneLayout::Tiled => self.atoms._NET_WM_WINDOW_TYPE_NORMAL,
+            }],
         )?;
         // The initial state, which a window manager reads at the first map.
         // Changing it later would take a client message to the root; the

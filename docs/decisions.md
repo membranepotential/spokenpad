@@ -1372,3 +1372,27 @@ The user decided the pane's size is columns by lines, like Alacritty's
   per mode; neither key does anything in the other mode.
 - `[nvim]` is re-read for every new window, so a changed size applies to the
   next pane.
+
+## A tiled pane beside the floating one (2026-09-22)
+
+The user asked for a floating/tiled option, floating by default, and made
+one condition: a tiled pane must never take the focus by itself on any
+window manager, or be refused where that cannot be proven.
+
+- **`nvim.pane_layout = "floating" | "tiled"`.** Tiled changes one property:
+  the window type is `_NET_WM_WINDOW_TYPE_NORMAL`, which i3 and sway tile.
+  The user time, `_NET_WM_STATE_ABOVE`, `WM_HINTS input = True` and the
+  sway rule are the same in both layouts.
+- **Proven, so refused nowhere.** The full focus story, run tiled on i3,
+  sway, Openbox, KWin Wayland and KWin X11, never saw the pane focused; the
+  user's click focused it everywhere
+  ([experiment](experiments/2026-09-22-tiled-pane-focus.md)). A tiling
+  window manager not run here (bspwm, Hyprland, awesome) is unverified, as
+  for the floating pane.
+- **Stacking window managers have no tiles.** On Openbox and KWin "tiled"
+  is an ordinary window at the pointer, kept above. Documented rather than
+  refused, since it never takes the focus.
+- i3 is now also a `harness::desktops` desktop, so it runs the same story
+  through the daemon's open path, floating and tiled.
+- The layout is read with `[nvim]` for every new window, so a change applies
+  to the next pane.

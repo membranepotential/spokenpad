@@ -161,6 +161,11 @@ pub trait Desktop {
     fn sway_socket(&self) -> Option<PathBuf> {
         None
     }
+    /// Whether this window manager tiles: gives an ordinary window a tile
+    /// beside the others rather than floating it.
+    fn tiles(&self) -> bool {
+        false
+    }
     /// The `XDG_RUNTIME_DIR` the window manager runs with, where sway puts
     /// its socket; `None` on every desktop but sway.
     fn runtime_dir(&self) -> Option<PathBuf> {
@@ -356,6 +361,10 @@ impl Desktop for Sway {
     fn runtime_dir(&self) -> Option<PathBuf> {
         Some(self.private.runtime())
     }
+
+    fn tiles(&self) -> bool {
+        true
+    }
 }
 
 /// The X11 window of the focused node in an i3 or sway tree, if the focused
@@ -446,6 +455,71 @@ impl Openbox {
             .expect("destroy the probe");
         openbox.server.sync();
         openbox
+    }
+}
+
+// --------------------------------------------------------------------- i3
+
+/// i3 on an Xvfb of the test's own, with the generated config of
+/// [`super::I3`], asked over its own IPC socket as sway is.
+pub struct I3 {
+    // Declared first, so i3 stops before its X server does.
+    i3: super::I3,
+    pub server: XServer,
+}
+
+impl I3 {
+    pub fn start() -> Self {
+        let server = XServer::start();
+        let i3 = super::I3::start(&server);
+        Self { i3, server }
+    }
+}
+
+impl Desktop for I3 {
+    fn describe(&self) -> String {
+        format!("i3 {} (Xvfb {})", self.i3.version(), self.server.display)
+    }
+
+    fn server(&self) -> &XServer {
+        &self.server
+    }
+
+    fn server_mut(&mut self) -> &mut XServer {
+        &mut self.server
+    }
+
+    fn focused(&self) -> Option<Window> {
+        tree_focus(&self.i3.tree())
+    }
+
+    fn manages(&self, window: Window) -> bool {
+        self.i3.node(window).is_some()
+    }
+
+    fn floating(&self, window: Window) -> Option<bool> {
+        self.i3.node(window).map(|node| node.floating)
+    }
+
+    /// A click through XTEST on the test's own Xvfb.
+    fn select(&mut self, _window: Window, (x, y): (i16, i16)) {
+        fake_click(&mut self.server, x, y);
+    }
+
+    fn type_key(&mut self) -> bool {
+        fake_key(&mut self.server)
+    }
+
+    fn go_to_empty_workspace(&mut self) {
+        self.i3.command("workspace pane-empty");
+    }
+
+    fn view(&self) -> View {
+        View::Tree(self.i3.ipc.clone())
+    }
+
+    fn tiles(&self) -> bool {
+        true
     }
 }
 

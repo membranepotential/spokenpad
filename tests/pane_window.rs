@@ -28,6 +28,7 @@ use harness::{
     find_key, move_pointer, press_key,
 };
 use spokenpad::{
+    config::PaneLayout,
     core::geometry::Rect,
     shell::pane::x11::{self, Display, Window as Pane},
 };
@@ -94,8 +95,8 @@ impl Watched {
 
     fn at(server: &XServer, rect: Rect) -> Self {
         let display = Display::connect(&server.display).expect("connect to the test display");
-        let window =
-            Pane::open(display, rect, "spokenpad dictation").expect("open the pane window");
+        let window = Pane::open(display, rect, "spokenpad dictation", PaneLayout::Floating)
+            .expect("open the pane window");
         Self {
             window,
             key_press: 0,

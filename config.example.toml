@@ -407,6 +407,15 @@ window_fraction = 0.33
 # goes to the pointer, as for the managed window above.
 pane_dimensions = { columns = 72, lines = 20 }
 
+# Pane mode only: "floating" (the default) opens the pane above your windows
+# at the pointer. "tiled" makes it an ordinary window: i3 and sway tile it
+# beside the window you are typing in, at the size of its tile; Openbox, KWin
+# and other stacking window managers have no tiles and show it at the pointer
+# as they would a floating one. Neither takes the focus by itself (verified
+# on i3, sway, Openbox and KWin); your click still focuses it. Applies to the
+# next window after you save.
+pane_layout = "floating"
+
 # Pane mode only: the font the window draws with, as a fontconfig family name
 # -- a name, not a pattern, so no colon, comma or backslash.
 # "monospace" is the alias your desktop already points at the font you want,
