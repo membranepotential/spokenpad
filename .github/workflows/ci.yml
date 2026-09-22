@@ -1,0 +1,41 @@
+# Correctness: fmt, clippy and every test.
+#
+# Runs in an Arch Linux container on purpose: spokenpad ships as an Arch
+# package, and its tests drive the real programs it runs against -- nvim, a
+# headless Xvfb with its own i3, Alacritty for the HiDPI comparison, and
+# systemd-socket-activate -- in the versions Arch ships.
+#
+# No SPOKENPAD_ALLOW_MISSING_* variable is set: a test whose tools are
+# missing fails instead of skipping, so a skip can never pass for a pass.
+# The tests that load the real models stay #[ignore]d; they need a 670 MB
+# download and are run by hand.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: fmt + clippy + tests
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      # Before checkout: the container has no git, and actions/checkout without
+      # git downloads a tarball with no .git.
+      - name: Install the toolchain, the libraries and the programs the tests drive
+        run: >-
+          pacman -Syu --noconfirm --needed
+          rust git portaudio neovim
+          libxcb libxkbcommon-x11 fontconfig ttf-dejavu
+          xorg-server-xvfb i3-wm xorg-setxkbmap xclip
+          alacritty mesa
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked --all-targets

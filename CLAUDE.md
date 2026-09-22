@@ -111,7 +111,9 @@ those belongs in `src/shell/`.
   (`spokenpad.socket`, enabled by the package; `spokenpad.service`, started
   only by it; `dev.conf.example`, the drop-in that runs `~/.local/bin`),
   `packaging/i3` and `packaging/sway` (window rules and example key
-  bindings).
+  bindings). `.github/workflows/ci.yml` runs fmt, clippy and every test in an
+  Arch container, with every tool the tests drive installed and no
+  `SPOKENPAD_ALLOW_MISSING_*` set.
 
 ## Commands
 
