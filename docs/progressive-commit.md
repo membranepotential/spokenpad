@@ -84,13 +84,22 @@ tail is skipped, so the tail settles and previews resume by themselves. The
 winbar says which. Such a tick reads the first `preview.max_seconds` of the
 tail only (`TickKind::Commits`). When no chunk settles inside that window —
 slow dictation whose pauses are too short to settle a chunk and whose speech
-is too little to fill one — the window is committed whole: every segment in it
-is decoded and committed at its own speech end, and the offset moves to the
-window's end. Without that, every later tick read the same window, nothing
-committed until the release, and the tail grew with the capture. The cut at
-the window's end may fall inside a word; that is the price of the bound, and
-it is paid only there. A release during such a commit stops it between
-segments, and the release decodes the rest.
+is too little to fill one — the window is committed through its last pause:
+the end of the last speech the detector heard with silence after it, either
+before the next speech or, for the window's last speech, for at least
+`vad.pad_seconds` before the window ends. Every segment before the pause is
+decoded, padded by at most `vad.pad_seconds` of the silence after it, and
+committed at its own speech end, and the offset moves to the pause. What
+follows the pause stays for the next tick: a word the window's end would cut
+in two, and one begun too briefly before it for the detector to call it
+speech yet, which a cut at the window's end left under an empty commit and
+never decoded. Only a window with no pause at all — one run of speech the
+detector never breaks — is committed through its end, where the cut may fall
+inside a word; that is the price of the bound, and it is paid only there.
+Without either, every later tick read the same window, nothing committed
+until the release, and the tail grew with the capture. A release during such
+a commit keeps the segment whose decode it waited for, as it keeps a settled
+chunk, stops before the next one, and the release decodes the rest.
 
 The worker owns the offset because preview and release inference are serialized
 there. The main loop's hint exists only to avoid copying an entire long capture

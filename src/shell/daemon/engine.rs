@@ -214,8 +214,8 @@ fn decode_recording<R: Recognizer, S: Segmenter>(
         }
         // A full window, as a live tick past `preview.max_seconds` has: one
         // with nothing settled in it -- speech the detector never breaks, or
-        // pauses too short to settle it -- is committed whole, which keeps
-        // this to a window.
+        // pauses too short to settle it -- is committed through its last
+        // pause, or whole, which keeps this to a window.
         let Some(tail) = worker.tick(&held, start, utterance, TickKind::Commits, &mut commit)?
         else {
             break;
@@ -258,7 +258,7 @@ mod tests {
                 .collect();
             Ok(Split {
                 segments,
-                silent_through: 0,
+                ..Split::default()
             })
         }
     }

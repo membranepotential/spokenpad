@@ -971,7 +971,7 @@ impl Segmenter for Chunks {
                     }
                 })
                 .collect(),
-            silent_through: 0,
+            ..Split::default()
         })
     }
 }

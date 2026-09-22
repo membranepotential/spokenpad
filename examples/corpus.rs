@@ -1249,7 +1249,7 @@ mod tests {
                             settled: i + 4 < samples.len(),
                         })
                         .collect(),
-                    silent_through: 0,
+                    ..Split::default()
                 })
             }
         }

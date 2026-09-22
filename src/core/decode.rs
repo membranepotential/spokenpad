@@ -35,6 +35,27 @@ pub struct Split {
     /// dropped. Zero while the trailing silence is too short to be a decode
     /// boundary, and always on the detector's window grid.
     pub silent_through: usize,
+    /// Where the slice may be cut when none of `segments` settled, with the
+    /// windows that decode what comes before the cut; `None` when the
+    /// detector heard no pause in it.
+    pub pause: Option<Pause>,
+}
+/// The last pause the detector heard in a slice. `at` is where the speech
+/// before it ends, and `segments` decode everything before `at`, padded as
+/// a window that ends there is, but never into the speech that follows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pause {
+    pub at: usize,
+    pub segments: Vec<Segment>,
+}
+impl Pause {
+    /// How much of the slice its segments read: `at`, and the padding
+    /// after it.
+    fn reach(&self) -> usize {
+        self.segments
+            .last()
+            .map_or(self.at, |s| s.window.end.max(self.at))
+    }
 }
 /// One recognizer input. `window` indexes the slice that was segmented;
 /// `speech_end` is the unpadded speech boundary inside the same slice, which
@@ -112,22 +133,20 @@ pub struct Pipeline<R, S> {
 impl<R: Recognizer, S: Segmenter> Pipeline<R, S> {
     fn split(&mut self, samples: &[f32]) -> Result<Split> {
         let split = self.segmenter.split(samples)?;
-        let mut end = 0;
-        for s in &split.segments {
-            ensure!(
-                s.window.start <= s.speech_end
-                    && s.speech_end <= s.window.end
-                    && s.window.end <= samples.len()
-                    && s.speech_end >= end,
-                "invalid segment boundaries"
-            );
-            end = s.speech_end;
-        }
+        let end = speech_end(&split.segments, samples.len())?;
         ensure!(
             split.silent_through == 0
                 || (split.silent_through >= end && split.silent_through <= samples.len()),
             "settled silence outside the slice"
         );
+        if let Some(pause) = &split.pause {
+            ensure!(
+                pause.at > 0
+                    && pause.at <= samples.len()
+                    && speech_end(&pause.segments, samples.len())? <= pause.at,
+                "a pause outside the slice"
+            );
+        }
         Ok(split)
     }
     /// Decodes one segment's window. A window the VAD marked as speech that
@@ -160,25 +179,28 @@ impl<R: Recognizer, S: Segmenter> Pipeline<R, S> {
     pub fn decode(
         &mut self,
         samples: &[f32],
-        mut abandoned: impl FnMut() -> bool,
+        abandoned: impl Fn() -> bool,
         on_segment: impl FnMut(String, usize),
     ) -> Result<String> {
         if samples.is_empty() || abandoned() {
             return Ok(String::new());
         }
         let segments = self.split(samples)?.segments;
-        self.decode_segments(samples, &segments, abandoned, on_segment)
+        self.decode_segments(samples, &segments, &abandoned, &abandoned, on_segment)
     }
     /// [`decode`](Self::decode) over the segments [`split`](Self::split)
-    /// already made of `samples`.
+    /// already made of `samples`. `stop` is asked before each decode, and
+    /// once it says so nothing more is decoded; `discard` is asked after
+    /// each, and a decode that ends while it says so is thrown away.
     fn decode_segments(
         &mut self,
         samples: &[f32],
         segments: &[Segment],
-        mut abandoned: impl FnMut() -> bool,
+        stop: impl Fn() -> bool,
+        discard: impl Fn() -> bool,
         mut on_segment: impl FnMut(String, usize),
     ) -> Result<String> {
-        if samples.is_empty() || abandoned() {
+        if samples.is_empty() || stop() {
             return Ok(String::new());
         }
         // Silence is not decoded: `split` only returns nothing when the VAD
@@ -193,12 +215,12 @@ impl<R: Recognizer, S: Segmenter> Pipeline<R, S> {
         }
         let mut texts = vec![];
         for s in segments {
-            if abandoned() {
+            if stop() {
                 return Ok(texts.join(" "));
             }
             let text = self.transcribe_speech(&samples[s.window.clone()])?;
             log::debug!("chunk {:?}: {} characters", s.window, text.chars().count());
-            if abandoned() {
+            if discard() {
                 return Ok(texts.join(" "));
             }
             if !text.trim().is_empty() {
@@ -207,7 +229,7 @@ impl<R: Recognizer, S: Segmenter> Pipeline<R, S> {
             }
         }
         // Explicit failure recovery exception: don't let segmentation erase speech.
-        if texts.is_empty() && segments.len() > 1 && !abandoned() {
+        if texts.is_empty() && segments.len() > 1 && !stop() {
             log::warn!(
                 "all {} chunks empty; retrying the complete remainder",
                 segments.len()
@@ -215,13 +237,30 @@ impl<R: Recognizer, S: Segmenter> Pipeline<R, S> {
             let text = self
                 .recognizer
                 .transcribe(samples, TrailingSilence::Padded)?;
-            if !text.trim().is_empty() && !abandoned() {
+            if !text.trim().is_empty() && !discard() {
                 texts.push(text.clone());
                 on_segment(text, samples.len());
             }
         }
         Ok(texts.join(" "))
     }
+}
+
+/// Where the speech of `segments` ends, after checking that they are in
+/// order and inside a slice of `len` samples.
+fn speech_end(segments: &[Segment], len: usize) -> Result<usize> {
+    let mut end = 0;
+    for s in segments {
+        ensure!(
+            s.window.start <= s.speech_end
+                && s.speech_end <= s.window.end
+                && s.window.end <= len
+                && s.speech_end >= end,
+            "invalid segment boundaries"
+        );
+        end = s.speech_end;
+    }
+    Ok(end)
 }
 
 #[derive(Debug)]
@@ -257,7 +296,8 @@ pub enum TickKind {
     /// every tick. Settled chunks still commit, so the committed offset keeps
     /// moving and the audio behind it can still be dropped; the rest is not
     /// decoded. A window that begins at the committed offset and settles
-    /// nothing is committed whole, so the offset moves anyway.
+    /// nothing is committed through its last pause, or whole when it has
+    /// none, so the offset moves anyway.
     Commits,
 }
 
@@ -368,7 +408,7 @@ impl<R: Recognizer, S: Segmenter> Worker<R, S> {
             }
         }
         if kind == TickKind::Commits && skip == 0 && self.progress.through == base {
-            self.commit_window(remainder, &split.segments, utterance, &mut commit)?;
+            self.commit_window(remainder, &split, utterance, &mut commit)?;
         }
         Ok(utterance
             .ticking()
@@ -382,26 +422,33 @@ impl<R: Recognizer, S: Segmenter> Worker<R, S> {
             heard,
         }
     }
-    /// Commits `window`, which begins at the worker's offset and holds
-    /// `segments`, whole, and moves the offset to its end: a window cut from
-    /// a longer tail in which no chunk settled -- speech the detector never
-    /// breaks, or pauses too short to settle it -- so that no more than a
-    /// window of it is ever held. Decoded as [`finish`](Self::finish) decodes
-    /// a tail, but without ending anything, and given up between segments
-    /// once the utterance stops ticking, which leaves the offset at the last
-    /// segment committed. The cut may fall inside a word: the price of the
-    /// bound, paid only there.
+    /// Commits `window`, which begins at the worker's offset and was split
+    /// into `split`, through its last pause, and moves the offset there: a
+    /// window cut from a longer tail in which no chunk settled -- pauses too
+    /// short to settle one, or speech the detector never breaks -- so that
+    /// no more than a window of it is ever held. What follows the pause stays
+    /// for the next tick: a word the window's end cuts in two, or one begun
+    /// too briefly before it for the detector to call it speech yet. Only a
+    /// window with no pause at all is committed whole, and its end may fall
+    /// inside a word: the price of the bound, paid only there. Decoded as
+    /// [`finish`](Self::finish) decodes a tail, but without ending anything;
+    /// a release stops it before the next segment and keeps the one just
+    /// decoded, as a settled chunk is kept.
     fn commit_window(
         &mut self,
         window: &[f32],
-        segments: &[Segment],
+        split: &Split,
         utterance: &Arc<Utterance>,
         commit: &mut impl FnMut(Commit),
     ) -> Result<()> {
         let base = self.progress.through;
-        let end = base + window.len();
+        let (slice, segments, cut) = match &split.pause {
+            Some(pause) => (&window[..pause.reach()], &pause.segments, pause.at),
+            None => (window, &split.segments, window.len()),
+        };
+        let end = base + cut;
         let (_, reached) = self.decode_rest(
-            window,
+            slice,
             segments,
             base,
             utterance,
@@ -410,8 +457,8 @@ impl<R: Recognizer, S: Segmenter> Worker<R, S> {
         )?;
         self.progress.through = reached;
         if utterance.ticking() && end > reached {
-            // Every segment was decoded: what follows the last one is
-            // silence, finished with as settled silence is.
+            // Every segment was decoded: what follows the last one up to the
+            // cut is silence, finished with as settled silence is.
             self.progress.through = end;
             commit(Commit {
                 utterance: Arc::clone(utterance),
@@ -423,28 +470,33 @@ impl<R: Recognizer, S: Segmenter> Worker<R, S> {
     }
     /// Decodes `remainder`, which begins at `base` and holds `segments`,
     /// committing each segment's text at its own speech end, so that text
-    /// never claims audio that was not decoded. Returns the text and how far
-    /// the commits reach.
+    /// never claims audio that was not decoded. No segment is decoded once
+    /// `stop` says so, and one decoded after a cancel is thrown away. Returns
+    /// the text and how far the commits reach.
     fn decode_rest(
         &mut self,
         remainder: &[f32],
         segments: &[Segment],
         base: Frames,
         utterance: &Arc<Utterance>,
-        abandoned: impl FnMut() -> bool,
+        stop: impl Fn() -> bool,
         commit: &mut impl FnMut(Commit),
     ) -> Result<(String, Frames)> {
         let mut reached = base;
-        let text =
-            self.pipeline
-                .decode_segments(remainder, segments, abandoned, |text, speech_end| {
-                    reached = base + speech_end;
-                    commit(Commit {
-                        utterance: Arc::clone(utterance),
-                        text,
-                        through: reached,
-                    });
-                })?;
+        let text = self.pipeline.decode_segments(
+            remainder,
+            segments,
+            stop,
+            || utterance.cancelled(),
+            |text, speech_end| {
+                reached = base + speech_end;
+                commit(Commit {
+                    utterance: Arc::clone(utterance),
+                    text,
+                    through: reached,
+                });
+            },
+        )?;
         Ok((text, reached))
     }
     /// Decodes what is left of the capture. `samples` is the audio still held,
@@ -517,7 +569,7 @@ mod tests {
                         settled: i + 4 < s.len(),
                     })
                     .collect(),
-                silent_through: 0,
+                ..Split::default()
             })
         }
     }
@@ -774,6 +826,7 @@ mod tests {
                 Ok(Split {
                     segments: vec![],
                     silent_through: s.len().saturating_sub(self.0),
+                    ..Split::default()
                 })
             }
         }
@@ -861,7 +914,7 @@ mod tests {
                     speech_end: s.len(),
                     settled: false,
                 }],
-                silent_through: 0,
+                ..Split::default()
             })
         }
     }
@@ -902,6 +955,41 @@ mod tests {
         .unwrap();
         assert_eq!(commits.last().map(|c| c.through), Some(Frames(20)));
         assert_eq!(w.pipeline.recognizer.calls, vec![vec![1.; 10]; 2]);
+    }
+
+    /// A release while a window is committed whole keeps the segment whose
+    /// decode it interrupted, as a settled chunk is kept: the release decodes
+    /// only what follows it.
+    #[test]
+    fn a_release_during_a_window_committed_whole_keeps_the_decoded_segment() {
+        let mut w = Worker::new(Pipeline {
+            recognizer: Fake {
+                calls: vec![],
+                replies: vec![],
+                stop: None,
+            },
+            segmenter: Unbroken,
+        });
+        let u = Utterance::new(1);
+        w.pipeline.recognizer.stop = Some(u.clone());
+        let mut commits = vec![];
+        assert_eq!(
+            w.tick(&[1.; 10], Frames::ZERO, &u, TickKind::Commits, |c| {
+                commits.push(c)
+            })
+            .unwrap(),
+            None
+        );
+        assert_eq!(
+            commits
+                .iter()
+                .map(|c| (c.text.as_str(), c.through))
+                .collect::<Vec<_>>(),
+            vec![("text", Frames(10))]
+        );
+        w.finish(&[1.; 10], Frames::ZERO, &u, |c| commits.push(c))
+            .unwrap();
+        assert_eq!(w.pipeline.recognizer.calls.len(), 1, "decoded once");
     }
 
     /// A preview tick is not a full window: its tail is all there is, and it
@@ -1457,6 +1545,80 @@ mod long_capture {
             Frames(peak).seconds(RATE),
             Frames(bound).seconds(RATE)
         );
+    }
+
+    /// Amplitude VAD that, as Silero, calls a run speech only once it lasts
+    /// `vad.min_speech_seconds`, then the real merge policy.
+    struct MinSpeech(Vad);
+
+    impl Segmenter for MinSpeech {
+        fn split(&mut self, samples: &[f32]) -> Result<Split> {
+            let shortest = (self.0.min_speech_seconds * f64::from(RATE)) as usize;
+            let mut spans: Vec<Range<usize>> = vec![];
+            for (i, window) in samples.as_chunks::<VAD_WINDOW>().0.iter().enumerate() {
+                if !window.iter().any(|s| s.abs() > 0.1) {
+                    continue;
+                }
+                let (start, end) = (i * VAD_WINDOW, (i + 1) * VAD_WINDOW);
+                match spans.last_mut() {
+                    Some(last) if last.end == start => last.end = end,
+                    _ => spans.push(start..end),
+                }
+            }
+            spans.retain(|span| span.len() >= shortest);
+            Ok(merge_spans(&spans, samples.len(), &self.0, RATE))
+        }
+    }
+
+    /// A window that settles nothing -- short phrases, pauses too short to
+    /// settle them -- is committed through its last pause, not its end. A
+    /// word that begins a tenth of a second before the window ends is too
+    /// short there to be speech; committed whole, the window claimed it, and
+    /// the release decoded only the rest of the word. Every loud sample is
+    /// decoded exactly once.
+    #[test]
+    fn a_window_that_settles_nothing_is_cut_at_its_last_pause() {
+        let second = RATE as usize;
+        let window = 12 * second;
+        let spans = [
+            second..3 * second,
+            4 * second..6 * second,
+            7 * second..17 * second / 2,
+            window - second / 10..window + second / 2,
+        ];
+        let samples = audio(&spans, 0..13 * second);
+        let loud = samples.iter().filter(|s| s.abs() > 0.1).count();
+        let calls = Rc::new(Cell::new(vec![]));
+        let mut worker = Worker::new(Pipeline {
+            recognizer: Counter(Rc::clone(&calls)),
+            segmenter: MinSpeech(Vad::default()),
+        });
+        let utterance = Utterance::new(1);
+        let mut commits = vec![];
+        worker
+            .tick(
+                &samples[..window],
+                Frames::ZERO,
+                &utterance,
+                TickKind::Commits,
+                |c| commits.push(c),
+            )
+            .expect("tick");
+        let through = commits.last().expect("the window committed").through;
+        // Where the detector's windows end the third phrase.
+        let pause = (17 * second / 2).next_multiple_of(VAD_WINDOW);
+        assert_eq!(through, Frames(pause), "cut at the last pause");
+        utterance.release();
+        worker
+            .finish(&samples[through.get()..], through, &utterance, |c| {
+                commits.push(c)
+            })
+            .expect("finish");
+        let decoded: usize = commits
+            .iter()
+            .map(|c| c.text.parse::<usize>().unwrap_or(0))
+            .sum();
+        assert_eq!(decoded, loud, "every loud sample, once");
     }
 
     /// The keep-back is what a later window's padding may still need, so it

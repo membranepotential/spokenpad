@@ -2380,9 +2380,11 @@ came back, and the silence timeout ended the capture mid-sentence.
   the capture counts as speech for the silence timeout (`Preview::heard`),
   beside text the recognizer produced. Rejected: the detector alone, since a
   settled commit's text is also proof and costs nothing to keep.
-- Rejected: cutting the window at its last pause instead of its end. The
-  split the worker sees has merged the pauses away, and the case is rare
-  enough that the cut inside a word it may cost is paid seldom.
+- Rejected at first: cutting the window at its last pause instead of its
+  end. The split the worker sees has merged the pauses away, and the case
+  is rare enough that the cut inside a word it may cost is paid seldom.
+  Reversed on 2026-09-23, see
+  [below](#a-window-that-settles-nothing-is-cut-at-its-last-pause-2026-09-23).
 
 The same audit (P1-002) found that a final decode stamped every segment's
 commit with the end of all the audio it held. After the first of several
@@ -2583,3 +2585,37 @@ the retry path.
   rest again". If the next start fails at the same point, the notice gives
   the `spokenpad transcribe --from` that recovers it, as for any recording.
 - Test: `a_capture_whose_release_decode_fails_is_left_to_the_next_start`.
+
+## A window that settles nothing is cut at its last pause (2026-09-23)
+
+The review of 2026-09-23 found two faults in the whole-window commit above.
+It cut the window at its end, which falls inside a word about as often as
+the user is speaking. Worse, a word begun less than `vad.min_speech_seconds`
+before that end is not yet a detector span: it fell under the closing empty
+commit and was never decoded. And a release during the commit threw away the
+segment whose decode had just finished, so the release decoded it again,
+up to 30 s of audio.
+
+- Chosen: `merge_spans` also returns the slice's last pause (`Split::pause`):
+  the end of the last span that has silence after it, either before the next
+  span or, for the last one, for at least `vad.pad_seconds` before the slice
+  ends. That rule leaves out a span the detector closed only because the
+  slice ended, and one it cut at its longest span with no gap. With the
+  pause come the windows that decode everything before it, merged by the
+  same policy and padded by at most `vad.pad_seconds`, never into the speech
+  that follows. A `TickKind::Commits` window that settles nothing is
+  committed through that pause; the rest stays for the next tick. Only a
+  window with no pause is still committed through its end.
+- Chosen: a release during that commit keeps the segment whose decode it
+  waited for, as a settled chunk is kept, and stops before the next one. A
+  cancel still throws it away. `decode_segments` takes separate predicates
+  for "decode no further segment" and "throw away the one just decoded".
+- Kept: the commit runs only when the tick settled nothing and its slice
+  begins at the committed offset, so no committed audio is decoded again.
+- Rejected: running the detector again over the audio up to the pause. The
+  merge already knows the spans, and a second detector pass would lengthen
+  the uninterruptible work a release can wait behind.
+- Test: `a_window_that_settles_nothing_is_cut_at_its_last_pause` (every loud
+  sample decoded once, the short word included),
+  `a_release_during_a_window_committed_whole_keeps_the_decoded_segment`,
+  and `the_last_pause_follows_the_last_span_with_silence_after_it`.

@@ -203,7 +203,8 @@ session, decode and nvim tests:
    chunk — which, if that chunk was settled, it has just committed rather than
    wasted. What a release can still queue behind is the work already inside
    the tick: one detector pass, and one chunk's decode (a settled chunk, or
-   one segment of a window committed whole because nothing in it settled —
+   one segment of a window committed through its last pause because nothing
+   in it settled —
    [progressive-commit.md](progressive-commit.md#recording-tick)). Neither is
    interruptible, so both are bounded instead — a tick is handed at most
    `[preview].max_seconds` of audio however long the tail is, which holds the

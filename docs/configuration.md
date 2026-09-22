@@ -203,4 +203,4 @@ and no keystrokes are synthesised ([nvim-window.md](nvim-window.md)).
   half the time. See [progressive-commit.md](progressive-commit.md).
 - `max_seconds` (30): the most open tail one tick reads. Past it the preview
   pauses and the tick still commits; a window in which nothing settles is
-  committed whole.
+  committed through its last pause, or whole when it has none.

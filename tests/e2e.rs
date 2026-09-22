@@ -263,7 +263,7 @@ impl Segmenter for Chunker {
                     }
                 })
                 .collect(),
-            silent_through: 0,
+            ..Split::default()
         })
     }
 }
