@@ -1751,6 +1751,61 @@ fn a_waiting_recording_that_vanished_is_reported_lost() {
     h.finish();
 }
 
+/// A recording that becomes unreadable after part of it was transcribed is
+/// not reported lost: its text so far is in the file, and the window says
+/// from where to recover the rest.
+#[test]
+fn a_recording_that_fails_partway_says_from_where_to_recover_it() {
+    if !nvim_available() {
+        return;
+    }
+    let h = Harness::start(Settings {
+        loading: true,
+        vad: Some(brisk_vad()),
+        words: false,
+        max_seconds: 1.0,
+        delay: Duration::from_millis(500),
+        ..Settings::default()
+    });
+    h.press(true);
+    h.say(&tone(4.0));
+    h.press_only(true);
+    h.release_for_good();
+    let recording = fs::read_dir(&h.recordings)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.extension().is_some_and(|e| e == "wav"))
+        .expect("a recording");
+    h.load(Ok(()));
+    wait_until("the first window's text is written", || {
+        counted(&h.text()) > 0
+    });
+    // Everything after the WAV header is gone, so the next window the
+    // transcription reads fails.
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&recording)
+        .unwrap()
+        .set_len(44)
+        .unwrap();
+    wait_until("the window says it was partly transcribed", || {
+        h.indicator("notice")
+            .contains("recording partly transcribed")
+    });
+    let detail = h.indicator("notice_detail");
+    let from: f64 = detail
+        .trim()
+        .rsplit_once("spokenpad transcribe --from ")
+        .and_then(|(_, seconds)| seconds.parse().ok())
+        .unwrap_or_else(|| panic!("no offset to recover from: {detail}"));
+    assert!(
+        from > 0. && from < 4.,
+        "from where the written text ends: {detail}"
+    );
+    assert!(counted(&h.text()) < 4 * RATE as usize, "{}", h.text());
+    h.finish();
+}
+
 /// A model that cannot be had (offline, a failed download, a broken file)
 /// does not stop the daemon: the window says why, what is recorded is kept,
 /// and the next press tries again. Every recording is transcribed once it

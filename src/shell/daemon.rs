@@ -970,20 +970,36 @@ where
                             Err(e) => log::error!("decode failed for utterance {}: {e:#}", id.0),
                         }
                         if let Some(at) = transcribing.iter().position(|t| t.id == id) {
-                            let recording = transcribing.remove(at);
-                            capture.release_recording(&recording.path);
+                            let Waiting { path, through, .. } = transcribing.remove(at);
                             let to_go = waiting.len() + transcribing.len();
-                            if result_failed {
-                                log::error!(
-                                    "{} was not transcribed; {to_go} to go",
-                                    recording.path.display()
-                                );
-                                session.notify(Notice::RecordingLost(recording.path));
-                            } else {
-                                log::info!(
-                                    "transcribed {}; {to_go} to go",
-                                    recording.path.display()
-                                );
+                            match (result_failed, through) {
+                                (false, _) => {
+                                    capture.release_recording(&path);
+                                    log::info!("transcribed {}; {to_go} to go", path.display());
+                                }
+                                (true, Frames::ZERO) => {
+                                    capture.release_recording(&path);
+                                    log::error!(
+                                        "{} was not transcribed; {to_go} to go",
+                                        path.display()
+                                    );
+                                    session.notify(Notice::RecordingLost(path));
+                                }
+                                // Its text through `through` is written; the
+                                // rest is the user's to recover, from there,
+                                // so the recording stays kept from pruning.
+                                (true, through) => {
+                                    let seconds = through.seconds(rate);
+                                    log::error!(
+                                        "{} was transcribed through {seconds:.2}s only; recover the rest with `spokenpad transcribe --from {seconds:.2} {}`; {to_go} to go",
+                                        path.display(),
+                                        path.display()
+                                    );
+                                    session.notify(Notice::RecordingPartlyTranscribed {
+                                        path,
+                                        through: Duration::from_secs_f64(seconds),
+                                    });
+                                }
                             }
                         }
                         session.finish(id);

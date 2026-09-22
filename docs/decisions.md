@@ -1540,3 +1540,22 @@ could be gone by the time the user read it.
 - Rejected: writing the list at every commit, so that a crash keeps it too.
   That is a file write on the event loop per commit, for a case the
   recovery WAVs already cover by hand.
+
+## A recording that fails partway is not reported lost (2026-09-22)
+
+A recording made before the model was ready whose transcription failed
+after some of its text was written said "recording lost", although the text
+up to that point was in the file and the rest was still in the WAV. Now it
+says "recording partly transcribed", with the offset to recover the rest
+from: "… failed after 12.34s; recover the rest with spokenpad transcribe
+--from 12.34" (`Notice::RecordingPartlyTranscribed`), and the log says the
+same with the whole path, as the stop does.
+
+- **It ranks just below "recording lost"**: a whole capture gone is worse
+  news than the rest of one, which can still be recovered.
+- **The recording stays kept** from pruning for the rest of the daemon's
+  run, since the notice sends the user to it. A lost one, which failed
+  before any text, is released as before.
+- It is not retried or put on the list for the next start: a transcription
+  that failed once on the same file is likely to fail again, and the
+  notice already names what to run.
