@@ -85,6 +85,22 @@ fn x11() -> &'static ffi::x11::XkbCommonX11 {
     ffi::x11::xkbcommon_x11_handle()
 }
 
+/// The text one of xkbcommon's `*_get_utf8` calls writes, `write` being
+/// that call with its buffer and the buffer's length. The call reports the
+/// length it needs when the buffer is too small, but a keysym's or a
+/// sequence's UTF-8 is at most a few bytes: one call with a generous buffer
+/// is always enough, and the length is checked anyway. Empty when nothing
+/// is typed.
+fn utf8_written_by(write: impl FnOnce(*mut c_char, usize) -> std::os::raw::c_int) -> String {
+    let mut buffer = [0_u8; 64];
+    let written = write(buffer.as_mut_ptr().cast::<c_char>(), buffer.len());
+    usize::try_from(written)
+        .ok()
+        .and_then(|length| buffer.get(..length.min(buffer.len() - 1)))
+        .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+        .unwrap_or_default()
+}
+
 /// An xkbcommon context: the root object every other one is made from.
 pub struct Context(NonNull<ffi::xkb_context>);
 
@@ -144,28 +160,12 @@ impl State {
     /// The text this keycode types in the current state, which is empty for a
     /// key that types nothing.
     pub fn text(&self, keycode: u32) -> String {
-        // The C call reports the length it needs when the buffer is too
-        // small, but a keysym's UTF-8 is at most a few bytes: one call with a
-        // generous buffer is always enough, and the length is checked anyway.
-        let mut buffer = [0_u8; 64];
-        // SAFETY: a live state, and a buffer of exactly the length passed
-        // with it. The library writes at most that many bytes and NUL
-        // terminates within them.
-        let written = unsafe {
-            (base().xkb_state_key_get_utf8)(
-                self.0.as_ptr(),
-                keycode,
-                buffer.as_mut_ptr().cast::<c_char>(),
-                buffer.len(),
-            )
-        };
-        let Ok(length) = usize::try_from(written) else {
-            return String::new();
-        };
-        match buffer.get(..length.min(buffer.len() - 1)) {
-            Some(bytes) => String::from_utf8_lossy(bytes).into_owned(),
-            None => String::new(),
-        }
+        utf8_written_by(|buffer, length| {
+            // SAFETY: a live state, and a buffer of exactly the length passed
+            // with it. The library writes at most that many bytes and NUL
+            // terminates within them.
+            unsafe { (base().xkb_state_key_get_utf8)(self.0.as_ptr(), keycode, buffer, length) }
+        })
     }
 
     /// Whether the named modifier is in effect.
@@ -279,21 +279,14 @@ impl ComposeState {
         // SAFETY: a live state; this only reads.
         let keysym =
             unsafe { (compose_library().xkb_compose_state_get_one_sym)(self.state.as_ptr()) };
-        let mut buffer = [0_u8; 64];
-        // SAFETY: a live state, and a buffer of exactly the length passed
-        // with it, as in `State::text`.
-        let written = unsafe {
-            (compose_library().xkb_compose_state_get_utf8)(
-                self.state.as_ptr(),
-                buffer.as_mut_ptr().cast::<c_char>(),
-                buffer.len(),
-            )
-        };
-        let text = usize::try_from(written)
-            .ok()
-            .and_then(|length| buffer.get(..length.min(buffer.len() - 1)))
-            .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
-            .unwrap_or_default();
+        let text = utf8_written_by(|buffer, length| {
+            // SAFETY: a live state, and a buffer of exactly the length passed
+            // with it. The library writes at most that many bytes and NUL
+            // terminates within them.
+            unsafe {
+                (compose_library().xkb_compose_state_get_utf8)(self.state.as_ptr(), buffer, length)
+            }
+        });
         (keysym, text)
     }
 

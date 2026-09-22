@@ -29,6 +29,36 @@ fn a_pane_without_a_display_says_to_use_attach_mode() {
     assert_eq!(session.refused.as_deref(), Some(error.as_str()));
 }
 
+/// Only a path that resolves into the dictation directory is trusted with a
+/// transcript: not one that climbs out with `..`, not a symlink inside that
+/// points out, and nothing while the directory does not exist.
+#[test]
+fn only_paths_that_resolve_into_the_dictation_directory_are_inside() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = Nvim {
+        dictation_dir: directory.path().join("dictation"),
+        ..Nvim::default()
+    };
+    let outside = directory.path().join("elsewhere.md");
+    fs::write(&outside, "").unwrap();
+    assert_eq!(inside_dictation_dir(&config, &outside).unwrap(), None);
+
+    fs::create_dir(&config.dictation_dir).unwrap();
+    let file = config.dictation_dir.join("a.md");
+    fs::write(&file, "").unwrap();
+    assert_eq!(
+        inside_dictation_dir(&config, &file).unwrap(),
+        Some(file.canonicalize().unwrap())
+    );
+    let climbing = config.dictation_dir.join("..").join("elsewhere.md");
+    assert_eq!(inside_dictation_dir(&config, &climbing).unwrap(), None);
+    let link = config.dictation_dir.join("link.md");
+    std::os::unix::fs::symlink(&outside, &link).unwrap();
+    assert_eq!(inside_dictation_dir(&config, &link).unwrap(), None);
+    let missing = config.dictation_dir.join("missing.md");
+    assert_eq!(inside_dictation_dir(&config, &missing).unwrap(), None);
+}
+
 /// The editor tests need a real Neovim. A missing one is a broken environment,
 /// not a reason to report a green suite, so it fails unless the operator says
 /// otherwise.

@@ -16,7 +16,7 @@
 //! [`take`]s the passage instead: the pointer is removed before the editor
 //! reads the file, under a lock every write holds too, so a write either
 //! finishes before the editor reads the file or starts a new passage.
-use super::{new_file, utf8_path};
+use super::{inside_dictation_dir, new_file, utf8_path};
 use crate::config::Nvim;
 use anyhow::{Context, Result};
 use std::{
@@ -72,9 +72,8 @@ pub fn append(config: &Nvim, text: &str, continued: bool) -> Result<DetachedWrit
 /// convenience, and a stale or foreign one must not redirect a transcript.
 pub fn pending(config: &Nvim) -> Option<PathBuf> {
     let recorded = fs::read_to_string(pointer_path(&config.socket_path)).ok()?;
-    let path = fs::canonicalize(recorded.trim_end_matches('\n')).ok()?;
-    let root = fs::canonicalize(&config.dictation_dir).ok()?;
-    (path.starts_with(&root) && fs::metadata(&path).ok()?.is_file()).then_some(path)
+    let path = inside_dictation_dir(config, Path::new(recorded.trim_end_matches('\n'))).ok()??;
+    fs::metadata(&path).ok()?.is_file().then_some(path)
 }
 
 /// Forgets the pending passage once an editor the daemon opened holds

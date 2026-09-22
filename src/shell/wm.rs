@@ -102,13 +102,7 @@ impl Wm {
 /// manager that stops answering must not hold the editor thread, which is
 /// opening a pane while the user is already speaking.
 fn request(socket: &Path, message: Message, payload: &str) -> Result<String> {
-    let deadline = Instant::now() + TIMEOUT;
-    let remaining = || {
-        deadline
-            .checked_duration_since(Instant::now())
-            .filter(|left| !left.is_zero())
-            .context("window manager did not answer in time")
-    };
+    let remaining = remaining_until(Instant::now() + TIMEOUT);
     let mut stream = connect_by(socket, &remaining)
         .with_context(|| format!("connect to window manager at {}", socket.display()))?;
     stream.set_write_timeout(Some(remaining()?))?;
@@ -130,15 +124,16 @@ fn request(socket: &Path, message: Message, payload: &str) -> Result<String> {
 /// The process listening on `socket`, from the connection's peer
 /// credentials (`SO_PEERCRED`, which the kernel fills in at `listen`).
 fn peer_pid(socket: &Path) -> Result<u32> {
-    let deadline = Instant::now() + TIMEOUT;
-    let remaining = || {
-        deadline
-            .checked_duration_since(Instant::now())
-            .filter(|left| !left.is_zero())
-            .context("window manager did not answer in time")
-    };
+    let remaining = remaining_until(Instant::now() + TIMEOUT);
     let stream = connect_by(socket, &remaining)
         .with_context(|| format!("connect to window manager at {}", socket.display()))?;
+    let credentials = peer_credentials(&stream).context("read the socket's peer credentials")?;
+    u32::try_from(credentials.pid).context("the socket's peer has no process id")
+}
+
+/// The process, user and group on the other end of a connected Unix socket
+/// (`SO_PEERCRED`: for the side that listens, as it was at `listen`).
+pub(crate) fn peer_credentials(stream: &UnixStream) -> std::io::Result<libc::ucred> {
     let mut credentials = libc::ucred {
         pid: 0,
         uid: 0,
@@ -157,9 +152,20 @@ fn peer_pid(socket: &Path) -> Result<u32> {
         )
     };
     if read != 0 {
-        return Err(std::io::Error::last_os_error()).context("read the socket's peer credentials");
+        return Err(std::io::Error::last_os_error());
     }
-    u32::try_from(credentials.pid).context("the socket's peer has no process id")
+    Ok(credentials)
+}
+
+/// How much of the time until `deadline` is left, for each step of one
+/// exchange; an error once none is.
+fn remaining_until(deadline: Instant) -> impl Fn() -> Result<Duration> {
+    move || {
+        deadline
+            .checked_duration_since(Instant::now())
+            .filter(|left| !left.is_zero())
+            .context("window manager did not answer in time")
+    }
 }
 
 /// `UnixStream::connect` under the deadline.
@@ -515,13 +521,7 @@ mod tests {
         let _listener = UnixListener::bind(&socket).unwrap();
         let mut queued = Vec::new();
         let error = loop {
-            let deadline = Instant::now() + Duration::from_millis(200);
-            let remaining = || {
-                deadline
-                    .checked_duration_since(Instant::now())
-                    .filter(|left| !left.is_zero())
-                    .context("window manager did not answer in time")
-            };
+            let remaining = remaining_until(Instant::now() + Duration::from_millis(200));
             let started = Instant::now();
             match connect_by(&socket, &remaining) {
                 Ok(stream) => queued.push(stream),

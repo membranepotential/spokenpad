@@ -747,12 +747,7 @@ impl NvimSession {
             None => None,
         };
 
-        client.request(
-            "nvim_exec_lua",
-            vec![Value::from(SPOKENPAD_LUA), Value::Array(Vec::new())],
-            deadline(SETUP_TIMEOUT),
-            Patience::Deadline,
-        )?;
+        load_spokenpad_lua(&mut client, deadline(SETUP_TIMEOUT))?;
         let mut fresh = None;
         let (buffer, path) = match adoptable {
             Some(adopted) => adopted,
@@ -781,18 +776,9 @@ impl NvimSession {
         let Some(pinned) = pinned else {
             return Ok(None);
         };
-        let root = match self.config.dictation_dir.canonicalize() {
-            Ok(root) => root,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error).context("canonicalize dictation directory"),
-        };
-        let candidate = match Path::new(&pinned.name).canonicalize() {
-            Ok(candidate) => candidate,
-            Err(_) => return Ok(None),
-        };
-        Ok(candidate
-            .starts_with(&root)
-            .then(|| (pinned.buffer, PathBuf::from(&pinned.name))))
+        Ok(inside_dictation_dir(&self.config, Path::new(&pinned.name))
+            .context("canonicalize dictation directory")?
+            .map(|_| (pinned.buffer, PathBuf::from(&pinned.name))))
     }
 
     /// Wait for the editor inside a pane this session just opened to answer
@@ -993,12 +979,7 @@ impl NvimSession {
                 keep: client,
             });
         }
-        client.request(
-            "nvim_exec_lua",
-            vec![Value::from(SPOKENPAD_LUA), Value::Array(Vec::new())],
-            capped(startup_deadline, SETUP_TIMEOUT),
-            Patience::Deadline,
-        )?;
+        load_spokenpad_lua(&mut client, capped(startup_deadline, SETUP_TIMEOUT))?;
         let buffer = open_buffer(&mut client, target, capped(startup_deadline, SETUP_TIMEOUT))?;
         setup_buffer(
             &mut client,
@@ -1536,6 +1517,19 @@ fn remove_stale_socket(path: &Path) -> Result<()> {
     fs::remove_file(path).with_context(|| format!("remove stale socket {}", path.display()))
 }
 
+/// Loads `spokenpad.lua` into the editor, which defines the `Spokenpad`
+/// table every later call uses. Loading it again replaces the functions and
+/// keeps the state.
+fn load_spokenpad_lua(client: &mut RpcClient, deadline: Instant) -> Result<()> {
+    client.request(
+        "nvim_exec_lua",
+        vec![Value::from(SPOKENPAD_LUA), Value::Array(Vec::new())],
+        deadline,
+        Patience::Deadline,
+    )?;
+    Ok(())
+}
+
 fn open_buffer(client: &mut RpcClient, path: &Path, deadline: Instant) -> Result<i64> {
     client
         .request(
@@ -1567,6 +1561,25 @@ fn setup_buffer(
         Patience::Deadline,
     )?;
     Ok(())
+}
+
+/// `candidate` resolved, symlinks and all, when that lands inside the
+/// dictation directory; `None` when it lands elsewhere, or when either
+/// cannot be resolved because it does not exist (a candidate that cannot be
+/// resolved for any reason is not proven inside). The one check behind every
+/// path spokenpad trusts with a transcript it did not create itself: a
+/// pinned buffer, or the pending passage's pointer. Errors only when the
+/// dictation directory exists and cannot be resolved.
+fn inside_dictation_dir(config: &Nvim, candidate: &Path) -> std::io::Result<Option<PathBuf>> {
+    let root = match config.dictation_dir.canonicalize() {
+        Ok(root) => root,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    Ok(candidate
+        .canonicalize()
+        .ok()
+        .filter(|resolved| resolved.starts_with(&root)))
 }
 
 fn new_file(config: &Nvim) -> Result<PathBuf> {

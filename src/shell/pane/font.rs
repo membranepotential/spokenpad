@@ -121,7 +121,7 @@ const MATCH_TIMEOUT: Duration = Duration::from_millis(250);
 const LOAD_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// One font file, loaded.
-struct Loaded {
+struct LoadedFace {
     data: Vec<u8>,
     index: u32,
     /// Whether this is the same file fontconfig gave for the plain face, so a
@@ -131,7 +131,7 @@ struct Loaded {
     source: Matched,
 }
 
-impl Loaded {
+impl LoadedFace {
     fn font(&self) -> Result<FontRef<'_>> {
         FontRef::from_index(&self.data, self.index as usize)
             .context("the font file holds no face at that index")
@@ -140,12 +140,12 @@ impl Loaded {
 
 /// The font the pane draws with, and everything already rasterised from it.
 pub struct Font {
-    faces: [Loaded; 4],
+    faces: [LoadedFace; 4],
     caches: [HashMap<String, Option<Glyph>>; 4],
     /// Faces fontconfig named for characters the chosen family does not
     /// cover. A dictation transcript is whatever was said, and a cell drawn
     /// as nothing looks like lost text rather than like a missing glyph.
-    fallbacks: Vec<Loaded>,
+    fallbacks: Vec<LoadedFace>,
     /// Which of those covers a character, or that nothing does. Misses are
     /// remembered too: asking fontconfig again on every frame would put a
     /// process spawn on the drawing path.
@@ -220,7 +220,7 @@ impl Font {
                 face => read_match(&face.pattern(family, size), LOAD_TIMEOUT)?.found,
             };
             let substituted = face != Face::PLAIN && found == plain;
-            loaded.push(Loaded {
+            loaded.push(LoadedFace {
                 data: std::fs::read(&found.0)
                     .with_context(|| format!("read the font file {}", found.0.display()))?,
                 index: found.1,
@@ -228,7 +228,7 @@ impl Font {
                 source: found,
             });
         }
-        let faces: [Loaded; 4] = loaded
+        let faces: [LoadedFace; 4] = loaded
             .try_into()
             .map_err(|_| anyhow::anyhow!("expected four faces"))?;
         let metrics = measure(&faces[0], size, hinting)?;
@@ -373,7 +373,7 @@ impl Font {
                 found.0.display(),
                 self.family
             );
-            self.fallbacks.push(Loaded {
+            self.fallbacks.push(LoadedFace {
                 data,
                 index: found.1,
                 substituted: false,
@@ -388,7 +388,7 @@ impl Font {
 }
 
 /// Whether this face has an outline for the character at all.
-fn covers(face: &Loaded, character: char) -> bool {
+fn covers(face: &LoadedFace, character: char) -> bool {
     face.font()
         .map(|font| font.charmap().map(character) != 0)
         .unwrap_or(false)
@@ -480,7 +480,7 @@ fn read_match(pattern: &str, timeout: Duration) -> Result<Answer> {
 ///
 /// The width is the advance of `0`, the glyph crossfont loads for it; a face
 /// that maps no `0` gives `.notdef`'s advance, as FreeType would.
-fn measure(face: &Loaded, size: PixelSize, hinting: Hinting) -> Result<CellMetrics> {
+fn measure(face: &LoadedFace, size: PixelSize, hinting: Hinting) -> Result<CellMetrics> {
     let font = face.font()?;
     let table = |name: &[u8; 4]| font.table(swash::tag_from_bytes(name));
     let tables = Tables {
@@ -503,7 +503,12 @@ fn measure(face: &Loaded, size: PixelSize, hinting: Hinting) -> Result<CellMetri
 
 /// Rasterise one grapheme: the base character, with any combining marks drawn
 /// over it at the same pen position, into one bitmap.
-fn rasterise(face: &Loaded, context: &mut ScaleContext, size: f32, text: &str) -> Option<Glyph> {
+fn rasterise(
+    face: &LoadedFace,
+    context: &mut ScaleContext,
+    size: f32,
+    text: &str,
+) -> Option<Glyph> {
     let font = face.font().ok()?;
     let charmap = font.charmap();
     let glyphs: Vec<GlyphId> = text
