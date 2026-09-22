@@ -384,7 +384,7 @@ caught up. The log always has the full sentence and paths.
   window with a command half typed cancels it, and what you typed is written
   as usual.
 - **Recording continues for a quarter second after you let go**
-  (`audio.postroll_ms`), so a word still sounding at key-up is not cut off.
+  (`audio.postroll_seconds`), so a word still sounding at key-up is not cut off.
   Pressing the key again within the first 150 ms continues the same
   recording; pressing it later ends the wait at once and starts the next
   capture.
@@ -412,7 +412,7 @@ caught up. The log always has the full sentence and paths.
   been transcribed is dropped as you speak; what is held is the sentence you
   are still in. The recovery WAV keeps the whole recording.
 - **A latch you forget stops by itself** after five minutes without speech
-  (`capture.silence_timeout_s`). It is an ordinary stop: the tail is decoded,
+  (`capture.silence_timeout_seconds`). It is an ordinary stop: the tail is decoded,
   everything spoken is kept, and the winbar says "stopped after silence" until
   your next press, which starts a new recording. The timeout runs from the
   last speech the detector heard or text the recogniser produced, so a pause
@@ -430,11 +430,11 @@ caught up. The log always has the full sentence and paths.
   decoded, and the winbar names the recovery WAV — which is finished and
   closed there, like any other capture's, not carried on past the limit. Text
   that lands while you speak is what makes the audio droppable, so the limit
-  is reachable only where nothing lands: with a `preview.interval_ms` long
+  is reachable only where nothing lands: with a `preview.interval_seconds` long
   enough that few ticks fire.
 - **Before the speech model is ready there is no silence timeout**: nothing
   decodes while you speak, so there is nothing to measure, and the two limits
-  above are what end a forgotten capture. A `preview.interval_ms` long enough
+  above are what end a forgotten capture. A `preview.interval_seconds` long enough
   to starve the timeout is not silently ignored: the daemon refuses a
   configuration whose timeout is under two ticks, and says which two keys
   disagree.
@@ -500,7 +500,7 @@ cannot pass silently. Keys are not configured here; see
 
 | key | default | what it does |
 |---|---|---|
-| `capture.silence_timeout_s` | `300` | seconds without speech after which a latched capture ends by itself; `0` turns it off, and the four-hour limit still applies. Must be at least twice `preview.interval_ms` |
+| `capture.silence_timeout_seconds` | `300` | seconds without speech after which a latched capture ends by itself; `0` turns it off, and the four-hour limit still applies. Must be at least twice `preview.interval_seconds` |
 | `asr.vocabulary` | `[]` | words to bias Parakeet towards, such as `["kubectl", "nginx"]`; switches to beam search, which sometimes drops a sentence ([docs/asr.md](docs/asr.md)) |
 | `nvim.mode` | `"pane"` | `pane`: the daemon opens a window it draws itself; `attach`: you run `spokenpad editor` |
 | `nvim.font_family`, `nvim.font_size` | `"monospace"`, `11.25` | pane mode only: the font it draws with, sized in points exactly as Alacritty's `font.size` (scaled by the X resource `Xft.dpi`), so the same numbers give the same cells — provided `Xft.dpi` is set (`xrdb` or `~/.Xresources`): the pane does not read an XSETTINGS daemon's `Xft/DPI` or RandR's physical screen size, which Alacritty falls back to, and uses 96 dpi instead |

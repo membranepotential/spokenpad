@@ -859,11 +859,7 @@ where
     let rate = config.audio.sample_rate;
     let processor = Processor::new(&config.text)?;
     // No ticks and no silence timeout until the pipeline is ready.
-    let mut session = Session::new(
-        false,
-        Duration::from_millis(config.preview.interval_ms),
-        None,
-    );
+    let mut session = Session::new(false, config.preview.interval(), None);
     let mut recognition = match &pipeline {
         PipelineSource::Ready(_) => {
             configure(&mut session, config);

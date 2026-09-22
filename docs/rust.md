@@ -68,7 +68,7 @@ the root because both sides read it. Nothing under `core/` may import
   *idle*, so the pre-roll is full at the next press; the ring is cleared when a
   capture starts, so audio from before the previous capture cannot be spliced
   into this one. A decode (release, latched stop) keeps capturing for
-  `audio.postroll_ms` (250 ms, at most 1000) after the `stop` or the ending
+  `audio.postroll_seconds` (0.25 s, at most 1) after the `stop` or the ending
   press, because speech was still sounding at key-up in 22 of 128 recorded
   captures; audio captured during the repeat window counts towards it. The
   wait counts device frames delivered under the state lock, so it also
@@ -146,7 +146,7 @@ use is rejected. A key spokenpad no longer reads (`config::GONE`) is refused
 with what became of it, never as a bare unknown field.
 `audio.sample_rate` must be **16000** — the Silero window is 512 samples at
 that rate and Parakeet reads it, and nothing resamples in between. `vad.chunk_seconds` must be positive, `preview.max_seconds` at most
-3600 (default 30), `capture.silence_timeout_s` either 0 (off) or in [1,3600]
+3600 (default 30), `capture.silence_timeout_seconds` either 0 (off) or in [1,3600]
 (default 300), and `nvim.colorscheme` must match `[A-Za-z0-9_.-]+`, since it
 becomes Lua code. Recovery rejects a WAV whose rate differs from the configured
 capture rate, as in the original command.

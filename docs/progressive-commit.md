@@ -126,7 +126,7 @@ chunk_seconds + ceil(chunk_seconds / min_speech_seconds) x settling_silence
 
 plus one split threshold of silence (4 s with the default padding), kept back
 so that a later window's lead padding has real audio to use and the detector
-sees the same windows it would have seen, plus one `preview.interval_ms` and
+sees the same windows it would have seen, plus one `preview.interval_seconds` and
 the decode of audio arriving meanwhile. Unbroken speech is the easy case: a
 Silero span ends at `vad.max_speech_seconds` (20 s), which closes a chunk on
 its own.
@@ -158,7 +158,7 @@ the tail is decoded, everything spoken is kept, and one notice says which rule
 it was.
 
 - **Silence.** A latched capture with no key down that has heard no speech
-  for `capture.silence_timeout_s` (300 s) ends. "Heard speech" is text the
+  for `capture.silence_timeout_seconds` (300 s) ends. "Heard speech" is text the
   recognizer produced — a settled commit or a live preview — or speech the
   detector found in a tick's audio that ends later than any it found before
   in this capture (`Preview::heard`), whichever came last. The second counts
@@ -179,7 +179,7 @@ it was.
 
   The rule is off for a capture made before the speech model was ready: no
   tick runs then. Only a tick reports speech, so `Config::validate` also requires the timeout to be at
-  least two `preview.interval_ms`: the earliest a capture can report speech
+  least two `preview.interval_seconds`: the earliest a capture can report speech
   is one tick after the press, and a shorter timeout would end a capture that
   was never given the chance.
 - **Length.** Any capture reaching `MAX_CAPTURE` (4 h) ends, whatever is

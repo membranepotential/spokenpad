@@ -172,7 +172,7 @@ words anyway.
 ### The two paths
 
 `--path live` drives `core::decode::Worker` the way `shell/daemon.rs` does: a
-tick every `preview.interval_ms` over the audio since the committed offset,
+tick every `preview.interval_seconds` over the audio since the committed offset,
 bounded by `preview.max_seconds` as one tick's work, every settled chunk
 committed once, then the release decoding only the audio still held — the
 daemon drops the rest (`AudioCapture::discard_before`). `--path whole` decodes

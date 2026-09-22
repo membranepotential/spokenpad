@@ -142,7 +142,7 @@ fn wrong_sample_rate_rejected_before_loading_model() {
 fn invalid_config_fails_before_devices_and_missing_model_is_exit_two() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("bad.toml");
-    std::fs::write(&path, "[preview]\ninterval_ms=1").unwrap();
+    std::fs::write(&path, "[preview]\ninterval_seconds=0.001").unwrap();
     let output = command(&dir)
         .arg("-c")
         .arg(path)
@@ -150,7 +150,7 @@ fn invalid_config_fails_before_devices_and_missing_model_is_exit_two() {
         .output()
         .unwrap();
     assert_eq!(code(&output), 1);
-    assert!(String::from_utf8_lossy(&output.stderr).contains("preview.interval_ms"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("preview.interval_seconds"));
     let output = command(&dir)
         .arg("--model-dir")
         .arg(dir.path().join("absent"))
@@ -284,7 +284,7 @@ fn write_offline_config(root: &std::path::Path) {
     std::fs::write(
         root.join("spokenpad/config.toml"),
         format!(
-            "[asr]\nmodel_dir = '{0}/no-model'\n[vad]\nmodel = '{0}/no-vad.onnx'\n[audio]\npreroll_ms = 0\n",
+            "[asr]\nmodel_dir = '{0}/no-model'\n[vad]\nmodel = '{0}/no-vad.onnx'\n[audio]\npreroll_seconds = 0\n",
             root.display()
         ),
     )

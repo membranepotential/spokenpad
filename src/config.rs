@@ -11,13 +11,18 @@ use std::{
 /// Both models are 16kHz: Silero's window is 512 samples at that rate and
 /// Parakeet's features assume it. Nothing resamples in between.
 pub const REQUIRED_SAMPLE_RATE: u32 = 16_000;
-/// Upper bound for `audio.postroll_ms`: every release blocks the event loop
-/// this long at most, and a key pressed meanwhile ends it early.
-pub const MAX_POSTROLL_MS: u32 = 1_000;
-/// Upper bound for `audio.preroll_ms`. Together with [`MAX_POSTROLL_MS`] it
-/// bounds how much a recovery WAV holds beyond the capture itself, which is
-/// what `shell::recorder`'s own limit has to leave room for.
-pub const MAX_PREROLL_MS: u32 = 60_000;
+/// Upper bound for `audio.postroll_seconds`: every release blocks the event
+/// loop this long at most, and a key pressed meanwhile ends it early.
+pub const MAX_POSTROLL_SECONDS: f64 = 1.0;
+/// Upper bound for `audio.preroll_seconds`. Together with
+/// [`MAX_POSTROLL_SECONDS`] it bounds how much a recovery WAV holds beyond
+/// the capture itself, which is what `shell::recorder`'s own limit has to
+/// leave room for.
+pub const MAX_PREROLL_SECONDS: f64 = 60.0;
+/// The longest any other duration setting may be: an hour, far past any
+/// value that makes sense, and short enough that a typo of a few zeros is
+/// caught rather than taken.
+pub const LONGEST_SECONDS: f64 = 3600.0;
 
 /// How a transducer searches. Hotwords exist only inside
 /// `ModifiedBeamSearch`, the one sherpa-onnx search that applies them.
@@ -44,32 +49,34 @@ impl Decoding {
 #[serde(default, deny_unknown_fields)]
 pub struct Audio {
     pub sample_rate: u32,
-    pub preroll_ms: u32,
+    /// Audio kept from before the press, because the first word is often
+    /// already sounding when the key goes down.
+    pub preroll_seconds: f64,
     /// Audio still captured after a release, because speech is often still
     /// sounding when the key comes up.
-    pub postroll_ms: u32,
+    pub postroll_seconds: f64,
     pub device: Option<String>,
 }
 impl Default for Audio {
     fn default() -> Self {
         Self {
             sample_rate: 16000,
-            preroll_ms: 250,
-            postroll_ms: 250,
+            preroll_seconds: 0.25,
+            postroll_seconds: 0.25,
             device: None,
         }
     }
 }
 impl Audio {
     pub fn preroll_frames(&self) -> usize {
-        self.frames_in(Duration::from_millis(u64::from(self.preroll_ms)))
+        self.frames_in(Duration::from_secs_f64(self.preroll_seconds))
     }
     pub fn postroll(&self) -> Duration {
-        Duration::from_millis(u64::from(self.postroll_ms))
+        Duration::from_secs_f64(self.postroll_seconds)
     }
     /// Whole frames in `span` at the sample rate.
     pub fn frames_in(&self, span: Duration) -> usize {
-        (u128::from(self.sample_rate) * span.as_millis() / 1000) as usize
+        (u128::from(self.sample_rate) * span.as_micros() / 1_000_000) as usize
     }
 }
 
@@ -81,19 +88,20 @@ impl Audio {
 pub struct Capture {
     /// Seconds a latched capture may hear no speech before it ends itself,
     /// or `0` to never end one for silence.
-    pub silence_timeout_s: f64,
+    pub silence_timeout_seconds: f64,
 }
 impl Default for Capture {
     fn default() -> Self {
         Self {
-            silence_timeout_s: 300.,
+            silence_timeout_seconds: 300.,
         }
     }
 }
 impl Capture {
     /// The timeout as a duration, or `None` where it is off.
     pub fn silence_timeout(&self) -> Option<Duration> {
-        (self.silence_timeout_s > 0.).then(|| Duration::from_secs_f64(self.silence_timeout_s))
+        (self.silence_timeout_seconds > 0.)
+            .then(|| Duration::from_secs_f64(self.silence_timeout_seconds))
     }
 }
 
@@ -431,7 +439,8 @@ pub struct Nvim {
     /// the display.
     #[serde(skip)]
     pub runtime_dir: Option<PathBuf>,
-    pub startup_timeout_s: f64,
+    /// How long a dictation editor may take to start and answer.
+    pub startup_timeout_seconds: f64,
     /// Send a desktop notification when dictated text has to go to the
     /// dictation file because no editor is open.
     pub notify: bool,
@@ -466,7 +475,7 @@ impl Default for Nvim {
             display: None,
             sway_socket: None,
             runtime_dir: None,
-            startup_timeout_s: 20.,
+            startup_timeout_seconds: 20.,
             notify: true,
             copy_to_clipboard: false,
         }
@@ -476,15 +485,22 @@ impl Default for Nvim {
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Preview {
-    pub interval_ms: u64,
+    /// The shortest time between two ticks.
+    pub interval_seconds: f64,
     pub max_seconds: f64,
 }
 impl Default for Preview {
     fn default() -> Self {
         Self {
-            interval_ms: 1100,
+            interval_seconds: 1.1,
             max_seconds: 30.,
         }
+    }
+}
+impl Preview {
+    /// The shortest time between two ticks.
+    pub fn interval(&self) -> Duration {
+        Duration::from_secs_f64(self.interval_seconds)
     }
 }
 
@@ -640,48 +656,47 @@ impl Config {
             self.audio.sample_rate == REQUIRED_SAMPLE_RATE,
             "audio.sample_rate must be {REQUIRED_SAMPLE_RATE}: the Silero VAD window is 512 samples at 16kHz and the ASR models expect 16kHz input"
         );
+        seconds(
+            "audio.preroll_seconds",
+            self.audio.preroll_seconds,
+            0.0..=MAX_PREROLL_SECONDS,
+        )?;
+        seconds(
+            "audio.postroll_seconds",
+            self.audio.postroll_seconds,
+            0.0..=MAX_POSTROLL_SECONDS,
+        )?;
+        let quiet = self.capture.silence_timeout_seconds;
         ensure!(
-            self.audio.preroll_ms <= MAX_PREROLL_MS,
-            "audio.preroll_ms must be <= {MAX_PREROLL_MS}"
-        );
-        let quiet = self.capture.silence_timeout_s;
-        ensure!(
-            quiet == 0. || (quiet.is_finite() && (1.0..=3600.).contains(&quiet)),
-            "capture.silence_timeout_s must be 0 (off) or in [1,3600]: it is how long a latched capture may hear no speech before it ends itself"
-        );
-        ensure!(
-            self.audio.postroll_ms <= MAX_POSTROLL_MS,
-            "audio.postroll_ms must be <= {MAX_POSTROLL_MS}: the release waits this long before decoding"
+            quiet == 0. || (quiet.is_finite() && (1.0..=LONGEST_SECONDS).contains(&quiet)),
+            "capture.silence_timeout_seconds must be 0 (off) or in [1,{LONGEST_SECONDS}]: it is how long a latched capture may hear no speech before it ends itself"
         );
         ensure!(
             self.vad.threshold.is_finite() && self.vad.threshold > 0. && self.vad.threshold < 1.,
             "vad.threshold must be in (0,1)"
         );
-        for (name, v) in [
-            ("min_silence_seconds", self.vad.min_silence_seconds),
-            ("min_speech_seconds", self.vad.min_speech_seconds),
-            ("max_speech_seconds", self.vad.max_speech_seconds),
+        for (name, value) in [
+            ("vad.min_silence_seconds", self.vad.min_silence_seconds),
+            ("vad.min_speech_seconds", self.vad.min_speech_seconds),
+            ("vad.max_speech_seconds", self.vad.max_speech_seconds),
+            ("vad.chunk_seconds", self.vad.chunk_seconds),
+            ("preview.max_seconds", self.preview.max_seconds),
+            (
+                "nvim.startup_timeout_seconds",
+                self.nvim.startup_timeout_seconds,
+            ),
         ] {
-            ensure!(
-                v.is_finite() && v > 0. && v <= 3600.,
-                "vad.{name} must be in (0,3600]"
-            );
+            positive_seconds(name, value)?;
         }
-        ensure!(
-            self.vad.chunk_seconds.is_finite()
-                && self.vad.chunk_seconds > 0.
-                && self.vad.chunk_seconds <= 3600.,
-            "vad.chunk_seconds must be in (0,3600]"
-        );
         ensure!(
             self.vad.max_speech_seconds > self.vad.min_speech_seconds,
             "vad.max_speech_seconds must exceed min_speech_seconds"
         );
-        for v in [self.vad.pad_seconds, self.vad.edge_pad_seconds] {
-            ensure!(
-                v.is_finite() && (0.0..=3600.).contains(&v),
-                "invalid VAD padding"
-            );
+        for (name, value) in [
+            ("vad.pad_seconds", self.vad.pad_seconds),
+            ("vad.edge_pad_seconds", self.vad.edge_pad_seconds),
+        ] {
+            seconds(name, value, 0.0..=LONGEST_SECONDS)?;
         }
         ensure!(
             self.recording.max_total_bytes > 0,
@@ -695,12 +710,6 @@ impl Config {
                 .first()
                 .is_some_and(|program| !program.is_empty() && !program.starts_with('-')),
             "nvim.editor must name an executable"
-        );
-        ensure!(
-            self.nvim.startup_timeout_s.is_finite()
-                && self.nvim.startup_timeout_s > 0.
-                && self.nvim.startup_timeout_s <= 3600.,
-            "invalid nvim.startup_timeout_s"
         );
         let items: Vec<_> = chrono::format::StrftimeItems::new(&self.nvim.file_template).collect();
         ensure!(
@@ -717,10 +726,11 @@ impl Config {
                 && rendered != "..",
             "nvim.file_template must be a single filename"
         );
-        ensure!(
-            self.preview.interval_ms >= 200 && self.preview.interval_ms <= 3_600_000,
-            "preview.interval_ms must be in [200,3600000]"
-        );
+        seconds(
+            "preview.interval_seconds",
+            self.preview.interval_seconds,
+            0.2..=LONGEST_SECONDS,
+        )?;
         // The silence timeout measures the time since a tick last reported
         // speech: the earliest a capture can report any is one tick after the
         // press. A timeout shorter than two ticks would end a capture the
@@ -728,20 +738,13 @@ impl Config {
         // two keys are validated against each other rather than only against
         // their own ranges.
         if let Some(timeout) = self.capture.silence_timeout() {
-            let tick = Duration::from_millis(self.preview.interval_ms);
             ensure!(
-                timeout >= tick * 2,
-                "capture.silence_timeout_s ({:.3}s) must be at least twice preview.interval_ms ({}ms): the first text a capture can produce arrives one tick after the key press, so a shorter timeout would end a capture before anything had the chance to report speech",
-                timeout.as_secs_f64(),
-                self.preview.interval_ms
+                timeout >= self.preview.interval() * 2,
+                "capture.silence_timeout_seconds ({}) must be at least twice preview.interval_seconds ({}): the first speech a capture can report arrives one tick after the key press, so a shorter timeout would end a capture before anything had the chance to report speech",
+                self.capture.silence_timeout_seconds,
+                self.preview.interval_seconds
             );
         }
-        ensure!(
-            self.preview.max_seconds.is_finite()
-                && self.preview.max_seconds > 0.
-                && self.preview.max_seconds <= 3600.,
-            "preview.max_seconds must be in (0,3600]"
-        );
         if let Some(name) = &self.nvim.colorscheme {
             ensure!(
                 !name.is_empty()
@@ -776,17 +779,98 @@ impl Config {
     }
 }
 
+/// `key`'s `value` is a number of seconds within `range`.
+fn seconds(key: &str, value: f64, range: std::ops::RangeInclusive<f64>) -> Result<()> {
+    ensure!(
+        value.is_finite() && range.contains(&value),
+        "{key} must be a number of seconds in [{},{}]",
+        range.start(),
+        range.end()
+    );
+    Ok(())
+}
+
+/// `key`'s `value` is a number of seconds above zero and at most
+/// [`LONGEST_SECONDS`].
+fn positive_seconds(key: &str, value: f64) -> Result<()> {
+    ensure!(
+        value.is_finite() && value > 0. && value <= LONGEST_SECONDS,
+        "{key} must be a number of seconds in (0,{LONGEST_SECONDS}]"
+    );
+    Ok(())
+}
+
 /// What became of a key spokenpad no longer reads.
 enum Gone {
     /// Removed; the text follows "was removed" and says why and what to do
     /// instead.
     Removed(&'static str),
+    /// Renamed to the key `to` in the same section, which is in seconds;
+    /// the old one was in `unit`.
+    Renamed { to: &'static str, unit: Unit },
+}
+
+/// The unit a renamed key was in.
+#[derive(Clone, Copy)]
+enum Unit {
+    Milliseconds,
+    Seconds,
+}
+
+impl Unit {
+    /// `value`, as the new key in seconds takes it.
+    fn in_seconds(self, value: f64) -> f64 {
+        match self {
+            Self::Milliseconds => value / 1000.,
+            Self::Seconds => value,
+        }
+    }
 }
 
 /// Every key spokenpad no longer reads, by section. A configuration that
 /// still sets one is refused with what became of it, rather than with
 /// serde's bare "unknown field".
 const GONE: &[(&str, &str, Gone)] = &[
+    (
+        "audio",
+        "preroll_ms",
+        Gone::Renamed {
+            to: "preroll_seconds",
+            unit: Unit::Milliseconds,
+        },
+    ),
+    (
+        "audio",
+        "postroll_ms",
+        Gone::Renamed {
+            to: "postroll_seconds",
+            unit: Unit::Milliseconds,
+        },
+    ),
+    (
+        "capture",
+        "silence_timeout_s",
+        Gone::Renamed {
+            to: "silence_timeout_seconds",
+            unit: Unit::Seconds,
+        },
+    ),
+    (
+        "preview",
+        "interval_ms",
+        Gone::Renamed {
+            to: "interval_seconds",
+            unit: Unit::Milliseconds,
+        },
+    ),
+    (
+        "nvim",
+        "startup_timeout_s",
+        Gone::Renamed {
+            to: "startup_timeout_seconds",
+            unit: Unit::Seconds,
+        },
+    ),
     (
         "asr",
         "family",
@@ -845,9 +929,21 @@ fn removed(table: &toml::Table) -> Option<String> {
         );
     }
     GONE.iter().find_map(|(name, key, gone)| {
-        section(name)?.get(*key)?;
+        let old = section(name)?.get(*key)?;
         Some(match gone {
             Gone::Removed(instead) => format!("{name}.{key} was removed{instead}"),
+            Gone::Renamed { to, unit } => {
+                let value = old
+                    .as_float()
+                    .or_else(|| old.as_integer().map(|whole| whole as f64));
+                let instead = match value {
+                    Some(value) => format!("write `{to} = {}`", unit.in_seconds(value)),
+                    None => format!("write `{to}` in seconds"),
+                };
+                format!(
+                    "{name}.{key} was renamed {name}.{to}, in seconds like every duration: {instead} under [{name}]"
+                )
+            }
         })
     })
 }
@@ -950,14 +1046,14 @@ mod tests {
         };
         assert_eq!(timeout(""), Some(Duration::from_secs(300)));
         assert_eq!(
-            timeout("[capture]\nsilence_timeout_s=3600"),
+            timeout("[capture]\nsilence_timeout_seconds=3600"),
             Some(Duration::from_secs(3600))
         );
-        assert_eq!(timeout("[capture]\nsilence_timeout_s=0"), None);
+        assert_eq!(timeout("[capture]\nsilence_timeout_seconds=0"), None);
         // Exactly two ticks is allowed; the rejected side is in
         // `reject_invalid_boundaries`.
         assert_eq!(
-            timeout("[capture]\nsilence_timeout_s=1\n[preview]\ninterval_ms=500"),
+            timeout("[capture]\nsilence_timeout_seconds=1\n[preview]\ninterval_seconds=0.5"),
             Some(Duration::from_secs(1))
         );
     }
@@ -965,17 +1061,17 @@ mod tests {
     fn reject_invalid_boundaries() {
         for bad in [
             "[wat]",
-            "[audio]\nprerol_ms=2",
+            "[audio]\nprerol_seconds=0.1",
             "[audio]\nsample_rate=0",
             "[audio]\nsample_rate=44100",
             "[vad]\nchunk_seconds=0",
             "[preview]\nmax_seconds=3601",
             "[nvim]\ncolorscheme='ha ha; !'",
             "[nvim]\ncolorscheme=''",
-            "[audio]\npreroll_ms=-1",
-            "[audio]\npostroll_ms=-1",
-            "[audio]\npostroll_ms=1001",
-            "[preview]\ninterval_ms=199",
+            "[audio]\npreroll_seconds=-1",
+            "[audio]\npostroll_seconds=-1",
+            "[audio]\npostroll_seconds=1.001",
+            "[preview]\ninterval_seconds=0.199",
             "[preview]\nmax_seconds=nan",
             "[vad]\nthreshold=nan",
             "[nvim]\npane_dimensions = { columns = 0, lines = 20 }",
@@ -988,16 +1084,16 @@ mod tests {
             "[nvim]\nmode='spawn'",
             "[nvim]\nmode=true",
             "[recording]\nmax_total_bytes=0",
-            "[capture]\nsilence_timeout_s=0.5",
+            "[capture]\nsilence_timeout_seconds=0.5",
             // Shorter than two preview ticks: it would end a capture the
             // user is talking into, before any tick could say so.
-            "[capture]\nsilence_timeout_s=300\n[preview]\ninterval_ms=600000",
-            "[capture]\nsilence_timeout_s=2\n[preview]\ninterval_ms=5000",
-            "[capture]\nsilence_timeout_s=1\n[preview]\ninterval_ms=501",
-            "[capture]\nsilence_timeout_s=3601",
-            "[capture]\nsilence_timeout_s=-1",
-            "[capture]\nsilence_timeout_s=nan",
-            "[capture]\nsilence_timeou_s=300",
+            "[capture]\nsilence_timeout_seconds=300\n[preview]\ninterval_seconds=600",
+            "[capture]\nsilence_timeout_seconds=2\n[preview]\ninterval_seconds=5",
+            "[capture]\nsilence_timeout_seconds=1\n[preview]\ninterval_seconds=0.501",
+            "[capture]\nsilence_timeout_seconds=3601",
+            "[capture]\nsilence_timeout_seconds=-1",
+            "[capture]\nsilence_timeout_seconds=nan",
+            "[capture]\nsilence_timeou_seconds=300",
             "[asr]\ndecoding='typo'",
             "[asr]\ndecoding='greedy_search'\nvocabulary=['rust']",
             "[asr]\ndecoding='greedy_search'\nhotwords_score=3.0",
@@ -1040,7 +1136,7 @@ mod tests {
             .to_string();
         assert!(error.contains("Silero") && error.contains("ASR"), "{error}");
         assert_eq!(
-            Config::parse("[audio]\npreroll_ms=0", None)
+            Config::parse("[audio]\npreroll_seconds=0", None)
                 .unwrap()
                 .audio
                 .preroll_frames(),
@@ -1082,6 +1178,24 @@ mod tests {
             ("[asr]\nlanguage='de'", "asr.language was removed"),
             ("[vad]\nenabled=false", "vad.enabled was removed"),
             ("[preview]\nenabled=true", "preview.enabled was removed"),
+            (
+                "[audio]\npreroll_ms=250",
+                "audio.preroll_ms was renamed audio.preroll_seconds, in seconds like every duration: write `preroll_seconds = 0.25` under [audio]",
+            ),
+            ("[audio]\npostroll_ms=1000", "`postroll_seconds = 1`"),
+            (
+                "[capture]\nsilence_timeout_s=120",
+                "`silence_timeout_seconds = 120`",
+            ),
+            ("[preview]\ninterval_ms=1100", "`interval_seconds = 1.1`"),
+            (
+                "[nvim]\nstartup_timeout_s=20.5",
+                "`startup_timeout_seconds = 20.5`",
+            ),
+            (
+                "[nvim]\nstartup_timeout_s='x'",
+                "write `startup_timeout_seconds` in seconds",
+            ),
         ] {
             let error = format!("{:#}", Config::parse(toml, None).unwrap_err());
             assert!(error.contains(says), "{toml}: {error}");

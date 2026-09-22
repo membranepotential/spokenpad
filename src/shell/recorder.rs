@@ -5,7 +5,7 @@
 //! abandoned after a bounded wait without affecting live capture or ASR.
 
 use crate::{
-    config::{MAX_POSTROLL_MS, MAX_PREROLL_MS, Recording},
+    config::{MAX_POSTROLL_SECONDS, MAX_PREROLL_SECONDS, Recording},
     core::{frames::Frames, session::RecordingStatus, state::MAX_CAPTURE},
 };
 use anyhow::{Context, Result, bail, ensure};
@@ -42,7 +42,7 @@ const QUEUE_SECONDS: usize = 60;
 /// What a WAV may hold beyond the capture the state machine ended: the widest
 /// pre-roll `config` allows before it, the widest post-roll after it, and one
 /// second of slack at each end for the device buffer in flight there.
-const RECOVERY_MARGIN_SECONDS: f64 = (MAX_PREROLL_MS + MAX_POSTROLL_MS) as f64 / 1000.0 + 2.0;
+const RECOVERY_MARGIN_SECONDS: f64 = MAX_PREROLL_SECONDS + MAX_POSTROLL_SECONDS + 2.0;
 /// Recovery refuses implausibly long WAVs rather than allocating for them.
 /// A WAV this daemon wrote holds one capture, which
 /// [`MAX_CAPTURE`](crate::core::state::MAX_CAPTURE) ends, plus that margin —
@@ -921,9 +921,7 @@ mod tests {
     /// is derived from the right ones and that the slack is real.
     #[test]
     fn the_recovery_limit_covers_a_whole_capture() {
-        let longest = MAX_CAPTURE.as_secs_f64()
-            + f64::from(MAX_PREROLL_MS) / 1000.
-            + f64::from(MAX_POSTROLL_MS) / 1000.;
+        let longest = MAX_CAPTURE.as_secs_f64() + MAX_PREROLL_SECONDS + MAX_POSTROLL_SECONDS;
         assert!(
             MAX_RECOVERY_SECONDS >= longest + 1.0,
             "recovery refuses {longest:.0}s, which a capture may reach, at {MAX_RECOVERY_SECONDS:.0}s"

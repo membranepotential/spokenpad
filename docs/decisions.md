@@ -2465,3 +2465,22 @@ A configuration that still sets one of these keys is refused with what
 became of it (`config::GONE`), never with serde's bare "unknown field".
 `examples/eval.rs --whole` and `examples/corpus.rs --path whole` keep their
 whole-capture decode by calling the recognizer directly.
+
+## Every duration is in seconds, and its key says so (2026-09-22)
+
+The configuration spelled a duration three ways: `_ms` (`audio.preroll_ms`,
+`audio.postroll_ms`, `preview.interval_ms`), `_s`
+(`capture.silence_timeout_s`, `nvim.startup_timeout_s`) and `_seconds`
+(`vad.*_seconds`, `preview.max_seconds`), with no rule for which (audit
+P2-018). The user decided on seconds, suffixed `_seconds`, everywhere:
+`audio.preroll_seconds = 0.25`, `audio.postroll_seconds = 0.25`,
+`capture.silence_timeout_seconds = 300`, `preview.interval_seconds = 1.1`,
+`nvim.startup_timeout_seconds = 20`.
+
+- Chosen: an old key is refused, never read on: the message names the new
+  key and gives the value converted, such as "write `preroll_seconds = 0.25`
+  under [audio]" (`Gone::Renamed` in `config::GONE`). Reading both would
+  leave two spellings of one setting for good.
+- Chosen: the bound every other duration shares is named
+  (`LONGEST_SECONDS`, an hour; audit P3-005), and one helper validates a
+  duration and names its key in the message.

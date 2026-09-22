@@ -122,7 +122,7 @@ raises a hit-enter prompt that holds every later call until you press Enter —
 in the window, which has to be showing for you to see it. So the pane's own
 setup in Neovim ([the quit notice](#what-happens-when)) is sent without
 waiting and runs once the prompt is answered; the daemon's calls over the
-`--listen` socket wait for it within `nvim.startup_timeout_s`, as for any
+`--listen` socket wait for it within `nvim.startup_timeout_seconds`, as for any
 editor it starts. The editor is otherwise the same one
 every mode gets — same argv, same init, same ownership marker, same
 `--listen` socket — so the daemon appends to it exactly as it does to an
@@ -840,7 +840,7 @@ the user is still speaking.
 
 The editor's own start is the larger part, and a configuration can make it
 much larger: a first-ever open took 13.5 s while a plugin manager did
-one-time work, so `nvim.startup_timeout_s` stays a generous 20 s. Readiness
+one-time work, so `nvim.startup_timeout_seconds` stays a generous 20 s. Readiness
 is a raw msgpack-RPC round trip on the socket, under one absolute deadline,
 so an editor that is still starting cannot block the editor thread with no
 way out, and a pane whose editor exited is noticed at once rather than

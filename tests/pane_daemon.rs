@@ -635,7 +635,7 @@ impl Daemon {
     fn with_chunks(display: &str) -> Self {
         Self::with(Some(display.to_owned()), Chunks(16_000), |config| {
             config.recording.enabled = true;
-            config.preview.interval_ms = 200;
+            config.preview.interval_seconds = 0.2;
             config.nvim.editor = [
                 "nvim",
                 "--cmd",
@@ -659,7 +659,7 @@ impl Daemon {
         config.nvim.copy_to_clipboard = true;
         config.nvim.socket_path = root.join("nvim.sock");
         config.nvim.dictation_dir = root.join("dictation");
-        config.nvim.startup_timeout_s = STARTUP_TIMEOUT.as_secs_f64();
+        config.nvim.startup_timeout_seconds = STARTUP_TIMEOUT.as_secs_f64();
         // The bundled configuration, read from the repository rather than
         // materialised into the user's state directory.
         config.nvim.init = Some(PathBuf::from(concat!(

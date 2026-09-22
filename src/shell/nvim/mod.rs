@@ -869,7 +869,7 @@ impl NvimSession {
         bail!(
             "nvim did not answer on {} within {:.1}s{}",
             self.config.socket_path.display(),
-            self.config.startup_timeout_s,
+            self.config.startup_timeout_seconds,
             last_error
                 .map(|error| format!(": {error}"))
                 .unwrap_or_default()
@@ -908,7 +908,8 @@ impl NvimSession {
         // One deadline for the whole thing: the window, and the editor
         // answering inside it. Two would let a slow window spend the
         // editor's budget as well as its own.
-        let deadline = Instant::now() + Duration::from_secs_f64(self.config.startup_timeout_s);
+        let deadline =
+            Instant::now() + Duration::from_secs_f64(self.config.startup_timeout_seconds);
         let (target, display, manager) = pane_target(&self.config)?;
         refuse_pane_focus_on_sway(&self.config, &manager)?;
         let layout = x11::layout_under(self.config.pane_layout, &manager);

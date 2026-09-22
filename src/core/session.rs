@@ -34,7 +34,7 @@ pub enum Notice {
     NearlySilent,
     PreviewPaused,
     MemoryCap(RecordingStatus),
-    /// A latched capture heard no speech for `capture.silence_timeout_s` and
+    /// A latched capture heard no speech for `capture.silence_timeout_seconds` and
     /// ended itself.
     SilenceTimeout,
     /// A capture ran for [`MAX_CAPTURE`] and ended itself.
@@ -286,7 +286,7 @@ impl Notice {
                     .into()
             }
             Self::SilenceTimeout => {
-                "no speech for capture.silence_timeout_s; press the key to dictate again".into()
+                "no speech for capture.silence_timeout_seconds; press the key to dictate again".into()
             }
             Self::LengthLimit => format!(
                 "a capture ends after {} hours; press the key to dictate again",

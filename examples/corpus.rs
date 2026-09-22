@@ -11,7 +11,7 @@
 //! Two paths, because they fail differently:
 //!
 //! * `live` drives [`Worker`] as `shell/daemon.rs` does -- a tick every
-//!   `preview.interval_ms` of audio over the audio since the committed offset,
+//!   `preview.interval_seconds` of audio over the audio since the committed offset,
 //!   bounded by `preview.max_seconds`, every settled chunk committed once, then
 //!   the release decoding only what is still held.
 //! * `whole` decodes each capture in one pass with no detector, like
@@ -90,7 +90,7 @@ struct Args {
     /// Zeros appended before each decode, overriding the recognizer's second
     #[arg(long, value_name = "MS")]
     trailing_silence_ms: Option<u64>,
-    /// Audio between preview ticks on the live path [default: preview.interval_ms]
+    /// Audio between preview ticks on the live path [default: preview.interval_seconds]
     #[arg(long, value_name = "MS")]
     tick_ms: Option<u64>,
     /// Captures decoded at once; each job loads its own copy of the model
@@ -997,8 +997,10 @@ fn main() -> Result<()> {
     );
 
     let rate = config.audio.sample_rate;
-    let tick =
-        ((args.tick_ms.unwrap_or(config.preview.interval_ms)) * u64::from(rate) / 1000) as usize;
+    let tick = args.tick_ms.map_or(
+        (config.preview.interval_seconds * f64::from(rate)) as usize,
+        |ms| (ms * u64::from(rate) / 1000) as usize,
+    );
     ensure!(tick > 0, "--tick-ms must be at least 1");
     let plan = |path| Plan {
         path,

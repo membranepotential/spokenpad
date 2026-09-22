@@ -506,7 +506,7 @@ impl<B: InputBackend> AudioCapture<B> {
     /// Ends a capture that is going to be decoded, after its post-roll: the
     /// speech still sounding when the key came up at `released`. Audio
     /// captured since then counts towards it, so this blocks for at most what
-    /// is left of `postroll_ms` plus [`FINAL_CALLBACK_WAIT`], and returns as
+    /// is left of `postroll_seconds` plus [`FINAL_CALLBACK_WAIT`], and returns as
     /// soon as `interrupted` is true, which it is asked between polls of the
     /// device. The state lock is never held while waiting.
     pub fn finish_capture(
@@ -1194,8 +1194,8 @@ mod tests {
             backend.clone(),
             Audio {
                 sample_rate: 1_000,
-                preroll_ms,
-                postroll_ms: TEST_POSTROLL_MS,
+                preroll_seconds: f64::from(preroll_ms) / 1000.,
+                postroll_seconds: f64::from(TEST_POSTROLL_MS) / 1000.,
                 device: None,
             },
             Recording {
@@ -1220,8 +1220,8 @@ mod tests {
             backend.clone(),
             Audio {
                 sample_rate: 1_000,
-                preroll_ms: 100,
-                postroll_ms: TEST_POSTROLL_MS,
+                preroll_seconds: 0.1,
+                postroll_seconds: f64::from(TEST_POSTROLL_MS) / 1000.,
                 device: None,
             },
             Recording {
@@ -1267,7 +1267,7 @@ mod tests {
         );
 
         // A second press immediately afterwards must not see the first
-        // capture's audio, even though less than preroll_ms has passed.
+        // capture's audio, even though less than preroll_seconds has passed.
         capture.start_capture().unwrap();
         backend.feed(&[10.0]);
         assert_eq!(capture.stop_capture().samples, [10.0]);
@@ -1422,8 +1422,8 @@ mod tests {
             backend.clone(),
             Audio {
                 sample_rate: 1_000,
-                preroll_ms: 0,
-                postroll_ms: TEST_POSTROLL_MS,
+                preroll_seconds: 0.,
+                postroll_seconds: f64::from(TEST_POSTROLL_MS) / 1000.,
                 device: None,
             },
             Recording {
@@ -1713,7 +1713,7 @@ mod tests {
         assert_eq!(samples[..3], [0.5; 3], "audio before the release is kept");
         assert!(
             samples.len() >= 3 + 250,
-            "the post-roll holds at least postroll_ms of audio: {} frames",
+            "the post-roll holds at least postroll_seconds of audio: {} frames",
             samples.len()
         );
     }

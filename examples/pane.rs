@@ -105,7 +105,7 @@ fn main() -> Result<()> {
         family: FontFamily::try_from(args.family.clone())?,
         size: Points::try_from(args.size)?,
         dimensions: Dimensions::new(args.columns, args.rows).expect("a grid of at least one cell"),
-        attach_timeout: Duration::from_secs_f64(config.startup_timeout_s),
+        attach_timeout: Duration::from_secs_f64(config.startup_timeout_seconds),
         target: None,
         layout: match args.tiled {
             true => PaneLayout::Tiled,

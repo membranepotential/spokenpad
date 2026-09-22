@@ -301,9 +301,9 @@ struct Settings {
     /// as a user in attach mode does. Without one, text goes to the pending
     /// passage until the test opens one ([`Harness::open_editor`]).
     editor: bool,
-    preroll_ms: u32,
-    postroll_ms: u32,
-    interval_ms: u64,
+    preroll_seconds: f64,
+    postroll_seconds: f64,
+    interval_seconds: f64,
     /// Fixed-length chunks; neither this nor `vad` is one window over the
     /// whole capture, which never settles.
     chunk: Option<usize>,
@@ -316,9 +316,9 @@ struct Settings {
     /// Mirrors `nvim.copy_to_clipboard`, off by default like the setting
     /// itself; the clipboard tests opt in explicitly.
     copy_to_clipboard: bool,
-    /// Mirrors `capture.silence_timeout_s`. Off unless a test asks, so no
+    /// Mirrors `capture.silence_timeout_seconds`. Off unless a test asks, so no
     /// other test can end on the clock while it is thinking.
-    silence_timeout_s: f64,
+    silence_timeout_seconds: f64,
     /// Build the pipeline on the inference thread, as the daemon does, each
     /// attempt ending when the test calls [`Harness::load`].
     loading: bool,
@@ -335,16 +335,16 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             editor: true,
-            preroll_ms: 250,
-            postroll_ms: 250,
-            interval_ms: 200,
+            preroll_seconds: 0.25,
+            postroll_seconds: 0.25,
+            interval_seconds: 0.2,
             chunk: None,
             vad: None,
             words: true,
             delay: Duration::ZERO,
             socket: false,
             copy_to_clipboard: false,
-            silence_timeout_s: 0.,
+            silence_timeout_seconds: 0.,
             loading: false,
             max_seconds: 30.,
             config_file: None,
@@ -371,8 +371,8 @@ impl Harness {
     fn start_in(directory: TempDir, settings: Settings) -> Self {
         let root = directory.path();
         let mut config = Config::default();
-        config.audio.preroll_ms = settings.preroll_ms;
-        config.audio.postroll_ms = settings.postroll_ms;
+        config.audio.preroll_seconds = settings.preroll_seconds;
+        config.audio.postroll_seconds = settings.postroll_seconds;
         config.recording.dir = root.join("audio");
         config.nvim.mode = Mode::Attach;
         config.nvim.notify = false;
@@ -390,9 +390,9 @@ impl Harness {
         .into();
         config.nvim.socket_path = root.join("nvim.sock");
         config.nvim.dictation_dir = root.join("dictation");
-        config.nvim.startup_timeout_s = 10.0;
-        config.preview.interval_ms = settings.interval_ms;
-        config.capture.silence_timeout_s = settings.silence_timeout_s;
+        config.nvim.startup_timeout_seconds = 10.0;
+        config.preview.interval_seconds = settings.interval_seconds;
+        config.capture.silence_timeout_seconds = settings.silence_timeout_seconds;
         config.preview.max_seconds = settings.max_seconds;
         config.validate().expect("harness config is valid");
 
@@ -997,7 +997,7 @@ fn shutdown_delivers_text_the_engine_produced_on_the_way_out() {
     let mut h = Harness::start(Settings {
         delay: Duration::from_millis(600),
         // No preview decode: the first call is the release's.
-        interval_ms: 3_600_000,
+        interval_seconds: 3600.,
         ..Settings::default()
     });
     h.press(false);
@@ -1295,7 +1295,7 @@ fn a_quick_re_press_does_not_wait_for_the_postroll() {
         return;
     }
     let h = Harness::start(Settings {
-        postroll_ms: 1_000,
+        postroll_seconds: 1.,
         ..Settings::default()
     });
     h.press(false);
@@ -1673,7 +1673,7 @@ fn a_capture_that_runs_through_a_long_pause_is_still_committed_whole() {
     let h = Harness::start(Settings {
         vad: Some(brisk_vad()),
         words: false,
-        interval_ms: 200,
+        interval_seconds: 0.2,
         ..Settings::default()
     });
     h.press(true);
@@ -1724,9 +1724,9 @@ fn slow_dictation_that_never_settles_a_chunk_still_commits_and_keeps_recording()
             ..Vad::default()
         }),
         words: false,
-        interval_ms: 200,
+        interval_seconds: 0.2,
         max_seconds: 2.0,
-        silence_timeout_s: 1.0,
+        silence_timeout_seconds: 1.0,
         ..Settings::default()
     });
     h.press(true);
@@ -2148,10 +2148,10 @@ fn a_forgotten_latch_stops_itself_and_the_next_press_starts_fresh() {
     let h = Harness::start(Settings {
         vad: Some(brisk_vad()),
         words: false,
-        interval_ms: 200,
+        interval_seconds: 0.2,
         // The shortest the configuration allows, so the suite waits seconds
         // rather than the five minutes a user gets.
-        silence_timeout_s: 1.0,
+        silence_timeout_seconds: 1.0,
         ..Settings::default()
     });
     h.press(true);
@@ -2261,8 +2261,8 @@ fn replay_into_capture(minutes: usize, dropping: bool) -> usize {
         backend.clone(),
         Audio {
             sample_rate: RATE,
-            preroll_ms: 0,
-            postroll_ms: 0,
+            preroll_seconds: 0.,
+            postroll_seconds: 0.,
             device: None,
         },
         Recording {
@@ -2517,7 +2517,7 @@ fn real_models_transcribe_the_kennedy_sample() {
     .into();
     config.nvim.socket_path = root.join("nvim.sock");
     config.nvim.dictation_dir = root.join("dictation");
-    config.nvim.startup_timeout_s = 10.0;
+    config.nvim.startup_timeout_seconds = 10.0;
     config.validate().unwrap();
 
     let mut transcriber = Transcriber::new(&config.asr, RATE).expect("load the CPU recognizer");

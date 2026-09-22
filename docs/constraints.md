@@ -92,7 +92,7 @@ is therefore linear in the audio, and nothing is capped or discarded at any
 length.
 
 A capture does *end* by itself when nobody ends it — after
-`capture.silence_timeout_s` without speech, at `MAX_CAPTURE` (4 h), or at the
+`capture.silence_timeout_seconds` without speech, at `MAX_CAPTURE` (4 h), or at the
 in-memory ceiling
 ([progressive-commit.md](progressive-commit.md#when-a-capture-ends-by-itself)).
 That is not a cap on dictation: each of those endings decodes the tail and

@@ -25,7 +25,7 @@ sample_rate = 16000
 # This costs an always-open input stream -- the mic stays live the whole
 # time spokenpad runs. Set to 0 to disable pre-roll; the stream is then
 # opened lazily on keypress instead, at the cost of clipping quick starts.
-preroll_ms = 250
+preroll_seconds = 0.25
 
 # Audio still captured after the key comes up, because the last syllable is
 # often still sounding at that moment: without it the final word is clipped.
@@ -34,8 +34,8 @@ preroll_ms = 250
 # as the key's auto-repeat. A `start` after that ends the wait at once, so a
 # quick re-press never loses its first word to the previous capture. Discards
 # (a tap held too briefly, `spokenpad cancel`) take no post-roll. 0 to
-# disable; at most 1000.
-postroll_ms = 250
+# disable; at most 1.
+postroll_seconds = 0.25
 
 # PortAudio device-name query: case-insensitive, ordered words matched against
 # the device name and host API. Omit to use the default input device.
@@ -56,7 +56,7 @@ postroll_ms = 250
 # pauses. 0 turns it off; the limits below still apply. Must be 0, or between
 # 1 and 3600 -- a value of a few seconds ends a capture between sentences.
 #
-# It must also be at least twice preview.interval_ms, and the daemon refuses
+# It must also be at least twice preview.interval_seconds, and the daemon refuses
 # to start otherwise, naming both keys. Only a preview tick produces text, so
 # the earliest a capture can report speech is one tick after the key press: a
 # timeout shorter than two ticks would end a capture you are talking into,
@@ -73,7 +73,7 @@ postroll_ms = 250
 #
 # It is off for a capture made before the speech model is ready: nothing
 # decodes it while it runs, so there is no silence to measure.
-silence_timeout_s = 300
+silence_timeout_seconds = 300
 
 # Two limits have no setting at all, because they are not preferences:
 #
@@ -115,7 +115,7 @@ silence_timeout_s = 300
 # against 116 MiB before). That incident cannot repeat with a VAD model loaded.
 #
 # The ceiling is still there for the cases where nothing is committed while
-# you speak, and so nothing can be dropped: a preview.interval_ms long enough
+# you speak, and so nothing can be dropped: a preview.interval_seconds long enough
 # that few ticks fire. It is 3600 seconds of *held* audio
 # (MAX_UTTERANCE_SECONDS in audio.rs), a compile-time constant rather than a
 # setting: it is a bound on how much of this machine's RAM one capture may
@@ -445,7 +445,7 @@ file_template = "dictation-%Y-%m-%d-%H%M%S.md"
 # set, AND your own startup handlers finished. Generous on purpose -- a first-ever open took 13.5s while
 # a plugin manager did one-time work, and killing a healthy editor mid-startup
 # is the worse failure.
-startup_timeout_s = 20.0
+startup_timeout_seconds = 20.0
 
 # Send a desktop notification (notify-send) when dictation starts going to a
 # file because no editor is open -- once per such file, not per utterance --
@@ -462,7 +462,7 @@ copy_to_clipboard = false
 
 [preview]
 # The tick of progressive commit (docs/progressive-commit.md): every
-# interval_ms while the key is held, the audio since the committed offset is
+# interval_seconds while the key is held, the audio since the committed offset is
 # split at silence, each chunk that has settled is decoded ONCE and appended
 # to the dictation buffer, and the open tail -- the sentence being spoken now
 # -- is decoded for the live preview below it.
@@ -471,10 +471,10 @@ copy_to_clipboard = false
 # never written to the file. What reaches the buffer is each chunk decoded
 # exactly once, when it settles or at key release. The tick is always on.
 
-# Minimum time between ticks. Must be >= 200. The real gap is
+# Minimum time between ticks, in seconds; at least 0.2. The real gap is
 # max(interval - last_decode, last_decode), so the worker stays idle at least
 # half the time however long the passage gets.
-interval_ms = 1100
+interval_seconds = 1.1
 
 # Backstop on how much uncommitted audio a preview may decode. The tick only
 # ever decodes the open tail, at most one chunk, and this is reached only if a
