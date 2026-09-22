@@ -4,6 +4,7 @@ use spokenpad::{
     config::{self, Config},
     core::{control::Request, decode::Pipeline, models::files_to_ensure, text::Processor},
     shell::{
+        control::Socket,
         inference::{Transcriber, load_segmenter, model_config},
         models::{FetchEvent, all_present, fetch_models},
         pane,
@@ -121,6 +122,12 @@ fn run(args: Args) -> Result<u8> {
         Some(Command::Action(action)) => Some(action),
         None => None,
     };
+    let inherited = match command {
+        // SAFETY: nothing so far has started a thread: only the arguments
+        // have been parsed.
+        None => unsafe { Socket::from_systemd(&config::control_socket()) }?,
+        Some(_) => None,
+    };
     spokenpad::shell::logging::init(args.verbose, args.log_file.as_deref())?;
     let mut config = Config::load(args.config.as_deref())?;
     if let Some(p) = args.model_dir {
@@ -230,7 +237,7 @@ fn run(args: Args) -> Result<u8> {
             if let Some(p) = &args.dump_audio {
                 std::fs::create_dir_all(p)?;
             }
-            spokenpad::shell::daemon::run(config, args.dump_audio.as_deref())?;
+            spokenpad::shell::daemon::run(config, inherited, args.dump_audio.as_deref())?;
         }
     }
     Ok(0)

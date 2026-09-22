@@ -27,7 +27,7 @@ imperative shell, and `config.rs` sits at the root because both sides read it.
 | `core/decode.rs` | Committed sample offset, settled commits, release tails, preview isolation | worker messages |
 | `core/segments.rs` | VAD merge/pad/settlement: spans in, decode windows out | none |
 | `shell/inference.rs` | CPU-only models; the sherpa recognizer and the Silero detector | ONNX Runtime |
-| `shell/control.rs` | Listen on the control socket, stamp and forward each request; the client the CLI uses | Unix socket |
+| `shell/control.rs` | Bind the control socket, or take over the one systemd passed (socket activation); stamp and forward each request; the client the CLI uses | Unix socket |
 | `shell/audio.rs` | Pre-roll, immutable capture chunks, dropping committed audio, the memory ceiling, stream repair | PortAudio (behind `InputBackend`) |
 | `shell/recorder.rs` | Persist every capture independently of decode, and prune the directory | filesystem |
 | `core/grid.rs` | Neovim's `ext_linegrid` redraw events, typed, and the screen they fold into; which rows each one changed | none |

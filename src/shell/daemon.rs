@@ -20,7 +20,7 @@ use crate::{
     },
     shell::{
         audio::{AudioCapture, CaptureEvent, Captured, InputBackend, PostRoll},
-        control::ControlServer,
+        control::{ControlServer, Socket},
         inference::{Transcriber, load_segmenter},
         nvim::{AppendFailure, CopyOutcome, IndicatorState, NvimSession},
     },
@@ -413,7 +413,9 @@ fn daemon_lock() -> Result<File> {
 }
 
 /// The imperative shell: acquire the machine's resources, then serve.
-pub fn run(config: Config, dump_dir: Option<&Path>) -> Result<()> {
+/// `inherited` is the control socket systemd passed in, if it passed one;
+/// otherwise the daemon binds its own.
+pub fn run(config: Config, inherited: Option<Socket>, dump_dir: Option<&Path>) -> Result<()> {
     let _lock = daemon_lock()?;
     let stopping = Arc::new(AtomicBool::new(false));
     signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&stopping))?;
@@ -430,9 +432,13 @@ pub fn run(config: Config, dump_dir: Option<&Path>) -> Result<()> {
     // Bound last: a request is accepted only once it can be acted on, and
     // the CLI says "no daemon" rather than queueing presses behind a model
     // that is still loading.
-    let socket = crate::config::control_socket();
-    let _control = ControlServer::bind(&socket, requests_tx)?;
-    log::info!("model ready; listening on {}", socket.display());
+    let path = crate::config::control_socket();
+    let socket = match inherited {
+        Some(socket) => socket,
+        None => Socket::bind(&path)?,
+    };
+    let _control = ControlServer::start(socket, requests_tx)?;
+    log::info!("model ready; listening on {}", path.display());
     serve(
         &config,
         Devices {

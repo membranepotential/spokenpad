@@ -37,7 +37,7 @@ use spokenpad::{
     },
     shell::{
         audio::{AudioCapture, CallbackCore, InputBackend, InputStream, Teardown},
-        control::ControlServer,
+        control::{ControlServer, Socket},
         daemon::{Devices, serve},
         inference::{Transcriber, load_segmenter},
         recorder::read_capture,
@@ -387,8 +387,9 @@ impl Harness {
         let (requests, received) = mpsc::channel();
         // Where `spokenpad start` looks, given the harness's runtime dir.
         let control = settings.socket.then(|| {
-            ControlServer::bind(&root.join("spokenpad.sock"), requests.clone())
-                .expect("listen on the test control socket")
+            let socket = Socket::bind(&root.join("spokenpad.sock"))
+                .expect("listen on the test control socket");
+            ControlServer::start(socket, requests.clone()).expect("serve the test control socket")
         });
         let stopping = Arc::new(AtomicBool::new(false));
         let stop = Arc::clone(&stopping);
