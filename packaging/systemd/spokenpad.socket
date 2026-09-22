@@ -1,0 +1,21 @@
+# spokenpad control socket. The package installs this unit enabled (a link in
+# /usr/lib/systemd/user/sockets.target.wants/), so every user's systemd
+# listens from login on; the first `spokenpad start` then starts
+# spokenpad.service, and waits on this socket while it does.
+[Unit]
+Description=spokenpad control socket
+Documentation=https://github.com/membranepotential/spokenpad
+
+[Socket]
+# Where `spokenpad start|stop|toggle|cancel` connect, fixed so that a key
+# binding reads no file to find it. The daemon checks that the socket it is
+# handed is bound here, and refuses to start on any other.
+ListenStream=%t/spokenpad.sock
+# Whoever can connect can start the microphone.
+SocketMode=0600
+# The daemon never removes this socket (it is not the daemon's), so the file
+# goes when the unit stops.
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

@@ -101,13 +101,17 @@ those belongs in `src/shell/`.
   `shell::daemon::serve` in pane mode; `tests/pane_hidpi.rs` sets `Xft.dpi`
   and compares the pane's cells with a live Alacritty's (llvmpipe, private
   `HOME`).
-- `scripts/install.sh` (binary to `~/.local/bin`, user unit; `--uninstall`),
-  `scripts/gladia-references.sh` (a development tool that **uploads the
+- `scripts/gladia-references.sh` (a development tool that **uploads the
   recordings to Gladia** to build the frozen dataset in `eval-samples/local/`;
   never run by the program). `eval-samples/README.md` is tracked and describes
   both evaluation sets; the dataset carries its own git-ignored README. Models (`$XDG_DATA_HOME/spokenpad/models`, pinned
-  sha256) come from `spokenpad fetch-models` or the first launch. `packaging/`
-  holds the unit, and the i3/sway window rules with example key bindings.
+  sha256) come from `spokenpad fetch-models` or the first launch.
+- `packaging/aur/PKGBUILD` (the Arch package, built from a GitHub tag
+  tarball; `.SRCINFO` from `makepkg --printsrcinfo`), `packaging/systemd/`
+  (`spokenpad.socket`, enabled by the package; `spokenpad.service`, started
+  only by it; `dev.conf.example`, the drop-in that runs `~/.local/bin`),
+  `packaging/i3` and `packaging/sway` (window rules and example key
+  bindings).
 
 ## Commands
 
@@ -119,7 +123,8 @@ cargo clippy --locked --all-targets -- -D warnings && cargo fmt --check
 cargo run --release --example=eval             # WER on the five eval clips (--whole: no VAD)
 cargo run --release --example=corpus -- --config C.toml   # the whole local corpus, both paths: the release gate
 cargo run --release --example=corpus -- --config C.toml --path live --subset dev --jobs 2   # 28 captures, for iteration
-scripts/install.sh                             # deploy: the service runs ~/.local/bin/spokenpad
+cargo install --locked --path . --root ~/.local  # deploy, with the dev drop-in (packaging/systemd/dev.conf.example)
+systemctl --user restart spokenpad             # ...then restart; the socket unit stays up
 ```
 
 Nvim-dependent tests fail loudly when nvim is missing unless
@@ -143,8 +148,9 @@ the daemon lock.
   Commit each finished unit of work without being asked, once the checks
   above pass and the docs are updated: one focused commit per logical change,
   never a half-done state. Pushing still needs the user's word. Deploying a
-  verified build (`scripts/install.sh`, then `systemctl --user restart
-  spokenpad`) is always allowed; in managed mode it closes the user's
+  verified build (`cargo install --locked --path . --root ~/.local`, then
+  `systemctl --user restart spokenpad`, with the dev drop-in in place) is
+  always allowed; in managed mode it closes the user's
   dictation window, so say that you did it.
 - Experiments: every experiment (a benchmark, a corpus replay, a model or
   parameter comparison, a spike) gets its own file

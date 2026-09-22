@@ -14,3 +14,9 @@ eval-samples/local/
 
 # API keys for development tools (reference transcripts); never committed.
 .env
+
+# makepkg build residue (running makepkg inside packaging/aur/)
+packaging/aur/src/
+packaging/aur/pkg/
+packaging/aur/*.tar.*
+packaging/aur/*.pkg.tar.zst

@@ -1,0 +1,83 @@
+# Maintainer: membranepotential
+pkgname=spokenpad
+pkgver=0.2.0
+pkgrel=1
+_sherpa=1.13.8
+pkgdesc="Local push-to-talk dictation into a Neovim window that never takes focus"
+# The prebuilt sherpa-onnx static libraries linked into the binary exist for
+# x86-64 only in this package's source list.
+arch=('x86_64')
+url="https://github.com/membranepotential/spokenpad"
+license=('MIT')
+# The binary links none of the last four, so namcap calls them unneeded:
+# neovim is run as a program in every mode, and for nvim.mode = "pane"
+# libxcb and libxkbcommon-x11 are opened with dlopen and fontconfig is run
+# as `fc-match`.
+depends=('glibc' 'libgcc' 'libstdc++' 'portaudio' 'neovim' 'libxcb' 'libxkbcommon-x11' 'fontconfig')
+makedepends=('cargo')
+optdepends=(
+    'libnotify: a desktop notification when text is dictated with no editor open'
+    'i3-wm: nvim.mode = "managed", the floating dictation terminal'
+    'sway: nvim.mode = "managed", the floating dictation terminal'
+    'xdotool: nvim.mode = "managed" on i3, to open the window at the pointer'
+    'alacritty: the terminal for nvim.mode = "managed" (the default)'
+    'kitty: a terminal for nvim.mode = "managed"'
+    'foot: a terminal for nvim.mode = "managed"'
+    'wezterm: a terminal for nvim.mode = "managed"'
+    'ghostty: a terminal for nvim.mode = "managed"'
+    'xclip: nvim.copy_to_clipboard on X11'
+    'xsel: nvim.copy_to_clipboard on X11'
+    'wl-clipboard: nvim.copy_to_clipboard on Wayland'
+)
+# sherpa-onnx-sys would download its prebuilt libraries during the build;
+# given here, it copies them from $SHERPA_ONNX_ARCHIVE_DIR instead, so the
+# build needs no network and the archive is checked like any other source.
+source=("$pkgname-$pkgver.tar.gz::https://github.com/membranepotential/spokenpad/archive/refs/tags/v$pkgver.tar.gz"
+        "https://github.com/k2-fsa/sherpa-onnx/releases/download/v$_sherpa/sherpa-onnx-v$_sherpa-linux-x64-static-lib.tar.bz2")
+noextract=("sherpa-onnx-v$_sherpa-linux-x64-static-lib.tar.bz2")
+# The first sum is set with `updpkgsums` once v$pkgver is tagged.
+sha256sums=('SKIP'
+            'e1fdc5b67530e15741ef897fa5ffff297056f3bf0c6d829a27af9225a4c4b5a6')
+
+prepare() {
+    cd "$pkgname-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+    cd "$pkgname-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    # Absolute: sherpa-onnx-sys caches its libraries under
+    # $CARGO_TARGET_DIR/sherpa-onnx-prebuilt and takes the variable as given,
+    # so a relative one would resolve against each build script's directory.
+    export CARGO_TARGET_DIR="$srcdir/$pkgname-$pkgver/target"
+    export SHERPA_ONNX_ARCHIVE_DIR="$srcdir"
+    # ring (TLS for the model download, and for sherpa-onnx-sys's build
+    # script) compiles C through the `cc` crate with $CFLAGS. makepkg's
+    # -flto=auto makes those GCC LTO bitcode only, which rust-lld cannot
+    # link: every ring_core_* symbol comes out undefined.
+    # -ffat-lto-objects keeps machine code beside the bitcode. The same fix
+    # jumanji needs for oniguruma, and the official `bat` package for it too.
+    CFLAGS+=' -ffat-lto-objects'
+    cargo build --frozen --release
+}
+
+package() {
+    cd "$pkgname-$pkgver"
+
+    install -Dm0755 -t "$pkgdir/usr/bin/" "target/release/$pkgname"
+
+    # The daemon starts only through its socket, enabled for every user the
+    # way gnupg enables gpg-agent.socket: by a link in sockets.target.wants.
+    install -Dm0644 -t "$pkgdir/usr/lib/systemd/user/" \
+        packaging/systemd/spokenpad.socket packaging/systemd/spokenpad.service
+    install -dm0755 "$pkgdir/usr/lib/systemd/user/sockets.target.wants"
+    ln -s ../spokenpad.socket "$pkgdir/usr/lib/systemd/user/sockets.target.wants/spokenpad.socket"
+
+    install -Dm0644 packaging/i3/spokenpad.conf "$pkgdir/usr/share/$pkgname/i3/spokenpad.conf"
+    install -Dm0644 packaging/sway/spokenpad.conf "$pkgdir/usr/share/$pkgname/sway/spokenpad.conf"
+    install -Dm0644 -t "$pkgdir/usr/share/doc/$pkgname/" \
+        README.md config.example.toml packaging/systemd/dev.conf.example
+    install -Dm0644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

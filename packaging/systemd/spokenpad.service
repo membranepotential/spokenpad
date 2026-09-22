@@ -1,0 +1,42 @@
+# spokenpad daemon. Started only through spokenpad.socket, by the first press
+# of a session, so it has no [Install] section: there is nothing to enable.
+[Unit]
+Description=spokenpad push-to-talk dictation
+Documentation=https://github.com/membranepotential/spokenpad
+Requires=spokenpad.socket
+After=spokenpad.socket
+# Stops with the graphical session where the desktop has one (GNOME, KDE
+# Plasma): a daemon outliving the session it was started for would hold the
+# microphone open, and the display it draws on, for nothing. The socket stays,
+# and the next session's first press starts a fresh daemon.
+PartOf=graphical-session.target
+
+[Service]
+Type=exec
+# Models and settings come from the XDG directories
+# (~/.local/share/spokenpad/models, ~/.config/spokenpad/config.toml), so the
+# working directory does not matter. For development, point this at a build
+# of your own with the drop-in in packaging/systemd/dev.conf.example.
+ExecStart=/usr/bin/spokenpad
+
+# Not -v: DEBUG still goes to the rotating file at
+# $XDG_STATE_HOME/spokenpad/spokenpad.log regardless, and duplicating it into
+# the journal buys nothing but noise. `journalctl --user -u spokenpad` shows
+# the INFO line per dictation, which is what you want when watching it live.
+
+# A missing or broken speech model does not end the daemon: it records, says
+# so in the dictation window, and tries again at the next press. What still
+# ends it is a failure a retry can clear, such as "another spokenpad daemon
+# holds $XDG_STATE_HOME/spokenpad/daemon.lock" while a daemon started by hand
+# exits. A failure a retry cannot clear, such as an invalid config, stops at
+# systemd's start limit; `systemctl --user status spokenpad` then shows why.
+Restart=on-failure
+RestartSec=3
+
+# The daemon stops itself well inside this: it gives its background threads
+# three seconds, which is also the whole budget a dictation pane has to write
+# what is in its buffers and close its editor. The limit is here so a stop
+# that does go wrong ends in seconds rather than in systemd's default ninety,
+# and it must stay comfortably above those three seconds: a SIGKILL here
+# would be the thing that loses what the user typed into the pane.
+TimeoutStopSec=10

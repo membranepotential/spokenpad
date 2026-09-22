@@ -1,0 +1,13 @@
+# Development drop-in for spokenpad.service: run your own build instead of
+# the packaged /usr/bin/spokenpad. Install it with
+#   mkdir -p ~/.config/systemd/user/spokenpad.service.d
+#   cp packaging/systemd/dev.conf.example ~/.config/systemd/user/spokenpad.service.d/dev.conf
+#   systemctl --user daemon-reload
+# then deploy a build with
+#   cargo install --locked --path . --root ~/.local
+#   systemctl --user restart spokenpad
+# Remove the file (and daemon-reload) to go back to the package.
+[Service]
+# The empty line clears the packaged ExecStart; a service has only one.
+ExecStart=
+ExecStart=%h/.local/bin/spokenpad

@@ -4,7 +4,8 @@ spokenpad is one Rust binary: the daemon and the `editor`, `transcribe`,
 `check` and `fetch-models` commands. There is no other implementation — the
 Python reference used during the port is retired, see
 [decisions.md](decisions.md#the-python-reference-implementation-is-dropped).
-Setup is one POSIX shell script, `scripts/install.sh`; the binary downloads
+It ships as an Arch package (`packaging/aur/PKGBUILD`) whose systemd user
+socket starts the daemon on the first press; the binary downloads
 its own default models (`fetch-models` subcommand, `core::models` and
 `shell::models`, see [decisions.md](decisions.md#model-download-moves-into-the-binary-2026-09-21)).
 Evaluation is `examples/eval.rs` (see [evaluation.md](evaluation.md)).
@@ -174,8 +175,14 @@ downloads the pinned 1.13.8 static libraries (or uses `SHERPA_ONNX_LIB_DIR`)
 and links sherpa-onnx and onnxruntime into the executable, so the binary needs
 only system libraries (libc, libstdc++, PortAudio) and runs from any
 directory; there is no runpath and nothing to keep beside it.
-`scripts/install.sh` builds it and copies it to `~/.local/bin/spokenpad`,
-which the systemd unit runs; the per-user lock above rejects a second daemon.
+The package installs it as `/usr/bin/spokenpad`, which `spokenpad.service`
+runs when `spokenpad.socket` is first connected to; for development,
+`cargo install --locked --path . --root ~/.local` and the drop-in
+`packaging/systemd/dev.conf.example` run a build of one's own instead. The
+per-user lock above rejects a second daemon. The package build sets
+`SHERPA_ONNX_ARCHIVE_DIR`, so sherpa-onnx-sys copies its libraries from the
+checked source list instead of downloading them, and an absolute
+`CARGO_TARGET_DIR`, which that build script takes as given.
 
 In attach mode (the default) the daemon opens no window: the user starts the
 editor with `spokenpad editor`, which writes an ownership marker beside the

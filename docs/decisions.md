@@ -1177,3 +1177,45 @@ presses. This reverses "the socket is bound last" from
 - Rejected: a daemon that only answers "run `spokenpad fetch-models`" while
   its model is missing. The user chose to keep the automatic download and to
   record meanwhile.
+
+## An Arch package, started by socket activation (2026-09-22)
+
+spokenpad ships like jumanji: `packaging/aur/PKGBUILD` builds a GitHub tag
+tarball, and `scripts/install.sh` is gone. The user asked for no install
+script and as few setup steps as possible.
+
+- **The daemon starts only through its socket.** The package installs
+  `spokenpad.socket` (`ListenStream=%t/spokenpad.sock`, mode 0600) and
+  enables it for every user with a link in
+  `/usr/lib/systemd/user/sockets.target.wants/`, as gnupg does for
+  `gpg-agent.socket`. `spokenpad.service` has no `[Install]` section: the
+  first press starts it, and it answers that press at once (see
+  [Presses are taken before the model is ready](#presses-are-taken-before-the-model-is-ready-2026-09-22)).
+  Nothing is enabled by hand, and no window manager line starts the service.
+  The daemon checks that the socket it is handed is bound to the path the
+  key bindings use, never probes or removes it, and still takes its own
+  per-user lock.
+- **Models are not packaged.** `spokenpad fetch-models` is the one explicit
+  step, and optional: the daemon downloads the default models itself.
+- **Restart policy.** `RestartPreventExitStatus=2` is dropped with exit 2: a
+  missing model no longer ends the daemon. `Restart=on-failure` stays for
+  failures a retry can clear; one that cannot, such as an invalid config,
+  stops at systemd's start limit. `TimeoutStopSec=10` stays above the
+  three-second shutdown budget of a pane.
+- **Development** runs a build of one's own through the drop-in
+  `packaging/systemd/dev.conf.example` (`ExecStart=%h/.local/bin/spokenpad`)
+  after `cargo install --locked --path . --root ~/.local`.
+- **The build needs no network beyond its sources.** The sherpa-onnx
+  archive is in `source=()` with its sha256 (the same digest GitHub lists
+  for the release asset), and `SHERPA_ONNX_ARCHIVE_DIR` makes
+  sherpa-onnx-sys copy it instead of downloading. Its build script takes
+  `CARGO_TARGET_DIR` literally, so the PKGBUILD sets it absolute. makepkg's
+  `-flto=auto` turns the C that `ring` compiles into GCC bitcode that
+  rust-lld cannot link, so `CFLAGS` gains `-ffat-lto-objects`, as jumanji's
+  and Arch's `bat` do.
+- **x86-64 only**, because the package's sherpa-onnx archive is.
+- **Session environment.** A socket-activated daemon runs under the user
+  manager and sees its environment only. Attach mode needs none; a window
+  that opens by itself needs `DISPLAY`, which GNOME, KDE Plasma and most
+  display managers import, and which a plain i3 or sway config imports with
+  `systemctl --user import-environment`.

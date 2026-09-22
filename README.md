@@ -44,45 +44,72 @@ applications.
 
 ## Install
 
-1. Build and install the binary and the systemd user unit:
+On Arch Linux, build and install the package in
+[`packaging/aur`](packaging/aur/PKGBUILD):
+
+```sh
+git clone https://github.com/membranepotential/spokenpad
+cd spokenpad/packaging/aur
+makepkg -si
+```
+
+It installs `/usr/bin/spokenpad` and two systemd user units, and enables
+`spokenpad.socket` for every user. There is no service to enable: the socket
+listens from login on, and the first `spokenpad start` starts the daemon,
+which answers it at once and records while it loads its model. Then:
+
+1. Download the speech model, about 670 MB, to
+   `~/.local/share/spokenpad/models`, verified against pinned sha256 sums:
    ```sh
-   git clone https://github.com/membranepotential/spokenpad
-   cd spokenpad
-   scripts/install.sh
+   spokenpad fetch-models
    ```
-   This puts `spokenpad` in `~/.local/bin` (make sure it is on your `PATH`)
-   and the unit in `~/.config/systemd/user`.
-2. Check that the models load: `spokenpad check`. The first run downloads
-   the default models (about 670 MB) to `~/.local/share/spokenpad/models`,
-   verifying every file against a pinned sha256, then prints
-   `Configuration valid; CPU recognizer ready; VAD ready.` To fetch them
-   ahead of time instead, run `spokenpad fetch-models`. If you skip this,
-   the daemon downloads them itself, and records what you dictate meanwhile.
-3. Enable the service:
-   ```sh
-   systemctl --user enable --now spokenpad
-   ```
-   It starts with `graphical-session.target`. GNOME, KDE Plasma and other
-   systemd-managed sessions reach that target. If yours does not (plain i3
-   and sway usually do not), start spokenpad from your window manager
-   config instead:
-   ```
-   exec "systemctl --user import-environment DISPLAY XAUTHORITY; systemctl --user start spokenpad"
-   ```
-   On sway, import `SWAYSOCK WAYLAND_DISPLAY DISPLAY` instead. The import only
-   matters for [a window that opens by itself](#a-window-that-opens-by-itself);
-   the default mode needs no environment from your session.
-4. [Bind your keys](#bind-your-keys).
-5. Open the dictation editor in any terminal: `spokenpad editor`. Then hold
+   If you skip this, the daemon downloads it on your first press, records
+   what you dictate meanwhile, and shows the progress in the dictation
+   window. `spokenpad check` loads the model and reports whether this
+   machine can open a pane window.
+2. [Bind your keys](#bind-your-keys).
+3. Log out and back in, or start the socket for this session:
+   `systemctl --user start spokenpad.socket`.
+4. Open the dictation editor in any terminal: `spokenpad editor`. Then hold
    your push-to-talk key and speak.
 
-To update, pull and run `scripts/install.sh` again, then
-`systemctl --user restart spokenpad`. To remove everything the script
-installed, run `scripts/install.sh --uninstall`. It leaves your models and
-settings in place.
+The daemon runs under your systemd user manager, not inside your session, so
+it sees only the environment the manager has. That matters only for
+[a window that opens by itself](#a-window-that-opens-by-itself): GNOME, KDE
+Plasma and most display managers import `DISPLAY` for you. On a plain i3 or
+sway session, add this to the window manager's config:
+```
+exec systemctl --user import-environment DISPLAY XAUTHORITY
+```
+On sway, import `SWAYSOCK WAYLAND_DISPLAY DISPLAY` instead.
 
-Watch the service with `journalctl --user -u spokenpad -f`. The full debug
-log is `~/.local/state/spokenpad/spokenpad.log`.
+To update, rebuild the package; a running daemon keeps the old binary until
+`systemctl --user restart spokenpad` or your next login. Watch it with
+`journalctl --user -u spokenpad -f`. The full debug log is
+`~/.local/state/spokenpad/spokenpad.log`.
+
+**Upgrading from `scripts/install.sh`.** That script is gone. Remove what it
+installed, and the line that started the old service, before you install
+the package:
+```sh
+systemctl --user disable --now spokenpad.service
+rm ~/.config/systemd/user/spokenpad.service ~/.local/bin/spokenpad
+systemctl --user daemon-reload
+```
+and delete `systemctl --user start spokenpad` from your window manager's
+config. Models and settings stay where they are.
+
+**Other distributions.** Build with Cargo (see [Requirements](#requirements))
+and install the units from `packaging/systemd` as your own:
+```sh
+cargo install --locked --path . --root ~/.local
+cp packaging/systemd/spokenpad.{socket,service} ~/.config/systemd/user/
+mkdir -p ~/.config/systemd/user/spokenpad.service.d
+cp packaging/systemd/dev.conf.example ~/.config/systemd/user/spokenpad.service.d/dev.conf
+systemctl --user daemon-reload
+systemctl --user enable --now spokenpad.socket
+```
+The drop-in points the service at `~/.local/bin/spokenpad`.
 
 ## Bind your keys
 
@@ -102,7 +129,7 @@ for nothing else. F13 to F24 are free on most systems, and a programmable
 keyboard (QMK, VIA) or a remapper such as keyd can send them from any key.
 Do not bind `cancel` to Escape: every application would lose Escape. If
 your window manager does not find `spokenpad`, write the full path,
-`~/.local/bin/spokenpad`.
+`/usr/bin/spokenpad`.
 
 The examples use F16 to talk and F17 to cancel. The standard XKB layouts
 name these keys `XF86Launch7` and `XF86Launch8`, not `F16` and `F17`; their
@@ -422,6 +449,7 @@ cargo test --locked --test e2e -- --ignored        # loads the real models (spok
 cargo clippy --locked --all-targets -- -D warnings
 cargo fmt --check
 cargo run --release --example=eval                 # WER on local clips in eval-samples/
+cargo install --locked --path . --root ~/.local    # run your build: see packaging/systemd/dev.conf.example
 ```
 
 The Neovim tests start real headless editors and fail if `nvim` is missing;
