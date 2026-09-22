@@ -350,9 +350,14 @@ impl Font {
             return Fallback::Deferred;
         }
         let asked = Instant::now();
+        // Neither the character nor fontconfig's error, which names it, goes
+        // to the log: it is dictated or typed text.
         let found = match_character(&self.family, character)
-            .inspect_err(|error| {
-                log::debug!("no fallback font for {character:?}: {error:#}");
+            .inspect_err(|_| {
+                log::debug!(
+                    "no fallback font for a character \"{}\" does not cover",
+                    self.family
+                );
             })
             .ok();
         self.spent += asked.elapsed();
@@ -369,7 +374,7 @@ impl Font {
                 })
                 .ok()?;
             log::debug!(
-                "pane font: {} for {character:?}, which \"{}\" does not cover",
+                "pane font: {} for a character \"{}\" does not cover",
                 found.0.display(),
                 self.family
             );

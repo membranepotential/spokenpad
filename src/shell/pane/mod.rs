@@ -1319,11 +1319,12 @@ fn rescue(entry: &Value) {
             path.display()
         ),
         Err(error) => {
+            // Its text is not logged: no transcript goes to the log.
             log::error!(
-                "the pane could not write {named} ({why}) and could not keep its text \
-                     either ({error:#}); it is in this log"
+                "the pane could not write {named} ({why}) and could not keep its {} \
+                 characters either ({error:#}); they are lost",
+                text.chars().count()
             );
-            log::debug!("unwritten text: {text:?}");
         }
     }
 }
