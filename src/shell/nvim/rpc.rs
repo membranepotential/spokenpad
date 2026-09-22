@@ -251,8 +251,18 @@ pub(super) struct RpcClient {
 }
 
 impl RpcClient {
+    /// Connects to the editor listening on `path`, which must run as this
+    /// user: the transcript goes wherever this connects, and a `socket_path`
+    /// in a directory other users can write to would otherwise let one of
+    /// them listen there first.
     pub(super) fn connect(path: &Path, deadline: Instant) -> Result<Self, RpcFailure> {
         let writer = connect_unix(path, deadline)?;
+        let peer = crate::shell::wm::peer_credentials(&writer).map_err(|error| {
+            RpcFailure::Other(anyhow::Error::from(error).context("read the nvim socket's peer"))
+        })?;
+        // SAFETY: geteuid takes no arguments, touches no memory and cannot fail.
+        let own = unsafe { libc::geteuid() };
+        same_user(peer.uid, own, path).map_err(RpcFailure::Other)?;
         let reader = BufReader::new(
             writer
                 .try_clone()
@@ -506,6 +516,16 @@ impl DeadlineWrite<'_> {
     }
 }
 
+/// Refuses a socket another user listens on.
+fn same_user(peer: libc::uid_t, own: libc::uid_t, path: &Path) -> Result<()> {
+    ensure!(
+        peer == own,
+        "refusing nvim socket {}: it belongs to user {peer}, not to this user ({own})",
+        path.display()
+    );
+    Ok(())
+}
+
 /// Connects to a Unix socket under a deadline.
 ///
 /// `UnixStream::connect` has no timeout, so this opens a non-blocking socket,
@@ -645,6 +665,28 @@ mod tests {
         assert!(nul.contains("NUL"), "{nul}");
         let long = ensure_socket_path(&[b'a'; 512]).unwrap_err().to_string();
         assert!(long.contains("too long"), "{long}");
+    }
+
+    /// Another user's listener is refused. A test cannot listen as another
+    /// user without root, so the decision is checked on its own, and the
+    /// connection to this user's own listener, which reads the real
+    /// credentials, below.
+    #[test]
+    fn only_a_listener_of_this_user_is_trusted() {
+        let path = Path::new("/tmp/shared/nvim.sock");
+        assert!(same_user(1000, 1000, path).is_ok());
+        let refused = same_user(1001, 1000, path).unwrap_err().to_string();
+        assert!(refused.contains("belongs to user 1001"), "{refused}");
+    }
+
+    #[test]
+    fn a_listener_of_this_user_is_connected_to() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("own.sock");
+        let _listener = UnixListener::bind(&socket).unwrap();
+        RpcClient::connect(&socket, Instant::now() + Duration::from_secs(1))
+            .map_err(|failure| failure.to_string())
+            .expect("this user's own socket");
     }
 
     #[test]

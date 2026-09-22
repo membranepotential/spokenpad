@@ -2128,3 +2128,20 @@ and `fetch-models` or `check` wrote the same `<file>.part` without a lock.
   connection, a second download waits for the lock and then downloads
   nothing; the ignored `a_real_download_…` fetches one file from each real
   host through its redirects.
+
+## The editor's socket must belong to this user (2026-09-22)
+
+The 2026-09-22 audit (P3-013): `attach_existing` trusted any listener at
+`nvim.socket_path` that showed the marker or pinned a buffer inside the
+dictation directory, and never asked who listened. With the default
+`$XDG_RUNTIME_DIR` (0700) nobody else can bind there; with a `socket_path`
+in a shared directory another user could bind it first and receive every
+transcript.
+
+- Chosen: every connection to an editor's socket reads `SO_PEERCRED` and is
+  refused unless the listener runs as the daemon's effective user.
+- Rejected: refusing a `socket_path` whose directory is not the user's own
+  and 0700. It would refuse setups that are safe (a private directory owned
+  by a group) and say nothing about who listens.
+- Test: the decision is unit-tested (`same_user`); a test cannot listen as
+  another user without root, so the refusal itself is not run.
