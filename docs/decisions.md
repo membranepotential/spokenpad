@@ -2407,3 +2407,17 @@ both.
 - Rejected: listing live captures while the daemon runs. The list is not
   rewritten per commit, so after a crash the next start would write again
   everything committed since the capture began.
+
+## No log ever holds dictated text (2026-09-22)
+
+DEBUG always reaches `spokenpad.log`, whatever `-v` says, and every
+committed chunk, every release tail and every undelivered append was logged
+with its text (audit P2-012). The log therefore held a second copy of up to
+about 4 MB of dictation that outlived the dictation file, and with `-v` the
+journal held one too. The user decided that no log line, at any level,
+carries transcript text: lines say how many characters, and where the text
+was undelivered they point at the recovery WAV, which holds the audio anyway.
+
+- Rejected: keeping the text in the last-resort "undelivered" lines as a
+  rescue copy. The recovery WAV is that copy, and `spokenpad transcribe`
+  turns it back into text.

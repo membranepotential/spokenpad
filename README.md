@@ -114,7 +114,8 @@ if you imported it after the daemon started, run
 To update, rebuild or reinstall the package; a running daemon keeps the old
 binary until `systemctl --user restart spokenpad` or your next login. Watch
 it with `journalctl --user -u spokenpad -f`. The full debug log is
-`~/.local/state/spokenpad/spokenpad.log`.
+`~/.local/state/spokenpad/spokenpad.log`. Neither ever holds what you
+dictated: the log says how long each piece of text is, never what it says.
 
 **Upgrading from `scripts/install.sh`.** That script is gone. Remove what it
 installed, and the line that started the old service, before you install

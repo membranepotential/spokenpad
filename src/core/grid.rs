@@ -345,11 +345,12 @@ fn parse_cells(cells: &[Value]) -> Vec<LineCell> {
     let mut highlight = 0;
     for cell in cells {
         let Some(parts) = cell.as_array() else {
-            log::debug!("grid_line cell is not an array: {cell}");
+            // The cell is the user's text: its shape is logged, never it.
+            log::debug!("grid_line cell is not an array");
             continue;
         };
         let Some(text) = parts.first().and_then(Value::as_str) else {
-            log::debug!("grid_line cell has no text: {cell}");
+            log::debug!("grid_line cell has no text");
             continue;
         };
         if let Some(id) = parts.get(1).and_then(Value::as_u64) {

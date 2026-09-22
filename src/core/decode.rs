@@ -155,7 +155,8 @@ impl<R: Recognizer, S: Segmenter> Pipeline<R, S> {
             log::debug!("{seconds:.1}s of speech decoded empty with and without trailing silence");
         } else {
             log::info!(
-                "{seconds:.1}s of speech decoded empty; without trailing silence: {retry:?}"
+                "{seconds:.1}s of speech decoded empty; without trailing silence: {} characters",
+                retry.chars().count()
             );
         }
         Ok(retry)
@@ -204,7 +205,7 @@ impl<R: Recognizer, S: Segmenter> Pipeline<R, S> {
                 return Ok(texts.join(" "));
             }
             let text = self.transcribe_speech(&samples[s.window.clone()])?;
-            log::debug!("chunk {:?}: {text:?}", s.window);
+            log::debug!("chunk {:?}: {} characters", s.window, text.chars().count());
             if abandoned() {
                 return Ok(texts.join(" "));
             }

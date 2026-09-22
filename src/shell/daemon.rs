@@ -557,9 +557,9 @@ fn editor_thread(
                         Err(e) => {
                             paragraph = None;
                             log::error!(
-                                "could not write the transcript to a dictation file: {e:#}; recover from the capture WAV if available"
+                                "could not write {} characters of transcript to a dictation file: {e:#}; recover from the capture WAV if available",
+                                text.chars().count()
                             );
-                            log::debug!("undelivered text: {text:?}");
                         }
                     }
                 }
@@ -605,7 +605,6 @@ fn editor_thread(
                 "shutting down with {} characters of undelivered transcript; recover from the capture WAV",
                 text.chars().count()
             );
-            log::debug!("undelivered text: {text:?}");
         }
     }
     nvim.close();
@@ -1132,12 +1131,12 @@ where
                         match &result {
                             Ok((text, frames)) => {
                                 log::info!(
-                                    "decoded the last {:.1}s in {:.2}s (utterance {})",
+                                    "decoded the last {:.1}s in {:.2}s (utterance {}, {} characters)",
                                     Frames(*frames).seconds(rate),
                                     elapsed.as_secs_f64(),
-                                    id.0
+                                    id.0,
+                                    text.chars().count()
                                 );
-                                log::debug!("release transcript: {text:?}");
                             }
                             Err(e) => log::error!("decode failed for utterance {}: {e:#}", id.0),
                         }
@@ -1489,9 +1488,10 @@ fn commit(
     session.note_commit(&c, Instant::now());
     let text = processor.process(&c.text);
     log::debug!(
-        "utterance {} committed through {}: {text:?}",
+        "utterance {} committed through {}: {} characters",
         c.utterance.id.0,
-        c.through
+        c.through,
+        text.chars().count()
     );
     if text.trim().is_empty() {
         return Ok(());
