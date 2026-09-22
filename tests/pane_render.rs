@@ -475,6 +475,89 @@ fn the_pane_draws_what_neovim_draws() {
     );
 }
 
+/// The winbar's background runs the whole width after a dictation stops.
+///
+/// The idle bar is shorter than the "transcribing" one before it, and Neovim
+/// 0.12 ends such a line with a run of zero cells. The pane read that as one
+/// cell in the default colours: a black bar in the middle of a grey winbar,
+/// found in the live check of 2026-09-22.
+#[test]
+fn the_winbar_background_is_continuous_after_a_stop() {
+    if !harness::tools_or_skip(&["Xvfb", "nvim", "fc-match"]) {
+        return;
+    }
+    const WINBAR: u32 = 0x1e2030;
+    let server = XServer::start();
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let config = dictation_config(directory.path());
+    let file = config.dictation_dir.join("dictation-2026-09-22-000001.md");
+    std::fs::write(&file, "").expect("create the dictation file");
+    let mut pane = pane_on(&server, &config, &file);
+    // A winbar with a background of its own, as tokyonight gives it, so a
+    // cell in the default colours shows.
+    call(
+        &mut pane,
+        "nvim_exec_lua",
+        vec![
+            Value::from(format!(
+                "vim.api.nvim_set_hl(0, 'WinBar', {{ bg = {WINBAR} }})"
+            )),
+            Value::Array(Vec::new()),
+        ],
+        PATIENCE,
+    );
+    let mut session = NvimSession::new(config.clone());
+    session
+        .ensure()
+        .expect("attach to the pane's editor")
+        .expect("attach mode found the pane's editor");
+    session
+        .set_indicator(&IndicatorState {
+            phase: IndicatorPhase::Transcribing,
+            preview: "der offene Rest".to_owned(),
+            ..IndicatorState::default()
+        })
+        .expect("push an indicator state");
+    wait_for(PATIENCE, "the transcribing winbar", || {
+        let _ = pane.step(Duration::from_millis(50));
+        pane.screen().line(0).contains("transcribing").then_some(())
+    });
+    session
+        .set_indicator(&IndicatorState::default())
+        .expect("push the idle state");
+    wait_for(PATIENCE, "the idle winbar", || {
+        let _ = pane.step(Duration::from_millis(50));
+        pane.screen().line(0).contains("spokenpad").then_some(())
+    });
+    let _ = pane.step(Duration::from_millis(200));
+    shoot(&pane, "pane-winbar-after-stop.png");
+
+    let screen = pane.screen();
+    let backgrounds: Vec<u32> = screen
+        .row(0)
+        .iter()
+        .map(|cell| screen.style(cell.highlight).background.0)
+        .collect();
+    assert!(
+        backgrounds.iter().all(|background| *background == WINBAR),
+        "a winbar cell is not on the winbar's background: {backgrounds:06x?}"
+    );
+    // And as drawn: the top pixel row of the winbar, which no glyph in it
+    // reaches, is the winbar's colour from edge to edge.
+    let (pixels, width, _) = pane.framebuffer();
+    let top = &pixels[..usize::from(width)];
+    let gaps: Vec<usize> = top
+        .iter()
+        .enumerate()
+        .filter(|(_, pixel)| **pixel != WINBAR)
+        .map(|(x, _)| x)
+        .collect();
+    assert!(
+        gaps.is_empty(),
+        "the winbar is not {WINBAR:06x} at x = {gaps:?}"
+    );
+}
+
 // ------------------------------------------------------------------ helpers
 
 /// The editor configuration these panes run with: a socket and a dictation

@@ -233,7 +233,9 @@ pub enum RedrawEvent {
 pub struct LineCell {
     pub text: String,
     pub highlight: u64,
-    /// How many cells this run covers; at least 1.
+    /// How many cells this run covers. Zero covers none: Neovim 0.12 ends a
+    /// winbar line that stops short of the window edge with `[" ", 0, 0]`,
+    /// and the cells after it are to stay as they are.
     pub repeat: u16,
 }
 
@@ -353,12 +355,14 @@ fn parse_cells(cells: &[Value]) -> Vec<LineCell> {
         if let Some(id) = parts.get(1).and_then(Value::as_u64) {
             highlight = id;
         }
+        // "Repeated `repeat` times (including the first time)", so zero means
+        // no cell at all. Read as one, it painted a default-coloured cell
+        // into the middle of the winbar after every stop.
         let repeat = parts
             .get(2)
             .and_then(Value::as_u64)
             .and_then(|value| u16::try_from(value).ok())
-            .unwrap_or(1)
-            .max(1);
+            .unwrap_or(1);
         parsed.push(LineCell {
             text: text.to_owned(),
             highlight,
@@ -1109,6 +1113,49 @@ mod tests {
                 },
             ]
         );
+    }
+
+    /// The winbar line Neovim 0.12.5 sent when a dictation stopped: the idle
+    /// bar is shorter than the one before it, so the line ends in a run of
+    /// zero cells, and the old bar's fill to its right stays.
+    #[test]
+    fn a_run_of_zero_cells_writes_nothing() {
+        let cell = |text: &str, rest: &[u64]| {
+            let mut parts = vec![value(text)];
+            parts.extend(rest.iter().map(|number| Value::from(*number)));
+            Value::Array(parts)
+        };
+        let payload = vec![Value::Array(vec![
+            value("grid_line"),
+            Value::Array(vec![
+                Value::from(1),
+                Value::from(0),
+                Value::from(0),
+                Value::Array(vec![
+                    cell("o", &[300]),
+                    cell(" ", &[68, 3]),
+                    cell(" ", &[0, 0]),
+                ]),
+                Value::from(false),
+            ]),
+        ])];
+        let mut screen = screen(8, 1);
+        screen.apply(&RedrawEvent::GridLine {
+            grid: 1,
+            row: 0,
+            column: 0,
+            cells: vec![LineCell {
+                text: "-".to_owned(),
+                highlight: 68,
+                repeat: 8,
+            }],
+        });
+        for event in RedrawEvent::parse_batch(&payload) {
+            screen.apply(&event);
+        }
+        assert_eq!(screen.line(0), "o   ----");
+        let highlights: Vec<u64> = screen.row(0).iter().map(|cell| cell.highlight).collect();
+        assert_eq!(highlights, [300, 68, 68, 68, 68, 68, 68, 68]);
     }
 
     #[test]
