@@ -1,0 +1,8 @@
+post_install() {
+    cat <<'EOF'
+spokenpad needs one thing from you: keys bound to `spokenpad start`, `stop`,
+`toggle` and `cancel` in your window manager or desktop. Examples for i3 and
+sway are in /usr/share/spokenpad/; the rest is in
+/usr/share/doc/spokenpad/README.md.
+EOF
+}

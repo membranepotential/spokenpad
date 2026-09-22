@@ -2,9 +2,19 @@
 name = "spokenpad"
 version = "0.2.0"
 edition = "2024"
+# The newest of the dependencies' own minimums (icu, libloading, time), and
+# what the code needs itself: let chains in edition 2024, `as_chunks`.
 rust-version = "1.88"
+# spokenpad's own source. The binary also links sherpa-onnx and onnxruntime
+# statically, under their own licences: THIRD-PARTY.md.
 license = "MIT"
 description = "Local push-to-talk dictation for Linux"
+repository = "https://github.com/membranepotential/spokenpad"
+readme = "README.md"
+keywords = ["dictation", "speech-to-text", "neovim", "push-to-talk"]
+categories = ["accessibility", "multimedia::audio"]
+# A program, not a library: nothing here is meant for crates.io.
+publish = false
 
 [dependencies]
 anyhow = "1.0"

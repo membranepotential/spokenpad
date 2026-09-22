@@ -30,12 +30,16 @@ applications.
 
 ## Requirements
 
-- Linux on x86-64 or aarch64.
+- Linux on x86-64. The package and the checked build below are x86-64 only.
 - Neovim 0.10 or newer.
 - PortAudio (`portaudio` on Arch, `libportaudio2` and `portaudio19-dev` on
   Debian and Ubuntu).
+- A Neovim clipboard provider to copy text out of the window: `xclip` (the
+  package depends on it), or `wl-clipboard` for `spokenpad editor` in a
+  Wayland terminal.
 - To build: Rust 1.88 or newer, a C/C++ toolchain, and `pkg-config`. The build
-  downloads sherpa-onnx's prebuilt static libraries from GitHub.
+  links sherpa-onnx's and onnxruntime's prebuilt static libraries, see
+  [Building from source](#building-from-source).
 - About 700 MB of disk for the default model, and about 1.2 GB of RAM while it
   runs.
 - For the window spokenpad draws itself (`nvim.mode = "pane"`, the default):
@@ -104,10 +108,12 @@ systemctl --user daemon-reload
 and delete `systemctl --user start spokenpad` from your window manager's
 config. Models and settings stay where they are.
 
-**Other distributions.** Build with Cargo (see [Requirements](#requirements))
-and install the units from `packaging/systemd` as your own:
+**Other distributions.** Build with Cargo, as in
+[Building from source](#building-from-source), and install the units from
+`packaging/systemd` as your own:
 ```sh
-cargo install --locked --path . --root ~/.local
+packaging/sherpa-archive.sh ~/.cache/spokenpad-sherpa
+SHERPA_ONNX_ARCHIVE_DIR=~/.cache/spokenpad-sherpa cargo install --locked --path . --root ~/.local
 cp packaging/systemd/spokenpad.{socket,service} ~/.config/systemd/user/
 mkdir -p ~/.config/systemd/user/spokenpad.service.d
 cp packaging/systemd/dev.conf.example ~/.config/systemd/user/spokenpad.service.d/dev.conf
@@ -115,6 +121,25 @@ systemctl --user daemon-reload
 systemctl --user enable --now spokenpad.socket
 ```
 The drop-in points the service at `~/.local/bin/spokenpad`.
+
+### Building from source
+
+spokenpad links sherpa-onnx and onnxruntime into its binary from a prebuilt
+archive the sherpa-onnx project publishes. A plain `cargo build` has the
+`sherpa-onnx-sys` crate download that archive from GitHub without checking
+it. `packaging/sherpa-archive.sh` downloads the same archive and checks it
+against the sha256 the Arch package pins; given its directory, the build
+copies the archive from there instead:
+
+```sh
+packaging/sherpa-archive.sh ~/.cache/spokenpad-sherpa
+SHERPA_ONNX_ARCHIVE_DIR=~/.cache/spokenpad-sherpa cargo build --locked --release
+```
+
+The build keeps the unpacked libraries in `target/sherpa-onnx-prebuilt` and
+uses them from there without looking at the archive again: after a build
+that downloaded them unchecked, remove that directory once. The package and
+CI build this way.
 
 ## Bind your keys
 
@@ -222,10 +247,16 @@ dictation file as its own paragraph and saved after every utterance.
   new file. If you dictate with no editor open, the text goes to a file, one
   desktop notification (`notify-send`) says where, and the next
   `spokenpad editor` opens that file.
+- **Copying text out:** spokenpad never pastes, so you copy what you want
+  and paste it yourself. In the window, `"+y` copies to the system
+  clipboard (`ggVG"+y` copies everything); a plain `y` stays in Neovim unless
+  your own Neovim config sends it to the clipboard. The window uses `xclip` for this, even on Wayland, where
+  it is an Xwayland window; `spokenpad editor` in a Wayland terminal uses
+  `wl-copy` from `wl-clipboard`.
 - **Clipboard (opt-in, off by default):** set `nvim.copy_to_clipboard = true`
   and, after every release, the dictation Neovim copies the whole buffer to
-  its `+` register, ready to paste wherever you want. This needs a Neovim
-  clipboard provider (`wl-copy`, `xclip` or `xsel`).
+  its `+` register, ready to paste wherever you want, through the same
+  provider.
 - **Files:** one Markdown file per editor, in
   `~/.local/state/spokenpad/dictation/`. It is a scratch pad you never save:
   every change you make in it is written promptly, and `:q` always writes
@@ -531,4 +562,10 @@ the [progressive commit](docs/progressive-commit.md) design, the
 
 ## License
 
-MIT, see [LICENSE](LICENSE).
+spokenpad's source is MIT, see [LICENSE](LICENSE). The binary also contains
+sherpa-onnx (Apache-2.0), ONNX Runtime (MIT) and the other libraries of
+sherpa-onnx's prebuilt archive, eSpeak NG (GPL-3.0-or-later) among them; the
+default models it downloads are NVIDIA's Parakeet TDT 0.6B v3 (CC-BY-4.0)
+and Silero VAD (MIT). [THIRD-PARTY.md](THIRD-PARTY.md) lists every component
+and its licence; the package installs it to
+`/usr/share/licenses/spokenpad/`.

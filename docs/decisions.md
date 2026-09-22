@@ -2207,3 +2207,56 @@ the option still described the always-on copy of before 2026-09-21.
   when the user asks, with `"+y`.
 - Test: `the_bundled_init_leaves_yanks_off_the_clipboard` starts nvim with
   the bundled init and reads `clipboard`; it read `unnamedplus` before.
+
+## The build checks the sherpa-onnx archive everywhere; CI is pinned (2026-09-22)
+
+The 2026-09-22 audit (P2-015, P2-016, P3-017): only the Arch package checked
+the prebuilt sherpa-onnx/onnxruntime archive that is linked into the binary
+against a sha256; CI and a plain `cargo build` let `sherpa-onnx-sys` download
+it unchecked. CI ran third-party actions by movable tag with the default
+token permissions.
+
+- Chosen: `packaging/sherpa-archive.sh DIR` downloads the archive over HTTPS
+  and checks it against the sum in `packaging/aur/PKGBUILD`, which it reads
+  by sourcing the PKGBUILD, so the version and the sum stay written down in
+  one place; `SHERPA_ONNX_ARCHIVE_DIR=DIR` makes the build copy it from
+  there. CI runs it before the build, with a new rust-cache key so no cache
+  from an unchecked download is reused (the build reuses an unpacked
+  `target/sherpa-onnx-prebuilt` without looking at the archive). The README
+  gives the same two lines for source builds.
+- Chosen: `actions/checkout` and `Swatinem/rust-cache` pinned to the commits
+  of v4.4.0 and v2.9.2 (looked up with `gh api`), tags in comments;
+  `permissions: contents: read` for the workflow.
+
+## The package pulls in a clipboard tool and notify-send (2026-09-22)
+
+The fresh-user walkthrough ([2026-09-22](experiments/2026-09-22-fresh-user-walkthrough.md)):
+without `xclip`, `xsel` or `wl-clipboard`, `"+y` in the pane copied nothing,
+and copying is the only way text leaves it (B1); when no window can open, a
+desktop notification is the only thing a user sees, and `libnotify` was
+optional (C10).
+
+- Chosen: `xclip` and `libnotify` are dependencies. The pane is an X11
+  window everywhere (Xwayland on Wayland), so `xclip` serves it on every
+  desktop; `wl-clipboard` stays optional, for `spokenpad editor` in a
+  Wayland terminal. `xsel` is dropped from the list. The README says to
+  copy with `"+y`.
+- Chosen: the package is x86-64 only, and the README no longer claims
+  aarch64. sherpa-onnx publishes an aarch64 static archive for 1.13.8, but
+  no aarch64 build has been made or run.
+- Chosen: `THIRD-PARTY.md`, installed beside `LICENSE`, names what the
+  binary links and under which licence, read from the symbols of a release
+  build: sherpa-onnx, kaldi-native-fbank, kaldi-decoder, kaldifst, OpenFst
+  and SentencePiece (Apache-2.0), ONNX Runtime and piper-phonemize (MIT),
+  KISS FFT (BSD-3-Clause), and eSpeak NG with ucd-tools
+  (GPL-3.0-or-later), which sherpa-onnx's text-to-speech brings in although
+  spokenpad never calls it; and the models' licences (Parakeet TDT 0.6B v3
+  CC-BY-4.0 per NVIDIA's model card, Silero VAD MIT). The PKGBUILD's
+  `license` lists them. Open: whether to accept GPL-3.0-or-later for the
+  binary or build sherpa-onnx without text-to-speech is the author's call.
+- Chosen: a three-line `post_install` message naming the one step left
+  (bind keys) and where the examples are; pacman shows it, the README
+  cannot.
+- `Cargo.toml` carries `repository`, `readme`, keywords and categories, and
+  `publish = false`; `rust-version` stays 1.88, the newest minimum among
+  the dependencies and what `as_chunks` and let chains need.
