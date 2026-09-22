@@ -180,6 +180,7 @@ pub fn run(
         },
         None => (daemon_lock()?, Socket::bind(&path)?),
     };
+    let reload = reload_from(source, &socket);
     // Served first, before anything slow: under socket activation the press
     // that started this daemon is waiting on the socket, and a request is
     // stamped when it is read. The model loads later, on the inference
@@ -222,11 +223,27 @@ pub fn run(
             capture,
             requests,
             pipeline: PipelineSource::Load(load),
-            reload: Box::new(move || source.load()),
+            reload,
         },
         stopping,
         dump_dir,
     )
+}
+
+/// What each new dictation window reads: `source` again, and for the daemon
+/// systemd started on its socket, the display and sockets the user manager
+/// has by then (`with_manager_session`). A daemon started in a terminal, or
+/// by a test, keeps the environment it was given.
+fn reload_from(source: Source, socket: &Socket) -> Reload {
+    match socket {
+        Socket::Inherited(_) => Box::new(move || {
+            source.load().map(|mut config| {
+                config.nvim = crate::shell::nvim::with_manager_session(config.nvim);
+                config
+            })
+        }),
+        Socket::Bound { .. } => Box::new(move || source.load()),
+    }
 }
 
 /// Builds the pipeline, and when a model that is in place does not load,

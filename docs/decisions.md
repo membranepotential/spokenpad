@@ -2338,8 +2338,9 @@ open", and the message did not say that a restart was needed.
 - Rejected: the manager's D-Bus API. `systemctl` needs no new dependency,
   and one short process per pane is nothing beside starting Neovim.
 - Test: `the_managers_session_replaces_the_one_the_daemon_started_with`
-  (the listing's parser; a quoted or empty value is not taken). The hook in
-  `shell/daemon.rs` is wired separately.
+  (the listing's parser; a quoted or empty value is not taken). The hook is
+  `reload_from` in `shell/daemon/mod.rs`, which adds it only for a control
+  socket systemd passed in (`Socket::Inherited`).
 
 ## A press starts the socket it finds missing (2026-09-22)
 
