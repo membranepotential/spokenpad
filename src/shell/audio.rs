@@ -692,6 +692,11 @@ impl<B: InputBackend> AudioCapture<B> {
         let mut events = Vec::new();
         let capturing = lock(&self.core.state).capturing();
 
+        // A stream that opened mute and delivers after all ends the streak,
+        // so that losing it later is reported, and retried, afresh.
+        if self.failing.is_some() && self.stream_is_live() {
+            self.recovered();
+        }
         if self.stream_expected() && !self.stream_is_live() {
             let now = Instant::now();
             if self.failing.is_none_or(|failing| now >= failing.retry_at) {
@@ -779,14 +784,7 @@ impl<B: InputBackend> AudioCapture<B> {
             Err(error) => Err(anyhow!("{error:#}")),
         };
         match outcome {
-            Ok(()) => {
-                if let Some(failing) = self.failing.take() {
-                    log::info!(
-                        "microphone available again after {} failed attempts",
-                        failing.attempts
-                    );
-                }
-            }
+            Ok(()) => self.recovered(),
             Err(error) => {
                 let failing = Failing::after(self.failing, Instant::now());
                 if failing.attempts == 1 {
@@ -804,6 +802,16 @@ impl<B: InputBackend> AudioCapture<B> {
             }
         }
         opened
+    }
+
+    /// Ends the streak of failures, if there was one, and says so once.
+    fn recovered(&mut self) {
+        if let Some(failing) = self.failing.take() {
+            log::info!(
+                "microphone available again after {} failed attempts",
+                failing.attempts
+            );
+        }
     }
 
     fn open_stream(&mut self) -> Result<Opened> {
@@ -1646,6 +1654,33 @@ mod tests {
             [CaptureEvent::StreamRestarted { .. }]
         ));
         assert_eq!(capture.failing, None, "the streak ends with the recovery");
+    }
+
+    /// A stream that opened mute and then delivers ends the streak, so a
+    /// later loss is reported and retried from the first wait again.
+    #[test]
+    fn a_mute_stream_that_starts_delivering_ends_the_streak() {
+        let (backend, mut capture) = capture(5);
+        backend.silent.store(true, Ordering::Relaxed);
+        backend.kill();
+        assert!(matches!(
+            capture.poll().as_slice(),
+            [CaptureEvent::StreamUnavailable { .. }]
+        ));
+        assert_eq!(capture.failing.map(|f| f.attempts), Some(1));
+        backend.feed(&[0.5]);
+        assert!(capture.poll().is_empty());
+        assert_eq!(capture.failing, None, "delivering, it works");
+
+        backend.silent.store(false, Ordering::Relaxed);
+        backend.kill();
+        assert!(
+            matches!(
+                capture.poll().as_slice(),
+                [CaptureEvent::StreamRestarted { .. }]
+            ),
+            "a later loss is repaired at once, not after a back-off"
+        );
     }
 
     /// The back-off is the watchdog's: a press tries the microphone at once.
