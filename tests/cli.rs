@@ -192,18 +192,10 @@ fn a_control_command_without_a_daemon_says_so() {
 fn a_socket_activated_daemon_answers_the_press_that_started_it() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    std::fs::create_dir(root.join("spokenpad")).unwrap();
-    std::fs::write(
-        root.join("spokenpad/config.toml"),
-        format!(
-            "[asr]\nmodel_dir = '{0}/no-model'\n[vad]\nmodel = '{0}/no-vad.onnx'\n[audio]\npreroll_ms = 0\n",
-            root.display()
-        ),
-    )
-    .unwrap();
+    write_offline_config(root);
     let socket = root.join("spokenpad.sock");
     let log = root.join("daemon.log");
-    let mut activator = activate(root, &log);
+    let mut activator = activate(root, root, &log);
 
     let pressed = Instant::now();
     let first = command(&dir).arg("cancel").output().unwrap();
@@ -230,23 +222,14 @@ fn a_socket_activated_daemon_answers_the_press_that_started_it() {
         );
         std::thread::sleep(Duration::from_millis(20));
     }
-    let again = command(&dir).arg("cancel").output().unwrap();
-    assert_eq!(
-        code(&again),
-        0,
-        "{}",
-        String::from_utf8_lossy(&again.stderr)
-    );
+    let (code, stderr) = cancel(&dir);
+    assert_eq!(code, 0, "{stderr}");
     assert!(
         activator.try_wait().unwrap().is_none(),
         "the daemon is still running"
     );
 
-    // SAFETY: kill sends SIGTERM to a child this test spawned and has not
-    // reaped, so its pid still names it.
-    unsafe { libc::kill(activator.id() as libc::pid_t, libc::SIGTERM) };
-    let status = activator.wait().unwrap();
-    assert!(status.success(), "the daemon stops cleanly: {status}");
+    stop(activator);
     assert!(
         socket.exists(),
         "systemd's socket is not the daemon's to remove"
@@ -257,11 +240,15 @@ fn a_socket_activated_daemon_answers_the_press_that_started_it() {
 
 /// Starts `systemd-socket-activate` on `root/spokenpad.sock`, which starts
 /// the daemon, logging to `log`, at the first connection. Returns once it
-/// listens.
-fn activate(root: &std::path::Path, log: &std::path::Path) -> std::process::Child {
+/// listens. Everything is under `root` but `$XDG_STATE_HOME`, `state`.
+fn activate(
+    root: &std::path::Path,
+    state: &std::path::Path,
+    log: &std::path::Path,
+) -> std::process::Child {
     let socket = root.join("spokenpad.sock");
     let activator = Command::new("systemd-socket-activate")
-        .env("XDG_STATE_HOME", root)
+        .env("XDG_STATE_HOME", state)
         .env("XDG_CONFIG_HOME", root)
         .env("XDG_DATA_HOME", root)
         .env("XDG_RUNTIME_DIR", root)
@@ -289,31 +276,110 @@ fn activate(root: &std::path::Path, log: &std::path::Path) -> std::process::Chil
     activator
 }
 
+/// A config under `root` that loads no model and opens no microphone
+/// until a capture starts: neither model path is the default spokenpad
+/// downloads, and the pre-roll is off.
+fn write_offline_config(root: &std::path::Path) {
+    std::fs::create_dir_all(root.join("spokenpad")).unwrap();
+    std::fs::write(
+        root.join("spokenpad/config.toml"),
+        format!(
+            "[asr]\nmodel_dir = '{0}/no-model'\n[vad]\nmodel = '{0}/no-vad.onnx'\n[audio]\npreroll_ms = 0\n",
+            root.display()
+        ),
+    )
+    .unwrap();
+}
+
+/// Sends `cancel`, which never opens the microphone, and returns the
+/// command's exit code and standard error.
+fn cancel(directory: &TempDir) -> (i32, String) {
+    let output = command(directory).arg("cancel").output().unwrap();
+    (
+        code(&output),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+/// Stops the daemon as systemd would, and checks that it stops cleanly.
+fn stop(mut activator: std::process::Child) {
+    // SAFETY: kill sends SIGTERM to a child this test spawned and has not
+    // reaped, so its pid still names it.
+    unsafe { libc::kill(activator.id() as libc::pid_t, libc::SIGTERM) };
+    let status = activator.wait().unwrap();
+    assert!(status.success(), "the daemon stops cleanly: {status}");
+}
+
 /// A daemon started by hand holds the per-user lock. The one systemd starts
-/// for a press answers that press -- another daemon is running -- and exits
-/// with 3, which the unit does not restart on; the press does not wait, and
-/// does not start it again.
+/// for a press answers every press -- another daemon is running -- and does
+/// not exit: an exit would have systemd start it again for the next press,
+/// until the unit's start limit failed the socket. Once the lock is free,
+/// the next press is served.
 #[test]
-fn a_socket_activated_daemon_that_finds_another_answers_and_exits_three() {
+fn a_socket_activated_daemon_that_finds_another_waits_for_it() {
     use std::os::fd::AsRawFd;
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    std::fs::create_dir(root.join("spokenpad")).unwrap();
+    write_offline_config(root);
     let lock = std::fs::File::create(root.join("spokenpad/daemon.lock")).unwrap();
     // SAFETY: flock borrows the descriptor `lock` owns for the whole call and
     // retains no pointer.
     let held = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
     assert_eq!(held, 0, "the test holds the lock the other daemon would");
     let log = root.join("daemon.log");
-    let mut activator = activate(root, &log);
+    let mut activator = activate(root, root, &log);
 
-    let press = command(&dir).arg("start").output().unwrap();
-    assert_eq!(code(&press), 1);
-    let stderr = String::from_utf8_lossy(&press.stderr);
-    assert!(stderr.contains("another daemon is running"), "{stderr}");
-    let status = activator.wait().unwrap();
-    assert_eq!(status.code(), Some(3), "{status}");
+    // More presses than systemd's default start limit allows starts.
+    for _ in 0..6 {
+        let (code, stderr) = cancel(&dir);
+        assert_eq!(code, 1);
+        assert!(stderr.contains("another daemon is running"), "{stderr}");
+    }
+    assert!(activator.try_wait().unwrap().is_none(), "it waits");
+
     drop(lock);
+    let (code, stderr) = cancel(&dir);
+    assert_eq!(code, 0, "served once the other daemon is gone: {stderr}");
+    stop(activator);
+    let log = std::fs::read_to_string(&log).unwrap();
+    assert!(log.contains("took the daemon lock"), "{log}");
+}
+
+/// A state directory that cannot hold the lock (not writable, or the disk
+/// is full; here, a file where the directory should be) is answered with
+/// what is wrong, the daemon stays, and the press after it is repaired is
+/// served.
+#[test]
+fn a_socket_activated_daemon_that_cannot_lock_says_so_and_stays() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_offline_config(root);
+    let state = root.join("state");
+    std::fs::create_dir(&state).unwrap();
+    std::fs::write(state.join("spokenpad"), "not a directory").unwrap();
+    let log = root.join("daemon.log");
+    let mut activator = activate(root, &state, &log);
+
+    for _ in 0..6 {
+        let (code, stderr) = cancel(&dir);
+        assert_eq!(code, 1);
+        assert!(
+            stderr.contains("cannot lock the state directory") && stderr.contains("journalctl"),
+            "{stderr}"
+        );
+    }
+    assert!(activator.try_wait().unwrap().is_none(), "it stays");
+
+    std::fs::remove_file(state.join("spokenpad")).unwrap();
+    let (code, stderr) = cancel(&dir);
+    assert_eq!(code, 0, "served once the directory is usable: {stderr}");
+    stop(activator);
+    let log = std::fs::read_to_string(&log).unwrap();
+    assert_eq!(
+        log.matches("cannot take the daemon lock").count(),
+        1,
+        "said once, not at every attempt: {log}"
+    );
 }
 
 /// A config from before the control socket names what replaced `[hotkey]`.

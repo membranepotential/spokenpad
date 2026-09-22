@@ -291,26 +291,49 @@ fn serve(listener: &UnixListener, sender: &Sender<Received>, stop: &AtomicBool) 
     }
 }
 
-/// Answers every connection already waiting on `socket` with `reply`, and
-/// forwards nothing: for a daemon that cannot serve and is about to exit.
-/// Under socket activation a waiting connection would start it again at
-/// once; answered, each press starts it at most once.
-pub fn refuse_pending(socket: Socket, reply: Reply) {
+/// Tries `ready` until it succeeds, and returns what it gave; meanwhile
+/// answers every press on `socket` with the reply its last failure gave, and
+/// forwards nothing. `ready` is tried again before each press is answered,
+/// and at least every [`STOP_POLL`]. `None` once `stopping` is set.
+///
+/// For a daemon that cannot serve yet. Under socket activation it must not
+/// exit instead: systemd would start it again for the next press, and again,
+/// until the unit's start limit fails `spokenpad.socket`.
+pub fn refuse_until<T>(
+    socket: &Socket,
+    stopping: &AtomicBool,
+    mut ready: impl FnMut() -> Result<T, Reply>,
+) -> Result<Option<T>> {
     let (Socket::Bound { listener, .. } | Socket::Inherited(listener)) = socket;
-    if let Err(e) = listener.set_nonblocking(true) {
-        log::warn!("could not answer waiting presses: {e}");
-        return;
-    }
-    while let Ok((mut stream, _)) = listener.accept() {
-        let answered = (|| -> io::Result<()> {
-            stream.set_nonblocking(false)?;
-            stream.set_read_timeout(Some(REQUEST_TIMEOUT))?;
-            stream.set_write_timeout(Some(REQUEST_TIMEOUT))?;
-            read_line(&mut stream)?;
-            stream.write_all(reply.encode().as_bytes())
-        })();
-        if let Err(e) = answered {
-            log::debug!("could not answer a waiting press: {e}");
+    listener
+        .set_nonblocking(true)
+        .context("make the control socket nonblocking")?;
+    loop {
+        let reply = match ready() {
+            Ok(value) => return Ok(Some(value)),
+            Err(reply) => reply,
+        };
+        match listener.accept() {
+            Ok((mut stream, _)) => {
+                let answered = (|| -> io::Result<()> {
+                    stream.set_nonblocking(false)?;
+                    stream.set_read_timeout(Some(REQUEST_TIMEOUT))?;
+                    stream.set_write_timeout(Some(REQUEST_TIMEOUT))?;
+                    read_line(&mut stream)?;
+                    stream.write_all(reply.encode().as_bytes())
+                })();
+                if let Err(e) = answered {
+                    log::debug!("could not answer a press: {e}");
+                }
+            }
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                if stopping.load(Ordering::Acquire) {
+                    return Ok(None);
+                }
+                wait_readable(listener);
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e).context("accept on the control socket"),
         }
     }
 }
@@ -394,6 +417,10 @@ impl std::fmt::Display for SendError {
                 f,
                 "no spokenpad daemon is listening on {} ({cause}); `spokenpad.socket` starts it on the first press: check `systemctl --user status spokenpad.socket`",
                 path.display()
+            ),
+            Self::Refused(reply @ Reply::CannotLock) => write!(
+                f,
+                "the daemon refused the request: {reply}; `journalctl --user -u spokenpad` says why"
             ),
             Self::Refused(reply) => write!(f, "the daemon refused the request: {reply}"),
             Self::Failed(e) => write!(f, "{e:#}"),
@@ -521,23 +548,63 @@ mod tests {
         assert!(path.exists(), "systemd's socket file stays");
     }
 
-    /// A daemon that cannot serve answers the presses already waiting, so
-    /// that under socket activation they do not start it again.
+    /// A daemon that cannot serve yet answers each press with why, tries
+    /// again before each one, and leaves the press that finds it ready on
+    /// the socket for the server.
     #[test]
-    fn waiting_presses_are_answered_by_a_daemon_that_cannot_serve() {
+    fn presses_are_refused_until_the_daemon_is_ready() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("control.sock");
-        let listener = UnixListener::bind(&path).unwrap();
-        let client = {
+        let socket = Socket::Inherited(UnixListener::bind(&path).unwrap());
+        let refused = {
             let path = path.clone();
-            thread::spawn(move || send(&path, Request::Start))
+            thread::spawn(move || {
+                let first = send(&path, Request::Start);
+                let second = send(&path, Request::Stop);
+                (first, second)
+            })
         };
-        thread::sleep(Duration::from_millis(100));
-        refuse_pending(Socket::Inherited(listener), Reply::AnotherDaemon);
+        let stopping = AtomicBool::new(false);
+        let mut tries = 0;
+        let ready = refuse_until(&socket, &stopping, || {
+            tries += 1;
+            match tries {
+                1 => Err(Reply::AnotherDaemon),
+                _ if !refused.is_finished() => Err(Reply::CannotLock),
+                _ => Ok("ready"),
+            }
+        })
+        .unwrap();
+        assert_eq!(ready, Some("ready"));
+        let (first, second) = refused.join().unwrap();
         assert!(matches!(
-            client.join().unwrap(),
-            Err(SendError::Refused(Reply::AnotherDaemon))
+            first,
+            Err(SendError::Refused(Reply::AnotherDaemon | Reply::CannotLock))
         ));
+        assert!(matches!(second, Err(SendError::Refused(Reply::CannotLock))));
+
+        let waiting = {
+            let path = path.clone();
+            thread::spawn(move || send(&path, Request::Cancel))
+        };
+        // Connected, and not answered by a refusal: it waits for the server.
+        thread::sleep(Duration::from_millis(100));
+        let ready = refuse_until(&socket, &stopping, || Ok(())).unwrap();
+        assert_eq!(ready, Some(()));
+        let (sender, receiver) = mpsc::channel();
+        let _server = ControlServer::start(socket, sender).unwrap();
+        waiting.join().unwrap().expect("served once ready");
+        assert_eq!(receiver.recv().unwrap().request, Request::Cancel);
+    }
+
+    #[test]
+    fn a_daemon_told_to_stop_stops_refusing() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("control.sock");
+        let socket = Socket::Inherited(UnixListener::bind(&path).unwrap());
+        let stopping = AtomicBool::new(true);
+        let ready = refuse_until(&socket, &stopping, || Err::<(), _>(Reply::AnotherDaemon));
+        assert!(ready.unwrap().is_none());
     }
 
     #[test]

@@ -167,12 +167,15 @@ missing (`check`, `transcribe`), `3` another daemon holds
 `$XDG_STATE_HOME/spokenpad/daemon.lock` (an `flock`, held for the process
 lifetime, never unlinked), `4` an unreadable or wrong-rate WAV handed to
 `transcribe`, `1` everything else, including a control command that finds
-no daemon. `3` is the daemon's only deliberate exit once it has adopted its
-socket, and the unit does not restart on it; it answers the presses already
-waiting first (`Reply::AnotherDaemon`), so they do not start it again. An
+no daemon. `3` is only for a daemon started by hand: once a daemon has
+adopted systemd's socket, nothing a user can cause ends it, because each
+exit would have the next press start it again until the unit's start limit
+failed the socket. While it cannot take the lock it answers every press
+with why (`Reply::AnotherDaemon`, or `Reply::CannotLock` for a state
+directory it cannot write) and takes the lock as soon as it can. An
 invalid config, a missing model or an unopenable microphone do not end the
-daemon: it runs on defaults, keeps the recordings, or retries the device,
-and says so in the window.
+daemon either: it runs on defaults, keeps the recordings, or retries the
+device, and says so in the window.
 
 Run `cargo build --locked --release`. The sherpa crates' `static` feature
 downloads the pinned 1.13.8 static libraries (or uses `SHERPA_ONNX_LIB_DIR`)

@@ -1471,3 +1471,38 @@ one, up to 60 s (`reopen_backoff` in `shell/audio.rs`).
 - Rejected: opening the stream on a thread of its own. The stream and
   PortAudio's handle belong to the loop that captures from them, and the
   cap already makes the cost rare.
+
+## A daemon that cannot take its lock waits for it (2026-09-22)
+
+This replaces the exit `3` of a socket-activated daemon from
+[An Arch package, started by socket activation](#an-arch-package-started-by-socket-activation-2026-09-22).
+That exit answered the presses already waiting, and the unit did not
+restart on it, but every later press started the service again, and it
+exited again. Five presses within ten seconds reach systemd's default start
+limit (`DefaultStartLimitBurst=5`, `DefaultStartLimitIntervalSec=10s`,
+systemd-system.conf(5)); the socket then fails with `service-start-limit-hit`
+and no key works until `systemctl --user reset-failed`. A lock that could
+not be created at all (the state directory not writable, the disk full)
+exited `1` without answering anyone, and was restarted every three seconds
+into the same limit.
+
+- **Now a daemon that systemd started never exits over the lock.** While it
+  cannot take it, it answers each press with why: "another daemon is
+  running" (`Reply::AnotherDaemon`) or "cannot lock the state directory"
+  (`Reply::CannotLock`, whose client message points to `journalctl`). It
+  tries again before answering each press and every 100 ms, so it takes the
+  lock as soon as the other daemon stops or the directory is repaired, and
+  the press that finds it free is served (`shell::control::refuse_until`,
+  `lock_under_activation` in `shell/daemon.rs`). The reason is logged once
+  per distinct reason. SIGTERM stops it cleanly while it waits.
+- **The unit loses `RestartPreventExitStatus=3`.** Under the socket there is
+  no exit `3` left to prevent. A daemon started by hand still exits `3` when
+  another holds the lock: nothing restarts it.
+- Rejected: `StartLimitIntervalSec=0` on the service. It keeps the socket
+  alive, but every press still starts a process that finds the lock taken
+  and exits, and it would also lift the limit for a daemon that crashes at
+  every start, which should fail loudly.
+- Rejected: a higher `StartLimitBurst`. It only moves the press count at
+  which the keys stop working.
+- A socket that is not the one the key bindings use still exits `1`, and is
+  meant to hit the limit: it is a broken unit, not something a user did.

@@ -23,7 +23,7 @@ use crate::{
         audio::{
             AudioCapture, CaptureEvent, Captured, InputBackend, MAX_UTTERANCE_SECONDS, PostRoll,
         },
-        control::{ControlServer, Socket, refuse_pending},
+        control::{ControlServer, Socket, refuse_until},
         inference::{SpeechSegmenter, Transcriber, load_segmenter},
         models::{Repair, ensure_defaults, repair_defaults},
         nvim::{AppendFailure, CopyOutcome, IndicatorState, NvimSession},
@@ -491,9 +491,9 @@ fn editor_thread(
     nvim.close();
 }
 
-/// Another daemon of this user holds the lock: the one exit of a daemon that
-/// has taken over its socket. `main` gives it exit code 3, which the unit
-/// does not restart on.
+/// Another daemon of this user holds the lock. A daemon started by hand
+/// exits with it, and `main` gives it exit code 3; one that systemd started
+/// waits for the lock instead ([`lock_under_activation`]).
 #[derive(Debug)]
 pub struct AnotherDaemon(std::io::Error);
 
@@ -511,7 +511,9 @@ fn daemon_lock() -> Result<File> {
     fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
-        .create(&dir)?;
+        .create(&dir)
+        .with_context(|| format!("create {}", dir.display()))?;
+    let path = dir.join("daemon.lock");
     let file = OpenOptions::new()
         .read(true)
         .write(true)
@@ -519,7 +521,8 @@ fn daemon_lock() -> Result<File> {
         .truncate(false)
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(dir.join("daemon.lock"))?;
+        .open(&path)
+        .with_context(|| format!("open {}", path.display()))?;
     // SAFETY: flock borrows a valid owned file descriptor and retains no pointer.
     let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
     if result != 0 {
@@ -538,35 +541,25 @@ pub fn run(
     inherited: Option<Socket>,
     dump_dir: Option<&Path>,
 ) -> Result<()> {
-    let _lock = match daemon_lock() {
-        Ok(lock) => lock,
-        Err(e) => {
-            // A press queued on systemd's socket would start this daemon
-            // again the moment it exits, and again: each is answered first,
-            // so that a press starts it at most once.
-            if let Some(socket) = inherited
-                && e.is::<AnotherDaemon>()
-            {
-                refuse_pending(socket, Reply::AnotherDaemon);
-            }
-            return Err(e);
-        }
+    let stopping = Arc::new(AtomicBool::new(false));
+    signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&stopping))?;
+    signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&stopping))?;
+    let path = crate::config::control_socket();
+    let (_lock, socket) = match inherited {
+        Some(socket) => match lock_under_activation(&socket, &stopping)? {
+            Some(lock) => (lock, socket),
+            // Stopped while it waited.
+            None => return Ok(()),
+        },
+        None => (daemon_lock()?, Socket::bind(&path)?),
     };
     // Served first, before anything slow: under socket activation the press
     // that started this daemon is waiting on the socket, and a request is
     // stamped when it is read. The model loads later, on the inference
     // thread, and what is recorded meanwhile is kept until it has.
     let (requests_tx, requests) = mpsc::channel();
-    let path = crate::config::control_socket();
-    let socket = match inherited {
-        Some(socket) => socket,
-        None => Socket::bind(&path)?,
-    };
     let _control = ControlServer::start(socket, requests_tx)?;
     log::info!("listening on {}", path.display());
-    let stopping = Arc::new(AtomicBool::new(false));
-    signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&stopping))?;
-    signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&stopping))?;
     let capture = AudioCapture::new(config.audio.clone(), config.recording.clone());
     let (asr, vad, rate) = (
         config.asr.clone(),
@@ -607,6 +600,41 @@ pub fn run(
         stopping,
         dump_dir,
     )
+}
+
+/// The lock of a daemon that systemd started: waited for, not required.
+///
+/// Exiting without it would leave the presses queued on systemd's socket to
+/// start this daemon again, and again, until the unit's start limit fails
+/// `spokenpad.socket` and no key works any more. So it answers each press
+/// with why it cannot serve ([`Reply::AnotherDaemon`] while a daemon started
+/// by hand holds the lock, [`Reply::CannotLock`] while the state directory
+/// cannot hold one), tries again before each press and every 100 ms, and
+/// once it holds the lock goes on as if it had at once. `None` when told to
+/// stop first.
+fn lock_under_activation(socket: &Socket, stopping: &AtomicBool) -> Result<Option<File>> {
+    let mut logged: Option<String> = None;
+    let lock = refuse_until(socket, stopping, || {
+        daemon_lock().map_err(|e| {
+            let reply = if e.is::<AnotherDaemon>() {
+                Reply::AnotherDaemon
+            } else {
+                Reply::CannotLock
+            };
+            let reason = format!("{e:#}");
+            if logged.as_ref() != Some(&reason) {
+                log::error!(
+                    "cannot take the daemon lock: {reason}; answering presses with \"{reply}\" until it can"
+                );
+                logged = Some(reason);
+            }
+            reply
+        })
+    })?;
+    if lock.is_some() && logged.is_some() {
+        log::info!("took the daemon lock");
+    }
+    Ok(lock)
 }
 
 /// Builds the pipeline, and when a model that is in place does not load,

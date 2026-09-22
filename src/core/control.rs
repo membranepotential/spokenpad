@@ -74,17 +74,22 @@ pub enum Reply {
     ShuttingDown,
     /// systemd started a daemon for this press, but another spokenpad
     /// daemon of this user is running (one started by hand) and holds the
-    /// lock.
+    /// lock. This one waits for it and takes over once it stops.
     AnotherDaemon,
+    /// systemd started a daemon for this press, but it cannot create or lock
+    /// its lock file: the state directory is not writable, or the disk is
+    /// full. It keeps trying, and its log says why.
+    CannotLock,
 }
 
 impl Reply {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::Accepted,
         Self::Malformed,
         Self::UnknownRequest,
         Self::ShuttingDown,
         Self::AnotherDaemon,
+        Self::CannotLock,
     ];
 
     fn as_str(self) -> &'static str {
@@ -94,6 +99,7 @@ impl Reply {
             Self::UnknownRequest => "error unknown request",
             Self::ShuttingDown => "error shutting down",
             Self::AnotherDaemon => "error another daemon is running",
+            Self::CannotLock => "error cannot lock the state directory",
         }
     }
 
