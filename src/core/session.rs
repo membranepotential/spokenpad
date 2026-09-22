@@ -28,6 +28,9 @@ pub enum RecordingStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Notice {
     HeldTooBriefly,
+    /// `spokenpad cancel` threw the capture away: what was committed stays,
+    /// the rest is not transcribed, the recording is kept.
+    Cancelled,
     MicrophoneGap,
     MicrophoneUnavailable,
     CaptureIncomplete,
@@ -151,10 +154,9 @@ fn recordings(count: usize) -> String {
 
 /// What happens to what is dictated before the model is ready.
 fn kept(waiting: usize) -> String {
-    let promise = "dictation is recorded and transcribed once it is ready";
     match waiting {
-        0 => promise.into(),
-        n => format!("{promise}; {} waiting", recordings(n)),
+        0 => "what you say is transcribed once it is ready".into(),
+        n => format!("{} waiting; what you say is kept", recordings(n)),
     }
 }
 
@@ -165,7 +167,7 @@ fn kept(waiting: usize) -> String {
 /// what a narrow window may lose, live in one place.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NoticeText {
-    pub headline: &'static str,
+    pub headline: Cow<'static, str>,
     pub detail: Cow<'static, str>,
 }
 
@@ -196,6 +198,8 @@ fn file_name(path: &Path) -> Cow<'_, str> {
 pub enum Priority {
     /// Cosmetic: only the live tail stopped.
     PreviewPaused,
+    /// The user threw the capture away themselves; what was written stays.
+    Cancelled,
     /// The wait is over; text is on its way.
     TranscribingRecordings,
     /// Transcription waits, for seconds.
@@ -257,13 +261,22 @@ impl Notice {
             Self::ModelLoading { .. } => Priority::ModelLoading,
             Self::TranscribingRecordings(_) => Priority::TranscribingRecordings,
             Self::PreviewPaused => Priority::PreviewPaused,
+            Self::Cancelled => Priority::Cancelled,
         }
     }
     /// The short form, drawn in every window however narrow. Fixed wording per
-    /// variant: it is the part the user learns to recognise at a glance.
-    pub fn headline(&self) -> &'static str {
-        match self {
+    /// variant, the part the user learns to recognise at a glance, but for
+    /// the two whose point is a figure or a reason: the download's
+    /// percentage, and why the config did not load. A detail is drawn only
+    /// where it fits, which in a pane of the default width it seldom does.
+    pub fn headline(&self) -> Cow<'static, str> {
+        let fixed = match self {
+            Self::ModelDownloading { percent, .. } => {
+                return format!("downloading the speech model, {percent}%").into();
+            }
+            Self::ConfigInvalid(reason) => return format!("config not reloaded: {reason}").into(),
             Self::HeldTooBriefly => "held too briefly",
+            Self::Cancelled => "recording cancelled",
             Self::MicrophoneGap => "microphone gap",
             Self::MicrophoneUnavailable => "microphone unavailable",
             Self::CaptureIncomplete => "capture incomplete",
@@ -277,12 +290,11 @@ impl Notice {
             Self::RecordingShortened(_) => "recording shortened",
             Self::RecordingPartlyTranscribed { .. } => "recording partly transcribed",
             Self::KeptTooLong { .. } => "reached the time limit",
-            Self::ConfigInvalid(_) => "config not reloaded",
-            Self::ModelDownloading { .. } => "downloading the speech model",
             Self::ModelLoading { .. } => "loading the speech model",
             Self::ModelUnavailable { .. } => "no speech model",
             Self::TranscribingRecordings(_) => "transcribing recordings",
-        }
+        };
+        fixed.into()
     }
     /// Why it happened, or what to do about it. The memory-cap detail names the
     /// recovery WAV by file name alone: the winbar has a window's width rather
@@ -290,6 +302,7 @@ impl Notice {
     pub fn detail(&self) -> Cow<'static, str> {
         match self {
             Self::HeldTooBriefly => "hold the key while speaking".into(),
+            Self::Cancelled => "text already written stays; the recording is kept".into(),
             Self::MicrophoneGap => {
                 "the microphone stopped delivering audio; it was reopened, but this recording has a gap"
                     .into()
@@ -368,12 +381,10 @@ impl Notice {
                 "a capture made before the speech model is ready ends after {minutes} minutes; it is transcribed once the model is; press the key to dictate again"
             )
             .into(),
-            Self::ConfigInvalid(reason) => {
-                format!("{reason}; this window keeps the settings in use").into()
+            Self::ConfigInvalid(_) => {
+                "this window keeps the settings in use; spokenpad check says more".into()
             }
-            Self::ModelDownloading { percent, waiting } => {
-                format!("{percent}%; {}", kept(*waiting)).into()
-            }
+            Self::ModelDownloading { waiting, .. } => kept(*waiting).into(),
             Self::ModelLoading { waiting } => kept(*waiting).into(),
             Self::ModelUnavailable { reason, waiting } => {
                 let kept = match waiting {
@@ -536,8 +547,12 @@ impl Session {
                 }
                 self.due = None;
                 self.preview.clear();
-                if reason == DiscardReason::TooShort {
-                    self.notify(Notice::HeldTooBriefly);
+                match reason {
+                    DiscardReason::TooShort => self.notify(Notice::HeldTooBriefly),
+                    DiscardReason::Cancelled => self.notify(Notice::Cancelled),
+                    // The window that would show it is gone; the desktop
+                    // notification says it instead.
+                    DiscardReason::WindowClosed => {}
                 }
             }
             Command::Nothing => {}
@@ -871,6 +886,41 @@ mod tests {
         start(&mut s);
         assert!(s.notice().is_none(), "the next press clears the notice");
     }
+    /// A cancel is the user's own doing, and says so until the next press;
+    /// anything that went wrong with the capture outranks it. Closing the
+    /// window cancels too, but that window is gone, and the desktop
+    /// notification says it.
+    #[test]
+    fn a_cancel_says_so_in_the_window() {
+        let mut s = Session::new(true, Duration::from_secs(1), None);
+        start(&mut s);
+        cancel(&mut s);
+        assert_eq!(s.notice(), Some(&Notice::Cancelled));
+        assert_eq!(Notice::Cancelled.headline(), "recording cancelled");
+        start(&mut s);
+        assert!(s.notice().is_none(), "the next press clears it");
+        s.notify(Notice::NearlySilent);
+        cancel(&mut s);
+        assert_eq!(s.notice(), Some(&Notice::NearlySilent));
+        start(&mut s);
+        let at = Instant::now();
+        assert_eq!(
+            s.event(Event::WindowClosed { at }),
+            Command::Discard(DiscardReason::WindowClosed)
+        );
+        assert!(s.notice().is_none());
+    }
+    /// A config that did not load says why in the headline, which the
+    /// winbar always draws, and a download its percentage.
+    #[test]
+    fn the_headline_carries_the_figure_or_the_reason() {
+        let invalid = Notice::ConfigInvalid("unknown field `x` (line 3)".into());
+        assert_eq!(
+            invalid.headline(),
+            "config not reloaded: unknown field `x` (line 3)"
+        );
+        assert!(invalid.detail().contains("spokenpad check"));
+    }
     #[test]
     fn a_too_short_tap_tells_the_user_why_nothing_appeared() {
         let mut s = Session::new(true, Duration::from_secs(1), None);
@@ -972,6 +1022,7 @@ mod tests {
             },
             Notice::ModelLoading { waiting: 0 },
             Notice::TranscribingRecordings(1),
+            Notice::Cancelled,
             Notice::PreviewPaused,
         ];
         for pair in ranked.windows(2) {
@@ -1015,9 +1066,10 @@ mod tests {
         })
         .notice(1)
         .unwrap();
+        assert_eq!(downloading.headline(), "downloading the speech model, 50%");
         assert_eq!(
             downloading.detail(),
-            "50%; dictation is recorded and transcribed once it is ready; 1 recording waiting"
+            "1 recording waiting; what you say is kept"
         );
         let unavailable = Recognition::Unavailable("offline".into())
             .notice(0)

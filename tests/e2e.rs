@@ -916,9 +916,9 @@ fn each_new_window_reads_the_config_file_again() {
         h.indicator("notice").contains("config not reloaded")
     });
     assert!(
-        h.indicator("notice_detail").contains("copy_to_clipboard"),
-        "{}",
-        h.indicator("notice_detail")
+        h.indicator("notice").contains("copy_to_clipboard"),
+        "the headline says why: {}",
+        h.indicator("notice")
     );
     h.say(&tone(1.0));
     h.release();
@@ -1781,8 +1781,7 @@ fn a_capture_made_before_the_model_is_ready_is_transcribed_once_it_is() {
     h.release_for_good();
     wait_until("the window says the model is on its way", || {
         h.indicator("notice")
-            .contains("downloading the speech model")
-            && h.indicator("notice_detail").contains("25%; ")
+            .contains("downloading the speech model, 25%")
     });
     wait_until("the window counts the recording", || {
         h.indicator("notice_detail").contains("1 recording waiting")

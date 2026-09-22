@@ -2500,3 +2500,24 @@ or after it, and every argument has a description. `fetch-models` reads no
 configuration at all: it fetches the pinned files wherever `--dir` says, and
 a broken configuration no longer stops it (audit P3-018). `run` dispatches
 to one function per command (audit P2-004).
+
+## The download's percentage and a config's error go in the headline; a cancel says so (2026-09-22)
+
+The fresh-user walkthrough found two notices whose point never reached the
+default pane (walkthrough C2, C3): the winbar draws a notice's headline
+always and its detail only when all of it fits, and at 72 columns beside the
+phase and the meter that is about 17 characters. The download's percentage
+and the reason a config did not load were in the detail.
+
+- Chosen: those two headlines carry their figure: "downloading the speech
+  model, 37%" and "config not reloaded: unknown field `pane_dimension`
+  (line 3)". The reason is `config::summary`: the first clause of the error,
+  with the TOML line, at most 48 characters; the log and `spokenpad check`
+  keep the whole report. Rejected: a narrower winbar layout, which is the
+  pane's (lane of `src/lua/spokenpad.lua`) and would not have made a
+  multi-line TOML report fit either.
+- Chosen: `spokenpad cancel` leaves "recording cancelled" in the winbar until
+  the next press (walkthrough P8); before, the preview vanished and nothing
+  said why. It ranks above only "preview paused". Closing the pane, which
+  also cancels, sets no notice: that window is gone, and the desktop
+  notification says it.

@@ -627,7 +627,7 @@ impl Config {
         {
             bail!("{removed}");
         }
-        let mut c: Self = toml::from_str(input).context("invalid configuration")?;
+        let mut c: Self = toml::from_str(input).map_err(|error| Unparsable::new(input, error))?;
         // A relative model path is relative to the config file. The defaults
         // are absolute, so joining leaves them alone.
         for p in [&mut c.asr.model_dir, &mut c.vad.model] {
@@ -776,6 +776,103 @@ impl Config {
             );
         }
         Ok(())
+    }
+}
+
+/// A configuration file that is not TOML, or not the settings spokenpad
+/// has: what is wrong, and on which line.
+#[derive(Debug)]
+pub struct Unparsable {
+    error: toml::de::Error,
+    /// The line the error is on, counted from 1, and the key set on it.
+    place: Option<(usize, Option<String>)>,
+}
+
+impl Unparsable {
+    fn new(input: &str, error: toml::de::Error) -> Self {
+        let place = error
+            .span()
+            .and_then(|span| input.get(..span.start))
+            .map(|before| {
+                let number = before.matches('\n').count() + 1;
+                let key = input
+                    .lines()
+                    .nth(number - 1)
+                    .and_then(|line| line.split_once('='))
+                    .map(|(key, _)| key.trim().to_owned())
+                    .filter(|key| !key.is_empty());
+                (number, key)
+            });
+        Self { error, place }
+    }
+
+    /// TOML's message without the list of what it expected, and the line,
+    /// with the key when the message does not name it.
+    fn summary(&self) -> (String, Option<usize>) {
+        let message = self.error.message();
+        let clause = message
+            .split(", expected")
+            .next()
+            .unwrap_or(message)
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .trim();
+        match &self.place {
+            Some((line, Some(key))) if !clause.contains(key.as_str()) => {
+                (format!("{key}: {clause}"), Some(*line))
+            }
+            Some((line, _)) => (clause.to_owned(), Some(*line)),
+            None => (clause.to_owned(), None),
+        }
+    }
+}
+
+impl std::fmt::Display for Unparsable {
+    /// The whole of TOML's own report, with the line quoted.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "invalid configuration: {}", self.error)
+    }
+}
+
+impl std::error::Error for Unparsable {}
+
+/// The most a [`summary`] says, in characters: short enough to stand beside
+/// a notice's headline in a pane of the default width.
+const SUMMARY_LENGTH: usize = 48;
+
+/// Why a configuration did not load, in a few words for the dictation
+/// window, which has no room for the whole report: `spokenpad check` gives
+/// that. The first clause of the reason, and the line for a TOML error,
+/// such as "unknown field `pane_dimension` (line 3)".
+pub fn summary(error: &anyhow::Error) -> String {
+    let (clause, line) = match error.downcast_ref::<Unparsable>() {
+        Some(unparsable) => unparsable.summary(),
+        // spokenpad's own messages: the rule, then a colon and why.
+        None => (
+            error
+                .root_cause()
+                .to_string()
+                .split([':', '\n'])
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .to_owned(),
+            None,
+        ),
+    };
+    let clause = if clause.chars().count() <= SUMMARY_LENGTH {
+        clause.to_owned()
+    } else {
+        let cut: String = clause.chars().take(SUMMARY_LENGTH).collect();
+        let whole_words = cut
+            .rsplit_once(' ')
+            .map_or(cut.as_str(), |(words, _)| words);
+        format!("{whole_words}…")
+    };
+    match line {
+        Some(line) => format!("{clause} (line {line})"),
+        None => clause,
     }
 }
 
@@ -941,7 +1038,7 @@ fn removed(table: &toml::Table) -> Option<String> {
                     None => format!("write `{to}` in seconds"),
                 };
                 format!(
-                    "{name}.{key} was renamed {name}.{to}, in seconds like every duration: {instead} under [{name}]"
+                    "{name}.{key} is now {name}.{to}: every duration is in seconds; {instead} under [{name}]"
                 )
             }
         })
@@ -1168,6 +1265,43 @@ mod tests {
         );
     }
 
+    /// The dictation window has room for a few words about a configuration
+    /// that did not load; `spokenpad check` prints the rest.
+    #[test]
+    fn a_configuration_error_has_a_summary_short_enough_for_the_window() {
+        let summarize = |toml: &str| summary(&Config::parse(toml, None).unwrap_err());
+        assert_eq!(
+            summarize("[nvim]\nmode = 'pane'\npane_dimension = 3\n"),
+            "unknown field `pane_dimension` (line 3)"
+        );
+        assert_eq!(
+            summarize("[audio]\nsample_rate = 44100\n"),
+            "audio.sample_rate must be 16000"
+        );
+        assert_eq!(
+            summarize("[audio]\npreroll_ms = 250\n"),
+            "audio.preroll_ms is now audio.preroll_seconds"
+        );
+        let long = summarize("[capture]\nsilence_timeout_seconds = 0.5\n");
+        assert!(long.chars().count() <= SUMMARY_LENGTH + 1, "{long}");
+        assert!(
+            long.starts_with("capture.silence_timeout_seconds"),
+            "{long}"
+        );
+        assert_eq!(
+            summarize("[nvim]\ncopy_to_clipboard = 3\n"),
+            "copy_to_clipboard: invalid type: integer `3` (line 2)"
+        );
+        let full = format!(
+            "{:#}",
+            Config::parse("[nvim]\npane_dimension = 3\n", None).unwrap_err()
+        );
+        assert!(
+            full.contains("pane_dimensions") && full.contains("line 2"),
+            "the whole report still lists the keys and quotes the line: {full}"
+        );
+    }
+
     /// A key spokenpad no longer reads is refused with what became of it,
     /// never with serde's bare "unknown field".
     #[test]
@@ -1180,7 +1314,7 @@ mod tests {
             ("[preview]\nenabled=true", "preview.enabled was removed"),
             (
                 "[audio]\npreroll_ms=250",
-                "audio.preroll_ms was renamed audio.preroll_seconds, in seconds like every duration: write `preroll_seconds = 0.25` under [audio]",
+                "audio.preroll_ms is now audio.preroll_seconds: every duration is in seconds; write `preroll_seconds = 0.25` under [audio]",
             ),
             ("[audio]\npostroll_ms=1000", "`postroll_seconds = 1`"),
             (

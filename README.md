@@ -267,8 +267,9 @@ dictation file as its own paragraph and saved after every utterance.
   starts a new recording** — it does not resume the old one, and it clears
   the notice in the winbar, so read that before you press.
 - **Cancel:** press the cancel key (`spokenpad cancel`) while recording. Text
-  that already reached the file stays, and the WAV is kept. After release,
-  cancel does nothing.
+  that already reached the file stays, and the WAV is kept; the winbar says
+  "recording cancelled" until the next press. After release, cancel does
+  nothing.
 - **Closing the window cancels the recording.** Close the pane while a
   recording runs — through your window manager, or with `:q` in it — and
   the recording is cancelled as if you had pressed the cancel key: what was
@@ -313,14 +314,18 @@ key press. It is shown once per capture and never replaces the preview.
 
 A notice has two parts: a **headline** (`⚠ microphone gap`), always drawn, and
 a sentence explaining it, added only when the window is wide enough for all of
-it. A narrow window gives up the level meter first, then the explanation, but
+it. Two headlines carry their figure themselves, because the explanation
+seldom fits beside them: the download's percentage ("downloading the speech
+model, 37%"), and why the config did not load ("config not reloaded: unknown
+field `pane_dimension` (line 3)"; `spokenpad check` prints the whole report).
+A narrow window gives up the level meter first, then the explanation, but
 never the phase label or the headline. When two things happen to the same
 capture, the more serious one is shown: memory limit reached > capture
 incomplete > microphone unavailable > capture not kept > recording lost >
 recording shortened > recording partly transcribed > no speech model > microphone gap > reached the time limit > stopped after
 silence > config not reloaded > nearly silent > held too briefly >
 downloading the speech model > loading the speech model > transcribing
-recordings > preview paused. The speech model's
+recordings > recording cancelled > preview paused. The speech model's
 notices are not about one capture: they stay until the model is ready and has
 caught up. The log always has the full sentence and paths.
 

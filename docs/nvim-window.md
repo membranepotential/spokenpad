@@ -737,17 +737,20 @@ reads as lost audio rather than as a cost control — which is exactly how it wa
 first reported.
 
 Every other **notice** about the capture just made — held too briefly,
-microphone gap, microphone unavailable, capture incomplete, nearly silent,
-stopped after silence, reached the time limit, memory cap — is appended to the
+recording cancelled, microphone gap, microphone unavailable, capture
+incomplete, nearly silent, stopped after silence, reached the time limit,
+memory cap — is appended to the
 winbar in the same way, in its own
 `SpokenpadNotice` highlight (the theme's `WarningMsg` foreground, or
 `DiagnosticWarn` where that is unset). One at a time, until the next key press.
 
-Which one, when a capture collects two, is decided by `Notice::priority` and
-applied in exactly one place, `Session::notify`: memory cap > capture
-incomplete > microphone unavailable > microphone gap > reached the time limit >
-stopped after silence > nearly silent > held too briefly > preview paused, ties
-going to the newer report. The two auto-stops sit there because nothing is lost
+Which one, when a capture collects two, is decided by `Notice::priority`, the
+declaration order of `session::Priority`, and applied in exactly one place,
+`Session::notify`: memory cap > capture incomplete > microphone unavailable >
+microphone gap > reached the time limit > stopped after silence > nearly
+silent > held too briefly > recording cancelled > preview paused, ties going
+to the newer report (README.md has the whole list, the speech model's notices
+included). The two auto-stops sit there because nothing is lost
 when a capture ends by itself; what the user reads instead is the microphone
 trouble that may have caused the silence. A paused preview can
 therefore never take the winbar from a microphone that dropped audio, and the

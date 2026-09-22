@@ -419,12 +419,8 @@ fn reconfigure(
             nvim.reconfigure(fresh.nvim);
         }
         Err(e) => {
-            let reason = format!("{e:#}")
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ");
-            log::error!("config not reloaded: {reason}; the window keeps the settings in use");
-            let _ = events.send(ResultEvent::ConfigInvalid(reason));
+            log::error!("config not reloaded: {e:#}; the window keeps the settings in use");
+            let _ = events.send(ResultEvent::ConfigInvalid(crate::config::summary(&e)));
         }
     }
 }

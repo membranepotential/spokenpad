@@ -1275,7 +1275,12 @@ fn indicator_fields(state: &IndicatorState) -> Vec<(Value, Value)> {
         // so the editor never has to split a sentence it did not compose.
         (
             Value::from("notice"),
-            Value::from(state.notice.as_ref().map_or("", |notice| notice.headline)),
+            Value::from(
+                state
+                    .notice
+                    .as_ref()
+                    .map_or("", |notice| notice.headline.as_ref()),
+            ),
         ),
         (
             Value::from("notice_detail"),

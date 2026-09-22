@@ -969,7 +969,7 @@ fn a_notice_is_winbar_text_in_every_phase_and_never_the_preview() {
     session.set_indicator(&idle).unwrap();
     let bar = rendered_winbar(&mut session);
     assert!(
-        bar.contains(held.headline) && bar.contains(held.detail.as_ref()),
+        bar.contains(held.headline.as_ref()) && bar.contains(held.detail.as_ref()),
         "an idle notice is invisible, which is the whole defect: {bar}"
     );
 
@@ -978,7 +978,7 @@ fn a_notice_is_winbar_text_in_every_phase_and_never_the_preview() {
     let bar = rendered_winbar(&mut session);
     assert!(bar.contains("spokenpad"), "the idle winbar is gone: {bar}");
     assert!(
-        !bar.contains(held.headline),
+        !bar.contains(held.headline.as_ref()),
         "a cleared notice stayed up: {bar}"
     );
 
@@ -986,7 +986,10 @@ fn a_notice_is_winbar_text_in_every_phase_and_never_the_preview() {
     live.notice = Some(gap.clone());
     session.set_indicator(&live).unwrap();
     let bar = winbar(&mut session);
-    assert!(bar.contains("REC") && bar.contains(gap.headline), "{bar}");
+    assert!(
+        bar.contains("REC") && bar.contains(gap.headline.as_ref()),
+        "{bar}"
+    );
     assert!(
         !bar.contains("provisional tail"),
         "the live tail belongs below the transcript, not in the winbar: {bar}"
@@ -1001,7 +1004,7 @@ fn a_notice_is_winbar_text_in_every_phase_and_never_the_preview() {
         "the preview must stay extmark virtual text: {marks}"
     );
     assert!(
-        !marks.contains(gap.headline),
+        !marks.contains(gap.headline.as_ref()),
         "the notice reached the preview: {marks}"
     );
     let lines = lua(
@@ -1055,7 +1058,7 @@ fn a_long_notice_keeps_the_phase_label_and_its_headline_in_a_narrow_window() {
             "spokenpad"
         };
         assert!(
-            bar.contains(phase) && bar.contains(notice.headline),
+            bar.contains(phase) && bar.contains(notice.headline.as_ref()),
             "the phase and the headline are the two things 40 columns must keep: {bar:?}"
         );
         assert!(
@@ -1074,7 +1077,7 @@ fn a_long_notice_keeps_the_phase_label_and_its_headline_in_a_narrow_window() {
     session.set_indicator(&capped).unwrap();
     let bar = rendered_winbar(&mut session);
     assert!(
-        bar.contains(notice.headline) && bar.contains(notice.detail.as_ref()),
+        bar.contains(notice.headline.as_ref()) && bar.contains(notice.detail.as_ref()),
         "a wide window shows the whole notice: {bar:?}"
     );
     assert!(
