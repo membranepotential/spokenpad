@@ -704,6 +704,49 @@ fn the_pane_says_when_the_daemon_waits_for_the_editor() {
     );
 }
 
+/// Closing the pane cancels a pending command with `<Esc>` so the buffer can
+/// be written, and never writes that `<Esc>` into the file: after `<C-v>` it
+/// would go in as a literal ESC, and after `<C-v>` and digits it would end
+/// the number and put its character in.
+#[test]
+fn closing_mid_command_writes_no_trace_of_the_cancelling_escape() {
+    if !harness::tools_or_skip(&["Xvfb", "nvim", "fc-match"]) {
+        return;
+    }
+    let server = XServer::start();
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let config = dictation_config(directory.path());
+    // Keys typed into a buffer holding "abcd", with the cursor at its start,
+    // and what the file must say after the pane closes.
+    let cases = [
+        ("Aef<C-v>", "abcdef"),
+        ("Aef<C-v>u12", "abcdef"),
+        ("Aef<C-v>1", "abcdef"),
+        ("Rxy<C-v>", "xycd"),
+        ("Aef<C-k>", "abcdef"),
+        ("Aef<C-r>", "abcdef"),
+        ("Aef<Esc>2", "abcdef"),
+        ("Aef<Esc>r", "abcdef"),
+        ("Aef<C-v><Tab>", "abcdef\t"),
+    ];
+    for (index, (keys, expected)) in cases.into_iter().enumerate() {
+        let file = config
+            .dictation_dir
+            .join(format!("dictation-2026-09-22-1{index:05}.md"));
+        std::fs::write(&file, "abcd\n").expect("create the dictation file");
+        let mut pane = pane_on(&server, &config, &file);
+        call(&mut pane, "nvim_input", vec![Value::from(keys)], PATIENCE);
+        let _ = pane.step(Duration::from_millis(200));
+        drop(pane);
+        let written = std::fs::read_to_string(&file).expect("read the dictation file");
+        assert_eq!(
+            written.trim_end_matches('\n'),
+            expected,
+            "after {keys:?} the file says {written:?}"
+        );
+    }
+}
+
 // ------------------------------------------------------------------ helpers
 
 /// The editor configuration these panes run with: a socket and a dictation

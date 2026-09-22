@@ -334,12 +334,21 @@ budget, because `shell::daemon::SHUTDOWN_GRACE` (3 s) is what the daemon
 gives its editor thread before it exits and stops that thread wherever it had
 got to. The pane divides that budget: 1.2 s for the writes, then 0.5 s for
 the editor to quit before it is killed. Before either, a command left half
-typed in the window is cancelled with `<Esc>`, at most three times, each time
-after asking `nvim_get_mode` (0.1 s each): Neovim runs no call while one is
-pending, the write included, so closing the window after a stray `g` or `2`
-used to lose everything typed since the last utterance. The three are checked
-against the grace at compile time, so a change to one of them cannot quietly break the
-guarantee. The systemd unit's `TimeoutStopSec=10` sits well above all of it,
+typed in the window is cancelled with `<Esc>`, at most three, each followed
+by a call that runs only once Neovim has read it (0.1 s each): Neovim runs no
+call while one is pending, the write included, so closing the window after a
+stray `g` or `2` used to lose everything typed since the last utterance.
+
+That call also says what the `<Esc>` typed, because in Insert mode it is not
+always a cancel: after `<C-v>` it goes into the text as a literal ESC, and
+after `<C-v>` and digits (`<C-v>u12`) it ends the number, whose control
+character goes in. The first is taken back with `<BS>`, which in Replace mode
+also puts back the character it replaced, and the second is deleted, so
+neither reaches the file (`tests/pane_render.rs` checks both, in Insert and
+Replace mode, against a real Neovim). `nvim_get_mode` cannot be that check:
+Neovim answers it on arrival, which can be before the `<Esc>` ahead of it is
+read. The budgets are checked against the grace at compile time, so a change
+to one of them cannot quietly break the guarantee. The systemd unit's `TimeoutStopSec=10` sits well above all of it,
 so a stop that goes wrong ends in seconds and never in a SIGKILL during a
 write.
 

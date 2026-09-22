@@ -1657,3 +1657,25 @@ stop never reaching its report of undelivered text.
   means reported, never written twice.
 - Rejected: a shorter cap. Someone who typed `"` and went to read something
   would lose the text of the utterance they were dictating from the window.
+
+## The cancelling `<Esc>` at pane teardown leaves no trace (2026-09-22)
+
+Closing the pane cancels a half-typed command with `<Esc>` so that the
+buffer can be written. In Insert mode after `<C-v>` that `<Esc>` went into
+the file as a literal ESC, and after `<C-v>u12` it ended the number and
+`\x12` went in.
+
+- Chosen: keep the `<Esc>` and take back what it typed. Measured on Neovim
+  0.12.5: after `<C-v>` the ESC is inserted and Insert mode goes on; after
+  `<C-v>` and digits the number's character is inserted and Normal mode
+  follows; after `<C-k>`, `<C-r>` or `<C-o>` nothing is inserted. A literal
+  ESC before the cursor is taken back with `<BS>`, which in Replace mode also
+  restores the character it replaced; a control character under the cursor
+  after leaving Insert mode is deleted.
+- Chosen: after each `<Esc>`, a call Neovim runs only once it has read that
+  key, instead of `nvim_get_mode`. `nvim_get_mode` is answered on arrival,
+  and in the first version that raced ahead of the `<Esc>`: the pane sent a
+  second one, which deleted the ESC in Replace mode instead of restoring the
+  character under it. The check only looks, so one left queued behind a
+  command that is still pending changes nothing when it runs.
+- Rejected: a different cancelling key. After `<C-v>` every key is literal.

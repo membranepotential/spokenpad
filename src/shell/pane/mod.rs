@@ -987,11 +987,13 @@ const WRITE_TIMEOUT: Duration = Duration::from_millis(1_200);
 const QUIT_GRACE: Duration = Duration::from_millis(500);
 /// Before either, a command the user left half typed is cancelled, one
 /// `<Esc>` at a time, asking each time with `nvim_get_mode` -- which Neovim
-/// answers at once even while it waits for a key.
+/// answers at once even while it waits for a key -- and once more after the
+/// last, then a call that takes back what that `<Esc>` typed, if it typed
+/// anything. Each gets this long.
 const MODE_TIMEOUT: Duration = Duration::from_millis(100);
 const CANCEL_ATTEMPTS: u32 = 3;
 const _: () = assert!(
-    CANCEL_ATTEMPTS as u128 * MODE_TIMEOUT.as_millis()
+    (CANCEL_ATTEMPTS as u128 + 2) * MODE_TIMEOUT.as_millis()
         + WRITE_TIMEOUT.as_millis()
         + QUIT_GRACE.as_millis()
         < crate::shell::daemon::SHUTDOWN_GRACE.as_millis(),
@@ -1034,19 +1036,118 @@ impl Pane {
     /// everything typed since the last utterance. Nothing is lost by
     /// cancelling it: the window is going away, and the command with it.
     fn cancel_half_typed_command(&mut self) {
+        let was = match self.call("nvim_get_mode", Vec::new(), MODE_TIMEOUT) {
+            Ok(mode) if waiting_for_keys(&mode) => mode_name(&mode).to_owned(),
+            _ => return,
+        };
+        log::info!("cancelling a command left half typed in the pane, to write it");
         for _ in 0..CANCEL_ATTEMPTS {
-            match self.call("nvim_get_mode", Vec::new(), MODE_TIMEOUT) {
-                Ok(mode) if waiting_for_keys(&mode) => {
-                    log::info!("cancelling a command left half typed in the pane, to write it");
-                    if self.editor.input("<Esc>").is_err() {
-                        return;
-                    }
-                }
-                _ => return,
+            if self.editor.input("<Esc>").is_err() {
+                return;
+            }
+            // Not `nvim_get_mode`: Neovim answers that the moment it arrives,
+            // possibly before the `<Esc>` ahead of it is read. This call runs
+            // only once the `<Esc>` is, so an answer means Neovim is free,
+            // and says what the `<Esc>` did. No answer means it is still
+            // waiting for keys, and the next `<Esc>` goes in; the query left
+            // behind changes nothing when it runs.
+            if let Ok(trace) = self.call(
+                "nvim_exec_lua",
+                vec![
+                    Value::from(ESCAPE_TRACE),
+                    Value::Array(vec![Value::from(was.as_str())]),
+                ],
+                MODE_TIMEOUT,
+            ) {
+                self.take_back_escape(&trace);
+                return;
             }
         }
     }
+
+    /// Take back what the `<Esc>` that cancelled a pending command typed,
+    /// as [`ESCAPE_TRACE`] found it.
+    ///
+    /// In Insert or Replace mode an `<Esc>` is not always a cancel: after
+    /// `<C-v>` it goes into the text as a literal ESC and Insert mode goes on,
+    /// and after `<C-v>` and some digits it ends the number, whose character
+    /// goes in, and leaves Insert mode. Either would be written into the
+    /// file. The first is taken back with `<BS>`, which in Replace mode also
+    /// puts back the character it replaced; the second is deleted.
+    fn take_back_escape(&mut self, trace: &Value) {
+        let field = |index: usize| trace.as_array().and_then(|parts| parts.get(index));
+        match field(0).and_then(Value::as_str) {
+            Some("backspace") => {
+                log::info!("the <Esc> went into the text after <C-v>; taking it back");
+                if let Err(error) = self.editor.input("<BS>") {
+                    log::warn!("could not take back the <Esc>: {error:#}");
+                }
+            }
+            Some("delete") => {
+                log::info!("the <Esc> ended a <C-v> number; taking its character back");
+                let (Some(row), Some(column)) = (
+                    field(1).and_then(Value::as_i64),
+                    field(2).and_then(Value::as_i64),
+                ) else {
+                    return;
+                };
+                let deleted = self.call(
+                    "nvim_buf_set_text",
+                    vec![
+                        Value::from(0),
+                        Value::from(row),
+                        Value::from(column),
+                        Value::from(row),
+                        Value::from(column + 1),
+                        Value::Array(Vec::new()),
+                    ],
+                    MODE_TIMEOUT,
+                );
+                if let Err(error) = deleted {
+                    log::warn!("could not take back the <C-v> number: {error:#}");
+                }
+            }
+            _ => {}
+        }
+    }
 }
+
+/// The `mode` of an `nvim_get_mode` answer, or "" without one.
+fn mode_name(mode: &Value) -> &str {
+    mode.as_map()
+        .and_then(|fields| {
+            fields
+                .iter()
+                .find(|(key, _)| key.as_str() == Some("mode"))
+                .and_then(|(_, value)| value.as_str())
+        })
+        .unwrap_or("")
+}
+
+/// What a cancelling `<Esc>` typed, given the mode it was sent in: `{
+/// "backspace" }`, `{ "delete", row, column }` (0-based, the character to
+/// delete) or `{ "none" }`. Only looks; see [`Pane::take_back_escape`].
+const ESCAPE_TRACE: &str = r#"
+local was = ...
+local mode = vim.api.nvim_get_mode().mode
+local row, col = unpack(vim.api.nvim_win_get_cursor(0))
+local line = vim.api.nvim_get_current_line()
+if mode:match("^[iR]") then
+  -- Still inserting: after <C-v>, the <Esc> is the character before the
+  -- cursor.
+  if col > 0 and line:byte(col) == 27 then
+    return { "backspace" }
+  end
+elseif was:match("^[iR]") then
+  -- Back in Normal mode from Insert: the <Esc> ended a <C-v> number, and
+  -- the cursor is on the control character that number made.
+  local byte = line:byte(col + 1)
+  if byte and byte < 32 and byte ~= 9 then
+    return { "delete", row - 1, col }
+  end
+end
+return { "none" }
+"#;
 
 /// Keep the text of a buffer Neovim could not write.
 ///
