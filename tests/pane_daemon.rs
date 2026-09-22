@@ -71,6 +71,7 @@ fn the_daemon_opens_a_pane_dictates_into_it_and_cleans_up() {
     if !harness::tools_or_skip(&["Xvfb", "i3", "nvim", "fc-match"]) {
         return;
     }
+    harness::log_to_test_output();
 
     // ---------------------------------------- with no display at all
     // The state a systemd user service is in when nobody imported DISPLAY.
@@ -142,18 +143,21 @@ fn the_daemon_opens_a_pane_dictates_into_it_and_cleans_up() {
     // budget hoped to be too small: the caller then gives up before the
     // thread has begun, so the case is reached every time instead of on a
     // machine that happens to be slow that morning.
-    let (host, socket, orphan_root) = abandoned_pane(&server);
+    let (host, orphan) = abandoned_pane(&server);
     wait_for(PATIENCE, "the abandoned editor to come up", || {
-        UnixStream::connect(&socket).ok().map(drop)
+        orphan.started.exists().then_some(())
     });
     wait_for(
         PATIENCE,
         "the abandoned pane to be closed by its thread",
-        || (UnixStream::connect(&socket).is_err() && pane_window(&i3).is_none()).then_some(()),
+        || {
+            (UnixStream::connect(&orphan.socket).is_err() && pane_window(&i3).is_none())
+                .then_some(())
+        },
     );
     println!("a pane that opened after its caller gave up was closed rather than orphaned");
     drop(host);
-    drop(orphan_root);
+    drop(orphan);
     let base = server.plain_window();
     i3.wait_until_managed(base);
     std::thread::sleep(SETTLE);
@@ -270,6 +274,7 @@ fn closing_the_pane_cancels_the_capture_it_showed() {
     if !harness::tools_or_skip(&["Xvfb", "i3", "nvim", "fc-match"]) {
         return;
     }
+    harness::log_to_test_output();
     let mut server = XServer::start();
     let i3 = I3::start(&server);
     let base = server.plain_window();
@@ -437,12 +442,25 @@ fn contains(path: &Path, text: &str) -> bool {
 /// The thread opens it all the same: it hears the request before it hears
 /// that nobody wants the answer. So this is the orphan case with none of its
 /// timing — the caller gave up before the window existed.
-fn abandoned_pane(server: &XServer) -> (PaneHost, PathBuf, tempfile::TempDir) {
+fn abandoned_pane(server: &XServer) -> (PaneHost, AbandonedPane) {
     let directory = tempfile::tempdir().expect("a temporary directory");
     let root = directory.path();
     let dictation = root.join("dictation");
     std::fs::create_dir_all(&dictation).expect("make the dictation directory");
+    // The editor leaves this behind once it has run its startup, which an
+    // `--embed` editor does only after the pane attached to it as its UI.
+    // The pane is closed a moment later, so its socket may come and go
+    // between two looks at it; a file stays.
+    let started = root.join("started");
     let config = Nvim {
+        editor: vec![
+            "nvim".to_owned(),
+            "-c".to_owned(),
+            format!(
+                "call writefile([], '{}')",
+                started.to_str().expect("a UTF-8 temporary path")
+            ),
+        ],
         mode: Mode::Pane,
         socket_path: root.join("nvim.sock"),
         dictation_dir: dictation.clone(),
@@ -474,7 +492,22 @@ fn abandoned_pane(server: &XServer) -> (PaneHost, PathBuf, tempfile::TempDir) {
         asked.is_err(),
         "a deadline that has already passed must not report a pane as open"
     );
-    (host, config.socket_path, directory)
+    (
+        host,
+        AbandonedPane {
+            socket: config.socket_path,
+            started,
+            _root: directory,
+        },
+    )
+}
+
+/// Where to look for the editor of a pane nobody waited for.
+struct AbandonedPane {
+    socket: PathBuf,
+    /// Written by the editor once it has started.
+    started: PathBuf,
+    _root: tempfile::TempDir,
 }
 
 /// The middle of the pane's window on the screen, as i3 placed it.

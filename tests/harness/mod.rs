@@ -41,6 +41,39 @@ use x11rb::{
 pub const SETTLE: Duration = Duration::from_millis(500);
 pub const START_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// Sends spokenpad's log to the output of the test that caused it, which the
+/// test harness shows only when that test fails: the daemon and the pane
+/// then say why a wait ran out, on CI as well as here. The redraw events the
+/// grid ignores are left out; there are hundreds per pane.
+pub fn log_to_test_output() {
+    struct TestOutput;
+    impl log::Log for TestOutput {
+        fn enabled(&self, metadata: &log::Metadata) -> bool {
+            metadata.target().starts_with("spokenpad")
+                && !(metadata.target() == "spokenpad::core::grid"
+                    && metadata.level() == log::Level::Debug)
+        }
+        fn log(&self, record: &log::Record) {
+            if self.enabled(record.metadata()) {
+                // Output a test thread captures is captured for the threads
+                // it spawns too, so each line lands with its own test.
+                eprintln!(
+                    "{} {:5} {}: {}",
+                    chrono::Local::now().format("%H:%M:%S%.3f"),
+                    record.level(),
+                    record.target(),
+                    record.args()
+                );
+            }
+        }
+        fn flush(&self) {}
+    }
+    static LOGGER: TestOutput = TestOutput;
+    if log::set_logger(&LOGGER).is_ok() {
+        log::set_max_level(log::LevelFilter::Debug);
+    }
+}
+
 pub fn on_path(program: &str) -> bool {
     let Some(path) = std::env::var_os("PATH") else {
         return false;
@@ -81,8 +114,25 @@ pub struct Killed(pub Child);
 
 impl Drop for Killed {
     fn drop(&mut self) {
-        // SAFETY: `id()` is this child's pid, and the child is not reaped
-        // until the `wait` below, so the pid cannot have been reused.
+        self.stop();
+    }
+}
+
+impl Killed {
+    pub fn alive(&mut self) -> bool {
+        matches!(self.0.try_wait(), Ok(None))
+    }
+
+    /// Stop and reap the child, if that has not happened yet.
+    fn stop(&mut self) {
+        // Once reaped, `try_wait` answers from what it kept, without asking
+        // the kernel, and the pid is not signalled again: it may be another
+        // process's by now.
+        if !matches!(self.0.try_wait(), Ok(None)) {
+            return;
+        }
+        // SAFETY: `id()` is this child's pid, and `try_wait` above found it
+        // not reaped, so the pid cannot have been reused.
         let _ = unsafe { libc::kill(self.0.id() as libc::pid_t, libc::SIGTERM) };
         let deadline = Instant::now() + Duration::from_secs(3);
         while Instant::now() < deadline {
@@ -93,12 +143,6 @@ impl Drop for Killed {
         }
         let _ = self.0.kill();
         let _ = self.0.wait();
-    }
-}
-
-impl Killed {
-    pub fn alive(&mut self) -> bool {
-        matches!(self.0.try_wait(), Ok(None))
     }
 }
 
@@ -158,6 +202,7 @@ impl XServer {
     }
 
     fn try_start(number: u32, screens: u32) -> Option<Self> {
+        clear_stale_lock(number);
         let display = format!(":{number}");
         let screen_args = (0..screens).flat_map(|screen| {
             [
@@ -330,6 +375,62 @@ impl XServer {
         self.connection.map_window(id).expect("map it");
         self.connection.flush().expect("flush");
         id
+    }
+}
+
+impl Drop for XServer {
+    /// An Xvfb that needed `SIGKILL` leaves its lock file and its socket
+    /// behind. Left there, a later run skips the number while the lock's pid
+    /// is alive, which after enough runs is some unrelated process that was
+    /// given the same pid. So this server's own leftovers are removed here,
+    /// once it is reaped, and only when the lock names this server.
+    fn drop(&mut self) {
+        if self.origin != Origin::Xvfb {
+            return;
+        }
+        let pid = self.owner.0.id();
+        self.owner.stop();
+        let lock = lock_file(self.number);
+        if std::fs::read_to_string(&lock).is_ok_and(|text| text.trim().parse() == Ok(pid)) {
+            let _ = std::fs::remove_file(&lock);
+            let _ = std::fs::remove_file(socket_file(self.number));
+        }
+    }
+}
+
+/// Where an X server on display `number` keeps its lock, holding its pid.
+fn lock_file(number: u32) -> PathBuf {
+    PathBuf::from(format!("/tmp/.X{number}-lock"))
+}
+
+/// Where an X server on display `number` listens.
+fn socket_file(number: u32) -> PathBuf {
+    PathBuf::from(format!("/tmp/.X11-unix/X{number}"))
+}
+
+/// Removes the lock of display `number` when it is one an Xvfb of this user
+/// left behind: nothing answers on its socket, and it is older than any
+/// server still starting could have made it. The pid in it says nothing by
+/// then: pids are reused, and an X server takes a lock whose pid is alive
+/// for a live server's. A lock of another user's, or one a server answers
+/// behind, is never touched.
+fn clear_stale_lock(number: u32) {
+    const STARTING: Duration = Duration::from_secs(60);
+    let lock = lock_file(number);
+    let Ok(metadata) = std::fs::symlink_metadata(&lock) else {
+        return;
+    };
+    // SAFETY: geteuid takes no arguments and cannot fail.
+    let ours = std::os::unix::fs::MetadataExt::uid(&metadata) == unsafe { libc::geteuid() };
+    let old = metadata
+        .modified()
+        .ok()
+        .and_then(|modified| modified.elapsed().ok())
+        .is_some_and(|age| age > STARTING);
+    let answered = UnixStream::connect(socket_file(number)).is_ok();
+    if ours && old && !answered {
+        let _ = std::fs::remove_file(&lock);
+        let _ = std::fs::remove_file(socket_file(number));
     }
 }
 
