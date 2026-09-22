@@ -18,7 +18,8 @@ never takes focus. Fully local, CPU-only. Next milestone: public release.
   walkthrough fixes, xclip dependency, CLI starts the socket) — two lanes
   running: core/daemon/config (A+B done), and edges (group 1 done).
   After merge (me): wire shell/models terminal_progress into main.rs;
-  nvim/** + pane/** create_dir_all -> shell::dirs::create_private.
+  nvim/** + pane/** create_dir_all -> shell::dirs::create_private;
+  daemon run(): Inherited socket -> nvim::with_manager_session on reload.
 
 ## Next
 1. User live check after i3 reload: pane_layout = "tiled"; hover focuses the
