@@ -4,7 +4,8 @@
 //! module finds the socket, sends one request per connection under an
 //! absolute deadline, and reads what spokenpad needs to open a dictation
 //! window: which window manager it is, the outputs, the configuration that
-//! must prove the `no_focus` rule, and the tree to find the window in. The
+//! must prove the `no_focus` rule, and the tree to find the window in. On
+//! sway it also adds the pane's own `no_focus` rule at runtime. The
 //! only subprocesses left are `xdotool` for the pointer on X11 and
 //! `i3 --get-socketpath` when no socket is named in the environment.
 use crate::core::{
@@ -103,6 +104,38 @@ impl Wm {
                 self.kind
             );
         }
+        self.ensure_workspace_holds_a_window()
+    }
+
+    /// Makes sway refuse focus to a window matching all of `criteria`, opened
+    /// now, or says why it cannot.
+    ///
+    /// sway focuses every window it maps on the focused workspace unless a
+    /// `no_focus` rule matches it (`should_focus` in `sway/tree/view.c`), and
+    /// reads neither `_NET_WM_USER_TIME` nor the window type. So this adds
+    /// that rule over IPC — never to the user's configuration file — and
+    /// requires sway's reply to say it took it. `GET_CONFIG` cannot show a
+    /// rule added this way; `tests/pane_focus_wms.rs` proves that sway honours
+    /// it. The first window on an empty workspace is focused whatever the
+    /// rules say, so that is refused as it is for [`Self::prove_no_focus`].
+    ///
+    /// i3 accepts `no_focus` only in its configuration, so this is sway's
+    /// alone.
+    pub fn refuse_focus(&self, criteria: &[Criterion]) -> Result<()> {
+        ensure!(
+            self.kind == WmKind::Sway,
+            "{} cannot add a `no_focus` rule while it runs",
+            self.kind
+        );
+        let command = wm::no_focus_command(criteria)?;
+        wm::check_command_reply(&request(&self.socket, Message::RunCommand, &command)?)
+            .with_context(|| format!("sway refused `{command}`"))?;
+        self.ensure_workspace_holds_a_window()
+    }
+
+    /// Both window managers give the first window on a workspace the focus
+    /// whatever `no_focus` says, and a new window lands on the focused one.
+    fn ensure_workspace_holds_a_window(&self) -> Result<()> {
         let empty = wm::focused_workspace_is_empty(&request(&self.socket, Message::GetTree, "")?)
             .context("cannot tell which workspace the window would open on")?;
         ensure!(
@@ -525,6 +558,64 @@ mod tests {
                 assert!(error.contains(expected), "{kind}: {error}");
             }
         }
+    }
+
+    /// The pane's rule goes to sway over IPC, anchored, and counts only when
+    /// sway says it took it and the window would not be the first on its
+    /// workspace. i3 cannot take a rule at runtime, so it is refused there.
+    #[test]
+    fn sway_is_given_a_runtime_no_focus_rule_and_i3_is_not_asked() {
+        let occupied = json!({"id": 1, "type": "root", "nodes": [
+            {"id": 2, "type": "workspace", "focused": false, "nodes": [
+                {"id": 4, "type": "con", "focused": true, "pid": 4242, "app_id": "foot"}
+            ]}
+        ]});
+        let empty = json!({"id": 1, "type": "root", "nodes": [
+            {"id": 2, "type": "workspace", "focused": true, "nodes": [], "floating_nodes": []}
+        ]});
+        let sway = json!({"variant": "sway", "major": 1}).to_string();
+        let criteria = [
+            criterion(Property::Instance, "spokenpad-pane"),
+            criterion(Property::Class, "spokenpad-pane"),
+        ];
+        let rule = r#"no_focus [instance="^spokenpad-pane$" class="^spokenpad-pane$"]"#;
+        for (tree, accepted, expected) in [
+            (&occupied, true, None),
+            (&empty, true, Some("the focused workspace is empty")),
+            (&occupied, false, Some("sway refused `no_focus")),
+        ] {
+            let reply = json!([if accepted {
+                json!({"success": true})
+            } else {
+                json!({"success": false, "error": "Token 'x' is not recognized"})
+            }]);
+            let fake = FakeWm::start(vec![
+                (Message::GetVersion, sway.clone()),
+                (Message::GetTree, tree.to_string()),
+                (Message::RunCommand, reply.to_string()),
+            ]);
+            let result = Wm::at(fake.socket.clone()).unwrap().refuse_focus(&criteria);
+            match expected {
+                None => result.unwrap(),
+                Some(expected) => {
+                    let error = format!("{:#}", result.unwrap_err());
+                    assert!(error.contains(expected), "{error}");
+                }
+            }
+            assert_eq!(*fake.commands.lock().unwrap(), [rule]);
+        }
+
+        let fake = FakeWm::start(vec![
+            (Message::GetVersion, json!({"major": 4}).to_string()),
+            (Message::RunCommand, json!([{"success": true}]).to_string()),
+        ]);
+        let error = Wm::at(fake.socket.clone())
+            .unwrap()
+            .refuse_focus(&criteria)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("i3 cannot add"), "{error}");
+        assert!(fake.commands.lock().unwrap().is_empty());
     }
 
     #[test]

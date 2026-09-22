@@ -1,47 +1,52 @@
-//! Does the pane stay unfocused under window managers other than i3?
+//! Does the pane stay unfocused, and on top, under window managers other
+//! than i3?
 //!
-//! Verdicts: Openbox and KWin (Wayland) never focus it; sway does, and
-//! [`sway_focuses_the_pane_so_pane_mode_is_unsupported_there`] pins that.
+//! Verdicts: sway (given the pane's `no_focus` rule over IPC), Openbox, KWin
+//! on Wayland and KWin on X11 never focus it, and every one shows it above
+//! the window the user is typing in.
 //!
 //! `tests/pane_window.rs` proves it on i3. This asks the same of sway (with
-//! Xwayland), Openbox and KWin (Wayland, with Xwayland), each in a headless
-//! session the test starts itself (`harness::desktops`), and each with the
-//! same story:
+//! Xwayland), Openbox, KWin (Wayland, with Xwayland) and KWin (X11), each in
+//! a headless session the test starts itself (`harness::desktops`), and each
+//! with the same story:
 //!
 //! 1. A window of the test's own holds the focus, the way the application the
 //!    user is dictating into does.
 //! 2. The pane opens exactly as the daemon opens it — `NvimSession::ensure`
-//!    in `nvim.mode = "pane"`, which measures the screen, starts the pane
-//!    thread, maps the window and attaches to the editor inside — and
-//!    dictated text is appended to it, so it redraws, while keys are typed
-//!    into the focused window.
+//!    in `nvim.mode = "pane"`, which measures the screen, adds the `no_focus`
+//!    rule under sway, starts the pane thread, maps the window and attaches
+//!    to the editor inside — and dictated text is appended to it, so it
+//!    redraws, while keys are typed into the focused window.
 //! 3. The focus is sampled every few milliseconds from before the open to
 //!    after the last redraw, both as the X server's input focus and as the
 //!    window manager reports it. No sample may name the pane or its frame.
-//! 4. The pane is mapped and wholly on screen; whether it is stacked above
-//!    the focused window is recorded.
-//! 5. The user selecting the pane — a click, or on KWin the activation a
-//!    click would cause — may focus it: that is the user asking, and the pane
-//!    sets `WM_HINTS input = True` so they can type into it
-//!    (`src/shell/pane/x11.rs`). Selecting the holder gives the focus back.
+//! 4. The pane is mapped, wholly on screen, and shown above the focused
+//!    window.
+//! 5. The user selecting the pane — a click, or on KWin Wayland the
+//!    activation a click would cause — must focus it: that is the user asking,
+//!    and the pane sets `WM_HINTS input = True` so they can type into it
+//!    (`src/shell/pane/x11.rs`). Selecting the holder gives the focus back,
+//!    and the pane stays above it.
 //! 6. The next passage's pane — after the user closed the first — is not
-//!    focused either, and neither is one opened on an empty workspace.
-//! 7. A positive control: the same window without `_NET_WM_USER_TIME` (and,
-//!    where that is not enough, typed `_NET_WM_WINDOW_TYPE_NORMAL`) must be
-//!    focused by the same window manager, or the checks above measure
-//!    nothing.
-//! 8. Ablations, recorded and not asserted: `WM_HINTS input = False`, a
-//!    normal window type with the user time kept, and `_NET_WM_STATE_ABOVE`.
+//!    focused either. On an empty workspace the pane opens unfocused, except
+//!    under sway, which focuses the first window on a workspace whatever the
+//!    rules say: there the pane refuses to open, and no window appears.
+//! 7. A positive control: the same window, not matched by the sway rule, then
+//!    also without `_NET_WM_USER_TIME`, then also typed
+//!    `_NET_WM_WINDOW_TYPE_NORMAL`, must be focused by the same window manager
+//!    at one of those steps, or the checks above measure nothing.
+//! 8. Ablations, recorded and not asserted: a normal window type with the user
+//!    time kept, and the shipped window without `_NET_WM_STATE_ABOVE`.
 //!
 //! Every row is printed (run with `-- --nocapture`); they are the evidence in
-//! `docs/experiments/2026-09-22-pane-focus-other-wms.md`.
+//! `docs/experiments/2026-09-22-pane-stacking-and-sway.md`.
 mod harness;
 
 use harness::{
     SETTLE, XServer, close_window,
     desktops::{
-        Desktop, FocusSampler, FocusStealingPrevention, KwinWayland, Openbox, SCREEN, Samples,
-        Sway, find_by_instance, screen_rect, with_frames,
+        Desktop, FocusSampler, FocusStealingPrevention, KwinWayland, KwinX11, Openbox, SCREEN,
+        Samples, Sway, ewmh_stacking_above, find_by_instance, screen_rect, with_frames,
     },
     wait_for,
 };
@@ -72,32 +77,30 @@ use x11rb::{
 
 const PATIENCE: Duration = Duration::from_secs(20);
 
-/// sway focuses the pane: pane mode is unsupported there, and this pins it.
+/// How long a control or ablation window waits, unmapped, between being
+/// created and having a property rewritten by the test.
 ///
-/// sway's `view_map` focuses every new window on the focused workspace
-/// unless a user's `no_focus` rule matches it or its ICCCM input model is
-/// "No Input"; it reads neither `_NET_WM_USER_TIME` nor the window type. So
-/// the pane, as shipped, takes the focus from the window the user is typing
-/// in. If this test ever fails, sway or the pane changed, and
-/// `docs/nvim-window.md` must say so.
+/// sway's Xwayland window manager sometimes missed a `WM_CLASS` rewritten
+/// right after the window was created: in about one run in four, sway's tree
+/// still showed the name the window was created with after the map, so
+/// sway's `no_focus` rule for the pane matched a control renamed not to match
+/// it. With this pause, ten runs in ten showed the new name. The pane itself
+/// never rewrites a property; this is for the test's own rewrites only.
+const REWRITE_PAUSE: Duration = SETTLE;
+
+/// sway focuses every window it maps unless a `no_focus` rule matches it; it
+/// reads neither `_NET_WM_USER_TIME` nor the window type. spokenpad adds that
+/// rule for the pane over sway's IPC before the map, and this proves sway
+/// honours it — and that the control, the same window under another
+/// `WM_CLASS`, is focused.
 #[test]
-fn sway_focuses_the_pane_so_pane_mode_is_unsupported_there() {
+fn the_pane_never_takes_focus_on_sway() {
     if !harness::tools_or_skip(&["sway", "Xwayland", "nvim", "fc-match"]) {
         return;
     }
     let mut sway = Sway::start();
     let report = story(&mut sway);
-    assert!(
-        report.control_focused,
-        "{}: the positive control was not focused, so this run proves nothing",
-        report.desktop
-    );
-    assert!(
-        !report.stolen.is_empty(),
-        "{}: the pane was never focused. sway, or the pane, changed: re-measure and \
-         update docs/nvim-window.md before calling sway supported",
-        report.desktop
-    );
+    report.assert_never_focused();
 }
 
 #[test]
@@ -140,6 +143,26 @@ fn the_pane_never_takes_focus_on_kwin_wayland_without_focus_stealing_prevention(
         return;
     }
     let mut kwin = KwinWayland::start(FocusStealingPrevention::None);
+    let report = story(&mut kwin);
+    report.assert_never_focused();
+}
+
+#[test]
+fn the_pane_never_takes_focus_on_kwin_x11() {
+    if !harness::tools_or_skip(&["Xvfb", "kwin_x11", "dbus-daemon", "nvim", "fc-match"]) {
+        return;
+    }
+    let mut kwin = KwinX11::start(FocusStealingPrevention::Low);
+    let report = story(&mut kwin);
+    report.assert_never_focused();
+}
+
+#[test]
+fn the_pane_never_takes_focus_on_kwin_x11_without_focus_stealing_prevention() {
+    if !harness::tools_or_skip(&["Xvfb", "kwin_x11", "dbus-daemon", "nvim", "fc-match"]) {
+        return;
+    }
+    let mut kwin = KwinX11::start(FocusStealingPrevention::None);
     let report = story(&mut kwin);
     report.assert_never_focused();
 }
@@ -201,7 +224,11 @@ fn story(desktop: &mut dyn Desktop) -> Report {
     // 2 and 3. The pane, opened as the daemon opens it, redrawn while the
     // user types elsewhere.
     let directory = tempfile::tempdir().expect("a temporary directory");
-    let mut session = NvimSession::new(pane_config(directory.path(), &desktop.server().display));
+    let mut session = NvimSession::new(pane_config(
+        directory.path(),
+        &desktop.server().display,
+        desktop.sway_socket(),
+    ));
     let sampler = FocusSampler::start(&desktop.server().display, desktop.view());
     let opened = session.ensure().expect("open the pane");
     assert!(opened.is_some(), "the pane did not attach");
@@ -236,19 +263,20 @@ fn story(desktop: &mut dyn Desktop) -> Report {
         name(desktop.focused(), holder, &frames)
     ));
 
-    // 4. Mapped and on screen; the stacking is recorded.
-    let placement = placement(desktop, pane, holder);
-    report.row(placement.row());
-    assert!(placement.viewable, "the pane is not viewable");
+    // 4. Mapped, on screen, and above the window the user is typing in.
+    let opened = placement(desktop, pane, holder);
+    report.row(opened.row("after the open"));
+    assert!(opened.viewable, "the pane is not viewable");
     assert!(
-        placement.on_screen,
+        opened.on_screen,
         "the pane is not wholly on the screen: {:?}",
-        placement.rect
+        opened.rect
     );
+    opened.assert_above("after the open");
 
-    // 5. Selecting the pane is the user asking for the focus; selecting the
-    // holder hands it back. Neither is a steal.
-    let (x, y, width, height) = placement.rect;
+    // 5. Selecting the pane is the user asking for the focus, and it must
+    // get it; selecting the holder hands it back. Neither is a steal.
+    let (x, y, width, height) = opened.rect;
     let centre = (x + width as i32 / 2, y + height as i32 / 2);
     desktop.select(pane, (centre.0 as i16, centre.1 as i16));
     sleep(SETTLE);
@@ -259,15 +287,29 @@ fn story(desktop: &mut dyn Desktop) -> Report {
         name(after_click, holder, &frames),
         name(Some(input_after_click), holder, &frames)
     ));
+    assert!(
+        after_click.is_some_and(|window| frames.contains(&window))
+            && frames.contains(&input_after_click),
+        "{}: the user selected the pane and it did not get the focus",
+        desktop.describe()
+    );
     let holder_rect = screen_rect(desktop.server(), holder);
     let spot =
-        outside(holder_rect, placement.rect).expect("a spot on the holder the pane leaves free");
+        outside(holder_rect, opened.rect).expect("a spot on the holder the pane leaves free");
     desktop.select(holder, spot);
     sleep(SETTLE);
     report.row(format!(
         "the user selects the holder again: the window manager focuses {}",
         name(desktop.focused(), holder, &frames)
     ));
+    assert_eq!(
+        desktop.focused(),
+        Some(holder),
+        "selecting the holder did not give it the focus back"
+    );
+    let reselected = placement(desktop, pane, holder);
+    report.row(reselected.row("after the user selected the holder again"));
+    reselected.assert_above("after the user selected the holder again");
 
     // 6a. The next passage: the user closed the pane, the next dictation
     // opens another.
@@ -294,6 +336,9 @@ fn story(desktop: &mut dyn Desktop) -> Report {
         &samples,
         &frames,
     );
+    let placed = placement(desktop, next, holder);
+    report.row(placed.row("the next passage's pane"));
+    placed.assert_above("the next passage's pane");
     session.close();
     wait_for(PATIENCE, "the pane to close", || {
         find_by_instance(desktop.server(), INSTANCE)
@@ -304,16 +349,10 @@ fn story(desktop: &mut dyn Desktop) -> Report {
     // 7. The positive control, on the holder's workspace.
     make_focused(desktop, holder);
     report.control_focused = control(desktop, &mut report);
-
-    // 8. What `WM_HINTS input = False` would buy and cost: recorded, not
-    // asserted, since the pane does not ship it.
-    make_focused(desktop, holder);
-    no_input(desktop, &mut report, holder);
     make_focused(desktop, holder);
 
-    // 9. Which of the shipped properties holds on its own, and what
-    // `_NET_WM_STATE_ABOVE` would do to the stacking: also recorded, not
-    // asserted.
+    // 8. Which of the shipped properties holds on its own, and what
+    // `_NET_WM_STATE_ABOVE` does to the stacking: recorded, not asserted.
     ablate(
         desktop,
         &mut report,
@@ -333,8 +372,13 @@ fn story(desktop: &mut dyn Desktop) -> Report {
         desktop,
         &mut report,
         holder,
-        "the shipped properties plus `_NET_WM_STATE_ABOVE`",
-        |server, window| set_atoms(server, window, "_NET_WM_STATE", "_NET_WM_STATE_ABOVE"),
+        "the shipped window without `_NET_WM_STATE_ABOVE`",
+        |server, window| {
+            server
+                .connection
+                .delete_property(window, server.atom("_NET_WM_STATE"))
+                .expect("delete _NET_WM_STATE");
+        },
     );
     make_focused(desktop, holder);
 
@@ -344,9 +388,34 @@ fn story(desktop: &mut dyn Desktop) -> Report {
     sleep(SETTLE);
     let before = desktop.server().input_focus();
     let sampler = FocusSampler::start(&desktop.server().display, desktop.view());
-    session
-        .ensure()
-        .expect("open a pane on the empty workspace");
+    let lone = session.ensure();
+    if desktop.sway_socket().is_some() {
+        // sway focuses the first window on a workspace whatever the rules
+        // say, so the pane must not open there at all.
+        let error = format!(
+            "{:#}",
+            lone.expect_err("the pane opened on an empty sway workspace")
+        );
+        sleep(SETTLE);
+        let samples = sampler.finish();
+        report.row(format!(
+            "a pane on an empty workspace: refused ({error}); a pane window exists: {}; \
+             {} samples, X input focus seen on {:?}",
+            find_by_instance(desktop.server(), INSTANCE).is_some(),
+            samples.count,
+            samples.input.keys().collect::<Vec<_>>()
+        ));
+        assert!(
+            error.contains("the focused workspace is empty"),
+            "refused for another reason: {error}"
+        );
+        assert!(
+            find_by_instance(desktop.server(), INSTANCE).is_none(),
+            "a refused pane left a window behind"
+        );
+        return report;
+    }
+    lone.expect("open a pane on the empty workspace");
     let lone = pane_window(desktop);
     desktop.wait_until_managed(lone);
     session
@@ -368,7 +437,6 @@ fn story(desktop: &mut dyn Desktop) -> Report {
     report
 }
 
-/// One stage's samples, as a row, and as a failure if any named the pane.
 fn record(report: &mut Report, stage: &str, samples: &Samples, frames: &[Window]) {
     let touched = samples.touched(frames);
     let row =
@@ -504,8 +572,8 @@ fn key_presses(server: &XServer, holder: Window) -> usize {
 // --------------------------------------------------------------- the pane
 
 /// The dictation settings a daemon in pane mode would run with, pointed into
-/// `root` and at the test's display.
-fn pane_config(root: &Path, display: &str) -> Nvim {
+/// `root`, at the test's display and, under sway, at the test's sway.
+fn pane_config(root: &Path, display: &str, sway_socket: Option<PathBuf>) -> Nvim {
     let dictation = root.join("dictation");
     std::fs::create_dir_all(&dictation).expect("make the dictation directory");
     Nvim {
@@ -513,6 +581,7 @@ fn pane_config(root: &Path, display: &str) -> Nvim {
         socket_path: root.join("nvim.sock"),
         dictation_dir: dictation,
         display: Some(display.to_owned()),
+        sway_socket,
         init: Some(PathBuf::from(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/src/lua/dictation_init.lua"
@@ -534,26 +603,45 @@ struct Placement {
     viewable: bool,
     on_screen: bool,
     floating: Option<bool>,
+    /// Whether the window manager shows the pane above the holder
+    /// ([`Desktop::above`]).
+    above: Option<bool>,
     /// Whether `_NET_CLIENT_LIST_STACKING` puts the pane above the holder,
     /// when the window manager publishes it.
-    above: Option<bool>,
+    ewmh_above: Option<bool>,
 }
 
 impl Placement {
-    fn row(&self) -> String {
+    fn row(&self, stage: &str) -> String {
         let (x, y, width, height) = self.rect;
+        let show =
+            |value: Option<bool>| value.map_or_else(|| "unknown".to_owned(), |v| v.to_string());
         format!(
-            "placement: {width}x{height} at {x},{y} on a {}x{} screen; viewable: {}; wholly on \
-             screen: {}; floating: {}; above the holder in _NET_CLIENT_LIST_STACKING: {}",
+            "placement {stage}: {width}x{height} at {x},{y} on a {}x{} screen; viewable: {}; \
+             wholly on screen: {}; floating: {}; shown above the holder: {}; above it in \
+             _NET_CLIENT_LIST_STACKING: {}",
             SCREEN.0,
             SCREEN.1,
             self.viewable,
             self.on_screen,
-            self.floating
-                .map_or_else(|| "unknown".to_owned(), |value| value.to_string()),
-            self.above
+            show(self.floating),
+            show(self.above),
+            self.ewmh_above
                 .map_or_else(|| "not published".to_owned(), |value| value.to_string())
         )
+    }
+
+    fn assert_above(&self, stage: &str) {
+        assert_eq!(
+            self.above,
+            Some(true),
+            "{stage}: the pane is not shown above the focused window"
+        );
+        assert_ne!(
+            self.ewmh_above,
+            Some(false),
+            "{stage}: _NET_CLIENT_LIST_STACKING puts the pane below the focused window"
+        );
     }
 }
 
@@ -575,20 +663,13 @@ fn placement(desktop: &dyn Desktop, pane: Window, holder: Window) -> Placement {
         && height > 0
         && x + width as i32 <= i32::from(SCREEN.0)
         && y + height as i32 <= i32::from(SCREEN.1);
-    let stacking = harness::desktops::client_list(server, "_NET_CLIENT_LIST_STACKING");
-    let above = match (
-        stacking.iter().position(|window| *window == pane),
-        stacking.iter().position(|window| *window == holder),
-    ) {
-        (Some(pane), Some(holder)) => Some(pane > holder),
-        _ => None,
-    };
     Placement {
         rect,
         viewable,
         on_screen,
         floating: desktop.floating(pane),
-        above,
+        above: desktop.above(pane, holder),
+        ewmh_above: ewmh_stacking_above(server, pane, holder),
     }
 }
 
@@ -612,16 +693,23 @@ fn outside(holder: (i32, i32, u32, u32), pane: (i32, i32, u32, u32)) -> Option<(
 
 // ------------------------------------------------------ the positive control
 
-/// The window the pane ships, with `_NET_WM_USER_TIME` deleted before the
-/// map, and then additionally typed `_NET_WM_WINDOW_TYPE_NORMAL`. Returns
-/// whether either was focused: at least one must be, or no row above can
-/// tell focus from no focus.
+/// The window the pane ships, taken apart one step at a time until the window
+/// manager focuses it: first renamed, so sway's `no_focus` rule for the pane
+/// does not match it; then also without `_NET_WM_USER_TIME`; then also typed
+/// `_NET_WM_WINDOW_TYPE_NORMAL`. Returns whether any step was focused: one
+/// must be, or no row above can tell focus from no focus.
 fn control(desktop: &mut dyn Desktop, report: &mut Report) -> bool {
-    let mut focused_any = false;
-    for (label, normal) in [
-        ("control: no `_NET_WM_USER_TIME`", false),
+    for (label, drop_user_time, normal) in [
+        ("control: `WM_CLASS` spokenpad-control", false, false),
         (
-            "control: no `_NET_WM_USER_TIME`, `_NET_WM_WINDOW_TYPE_NORMAL`",
+            "control: `WM_CLASS` spokenpad-control, no `_NET_WM_USER_TIME`",
+            true,
+            false,
+        ),
+        (
+            "control: `WM_CLASS` spokenpad-control, no `_NET_WM_USER_TIME`, \
+             `_NET_WM_WINDOW_TYPE_NORMAL`",
+            true,
             true,
         ),
     ] {
@@ -636,110 +724,63 @@ fn control(desktop: &mut dyn Desktop, report: &mut Report) -> bool {
             "spokenpad control",
         )
         .expect("open the control window");
+        sleep(REWRITE_PAUSE);
         let server = desktop.server();
         server
             .connection
-            .delete_property(window.id(), server.atom("_NET_WM_USER_TIME"))
-            .expect("delete _NET_WM_USER_TIME");
-        if normal {
+            .change_property8(
+                PropMode::REPLACE,
+                window.id(),
+                AtomEnum::WM_CLASS,
+                AtomEnum::STRING,
+                b"spokenpad-control\0spokenpad-control\0",
+            )
+            .expect("rename the control");
+        if drop_user_time {
             server
                 .connection
-                .change_property32(
-                    PropMode::REPLACE,
-                    window.id(),
-                    server.atom("_NET_WM_WINDOW_TYPE"),
-                    AtomEnum::ATOM,
-                    &[server.atom("_NET_WM_WINDOW_TYPE_NORMAL")],
-                )
-                .expect("write _NET_WM_WINDOW_TYPE");
+                .delete_property(window.id(), server.atom("_NET_WM_USER_TIME"))
+                .expect("delete _NET_WM_USER_TIME");
+        }
+        if normal {
+            set_atoms(
+                server,
+                window.id(),
+                "_NET_WM_WINDOW_TYPE",
+                "_NET_WM_WINDOW_TYPE_NORMAL",
+            );
         }
         server.sync();
         let before = server.input_focus();
+        // Sampled like the pane, so the control is held to the same measure:
+        // a focus that lasted one sample counts.
+        let sampler = FocusSampler::start(&desktop.server().display, desktop.view());
         window.map().expect("map the control");
         desktop.wait_until_managed(window.id());
         sleep(SETTLE);
+        let samples = sampler.finish();
         let frames = with_frames(desktop.server(), window.id());
-        let focused = desktop.focused().is_some_and(|id| frames.contains(&id))
-            && frames.contains(&desktop.server().input_focus());
+        let manager = desktop.focused();
+        let input = desktop.server().input_focus();
+        let focused = samples.touched(&frames);
         report.row(format!(
-            "{label}: focused on map: {focused} (X input focus before 0x{before:x})"
+            "{label}: focused: {focused} (after the map the window manager focuses {}, the X \
+             input focus is on {}; before the map it was on 0x{before:x})",
+            manager.map_or_else(|| "nothing".to_owned(), |id| name_raw(id, &frames)),
+            name_raw(input, &frames)
         ));
-        focused_any |= focused;
         drop(window);
         sleep(SETTLE);
-        if focused_any {
-            break;
+        if focused {
+            return true;
         }
     }
-    focused_any
+    false
 }
 
-/// The window the pane ships with `WM_HINTS input = False` — the ICCCM "No
-/// Input" model — written before the map. Does the window manager leave it
-/// unfocused, and can the user still click into it and type?
-fn no_input(desktop: &mut dyn Desktop, report: &mut Report, holder: Window) {
-    let rect = Rect {
-        x: 700,
-        y: 450,
-        width: 400,
-        height: 200,
-    };
-    let window = PaneWindow::open(
-        Display::connect(&desktop.server().display).expect("connect for the ablation"),
-        rect,
-        "spokenpad no-input",
-    )
-    .expect("open the ablation window");
-    let server = desktop.server();
-    x11rb::properties::WmHints {
-        input: Some(false),
-        initial_state: Some(x11rb::properties::WmHintsState::Normal),
-        ..x11rb::properties::WmHints::new()
-    }
-    .set(&server.connection, window.id())
-    .expect("write WM_HINTS");
-    server.sync();
-    window.map().expect("map the ablation window");
-    desktop.wait_until_managed(window.id());
-    sleep(SETTLE);
-    let frames = with_frames(desktop.server(), window.id());
-    let on_map = name(desktop.focused(), holder, &frames);
-    let (x, y, width, height) = screen_rect(desktop.server(), window.id());
-    desktop.select(
-        window.id(),
-        (
-            (x + width as i32 / 2) as i16,
-            (y + height as i32 / 2) as i16,
-        ),
-    );
-    sleep(SETTLE);
-    let after_select = name(desktop.focused(), holder, &frames);
-    let input = name(Some(desktop.server().input_focus()), holder, &frames);
-    let typed = desktop.type_key();
-    sleep(Duration::from_millis(300));
-    let mut keys = 0;
-    while let Some(event) = window.poll().expect("poll the ablation window") {
-        if matches!(event, Event::KeyPress(_)) {
-            keys += 1;
-        }
-    }
-    report.row(format!(
-        "ablation, `WM_HINTS input = False` (user time 0): on map the window manager focuses \
-         {on_map}; after the user selects it, {after_select}, X input focus on {input}; \
-         {}",
-        if typed {
-            format!("a key typed then reached it: {keys} of 1")
-        } else {
-            "no key can be typed here".to_owned()
-        }
-    ));
-    drop(window);
-    sleep(SETTLE);
-}
-
-/// The window the pane ships, with one property added over the holder before
-/// the map by `change`, which writes it over the test's connection. Is it
-/// still unfocused, and where is it stacked? Recorded, not asserted.
+/// The window the pane ships, with one property changed before the map by
+/// `change`, which writes it over the test's connection. Is it still
+/// unfocused, and where is it shown? Recorded, not asserted.
 fn ablate(
     desktop: &mut dyn Desktop,
     report: &mut Report,
@@ -758,6 +799,7 @@ fn ablate(
         "spokenpad ablation",
     )
     .expect("open the ablation window");
+    sleep(REWRITE_PAUSE);
     change(desktop.server(), window.id());
     desktop.server().sync();
     window.map().expect("map the ablation window");
@@ -766,11 +808,14 @@ fn ablate(
     let frames = with_frames(desktop.server(), window.id());
     let placed = placement(desktop, window.id(), holder);
     report.row(format!(
-        "ablation, {label}: on map the window manager focuses {}; above the holder in \
-         _NET_CLIENT_LIST_STACKING: {}",
+        "ablation, {label}: on map the window manager focuses {}; shown above the holder: {}; \
+         above it in _NET_CLIENT_LIST_STACKING: {}",
         name(desktop.focused(), holder, &frames),
         placed
             .above
+            .map_or_else(|| "unknown".to_owned(), |value| value.to_string()),
+        placed
+            .ewmh_above
             .map_or_else(|| "not published".to_owned(), |value| value.to_string())
     ));
     drop(window);

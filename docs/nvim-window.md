@@ -21,7 +21,7 @@ detection.
 |---|---|---|---|
 | `attach` (default) | you, with `spokenpad editor` | any terminal, any desktop: X11 or Wayland, any window manager | the daemon opens no window, so it cannot take focus |
 | `managed` | the daemon, on the first key-down, in `nvim.terminal` | i3 or sway | proven: the running window manager's `no_focus` rule, before the window exists |
-| `pane` | the daemon, on the first key-down, in a window it draws itself | X11, and Wayland through Xwayland | the window's own properties, which any window manager reads |
+| `pane` | the daemon, on the first key-down, in a window it draws itself | X11, and Wayland through Xwayland | the window's own properties; on sway, a `no_focus` rule the daemon adds over IPC |
 
 `attach` is the default because it is the one that works everywhere with no
 window-manager rules to install: a new user gets a working setup on any
@@ -30,7 +30,8 @@ original behaviour, generalised from alacritty on i3 to five terminals on i3
 and sway; it is worth its setup for a window that appears by itself, beside
 what you are reading. `pane` is that same window without the setup and
 without the terminal: spokenpad owns it, so the rule, the terminal table and
-the empty-workspace gap all go away — and so does the window's independence
+the empty-workspace gap all go away — except on sway, where spokenpad adds
+the rule itself and the gap stays — and so does the window's independence
 from the daemon.
 
 Everything below the mode is shared: one file per editor, the winbar
@@ -114,15 +115,16 @@ the pane draws, and never writes to the buffer.
 
 ### Why it needs no rule
 
-The window carries four properties, all set before it is first mapped, which
+The window carries five properties, all set before it is first mapped, which
 is when a window manager reads them:
 
 | property | what it does |
 |---|---|
 | `_NET_WM_USER_TIME = 0` | "do not focus this window when it is mapped" (EWMH). On i3 this is the whole guarantee, and unlike `no_focus` it holds for the first window on an empty workspace. |
 | `_NET_WM_WINDOW_TYPE_UTILITY` | floats it on tiling window managers, and is what refuses focus on those that ignore user time (bspwm, Hyprland's Xwayland). |
-| `WM_HINTS input = True` | the ICCCM "passive input" model, so the window manager may give it focus *later* — which is how you click in and type. |
-| `WM_CLASS = spokenpad-pane` | a name no rule written for the managed-mode terminal can match, because this window needs none. |
+| `_NET_WM_STATE_ABOVE` | keeps it above the window you are typing in. KWin, on Wayland and on X11, stacks a window it refused focus *below* the active one otherwise. |
+| `WM_HINTS input = True` | the ICCCM "passive input" model, so the window manager may give it focus *later*, when you click it — which is how you click in and type. |
+| `WM_CLASS = spokenpad-pane` | a name no rule written for the managed-mode terminal can match, and the name the one rule spokenpad adds itself, on sway, matches (below). |
 
 `_NET_WM_USER_TIME` is written **once, as zero, and never again**. The EWMH
 contract is that a toolkit updates it to the timestamp of the last user
@@ -134,19 +136,43 @@ along with everything in the table:
 zero it changes nothing, and announcing it would oblige spokenpad to answer
 it.
 
+**sway reads none of these.** It focuses every window it maps on the focused
+workspace unless a `no_focus` rule matches it (`should_focus` in
+`sway/tree/view.c`). So when `$SWAYSOCK` is set, the daemon sends sway, over
+its IPC socket and before the window exists,
+
+```
+no_focus [instance="^spokenpad-pane$" class="^spokenpad-pane$"]
+```
+
+and opens the pane only if sway answers that it took the rule. sway accepts
+`no_focus` at runtime and ignores a rule it already holds, so the rule is sent
+before every pane; a `swaymsg reload` drops it, and the next pane sends it
+again. Nothing is written to your sway configuration. sway focuses the first
+window on a workspace whatever the rules say, so on an empty focused
+workspace the pane does not open, and the text goes to the pending passage
+as it does when no window can open. `$SWAYSOCK` reaches the service through
+sway's own `/etc/sway/config.d/50-systemd-user.conf`, which imports it into
+the user manager.
+
 **Where it is verified.** Each of these runs headless in the test suite,
 with the pane opened the way the daemon opens it and the focus sampled every
-5 ms while it opens and redraws:
+5 ms while it opens and redraws. "Your click" is a real click through the
+window manager, except on KWin Wayland, which takes no synthetic input
+headless: there it is the activation KWin performs on a click.
 
-| window manager | the pane is focused on map | test |
-|---|---|---|
-| i3 | never, also as the first window on an empty workspace | `tests/pane_window.rs` |
-| Openbox 3.6 | never, also on an empty desktop | `tests/pane_focus_wms.rs` |
-| KWin 6.7 (Wayland, Xwayland) | never, with focus stealing prevention at its default or off; but KWin stacks the pane **below** the focused window, so a pane that overlaps it is partly hidden | `tests/pane_focus_wms.rs` |
-| sway 1.12 (Xwayland) | **always — unsupported.** sway focuses every new window unless a `no_focus` rule matches it or it refuses input, and reads neither the user time nor the window type. Use attach or managed mode on sway. | `tests/pane_focus_wms.rs` pins this |
+| window manager | the pane takes focus on its own | shown above the focused window | your click focuses it | test |
+|---|---|---|---|---|
+| i3 4.25 | never, also as the first window on an empty workspace | yes (floating) | yes | `tests/pane_window.rs` |
+| sway 1.12 (Xwayland) | never, through the rule above; on an empty workspace the pane does not open | yes (floating) | yes | `tests/pane_focus_wms.rs` |
+| Openbox 3.6 | never, also on an empty desktop | yes | yes | `tests/pane_focus_wms.rs` |
+| KWin 6.7 (Wayland, Xwayland) | never, with focus stealing prevention at its default or off, also on an empty desktop | yes, through `_NET_WM_STATE_ABOVE` | yes | `tests/pane_focus_wms.rs` |
+| KWin 6.7 (X11, `kwin_x11`) | never, with focus stealing prevention at its default or off, also on an empty desktop | yes, through `_NET_WM_STATE_ABOVE` | yes | `tests/pane_focus_wms.rs` |
 
 Measured in
-[2026-09-22-pane-focus-other-wms.md](experiments/2026-09-22-pane-focus-other-wms.md).
+[2026-09-22-pane-focus-other-wms.md](experiments/2026-09-22-pane-focus-other-wms.md)
+and
+[2026-09-22-pane-stacking-and-sway.md](experiments/2026-09-22-pane-stacking-and-sway.md).
 Mutter, xfwm4, bspwm and Hyprland are only read from their source, in the
 [P0 experiment](experiments/2026-09-21-own-window-p0-properties.md), and
 awesome is known to need more. Try pane mode before you rely on it there, and
@@ -375,8 +401,9 @@ else, and you keep reading.
 
 Who enforces that differs by mode. In `managed` it is the window manager's
 job, through a rule the user installs and spokenpad proves. In `pane` it is
-the window's own properties, which every window manager reads without being
-told anything ([above](#why-it-needs-no-rule)). What both have in common, and
+the window's own properties, which every window manager but sway reads
+without being told anything, and on sway a rule spokenpad adds over sway's
+IPC ([above](#why-it-needs-no-rule)). What both have in common, and
 what the rest of this section is about, is that spokenpad contains **no focus
 call at all**: not `xdotool windowfocus`, and not a "remember the focused window and
 restore it afterwards" dance either, since restoring focus is itself a focus

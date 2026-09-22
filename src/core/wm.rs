@@ -120,6 +120,8 @@ pub fn parse_outputs(reply: &str) -> Result<Vec<Output>> {
 pub enum Property {
     /// The instance half of X11 `WM_CLASS` (i3, and Xwayland under sway).
     Instance,
+    /// The class half of X11 `WM_CLASS` (i3, and Xwayland under sway).
+    Class,
     /// The Wayland `app_id` (sway, native windows).
     AppId,
 }
@@ -128,6 +130,7 @@ impl Property {
     fn key(self) -> &'static str {
         match self {
             Self::Instance => "instance",
+            Self::Class => "class",
             Self::AppId => "app_id",
         }
     }
@@ -169,9 +172,9 @@ impl Criterion {
     fn selects(&self, node: &Value) -> bool {
         let actual = match self.property {
             Property::AppId => node.get("app_id"),
-            Property::Instance => node
+            Property::Instance | Property::Class => node
                 .get("window_properties")
-                .and_then(|properties| properties.get("instance")),
+                .and_then(|properties| properties.get(self.property.key())),
         };
         actual.and_then(Value::as_str) == Some(self.value.as_str())
     }
@@ -306,6 +309,38 @@ pub fn placement_command(kind: WmKind, criterion: &Criterion, rect: Rect) -> Str
         "{criterion} floating enable, resize set {} {}, move {absolute}position {} {}",
         rect.width, rect.height, rect.x, rect.y
     )
+}
+
+/// The sway command that adds a `no_focus` rule, while sway runs, for exactly
+/// the windows all of `criteria` select.
+///
+/// sway accepts `no_focus` at runtime (it is in the table of commands valid
+/// both in the configuration and over IPC, `sway/commands.c`) and ignores a
+/// rule it already holds (`criteria_already_exists`). A rule added this way
+/// lasts until the next `reload`, which is why it is sent before every map
+/// rather than once.
+///
+/// sway reads every criteria value as a PCRE pattern that may match anywhere
+/// in the name, so each is anchored with `^` and `$`. The value is already
+/// `[A-Za-z0-9_.-]+`, and a dot is written `[.]`, so the pattern needs no
+/// backslash, which sway's criteria parser would strip.
+pub fn no_focus_command(criteria: &[Criterion]) -> Result<String> {
+    ensure!(
+        !criteria.is_empty(),
+        "a no_focus rule without criteria would match every window"
+    );
+    let criteria = criteria
+        .iter()
+        .map(|criterion| {
+            format!(
+                r#"{}="^{}$""#,
+                criterion.property.key(),
+                criterion.value.replace('.', "[.]")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    Ok(format!("no_focus [{criteria}]"))
 }
 
 /// `RUN_COMMAND`: one result per command, each of which must have succeeded.
@@ -527,6 +562,36 @@ mod tests {
             placement_command(WmKind::Sway, &app_id("spokenpad"), rect),
             r#"[app_id="spokenpad"] floating enable, resize set 600 400, move absolute position -1920 40"#
         );
+    }
+
+    #[test]
+    fn a_runtime_no_focus_rule_is_anchored_and_needs_criteria() {
+        let class = Criterion::new(Property::Class, "spokenpad-pane").unwrap();
+        assert_eq!(
+            no_focus_command(&[instance("spokenpad-pane"), class]).unwrap(),
+            r#"no_focus [instance="^spokenpad-pane$" class="^spokenpad-pane$"]"#
+        );
+        assert_eq!(
+            no_focus_command(&[app_id("org.spokenpad")]).unwrap(),
+            r#"no_focus [app_id="^org[.]spokenpad$"]"#
+        );
+        assert!(no_focus_command(&[]).is_err());
+    }
+
+    #[test]
+    fn a_class_criterion_reads_the_class_half_of_wm_class() {
+        let tree = json!({
+            "id": 1, "focused": false, "nodes": [],
+            "floating_nodes": [{
+                "id": 3, "focused": false,
+                "window_properties": {"instance": "pane", "class": "Pane"}
+            }]
+        })
+        .to_string();
+        let class = |value| Criterion::new(Property::Class, value).unwrap();
+        let criteria = [class("pane"), class("Pane")];
+        assert_eq!(find_window(&tree, &criteria).unwrap(), Some(&criteria[1]));
+        assert_eq!(criteria[1].to_string(), r#"[class="Pane"]"#);
     }
 
     #[test]

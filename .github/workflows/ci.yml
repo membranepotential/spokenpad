@@ -36,7 +36,7 @@ jobs:
           libxcb libxkbcommon-x11 fontconfig ttf-dejavu
           xorg-server-xvfb i3-wm xorg-setxkbmap xclip
           alacritty mesa
-          openbox sway kwin xorg-xwayland dbus
+          openbox sway kwin kwin-x11 xorg-xwayland dbus
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check

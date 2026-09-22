@@ -464,6 +464,12 @@ pub struct Nvim {
     /// pending passage.
     #[serde(skip)]
     pub display: Option<String>,
+    /// sway's IPC socket, read from `$SWAYSOCK` alongside `display`. When set,
+    /// a pane adds its own `no_focus` rule to sway before it maps, since sway
+    /// reads none of the properties that keep other window managers from
+    /// focusing it. `None` means no sway, and no IPC is attempted.
+    #[serde(skip)]
+    pub sway_socket: Option<PathBuf>,
     pub startup_timeout_s: f64,
     /// Send a desktop notification when dictated text has to go to the
     /// dictation file because no editor is open.
@@ -498,6 +504,7 @@ impl Default for Nvim {
             // Filled in by `Config::load`; `Default` is what a test builds,
             // and a test says which display it means.
             display: None,
+            sway_socket: None,
             startup_timeout_s: 20.,
             notify: true,
             copy_to_clipboard: false,
@@ -563,18 +570,24 @@ impl Source {
             Ok(config) => (config, None),
             Err(error) => {
                 let mut config = Config::default();
-                config.nvim.display = session_display();
+                config.nvim.read_session();
                 (config, Some(error))
             }
         }
     }
 }
 
-/// The session's X display, read once, when the config is: everything after
-/// takes it as a value, so nothing has to ask the environment at the moment
-/// it wants a window.
-fn session_display() -> Option<String> {
-    env::var("DISPLAY").ok().filter(|name| !name.is_empty())
+impl Nvim {
+    /// The session's X display and sway socket, read once, when the config
+    /// is: they are environment, not file, and everything after takes them
+    /// as values, so nothing has to ask the environment at the moment it
+    /// wants a window.
+    fn read_session(&mut self) {
+        self.display = env::var("DISPLAY").ok().filter(|name| !name.is_empty());
+        self.sway_socket = env::var_os("SWAYSOCK")
+            .filter(|socket| !socket.is_empty())
+            .map(PathBuf::from);
+    }
 }
 
 impl Config {
@@ -600,7 +613,7 @@ impl Config {
     /// Only the default location may be absent.
     pub fn load(path: Option<&Path>) -> Result<Self> {
         let mut config = Self::read_from(path)?;
-        config.nvim.display = session_display();
+        config.nvim.read_session();
         Ok(config)
     }
 

@@ -1273,3 +1273,50 @@ opened with.
   window open on the old font would have to be redrawn or reopened under the
   user, and a half-saved file would be read; the next window is a moment the
   user chose.
+
+## Pane stays on top, and sway gets a runtime `no_focus` rule (2026-09-22)
+
+The user decided three things after the
+[previous measurement](experiments/2026-09-22-pane-focus-other-wms.md):
+the focus rule is about the window acting by itself, the pane stacks on top,
+and sway gets a rule rather than being left unsupported. Measured in
+[the experiment](experiments/2026-09-22-pane-stacking-and-sway.md).
+
+- **The rule, reworded** ([constraints.md](constraints.md#no-window-spokenpad-opens-may-take-focus)):
+  no window spokenpad opens may take focus *by itself*; the user's own
+  deliberate click may focus it, so they can edit in it. The tests assert
+  both halves on every window manager: never focused on map, redraw, the
+  next passage's pane or an empty workspace, and focused after the user's
+  click. There is still no focus call anywhere.
+- **`_NET_WM_STATE_ABOVE` is set before the first map.** KWin, on Wayland
+  and on X11, stacks a window it refused focus below the active one; with
+  the state it is on top. On i3, sway, Openbox and both KWins the pane is
+  now shown above the focused window, also after the user clicks back into
+  that window, and still never focused.
+- **sway: the daemon adds `no_focus [instance="^spokenpad-pane$"
+  class="^spokenpad-pane$"]` over sway's IPC before every pane.** sway 1.12
+  accepts `no_focus` at runtime (it is in the table of commands valid in the
+  configuration and over IPC) and ignores a duplicate, and with the rule the
+  pane was never focused while a renamed twin was. The pane opens only on
+  sway's success reply, so a refused rule means no window. sway focuses the
+  first window on a workspace whatever the rules say, so on an empty focused
+  workspace the pane refuses to open and the text goes to the pending
+  passage, as when no window can open. The user's sway configuration is
+  never written; a `swaymsg reload` drops the rule and the next pane adds it
+  again.
+  - The socket comes from `$SWAYSOCK`, read once in `Config::load` into
+    `nvim.sway_socket` like `$DISPLAY`, so tests pass their own sway and
+    never reach the user's. sway's shipped
+    `/etc/sway/config.d/50-systemd-user.conf` imports `SWAYSOCK` into the
+    user manager.
+  - Not chosen: `WM_HINTS input = False` on sway. It would have needed a
+    sway-only variant of the window and left real keys through sway's seat
+    unmeasured.
+- **KWin 6.7.5 on X11 is covered** (`kwin_x11`, from `kwin-x11`, on a harness
+  Xvfb with a private bus): never focused at both focus stealing prevention
+  levels, on top, and a real click focuses it.
+- **Harness fixes:** Openbox ignored a window mapped right after it claimed
+  the screen in about one parallel run in three (already at c7a7d2b), so the
+  harness maps a probe window until Openbox manages it. sway's Xwayland
+  window manager sometimes missed a `WM_CLASS` rewritten right after a
+  window was created, so the test pauses before its own rewrites.

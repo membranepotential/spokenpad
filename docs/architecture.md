@@ -21,7 +21,7 @@ imperative shell, and `config.rs` sits at the root because both sides read it.
 | `core/geometry.rs` | Which output the pointer is on, and the clamped window rect | none |
 | `core/font.rs` | The pane's font size in points, `Xft.dpi`, and the cell a face makes: Alacritty's and FreeType's arithmetic, rounding included | none |
 | `core/text.rs` | Filler stripping, exact replacements, whitespace repair | none |
-| `core/wm.rs` | i3/sway IPC framing; parsing outputs, tree, config and `no_focus` rules | none |
+| `core/wm.rs` | i3/sway IPC framing; parsing outputs, tree, config and `no_focus` rules; the pane's runtime `no_focus` command for sway | none |
 | `core/terminal.rs` | The known terminals: how each names its window, where it opens, its argv | none |
 | `core/session.rs` | Utterance lifecycle, preview cadence, and the one user-visible notice | internal channels |
 | `core/decode.rs` | Committed sample offset, settled commits, release tails, preview isolation | worker messages |
@@ -43,7 +43,7 @@ imperative shell, and `config.rs` sits at the root because both sides read it.
 | `shell/pane/xkb.rs` | libxcb and libxkbcommon, opened with `dlopen` when a pane opens | shared libraries |
 | `shell/nvim/passage.rs` | With no editor open: append to the pending dictation file, and the pointer the next editor opens | filesystem |
 | `shell/nvim/rpc.rs` | msgpack-RPC transport with absolute deadlines; pure codec | Unix socket |
-| `shell/wm.rs` | i3/sway IPC requests under a deadline, once per spawn; `xdotool` for the pointer on i3 | IPC socket, one subprocess |
+| `shell/wm.rs` | i3/sway IPC requests under a deadline, once per spawn, and the pane's `no_focus` rule sent to sway before each pane; `xdotool` for the pointer on i3 | IPC socket, one subprocess |
 | `shell/logging.rs` | Private 0600 diagnostic log, rotated at 1 MB | filesystem |
 | `shell/daemon.rs` | `run` (the shell) and `serve` (the event loop) | all of the above |
 

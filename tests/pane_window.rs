@@ -1,6 +1,11 @@
 //! P0 of the own-window plan: does [`shell::pane::x11::Window`] stay unfocused
 //! when it appears, and still accept a click and keystrokes?
 //!
+//! Both halves of the rule are asserted: the window never takes the focus by
+//! itself, and the user's own click does give it the focus, so they can type
+//! into it. It is also shown above the window the user is typing in, before
+//! and after they click back into that window.
+//!
 //! The check runs against an X server and a window manager this test starts
 //! itself: an `Xvfb` on a free display number and an `i3` with a generated
 //! config and its own IPC socket. It never opens anything on the user's
@@ -17,7 +22,11 @@
 
 mod harness;
 
-use harness::{I3, SETTLE, XServer, click, find_key, move_pointer, press_key};
+use harness::{
+    I3, SETTLE, XServer, click,
+    desktops::{ewmh_stacking_above, x_stacking_above},
+    find_key, move_pointer, press_key,
+};
 use spokenpad::{
     core::geometry::Rect,
     shell::pane::x11::{Display, Window as Pane},
@@ -275,8 +284,13 @@ fn the_pane_window_never_takes_focus_on_i3() {
         "the X input focus moved when the pane was mapped"
     );
     assert_eq!(pane.focus_in, 0, "the window itself saw a FocusIn on map");
-    // (b) floating
+    // (b) floating, and so above the tiled window that has the focus
     assert!(observed.floating, "i3 did not float the pane");
+    assert_eq!(
+        x_stacking_above(&server, pane.id(), base),
+        Some(true),
+        "the pane is not above the focused window after the map"
+    );
     report.push(observed.row("the properties the pane ships"));
 
     // Placement: P2 must be able to put the pane where the pointer is.
@@ -355,6 +369,30 @@ fn the_pane_window_never_takes_focus_on_i3() {
     assert_eq!(
         pane.key_press, 2,
         "typed keys did not reach the focused pane"
+    );
+
+    // (d2) the user clicks back into the window they were typing in: it gets
+    // the focus, and the pane stays above it.
+    click(&mut server, 10, 10);
+    sleep(SETTLE);
+    assert!(
+        i3.node(base).expect("the base window").focused,
+        "a click on the base window did not give it the focus back"
+    );
+    let above = x_stacking_above(&server, pane.id(), base);
+    let ewmh_above = ewmh_stacking_above(&server, pane.id(), base);
+    report.push(format!(
+        "| stacking after the user clicked back into the focused window | above it in the X stacking order: {above:?} | in `_NET_CLIENT_LIST_STACKING`: {ewmh_above:?} | |"
+    ));
+    assert_eq!(
+        above,
+        Some(true),
+        "the pane is not above the focused window"
+    );
+    assert_ne!(
+        ewmh_above,
+        Some(false),
+        "_NET_CLIENT_LIST_STACKING puts the pane below the focused window"
     );
 
     // (e) re-map after unmap is unfocused again, and the property that makes

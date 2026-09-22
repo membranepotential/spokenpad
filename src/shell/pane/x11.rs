@@ -1,22 +1,24 @@
 //! The pane's X11 window: created so that no window manager will focus it,
 //! mapped only when spokenpad asks, and drawn into with `PutImage`.
 //!
-//! The window carries four properties, all of them set **before the first
+//! The window carries five properties, all of them set **before the first
 //! `MapWindow`**, which is when a window manager reads them:
 //!
 //! | property | what it does |
 //! |---|---|
 //! | `_NET_WM_USER_TIME = 0` | "do not focus this window when it is mapped" (EWMH). On i3 this is the whole guarantee, and it holds even for the first window on an empty workspace. |
 //! | `_NET_WM_WINDOW_TYPE_UTILITY` | floats the window on tiling window managers, and blocks focus on the ones that ignore user time (bspwm, Hyprland's Xwayland). |
-//! | `WM_HINTS input = True` | the ICCCM "passive input" model: the window manager may give the window the focus *later*, so the user can click in and type. |
-//! | `WM_CLASS = spokenpad-pane` | a name no rule written for the managed-mode terminal can match. |
+//! | `_NET_WM_STATE_ABOVE` | stacks the window above the one the user is typing in. KWin stacks a window it refused focus *below* the active one otherwise. It gives no focus anywhere measured. |
+//! | `WM_HINTS input = True` | the ICCCM "passive input" model: the window manager may give the window the focus *later*, when the user clicks it, so they can type into it. |
+//! | `WM_CLASS = spokenpad-pane` | a name no rule written for the managed-mode terminal can match, and the name the `no_focus` rule matches that spokenpad adds to sway before the map (`shell::wm::Wm::refuse_focus`): sway reads none of the properties above. |
 //!
 //! **`_NET_WM_USER_TIME` is written once, as 0, and never again.** The EWMH
 //! contract is that a toolkit updates it to the timestamp of the last user
 //! interaction; a window manager re-reads it at every map, so a window that
 //! updated it would steal the focus the next time it appeared. That was
 //! measured on i3, together with everything in the table above:
-//! `docs/experiments/2026-09-21-own-window-p0-properties.md`.
+//! `docs/experiments/2026-09-21-own-window-p0-properties.md`; the stacking
+//! and sway in `docs/experiments/2026-09-22-pane-stacking-and-sway.md`.
 //!
 //! `WM_TAKE_FOCUS` is deliberately absent: with `input = True` and a user time
 //! of 0 it changes nothing, and announcing it would oblige us to answer it.
@@ -58,6 +60,8 @@ x11rb::atom_manager! {
         _NET_WM_USER_TIME,
         _NET_WM_WINDOW_TYPE,
         _NET_WM_WINDOW_TYPE_UTILITY,
+        _NET_WM_STATE,
+        _NET_WM_STATE_ABOVE,
         // Not a standard property: the pane sends itself a client message of
         // this type to wake the thread blocked waiting for X events, so that
         // thread can notice it should stop.
@@ -206,6 +210,16 @@ impl Window {
             self.atoms._NET_WM_WINDOW_TYPE,
             AtomEnum::ATOM,
             &[self.atoms._NET_WM_WINDOW_TYPE_UTILITY],
+        )?;
+        // The initial state, which a window manager reads at the first map.
+        // Changing it later would take a client message to the root; the
+        // pane never sends one.
+        connection.change_property32(
+            PropMode::REPLACE,
+            self.id,
+            self.atoms._NET_WM_STATE,
+            AtomEnum::ATOM,
+            &[self.atoms._NET_WM_STATE_ABOVE],
         )?;
         WmHints {
             input: Some(true),

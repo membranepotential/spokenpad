@@ -1,6 +1,7 @@
 //! A headless desktop the pane tests start for themselves: an `Xvfb` on a
 //! free display number and an `i3` with a generated config and its own IPC
-//! socket. [`desktops`] starts sway, Openbox and KWin the same way.
+//! socket. [`desktops`] starts sway, Openbox and KWin (Wayland and X11) the
+//! same way.
 //!
 //! Nothing here ever touches the user's session. An Xvfb's display number is
 //! above `:50`, i3 gets `-c` and a private `ipc-socket`, and every process is
@@ -63,8 +64,9 @@ pub fn tools_or_skip(programs: &[&str]) -> bool {
         std::env::var_os("SPOKENPAD_ALLOW_MISSING_X11").is_some(),
         "{} not installed; this test needs a headless X server, i3, nvim and \
          fontconfig, the HiDPI test Alacritty, and the window manager tests sway, \
-         Xwayland, Openbox and KWin (pacman: xorg-server-xvfb i3-wm neovim \
-         xorg-setxkbmap alacritty sway xorg-xwayland openbox kwin). \
+         Xwayland, Openbox and KWin on Wayland and X11 (pacman: xorg-server-xvfb \
+         i3-wm neovim xorg-setxkbmap alacritty sway xorg-xwayland openbox kwin \
+         kwin-x11). \
          Set SPOKENPAD_ALLOW_MISSING_X11=1 to skip it deliberately.",
         missing.join(", ")
     );

@@ -286,16 +286,21 @@ The replaced tool's status overlay was a focusable window. When it appeared
 during recording, it could take focus away from the application the user was
 dictating into, aborting the transcription in progress.
 
-**Rule:** no window this project opens may receive keyboard focus at any point
-in its lifecycle. How that holds depends on `nvim.mode`:
+**Rule:** no window this project opens may take keyboard focus by itself,
+at any point in its lifecycle: not when it appears, not when it is shown
+again, not when it redraws. The user's own deliberate click may focus it, so
+they can edit in it; that is the user moving the focus, not the window. How
+the rule holds depends on `nvim.mode`:
 
 - **Pane mode opens exactly one: a window spokenpad draws itself**, and it
-  needs no rule and no window manager's cooperation. The window carries
+  needs no rule in the user's configuration. The window carries
   `_NET_WM_USER_TIME = 0` — the EWMH value for "do not focus this window when
   it is mapped" — together with `_NET_WM_WINDOW_TYPE_UTILITY`,
-  `WM_HINTS input = True` and a `WM_CLASS` of `spokenpad-pane`, all written
-  before the window is first mapped, which is when a window manager reads
-  them. Three rules hold this in place, and each is asserted:
+  `_NET_WM_STATE_ABOVE` (so it shows above the window the user is typing in),
+  `WM_HINTS input = True` (so their click can focus it) and a `WM_CLASS` of
+  `spokenpad-pane`, all written before the window is first mapped, which is
+  when a window manager reads them. Four rules hold this in place, and each
+  is asserted:
   - **`_NET_WM_USER_TIME` is written once, as zero, and never again.** The
     EWMH contract is that a toolkit keeps it at the timestamp of the last user
     interaction, and a window manager re-reads it at every map — so a window
@@ -306,16 +311,29 @@ in its lifecycle. How that holds depends on `nvim.mode`:
   - **`WM_TAKE_FOCUS` is not announced.** With `input = True` and a user time
     of zero it changes nothing, and announcing it would oblige spokenpad to
     answer a protocol whose whole purpose is taking focus.
+  - **On sway, a `no_focus` rule for exactly `spokenpad-pane` is in force
+    before the map.** sway reads none of the properties above and focuses
+    every window it maps unless such a rule matches. The daemon adds it over
+    sway's IPC socket before each pane (`no_focus
+    [instance="^spokenpad-pane$" class="^spokenpad-pane$"]`), opens the pane
+    only if sway answers that it took the rule, and never writes the user's
+    sway configuration. sway focuses the first window on a workspace whatever
+    the rules say, so on an empty focused workspace the pane refuses to open
+    and the text goes to the pending passage.
   - **There is no focus call**, as everywhere else in this project.
 
-  The proof is `tests/pane_window.rs`, which opens the shipped window on an
-  i3 it starts itself and checks the i3 tree and the X input focus, on a
-  workspace that already has a focused window *and* on an empty one — where
-  `no_focus` fails and this does not. It runs an ablation beside it, so
-  "unfocused" is known to mean something: drop the user time and the same
-  window is focused. **Verified on i3 only.** Mutter, KWin, Openbox, xfwm4,
-  bspwm and Hyprland are read from their source and not run; sway and awesome
-  are known to need more. Pane mode is new and says so wherever it is offered.
+  The proof runs headless, with the pane opened the way the daemon opens it
+  and the focus sampled every 5 ms: `tests/pane_window.rs` on i3, and
+  `tests/pane_focus_wms.rs` on sway (Xwayland), Openbox, and KWin on Wayland
+  (Xwayland) and on X11. Each asserts both halves of the rule — never
+  focused on the map, the redraws, the next passage's pane or an empty
+  workspace; focused after the user's click — and that the pane is shown
+  above the focused window. Each runs a positive control beside it, so
+  "unfocused" is known to mean something: the same window, with its
+  focus-refusing properties taken away one at a time, is focused by the same
+  window manager. Mutter, xfwm4, bspwm and Hyprland are read from their
+  source and not run; awesome is known to need more. Pane mode is new and
+  says so wherever it is offered.
 - **Attach mode opens no window at all.** The user opens the editor in a
   terminal of their choosing, and the daemon only ever talks to its socket,
   so the rule holds by construction, on any desktop.
@@ -332,10 +350,11 @@ in its lifecycle. How that holds depends on `nvim.mode`:
   refused, since its window cannot be named in advance.
 
 There is deliberately no focus call anywhere in
-[`shell/nvim/mod.rs`](../src/shell/nvim/mod.rs) or
-[`shell/wm.rs`](../src/shell/wm.rs) — not even a "restore the previous focus"
-one, which would be a focus change of its own; the only window-manager
-command sent floats, sizes and moves the dictation window by criteria. See
+[`shell/nvim/mod.rs`](../src/shell/nvim/mod.rs),
+[`shell/wm.rs`](../src/shell/wm.rs) or [`shell/pane/`](../src/shell/pane/) —
+not even a "restore the previous focus" one, which would be a focus change of
+its own; the only window-manager commands sent float, size and move the
+managed-mode window by criteria, and add the pane's `no_focus` rule on sway. See
 [nvim-window.md](nvim-window.md). (The Qt status overlay that preceded it was
 non-focusable by construction; it is deleted, see
 [decisions.md](decisions.md#pyside6-over-gtk4).)

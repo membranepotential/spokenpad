@@ -81,9 +81,11 @@ dictation window must float and must never take focus; the window manager
 enforces both through the rules in `packaging/i3/` or `packaging/sway/`
 ([nvim-window.md](nvim-window.md)).
 
-Pane mode needs no rule and no named window manager: the window it draws
-carries the properties that make a window manager float it and refuse it
-focus, and every window manager reads those without being told. It needs an X
-display, which on Wayland means Xwayland. **Verified on i3 only so far** —
-the rest is read from source, and sway and awesome are known to want more
+Pane mode needs no rule in your configuration: the window it draws carries
+the properties that make a window manager float it, keep it on top and refuse
+it focus. sway reads none of them, so under sway the daemon adds a `no_focus`
+rule for the pane over sway's IPC before each pane opens. It needs an X
+display, which on Wayland means Xwayland. **Verified headless on i3, sway,
+Openbox, and KWin on Wayland and on X11** — the rest is read from source, and
+awesome is known to want more
 ([constraints.md](constraints.md#no-window-spokenpad-opens-may-take-focus)).

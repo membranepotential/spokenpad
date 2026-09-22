@@ -716,10 +716,12 @@ impl NvimSession {
 
     /// Open a window spokenpad draws itself, with Neovim embedded in it.
     ///
-    /// Unlike a terminal this needs no window-manager rule and no proof of
-    /// one: the window carries the properties that make a window manager
-    /// refuse it focus, which `tests/pane_window.rs` checks on i3 against its
-    /// own ablation. What it does need is an X display, and saying so plainly
+    /// Unlike a terminal this needs no rule in the user's configuration: the
+    /// window carries the properties that make a window manager refuse it
+    /// focus, which `tests/pane_window.rs` and `tests/pane_focus_wms.rs`
+    /// check against their own ablations. sway alone reads none of them, and
+    /// is given a rule over IPC instead ([`refuse_pane_focus_on_sway`]).
+    /// What it does need is an X display, and saying so plainly
     /// is the whole error path — with none, the text goes to the pending
     /// passage exactly as it does when a terminal is missing.
     fn open_pane_and_attach(&mut self) -> Result<bool> {
@@ -743,6 +745,9 @@ impl NvimSession {
         // editor's budget as well as its own.
         let deadline = Instant::now() + Duration::from_secs_f64(self.config.startup_timeout_s);
         let (rect, display) = pane_geometry(&self.config)?;
+        if let Some(socket) = &self.config.sway_socket {
+            refuse_pane_focus_on_sway(socket)?;
+        }
         let mut fresh = NewFileGuard::claim(&self.config)?;
         let (command, marker) = pane_launch(&self.config, fresh.path())?;
         let value = marker.value().to_owned();
@@ -1542,6 +1547,28 @@ fn pane_geometry(config: &Nvim) -> Result<(Rect, String)> {
         .with_context(|| format!("connect to the X display {display}"))?;
     let rect = place::window(&connection, screen, config.window_fraction)?;
     Ok((rect, display))
+}
+
+/// sway focuses every window it maps unless a `no_focus` rule matches it,
+/// whatever the window says about itself, so before a pane maps under sway
+/// spokenpad adds that rule for the pane's own `WM_CLASS`, and refuses to open
+/// where sway would focus it anyway: as the first window on a workspace.
+fn refuse_pane_focus_on_sway(socket: &Path) -> Result<()> {
+    use crate::{
+        core::wm::{Criterion, Property},
+        shell::{pane::x11, wm::Wm},
+    };
+
+    let criteria = [
+        Criterion::new(Property::Instance, x11::INSTANCE)?,
+        Criterion::new(Property::Class, x11::CLASS)?,
+    ];
+    Wm::at(socket.to_owned())
+        .and_then(|sway| sway.refuse_focus(&criteria))
+        .context(
+            "the pane cannot open without taking the focus under sway; \
+             nvim.mode = \"attach\" works everywhere",
+        )
 }
 
 /// `nvim.init` as the path nvim is given, writing out the bundled one.
