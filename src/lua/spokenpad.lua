@@ -397,8 +397,16 @@ end
 --- buffer line. So the view is computed here: walk up from the last line until
 --- the text and the preview fill the window, then let smoothscroll's `skipcol`
 --- hide the surplus rows of that top line.
+---
+--- The cursor goes to the end of the text for a reader, and stays where it is
+--- for someone typing in this window: in Insert or Replace mode it is where
+--- the next key lands, and moving it there onto the last character put what
+--- they typed into the middle of the last dictated word.
 local function position_at_end(win, last_text, rows_below)
   local row = math.max(last_text, 1)
+  local typing = win == vim.api.nvim_get_current_win()
+    and vim.api.nvim_get_mode().mode:match("^[iR]") ~= nil
+  local cursor = vim.api.nvim_win_get_cursor(win)
   vim.api.nvim_win_call(win, function()
     -- Let normal-mode `$` perform the wrapped-line scroll. Setting the byte
     -- column directly is clamped to the final currently visible screen row
@@ -423,6 +431,9 @@ local function position_at_end(win, last_text, rows_below)
     view.topfill = 0
     view.skipcol = math.max(0, rows_from(top) - height) * vim.api.nvim_win_get_width(win)
     vim.fn.winrestview(view)
+    if typing then
+      vim.api.nvim_win_set_cursor(win, cursor)
+    end
   end)
 end
 

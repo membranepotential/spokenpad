@@ -41,6 +41,7 @@ use crate::core::{
     geometry::{self, Dimensions, Rect},
     grid::{Cell, CursorShape, Damage, RedrawEvent, Rgb, Screen, Style, Underline},
 };
+use crate::shell::nvim::rpc::waiting_for_keys;
 use anyhow::{Context, Result, bail, ensure};
 use font::{CellMetrics, Coverage, Face, Font};
 use keyboard::Keyboard;
@@ -884,8 +885,15 @@ const WRITE_TIMEOUT: Duration = Duration::from_millis(1_200);
 /// Then the editor is asked to quit. It has nothing left to save by then, so
 /// this is short and it is killed rather than waited for.
 const QUIT_GRACE: Duration = Duration::from_millis(500);
+/// Before either, a command the user left half typed is cancelled, one
+/// `<Esc>` at a time, asking each time with `nvim_get_mode` -- which Neovim
+/// answers at once even while it waits for a key.
+const MODE_TIMEOUT: Duration = Duration::from_millis(100);
+const CANCEL_ATTEMPTS: u32 = 3;
 const _: () = assert!(
-    WRITE_TIMEOUT.as_millis() + QUIT_GRACE.as_millis()
+    CANCEL_ATTEMPTS as u128 * MODE_TIMEOUT.as_millis()
+        + WRITE_TIMEOUT.as_millis()
+        + QUIT_GRACE.as_millis()
         < crate::shell::daemon::SHUTDOWN_GRACE.as_millis(),
     "the pane's teardown must fit inside the daemon's shutdown grace"
 );
@@ -897,6 +905,7 @@ impl Pane {
             // deliberate `:q!`. Either way there is nothing left to ask.
             return;
         }
+        self.cancel_half_typed_command();
         let call = self.call(
             "nvim_exec_lua",
             vec![Value::from(WRITE_EVERYTHING), Value::Array(Vec::new())],
@@ -913,6 +922,27 @@ impl Pane {
                     "could not write the pane's buffers before closing: {error:#}; \
                      anything typed into the window since the last utterance is lost"
                 )
+            }
+        }
+    }
+}
+
+impl Pane {
+    /// Cancel a command the user left half typed in the window: a count, `g`,
+    /// `"`, `f`. Neovim runs no call while one is pending, the write below
+    /// included, and a window closing mid-command would otherwise lose
+    /// everything typed since the last utterance. Nothing is lost by
+    /// cancelling it: the window is going away, and the command with it.
+    fn cancel_half_typed_command(&mut self) {
+        for _ in 0..CANCEL_ATTEMPTS {
+            match self.call("nvim_get_mode", Vec::new(), MODE_TIMEOUT) {
+                Ok(mode) if waiting_for_keys(&mode) => {
+                    log::info!("cancelling a command left half typed in the pane, to write it");
+                    if self.editor.input("<Esc>").is_err() {
+                        return;
+                    }
+                }
+                _ => return,
             }
         }
     }

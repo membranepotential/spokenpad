@@ -266,6 +266,16 @@ caught up. The log always has the full sentence and paths.
   default models are ever downloaded; for a model you configured, fix the
   path and press again.
 
+- **You can type into the window while you dictate.** In Insert mode your
+  cursor stays where you are typing: dictated text lands at the end of the
+  text, and what you type stays in one piece beside it. In Normal mode, a
+  command you have only half typed (a count, `g`, `"`, `f`) makes Neovim hold
+  back everything spokenpad sends until you finish or cancel it: the preview,
+  the level meter and the text stop moving. The waiting keys show in the
+  bottom-right corner with the bundled init (`showcmd`); press <kbd>Esc</kbd>
+  and everything catches up. Text dictated meanwhile waits and lands once, in
+  the window. Closing the window with a command half typed cancels it, and
+  what you typed is written as usual.
 - **Recording continues for a quarter second after you let go**
   (`audio.postroll_ms`), so a word still sounding at key-up is not cut off.
   Pressing the key again within the first 150 ms continues the same

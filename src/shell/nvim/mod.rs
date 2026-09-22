@@ -36,7 +36,7 @@ use crate::{
 };
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use rmpv::Value;
-use rpc::{RpcClient, RpcFailure};
+use rpc::{Patience, RpcClient, RpcFailure};
 use std::{
     convert::Infallible,
     fs::{self, File, OpenOptions},
@@ -376,10 +376,12 @@ impl NvimSession {
     /// handles a lost reply by repeating the same operation once.
     fn confirm_append(&mut self, id: u64, arguments: Vec<Value>) -> Result<usize> {
         let open = self.connection.as_mut().context("not connected to nvim")?;
-        let value = match open
-            .client
-            .reply(id, "nvim_exec_lua", deadline(APPEND_TIMEOUT))
-        {
+        let value = match open.client.reply(
+            id,
+            "nvim_exec_lua",
+            deadline(APPEND_TIMEOUT),
+            Patience::WhileTyping,
+        ) {
             Ok(value) => value,
             Err(RpcFailure::Timeout(reason)) => {
                 // The request may have completed after its reply was lost.
@@ -449,6 +451,7 @@ impl NvimSession {
                 Value::Array(Vec::new()),
             ],
             deadline(APPEND_TIMEOUT),
+            Patience::WhileTyping,
         );
         match result {
             Ok(value) => parse_copy_outcome(&value),
@@ -473,6 +476,7 @@ impl NvimSession {
                 "nvim_exec_lua",
                 indicator_call(indicator_fields(&IndicatorState::default())),
                 deadline(INDICATOR_TIMEOUT),
+                Patience::Deadline,
             );
         }
         self.drop_connection();
@@ -507,6 +511,7 @@ impl NvimSession {
             "nvim_exec_lua",
             append_call(arguments),
             deadline(APPEND_TIMEOUT),
+            Patience::WhileTyping,
         )
     }
 
@@ -532,6 +537,7 @@ impl NvimSession {
                 "nvim_exec_lua",
                 vec![Value::from(OWNERSHIP_QUERY), Value::Array(Vec::new())],
                 deadline(PROBE_TIMEOUT),
+                Patience::Deadline,
             ) {
                 Ok(value) => return Ok(Probe::Live(client, parse_ownership(&value)?)),
                 Err(error @ RpcFailure::PeerGone(_)) => {
@@ -589,6 +595,7 @@ impl NvimSession {
             "nvim_exec_lua",
             vec![Value::from(SPOKENPAD_LUA), Value::Array(Vec::new())],
             deadline(SETUP_TIMEOUT),
+            Patience::Deadline,
         )?;
         let mut fresh = None;
         let (buffer, path) = match adoptable {
@@ -861,7 +868,11 @@ impl NvimSession {
                 capped(startup_deadline, PROBE_TIMEOUT),
             )?,
         };
-        let ownership = query_ownership(&mut client, capped(startup_deadline, PROBE_TIMEOUT))?;
+        let ownership = query_ownership(
+            &mut client,
+            capped(startup_deadline, PROBE_TIMEOUT),
+            Patience::Deadline,
+        )?;
         match ownership.marker.as_deref() {
             None => {
                 return Ok(Readiness::Waiting {
@@ -890,6 +901,7 @@ impl NvimSession {
             "nvim_exec_lua",
             vec![Value::from(SPOKENPAD_LUA), Value::Array(Vec::new())],
             capped(startup_deadline, SETUP_TIMEOUT),
+            Patience::Deadline,
         )?;
         let buffer = open_buffer(&mut client, target, capped(startup_deadline, SETUP_TIMEOUT))?;
         setup_buffer(
@@ -1333,7 +1345,15 @@ fn still_pinned(open: &mut Connected) -> bool {
     // A bare `nvim_eval "1"` proves only that the editor answers. After the
     // user `:bdelete`s the dictation buffer it answers exactly as before, and
     // every append of that utterance failed against a buffer that was gone.
-    query_ownership(&mut open.client, deadline(PROBE_TIMEOUT)).is_ok_and(|ownership| {
+    //
+    // Patient: an editor whose user has half a command typed is alive and
+    // still pinned, and dropping it would send the next utterance elsewhere.
+    query_ownership(
+        &mut open.client,
+        deadline(PROBE_TIMEOUT),
+        Patience::WhileTyping,
+    )
+    .is_ok_and(|ownership| {
         ownership
             .pinned
             .is_some_and(|pin| pin.buffer == open.buffer)
@@ -1346,11 +1366,16 @@ enum Probe {
     Live(RpcClient, Ownership),
 }
 
-fn query_ownership(client: &mut RpcClient, deadline: Instant) -> Result<Ownership> {
+fn query_ownership(
+    client: &mut RpcClient,
+    deadline: Instant,
+    patience: Patience,
+) -> Result<Ownership> {
     let value = client.request(
         "nvim_exec_lua",
         vec![Value::from(OWNERSHIP_QUERY), Value::Array(Vec::new())],
         deadline,
+        patience,
     )?;
     parse_ownership(&value)
 }
@@ -1375,6 +1400,7 @@ fn open_buffer(client: &mut RpcClient, path: &Path, deadline: Instant) -> Result
                 Value::Array(vec![Value::from(utf8_path(path)?)]),
             ],
             deadline,
+            Patience::Deadline,
         )?
         .as_i64()
         .context("nvim returned a non-integer buffer handle")
@@ -1393,6 +1419,7 @@ fn setup_buffer(
             Value::Array(vec![Value::from(buffer), Value::from(dedicated)]),
         ],
         deadline,
+        Patience::Deadline,
     )?;
     Ok(())
 }

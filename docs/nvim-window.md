@@ -333,8 +333,12 @@ So the pane writes every modified buffer first, and the whole teardown has a
 budget, because `shell::daemon::SHUTDOWN_GRACE` (3 s) is what the daemon
 gives its editor thread before it exits and stops that thread wherever it had
 got to. The pane divides that budget: 1.2 s for the writes, then 0.5 s for
-the editor to quit before it is killed. The two are checked against the grace
-at compile time, so a change to one of them cannot quietly break the
+the editor to quit before it is killed. Before either, a command left half
+typed in the window is cancelled with `<Esc>`, at most three times, each time
+after asking `nvim_get_mode` (0.1 s each): Neovim runs no call while one is
+pending, the write included, so closing the window after a stray `g` or `2`
+used to lose everything typed since the last utterance. The three are checked
+against the grace at compile time, so a change to one of them cannot quietly break the
 guarantee. The systemd unit's `TimeoutStopSec=10` sits well above all of it,
 so a stop that goes wrong ends in seconds and never in a SIGKILL during a
 write.
@@ -572,7 +576,11 @@ before.
 Each utterance is appended as its own paragraph — one blank line between,
 none at the top of a fresh file. The cursor follows the end of the buffer
 only for a reader who was already at the end; someone who scrolled up to
-re-read or edit an earlier passage keeps their place.
+re-read or edit an earlier passage keeps their place. Someone typing in the
+window keeps their cursor as well: in Insert or Replace mode the view still
+follows the text, but the cursor stays where the next key lands. It used to
+be moved onto the last character like a reader's, and the next key typed
+went into the middle of the last dictated word.
 
 ## What runs inside nvim
 
@@ -820,6 +828,24 @@ that dribbles bytes must not extend a call indefinitely by staying inside a
 per-read timeout. An editor that does not answer in time is dropped and
 reattached to (or respawned) rather than waited on, since the recording is
 already running.
+
+**Except an editor that is waiting for its user.** Neovim runs no RPC call
+while a command is half typed in its window — a count, `g`, `"`, `f`, `r`, a
+prompt — and runs every one it held back the moment the command is finished
+or cancelled. Measured with a stand-in Neovim on 0.12.5: after `g`, `"`, `f`,
+`2`, `gr`, `z`, `r` or `d2`, an `nvim_eval` sent over the socket was still
+unanswered after 3 s; after `d` alone, or in Insert mode, it came back in
+20 ms. On an editor it is already attached to, the daemon therefore asks why a
+reply is late (`Patience::WhileTyping` in `rpc.rs`): `nvim_get_mode` is one of
+the few calls Neovim answers at once even then, and while it says `blocking`
+the call is waited for, asking again every half second, and the log says once
+why. This covers the liveness check, the append and its retry, and the
+clipboard copy. Before, the append gave up after 2 s, the reconnection's
+probe after 2 more, and the utterance was reported as failed while its
+request still sat in Neovim's queue; the next one went to a pending passage
+instead of the open window. Startup, attach and the last idle push on detach
+keep their plain deadlines: an editor stuck in a startup prompt is not one to
+wait for.
 
 An append that times out is the ambiguous case: the request may have completed
 after its reply was lost. It is retried once, on a fresh connection, with the

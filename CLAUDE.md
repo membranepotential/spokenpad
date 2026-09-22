@@ -108,7 +108,9 @@ those belongs in `src/shell/`.
   in a private headless session (`tests/harness/desktops.rs`);
   `tests/pane_render.rs` runs a real embedded nvim in it and checks the
   drawing against nvim's own screen; `tests/pane_daemon.rs` drives the real
-  `shell::daemon::serve` in pane mode; `tests/pane_hidpi.rs` sets `Xft.dpi`
+  `shell::daemon::serve` in pane mode; `tests/pane_typing.rs` types into a
+  pane on a German layout while a stand-in daemon dictates into it;
+  `tests/pane_hidpi.rs` sets `Xft.dpi`
   and compares the pane's cells with a live Alacritty's (llvmpipe, private
   `HOME`).
 - `scripts/gladia-references.sh` (a development tool that **uploads the

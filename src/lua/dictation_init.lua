@@ -35,7 +35,12 @@ vim.opt.laststatus = 0
 vim.opt.showtabline = 0
 vim.opt.ruler = false
 vim.opt.showmode = false
-vim.opt.showcmd = false
+-- The one piece of the command line kept: a half-typed command -- a count,
+-- `g`, `"`, `f` -- holds back everything spokenpad sends until it is finished
+-- or cancelled, the live preview and the level meter included. Showing the
+-- keys waiting in the bottom-right corner is what tells the user why the
+-- window has stopped moving, and that <Esc> starts it again.
+vim.opt.showcmd = true
 vim.opt.number = false
 vim.opt.relativenumber = false
 vim.opt.signcolumn = "no"

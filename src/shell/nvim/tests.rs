@@ -111,6 +111,7 @@ fn lua(session: &mut NvimSession, chunk: &str) -> Value {
             "nvim_exec_lua",
             vec![Value::from(chunk), Value::Array(Vec::new())],
             deadline(SETUP_TIMEOUT),
+            Patience::Deadline,
         )
         .unwrap_or_else(|error| panic!("lua chunk failed: {error}\n{chunk}"))
 }
@@ -133,6 +134,7 @@ fn attach_ui(session: &mut NvimSession) {
                 ]),
             ],
             deadline(SETUP_TIMEOUT),
+            Patience::Deadline,
         )
         .unwrap();
 }

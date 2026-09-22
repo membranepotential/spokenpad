@@ -1566,3 +1566,48 @@ during the stop:
   released.
 - These rank below "recording lost" and above "no speech model": shortened,
   then partly transcribed. The log says the same with the whole path.
+
+## Typing into the window while dictating (2026-09-22)
+
+A live check of the pane: during a latched recording the user clicked into
+it and typed, and the window "got stuck" — the preview, the level meter and
+the winbar stopped moving — while one append took 2085 ms instead of the
+usual 20. Two causes, measured in `tests/pane_typing.rs`:
+
+- **A half-typed Normal-mode command holds back every RPC call.** Neovim
+  waits for the rest of a count, `g`, `"`, `f`, `r` or `z` without running
+  its event loop, so nothing the daemon sends runs until the command is
+  finished or cancelled: a stand-in Neovim 0.12.5 left an `nvim_eval`
+  unanswered for over 3 s after each of those keys, and answered in 20 ms
+  after `d` or in Insert mode. The 2085 ms was an append whose 2 s deadline
+  expired, followed by a retry that the next key let through. Held longer
+  than 4 s, the append was reported as failed although it was still queued,
+  and the next utterance went to a pending passage instead of the window.
+  - Chosen: calls on an editor already attached to — the liveness check, the
+    append and its retry, the clipboard copy — ask `nvim_get_mode`, which
+    Neovim answers at once even then, when their reply is late, and wait for
+    as long as it says `blocking` (`Patience::WhileTyping`). The text lands
+    once, in the window, the moment the command ends.
+  - Chosen: the bundled init turns `showcmd` on, so the waiting keys show in
+    the corner and say why the window stopped moving.
+  - Chosen: closing the pane cancels a pending command with `<Esc>` before
+    it writes the buffers. The write waited behind it too and gave up after
+    1.2 s, losing what was typed by hand.
+  - Rejected: cancelling a pending command with `<Esc>` while the window
+    stays open, to keep the preview moving. It changes what the user's next
+    key means (`r` then `x` replaces a character; with the `r` cancelled, `x`
+    deletes one), and a window that rewrites what you type is worse than one
+    that waits for you.
+  - Rejected: waiting everywhere. An editor stuck in a startup prompt is not
+    one to wait for, so startup, attach and the last idle push keep their
+    deadlines.
+- **The preview moved the typing cursor.** Following the text scrolls the
+  window and put the cursor on the last character, as for a reader. In
+  Insert mode that is where the next key lands, so the user's text went into
+  the middle of the last dictated word. Now, in Insert or Replace mode in
+  that window, the view still follows and the cursor stays where it was.
+
+A consequence to know: while a command is half typed, the editor thread
+waits, and a daemon stopped then runs out its 3 s grace with the text still
+queued, and the pane goes with the process. The 4 s of deadlines before this
+ran it out the same way.
