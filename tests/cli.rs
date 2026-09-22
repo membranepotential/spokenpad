@@ -34,6 +34,64 @@ fn help_and_version_do_not_initialize_devices_or_models() {
     assert!(String::from_utf8_lossy(&version.stdout).contains(env!("CARGO_PKG_VERSION")));
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
 }
+/// A key binding's command lists only what it takes: it reads no config and
+/// writes no log. Every argument of the commands that do is described.
+#[test]
+fn each_command_lists_only_the_options_it_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    let help = |args: &[&str]| {
+        let output = command(&dir).args(args).arg("--help").output().unwrap();
+        assert_eq!(code(&output), 0);
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+    for control in ["start", "stop", "toggle", "cancel"] {
+        let text = help(&[control]);
+        for option in ["--config", "--model-dir", "--log-file", "--verbose"] {
+            assert!(!text.contains(option), "{control} lists {option}:\n{text}");
+        }
+    }
+    let transcribe = help(&["transcribe"]);
+    assert!(transcribe.contains("16 kHz mono WAV"), "{transcribe}");
+    assert!(
+        transcribe.contains("instead of standard output"),
+        "{transcribe}"
+    );
+    assert!(help(&["check"]).contains("--model-dir"));
+    assert!(!help(&["fetch-models"]).contains("--config"));
+    let top = help(&[]);
+    assert!(
+        top.contains("Run without a command, spokenpad is the daemon"),
+        "{top}"
+    );
+    assert!(
+        top.contains("5 check found that the pane cannot open here"),
+        "{top}"
+    );
+}
+/// `spokenpad fetch-models` downloads the pinned files whatever the
+/// configuration says, so a broken configuration does not stop it. Here the
+/// destination cannot be created, so it fails before any download, on that.
+#[test]
+fn fetch_models_reads_no_configuration() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("spokenpad")).unwrap();
+    std::fs::write(dir.path().join("spokenpad/config.toml"), "[wat]\n").unwrap();
+    let blocker = dir.path().join("blocker");
+    std::fs::write(&blocker, "a file, not a directory").unwrap();
+    let output = command(&dir)
+        .arg("fetch-models")
+        .arg("--dir")
+        .arg(blocker.join("models"))
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(code(&output), 1, "{stderr}");
+    assert!(stderr.contains("blocker"), "{stderr}");
+    assert!(
+        !stderr.contains("wat"),
+        "the configuration was read: {stderr}"
+    );
+}
 /// `spokenpad editor` becomes the editor. With a stand-in that prints its
 /// arguments, the command line it hands nvim can be read back: the socket,
 /// the ownership marker, and the dictation file last.

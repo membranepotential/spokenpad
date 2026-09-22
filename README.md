@@ -555,11 +555,12 @@ log to stderr), `--log-file PATH` (`none` for no file). The daemon also takes
 
 Exit codes: `2` model files missing (`check`, `transcribe`), `3` another
 spokenpad daemon is already running, `4` the WAV given to `transcribe` is
-unreadable or not 16 kHz, `1` anything else, including `start`, `stop`,
-`toggle` or `cancel` finding no daemon listening. On the socket
-`spokenpad.socket` listens on, they first try to start that unit once, and
-say why they failed in a desktop notification as well, since a key
-binding's output goes nowhere. The daemon itself does not
+unreadable or not 16 kHz, `5` `check` found that the pane cannot open on this
+machine, `1` anything else, including `start`, `stop`, `toggle` or `cancel`
+finding no daemon listening. On the socket `spokenpad.socket` listens on,
+they first try to start that unit once, and say why they failed in a desktop
+notification as well, since a key binding's output goes nowhere. The daemon
+itself does not
 exit over a missing model, a microphone it cannot open, or a config file
 that does not load (it runs on the defaults): it says so in the winbar and
 tries again at the next press or window.

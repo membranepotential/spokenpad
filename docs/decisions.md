@@ -2484,3 +2484,19 @@ P2-018). The user decided on seconds, suffixed `_seconds`, everywhere:
 - Chosen: the bound every other duration shares is named
   (`LONGEST_SECONDS`, an hour; audit P3-005), and one helper validates a
   duration and names its key in the message.
+
+## Exit code 5 for a pane that cannot open; each command lists its own options (2026-09-22)
+
+`spokenpad check` exited 2, "model files missing", when the pane's
+requirements were missing too (audit P2-017), so a script that answers 2
+with `spokenpad fetch-models` did that for a missing X server. It now exits
+5. The codes are one enum, `Exit` in `main.rs`, and `--help` lists them.
+
+The fresh-user walkthrough found `start`, `stop`, `toggle` and `cancel`
+listing `--config`, `--model-dir` and `--log-file`, which they never read,
+because those were global (walkthrough P5). They are now options of the
+daemon, `transcribe`, `check` and `editor` only, accepted before the command
+or after it, and every argument has a description. `fetch-models` reads no
+configuration at all: it fetches the pinned files wherever `--dir` says, and
+a broken configuration no longer stops it (audit P3-018). `run` dispatches
+to one function per command (audit P2-004).

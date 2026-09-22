@@ -156,19 +156,23 @@ which case defaults are used. An explicit `--config PATH` that does not exist is
 an **error**: silently running on defaults because a `--config` typo pointed
 nowhere is how a user loses their settings.
 
-Command-line flags: `-c/--config PATH`, `--model-dir PATH`, `-v/--verbose`,
-`--log-file PATH` (the literal `none` disables the file), and, on the daemon
-only, `--dump-audio DIR`, which writes each capture exactly as decoded for
-debugging. Subcommands are `start`, `stop`, `toggle`, `cancel`, `editor`,
-`transcribe <WAV> [--out PATH]`, `check` and `fetch-models [--dir DIR]`.
+Command-line flags: `-c/--config PATH` and `--model-dir PATH` for the
+daemon, `transcribe` and `check` (`editor` takes `-c` only), `-v/--verbose`
+and `--log-file PATH` (the literal `none` disables the file) for the same
+four, given before the command or after it, and, on the daemon only,
+`--dump-audio DIR`, which writes each capture exactly as decoded for
+debugging. Subcommands are `start`, `stop`, `toggle`, `cancel` (no options:
+they read no config and write no log), `editor`,
+`transcribe <WAV> [--out PATH] [--from SECONDS]`, `check` and
+`fetch-models [--dir DIR]`, which reads no configuration either.
 
-Exit codes are selected by error *type*, never by matching a message, so a
-reworded error cannot silently turn into a restart loop: `2` model files
-missing (`check`, `transcribe`), `3` another daemon holds
-`$XDG_STATE_HOME/spokenpad/daemon.lock` (an `flock`, held for the process
-lifetime, never unlinked), `4` an unreadable or wrong-rate WAV handed to
-`transcribe`, `1` everything else, including a control command that finds
-no daemon. `3` is only for a daemon started by hand: once a daemon has
+Exit codes are selected by error *type* (`Exit` in `main.rs`), never by
+matching a message, so a reworded error cannot silently turn into a restart
+loop: `2` model files missing (`check`, `transcribe`), `3` another daemon
+holds `$XDG_STATE_HOME/spokenpad/daemon.lock` (an `flock`, held for the
+process lifetime, never unlinked), `4` an unreadable or wrong-rate WAV handed
+to `transcribe`, `5` `check` found a requirement of the pane missing, `1`
+everything else, including a control command that finds no daemon. `3` is only for a daemon started by hand: once a daemon has
 adopted systemd's socket, nothing a user can cause ends it, because each
 exit would have the next press start it again until the unit's start limit
 failed the socket. While it cannot take the lock it answers every press
