@@ -1078,11 +1078,11 @@ fn display_summary(display: Option<&str>) -> Result<(String, Dpi)> {
     let (connection, screen) = x11rb::xcb_ffi::XCBConnection::connect(Some(&cstring))
         .with_context(|| format!("connect to {name}"))?;
     let rect = place::window(&connection, screen, 1.0)?;
-    let dpi = x11::dpi(&connection, screen);
+    let resolution = x11::xft_dpi(&connection);
     let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some_and(|value| !value.is_empty());
     Ok((
         format!(
-            "{name}, {}x{} usable, {dpi}{}",
+            "{name}, {}x{} usable, {resolution}{}",
             rect.width,
             rect.height,
             match wayland {
@@ -1090,7 +1090,7 @@ fn display_summary(display: Option<&str>) -> Result<(String, Dpi)> {
                 false => "",
             }
         ),
-        dpi,
+        resolution.dpi(),
     ))
 }
 

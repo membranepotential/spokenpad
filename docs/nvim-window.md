@@ -163,9 +163,14 @@ something fontconfig would read as pattern syntax.
 cells in both, on any display. `core/font.rs` repeats Alacritty 0.17's
 arithmetic step by step:
 
-- **Scale.** The display's `Xft.dpi`, read from the root window's
-  `RESOURCE_MANAGER` when the pane opens (96 when unset), divided by 96 is
-  winit's scale factor. The size in pixels is `points × dpi / 72`, kept in
+- **Scale.** The X resource `Xft.dpi` divided by 96 is winit's scale
+  factor. The pane looks it up when it opens exactly where winit does, in
+  x11rb's default resource database: the first screen's `RESOURCE_MANAGER`
+  (also for a display such as `:0.1`), else `~/.Xresources`, else
+  `~/.Xdefaults`, queried as `Xft.dpi`, so `*dpi` matches and the last of
+  equal entries wins. A missing or unusable value means 96 dpi, and the
+  debug log and `spokenpad check` say which it was. The size in pixels is
+  `points × dpi / 72`, kept in
   crossfont's own `f32` steps and asked of the rasteriser in 64ths of a
   pixel. 12 pt is 16 px at 96 dpi and 32 px at 192.
 - **Metrics.** FreeType's size metrics at that size: ascender rounded up,
@@ -186,11 +191,14 @@ arithmetic step by step:
 The match is exact rather than close: 304 cells measured from Alacritty's
 own window on an Xvfb, over four fonts, five resolutions and all three
 hinting modes, equal the pane's, and `tests/pane_hidpi.rs` checks it again
-against a live Alacritty at 96, 144 and 192 dpi
-([experiment](experiments/2026-09-22-pane-hidpi.md)). Only `Xft.dpi` is read:
-a desktop that sets the resolution through an XSETTINGS daemon alone, or not
-at all on a screen whose physical size RandR reports, gets 96 here where
-winit would find another value.
+against a live Alacritty at 96, 144 and 192 dpi, with `*dpi`, and with
+`Xft.dpi` only in `~/.Xresources`, under a private `HOME` so the user's
+fontconfig cannot tilt it
+([experiment](experiments/2026-09-22-pane-hidpi.md)). **The precondition is
+that `Xft.dpi` is set.** winit asks an XSETTINGS daemon's `Xft/DPI` before the
+resource, and RandR's physical screen size when neither exists; the pane
+reads neither, so a desktop that sets the resolution only through XSETTINGS,
+or not at all, gets 96 here where Alacritty may use another value.
 
 Bold is thickened by hand where fontconfig has no bold face — which is what
 `monospace` resolves to on some machines — and italic falls back to the plain

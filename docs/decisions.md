@@ -1067,10 +1067,14 @@ asked the display's resolution. The earlier reason for pixels, that the pane
   Alacritty's, 11.25 pt; valid sizes are 1 to 200. The key changed unit
   before any release, so there is no migration: a config with
   `font_size = 16` now asks for 16 pt.
-- **The resolution is `Xft.dpi` from `RESOURCE_MANAGER`, read when a pane
-  opens**, and 96 when unset. winit also reads XSETTINGS first and RandR's
-  physical size last; those are not reproduced, and `spokenpad check` prints
-  the resolution the pane would use.
+- **The resolution is the X resource `Xft.dpi`, looked up when a pane opens
+  through the same x11rb resource database winit uses** (the first screen's
+  `RESOURCE_MANAGER`, else `~/.Xresources` or `~/.Xdefaults`; wildcards and
+  last-entry-wins included), and 96 when unset or unusable. winit also reads
+  XSETTINGS first and RandR's physical size last; those are not reproduced,
+  so matching Alacritty requires `Xft.dpi` to be set, which the README and
+  `config.example.toml` state. `spokenpad check` prints the resolution the
+  pane would use and why.
 - **Everything else in pixels follows the font rather than a scale factor**:
   baseline, underline and strikeout as Alacritty's `create_rect` places them,
   the unfocused cursor's outline at Alacritty's 0.15 of a cell, and underline

@@ -388,10 +388,14 @@ window_fraction = 0.33
 font_family = "monospace"
 
 # Pane mode only: that font's size in points, meaning exactly what
-# Alacritty's `font.size` means. The display's `Xft.dpi` (from xrdb; 96 when
-# unset) turns it into pixels, and the cells are measured the way Alacritty
-# measures them, so the same family and size give the same text and the same
-# cells as Alacritty on any screen. 11.25 is Alacritty's default; copy your
+# Alacritty's `font.size` means. The X resource `Xft.dpi` (from xrdb, or
+# ~/.Xresources when xrdb never ran) turns it into pixels, and the cells are
+# measured the way Alacritty measures them, so the same family and size give
+# the same text and the same cells as Alacritty on any screen -- provided
+# Xft.dpi is set. Without it the pane uses 96 dpi, while Alacritty would ask
+# an XSETTINGS daemon (Xft/DPI) or RandR's physical screen size; the pane
+# reads neither. `spokenpad check` prints the resolution it found and why.
+# 11.25 is Alacritty's default; copy your
 # Alacritty `font.size` here to match it. In [1, 200]. The window's size in
 # cells follows from this and window_fraction above.
 font_size = 11.25

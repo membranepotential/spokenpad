@@ -122,28 +122,34 @@ impl XServer {
     /// it — which is what keeps this above the `:50` the user's session will
     /// never be on.
     pub fn start() -> Self {
+        Self::start_with_screens(1)
+    }
+
+    /// The same, with this many X screens, so a test can open on `:N.1`.
+    /// `display`, `connection` and `root` are always screen 0's.
+    pub fn start_with_screens(screens: u32) -> Self {
         for number in 50..200 {
-            if let Some(server) = Self::try_start(number) {
+            if let Some(server) = Self::try_start(number, screens) {
                 return server;
             }
         }
         panic!("no free X display number between :50 and :200");
     }
 
-    fn try_start(number: u32) -> Option<Self> {
+    fn try_start(number: u32, screens: u32) -> Option<Self> {
         let display = format!(":{number}");
+        let screen_args = (0..screens).flat_map(|screen| {
+            [
+                "-screen".to_owned(),
+                screen.to_string(),
+                "1280x800x24".to_owned(),
+            ]
+        });
         let mut child = Killed(
             Command::new("Xvfb")
-                .args([
-                    &display,
-                    "-displayfd",
-                    "1",
-                    "-screen",
-                    "0",
-                    "1280x800x24",
-                    "-nolisten",
-                    "tcp",
-                ])
+                .args([&display, "-displayfd", "1"])
+                .args(screen_args)
+                .args(["-nolisten", "tcp"])
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null())
                 .spawn()
@@ -194,6 +200,15 @@ impl XServer {
             .expect("write RESOURCE_MANAGER")
             .check()
             .expect("the server accepts RESOURCE_MANAGER");
+    }
+
+    /// Remove `RESOURCE_MANAGER`, as on a server where nobody ran `xrdb`.
+    pub fn clear_resources(&self) {
+        self.connection
+            .delete_property(self.root, AtomEnum::RESOURCE_MANAGER.into())
+            .expect("delete RESOURCE_MANAGER")
+            .check()
+            .expect("the server deletes RESOURCE_MANAGER");
     }
 
     /// Every synthetic event goes through this: it refuses any display this

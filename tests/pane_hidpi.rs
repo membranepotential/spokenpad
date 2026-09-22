@@ -4,14 +4,21 @@
 //! resolution, so on a 192 dpi screen its text was half the size of the same
 //! number in Alacritty, and nothing noticed: every other pane test runs on an
 //! X server without `Xft.dpi`, where a pixel and a point differ by a third and
-//! the cells looked plausible. This test sets `Xft.dpi` on its own Xvfb and
-//! checks the pane against the real thing: Alacritty, started on the same
-//! server with the same family, size and grid, measured from its window.
+//! the cells looked plausible. This test sets `Xft.dpi` on its own Xvfb, in
+//! each of the ways a desktop sets it, and checks the pane against the real
+//! thing: Alacritty, started on the same server with the same family, size
+//! and grid, measured from its window.
+//!
+//! **Hermetic.** Before anything runs, this process's `HOME` and
+//! `XDG_CONFIG_HOME` point at an empty temporary directory, and the variables
+//! that redirect fontconfig or the X resources are removed. The pane's
+//! `fc-match`, the reference `Font::load` and Alacritty all inherit that one
+//! environment, so they read the same system fontconfig and no user
+//! `fonts.conf`, `~/.Xresources` or Alacritty configuration.
 //!
 //! It needs Alacritty to run under Xvfb, which Mesa's software renderer
-//! (llvmpipe) makes possible. Alacritty gets a private `HOME` and
-//! configuration, so nothing of the user's is read; the server is the test's
-//! own, above `:50`. Screenshots of both windows at every resolution go to
+//! (llvmpipe) makes possible; the server is the test's own, above `:50`.
+//! Screenshots of both windows for every case go to
 //! `SPOKENPAD_PANE_SCREENSHOTS` (the temporary directory by default).
 mod harness;
 
@@ -21,7 +28,7 @@ use spokenpad::{
     core::font::{Dpi, Points},
     shell::{
         nvim::pane_launch,
-        pane::{Options, Pane, Sizing, font::Font},
+        pane::{Options, Pane, Sizing, font::Font, x11::Display},
     },
 };
 use std::{
@@ -41,34 +48,102 @@ const ALACRITTY_TIMEOUT: Duration = Duration::from_secs(20);
 const TEXT: &str = "The quick brown fox jumps over the lazy dog.\n\
                     Über Größe: 0123456789 ()[]{} <=> -> |x|\n";
 
+/// Where a case puts its resources.
+enum Resources {
+    /// The root window's `RESOURCE_MANAGER`, as `xrdb -load` writes it.
+    Property(&'static str),
+    /// Only `~/.Xresources`, on a server where nobody ran `xrdb`.
+    HomeFile(&'static str),
+}
+
+struct Case {
+    label: &'static str,
+    resources: Resources,
+    /// The resolution the resources state.
+    dpi: f32,
+    points: f32,
+}
+
+const CASES: [Case; 6] = [
+    Case {
+        label: "96dpi-12pt",
+        resources: Resources::Property("Xft.antialias:\t1\nXft.dpi:\t96\n"),
+        dpi: 96.0,
+        points: 12.0,
+    },
+    Case {
+        label: "192dpi-12pt",
+        resources: Resources::Property("Xft.antialias:\t1\nXft.dpi:\t192\n"),
+        dpi: 192.0,
+        points: 12.0,
+    },
+    Case {
+        label: "192dpi-11.25pt",
+        // The last of two equal entries wins, as in every X resource reader.
+        resources: Resources::Property("Xft.dpi:\t120\nXft.dpi:\t192\n"),
+        dpi: 192.0,
+        points: 11.25,
+    },
+    Case {
+        label: "144dpi-11.25pt",
+        resources: Resources::Property("Xft.dpi:\t144\n"),
+        dpi: 144.0,
+        points: 11.25,
+    },
+    Case {
+        label: "wildcard-192dpi-12pt",
+        resources: Resources::Property("*dpi:\t192\n"),
+        dpi: 192.0,
+        points: 12.0,
+    },
+    Case {
+        label: "xresources-192dpi-12pt",
+        resources: Resources::HomeFile("Xft.dpi: 192\n"),
+        dpi: 192.0,
+        points: 12.0,
+    },
+];
+
 #[test]
 fn the_pane_measures_its_cells_like_alacritty_at_every_resolution() {
     if !tools_or_skip(&["Xvfb", "nvim", "fc-match", "alacritty"]) {
         return;
     }
-    let server = XServer::start();
     let directory = tempfile::tempdir().expect("a temporary directory");
+    let home = directory.path().join("home");
+    std::fs::create_dir_all(&home).expect("make the private home");
+    isolate(&home);
+    // Two screens, so the last check can open on `:N.1`.
+    let server = XServer::start_with_screens(2);
     let file = directory.path().join("text.md");
     std::fs::write(&file, TEXT).expect("write the text both windows show");
     let family = FontFamily::default();
     let screenshots = screenshot_dir();
+    let xresources = home.join(".Xresources");
 
-    for (dpi, points) in [(96.0, 12.0), (192.0, 12.0), (192.0, 11.25), (144.0, 11.25)] {
-        server.set_resources(&format!("Xft.antialias:\t1\nXft.dpi:\t{dpi}\n"));
-        let size = Points::try_from(points).expect("a point size");
-        let label = format!("{dpi}dpi-{points}pt");
+    for case in CASES {
+        let label = case.label;
+        match case.resources {
+            Resources::Property(text) => {
+                let _ = std::fs::remove_file(&xresources);
+                server.set_resources(text);
+            }
+            Resources::HomeFile(text) => {
+                server.clear_resources();
+                std::fs::write(&xresources, text).expect("write ~/.Xresources");
+            }
+        }
+        let size = Points::try_from(case.points).expect("a point size");
 
         // The pane, reading the resolution from the server.
         let (pane_cells, pane_window) = {
-            let mut pane = open_pane(&server, directory.path(), &file, &family, size);
+            let mut pane = open_pane(&server.display, directory.path(), &file, &family, size);
             let metrics = pane.metrics();
-            // The resolution scales the size, exactly: 12 pt at 192 dpi is
-            // 24 pt at 96, and that is what the user reported missing.
-            let scaled = Points::try_from(points * dpi as f32 / 96.0).expect("a point size");
-            let expected = Font::load(&family, scaled, Dpi::DEFAULT)
-                .expect("load the font")
-                .metrics();
-            assert_eq!(metrics, expected, "{label}: the pane ignored Xft.dpi");
+            assert_eq!(
+                metrics,
+                scaled(&family, case.points, case.dpi),
+                "{label}: the pane did not find Xft.dpi"
+            );
             // Let nvim draw, for the screenshot.
             let settle = Instant::now() + Duration::from_millis(1500);
             while Instant::now() < settle {
@@ -96,17 +171,18 @@ fn the_pane_measures_its_cells_like_alacritty_at_every_resolution() {
         );
 
         // Alacritty, with the same font and grid, on the same server.
-        let alacritty_window = alacritty(&server, directory.path(), &file, &family, points);
-        let alacritty_cells = (
+        let alacritty_window = alacritty(
+            &server,
+            directory.path(),
+            &file,
+            &family,
+            case.points,
+            label,
+        );
+        println!(
+            "{label}: alacritty cells {}x{}",
             alacritty_window.0 / u32::from(COLUMNS),
             alacritty_window.1 / u32::from(ROWS),
-        );
-        let path = screenshots.join(format!("alacritty-{label}.png"));
-        println!(
-            "{label}: alacritty cells {}x{}, {}",
-            alacritty_cells.0,
-            alacritty_cells.1,
-            path.display()
         );
         assert_eq!(
             pane_window, alacritty_window,
@@ -114,27 +190,67 @@ fn the_pane_measures_its_cells_like_alacritty_at_every_resolution() {
              Alacritty is {alacritty_window:?}"
         );
     }
+
+    // A display that names the second screen still takes its resources from
+    // the first screen's root window, as winit's database does.
+    let _ = std::fs::remove_file(&xresources);
+    server.set_resources("Xft.dpi:\t192\n");
+    let second = format!("{}.1", server.display);
+    let dpi = Display::connect(&second)
+        .expect("connect to the second screen")
+        .dpi();
+    assert_eq!(dpi, Dpi::new(192.0).unwrap(), "{second}");
+    let size = Points::try_from(12.0).expect("a point size");
+    let pane = open_pane(&second, directory.path(), &file, &family, size);
+    assert_eq!(pane.metrics(), scaled(&family, 12.0, 192.0), "{second}");
 }
 
-fn open_pane(
-    server: &XServer,
-    root: &Path,
-    file: &Path,
-    family: &FontFamily,
-    size: Points,
-) -> Pane {
+/// Point this process, and everything it starts, at an empty home and the
+/// system's own fontconfig and X resources.
+fn isolate(home: &Path) {
+    // SAFETY: this test binary holds one test, and this runs at its start,
+    // before it starts an X server, a pane or any other thread; libtest's
+    // main thread only waits for it. Nothing reads the environment
+    // concurrently with these writes.
+    unsafe {
+        std::env::set_var("HOME", home);
+        std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
+        for variable in [
+            "XDG_DATA_HOME",
+            "FONTCONFIG_FILE",
+            "FONTCONFIG_PATH",
+            "XENVIRONMENT",
+            "WINIT_X11_SCALE_FACTOR",
+            "WAYLAND_DISPLAY",
+        ] {
+            std::env::remove_var(variable);
+        }
+    }
+}
+
+/// The cells of `points` at `dpi`, computed as that many points at 96 dpi:
+/// the resolution scales the size exactly, and that is what the user reported
+/// missing.
+fn scaled(family: &FontFamily, points: f32, dpi: f32) -> spokenpad::core::font::CellMetrics {
+    let points = Points::try_from(points * dpi / 96.0).expect("a point size");
+    Font::load(family, points, Dpi::DEFAULT)
+        .expect("load the font")
+        .metrics()
+}
+
+fn open_pane(display: &str, root: &Path, file: &Path, family: &FontFamily, size: Points) -> Pane {
     let config = Nvim {
         socket_path: root.join("nvim.sock"),
         dictation_dir: root.to_owned(),
         // The editor Alacritty runs too, so the two screenshots show the same.
         editor: vec!["nvim".to_owned(), "--clean".to_owned()],
-        display: Some(server.display.clone()),
+        display: Some(display.to_owned()),
         ..Nvim::default()
     };
     let (command, marker) = pane_launch(&config, file).expect("build the nvim command");
     let mut pane = Pane::open(
         &Options {
-            display: server.display.clone(),
+            display: display.to_owned(),
             family: family.clone(),
             size,
             sizing: Sizing::Cells {
@@ -159,10 +275,9 @@ fn alacritty(
     file: &Path,
     family: &FontFamily,
     points: f32,
+    label: &str,
 ) -> (u32, u32) {
-    let home = root.join("alacritty-home");
-    std::fs::create_dir_all(&home).expect("make Alacritty's home");
-    let config = home.join("alacritty.toml");
+    let config = root.join("alacritty.toml");
     std::fs::write(
         &config,
         format!(
@@ -170,11 +285,14 @@ fn alacritty(
              dimensions = {{ columns = {COLUMNS}, lines = {ROWS} }}\n\
              padding = {{ x = 0, y = 0 }}\n\
              [font]\n\
-             size = {points}\n\
-             normal = {{ family = \"{family}\" }}\n"
+             size = {}\n\
+             normal = {{ family = \"{family}\" }}\n",
+            points
         ),
     )
     .expect("write Alacritty's configuration");
+    // Everything else, `HOME` included, is this process's isolated
+    // environment, the same one the pane's `fc-match` sees.
     let _alacritty = Killed(
         Command::new("alacritty")
             .arg("--config-file")
@@ -188,11 +306,7 @@ fn alacritty(
             ])
             .arg(file)
             .env("DISPLAY", &server.display)
-            .env("HOME", &home)
-            .env("XDG_CONFIG_HOME", home.join("config"))
             .env("LIBGL_ALWAYS_SOFTWARE", "1")
-            .env_remove("WAYLAND_DISPLAY")
-            .env_remove("WINIT_X11_SCALE_FACTOR")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -242,10 +356,6 @@ fn alacritty(
         .chunks_exact(4)
         .map(|pixel| u32::from_le_bytes([pixel[0], pixel[1], pixel[2], 0]))
         .collect();
-    let label = format!(
-        "{}dpi-{points}pt",
-        dpi_of(server).expect("the test set Xft.dpi")
-    );
     write_png(
         &screenshot_dir().join(format!("alacritty-{label}.png")),
         &pixels,
@@ -294,22 +404,4 @@ fn geometry(server: &XServer, window: Window) -> (u32, u32) {
         .reply()
         .expect("a window's size");
     (u32::from(reply.width), u32::from(reply.height))
-}
-
-/// The `Xft.dpi` this test put on the server, read back.
-fn dpi_of(server: &XServer) -> Option<f64> {
-    let reply = server
-        .connection
-        .get_property(
-            false,
-            server.root,
-            AtomEnum::RESOURCE_MANAGER,
-            AtomEnum::STRING,
-            0,
-            1024,
-        )
-        .ok()?
-        .reply()
-        .ok()?;
-    Dpi::from_resources(&String::from_utf8_lossy(&reply.value)).map(Dpi::get)
 }

@@ -82,22 +82,6 @@ impl Dpi {
         (value.is_finite() && value > 0.0 && value <= 2000.0).then_some(Self(value))
     }
 
-    /// `Xft.dpi` from the text of the root window's `RESOURCE_MANAGER`
-    /// property, which is what `xrdb` writes and what winit reads.
-    ///
-    /// `None` when the resource is absent or not a usable number; the caller
-    /// then uses [`Dpi::DEFAULT`]. Only the exact name `Xft.dpi` is matched,
-    /// which is how every desktop and `xrdb` sets it.
-    pub fn from_resources(resources: &str) -> Option<Self> {
-        resources
-            .lines()
-            .filter_map(|line| line.split_once(':'))
-            .filter(|(name, _)| name.trim() == "Xft.dpi")
-            .filter_map(|(_, value)| value.trim().parse::<f64>().ok())
-            .next_back()
-            .and_then(Self::new)
-    }
-
     pub fn get(self) -> f64 {
         self.0
     }
@@ -106,6 +90,57 @@ impl Dpi {
 impl fmt::Display for Dpi {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "{} dpi", self.0)
+    }
+}
+
+/// What the display's `Xft.dpi` resource says, as the X resource database
+/// answers the query `Xft.dpi` (wildcards such as `*dpi` and the last of
+/// equal entries included; the shell asks x11rb's database, as winit does).
+#[derive(Debug, Clone, PartialEq)]
+pub enum XftDpi {
+    Set(Dpi),
+    /// No entry matches.
+    Unset,
+    /// An entry matches but is not a resolution the pane can use; the text
+    /// is kept so the user can be told what was found.
+    Unusable(String),
+}
+
+impl XftDpi {
+    /// Parse the resource's value, as winit does: a floating-point number,
+    /// surrounding whitespace ignored.
+    pub fn parse(value: Option<&str>) -> Self {
+        match value {
+            None => Self::Unset,
+            Some(text) => text
+                .trim()
+                .parse()
+                .ok()
+                .and_then(Dpi::new)
+                .map_or_else(|| Self::Unusable(text.to_owned()), Self::Set),
+        }
+    }
+
+    /// The resolution the pane uses: the resource's, or 96.
+    pub fn dpi(&self) -> Dpi {
+        match self {
+            Self::Set(dpi) => *dpi,
+            Self::Unset | Self::Unusable(_) => Dpi::DEFAULT,
+        }
+    }
+}
+
+impl fmt::Display for XftDpi {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Set(dpi) => write!(formatter, "{dpi} (Xft.dpi)"),
+            Self::Unset => write!(formatter, "{} (Xft.dpi is not set)", Dpi::DEFAULT),
+            Self::Unusable(text) => write!(
+                formatter,
+                "{} (Xft.dpi is {text:?}, not a resolution in (0, 2000])",
+                Dpi::DEFAULT
+            ),
+        }
     }
 }
 
@@ -606,22 +641,26 @@ mod tests {
     }
 
     #[test]
-    fn the_resolution_is_the_xft_dpi_resource() {
-        let resources = "Xft.antialias:\t1\nXft.dpi:\t192\nXft.hintstyle:\thintslight\n";
-        assert_eq!(Dpi::from_resources(resources), Some(dpi(192.0)));
-        assert_eq!(Dpi::from_resources("Xft.dpi: 144.5"), Some(dpi(144.5)));
-        // Absent, empty, nonsense or impossible: the caller falls back to 96.
-        for resources in [
-            "",
-            "Xft.antialias:\t1\n",
-            "Xft.dpi:\tlarge\n",
-            "Xft.dpi:\t0\n",
-            "Xft.dpi:\t-96\n",
-            "Xft.dpi:\tinf\n",
-            "Xft.dpiscale:\t2\n",
-        ] {
-            assert_eq!(Dpi::from_resources(resources), None, "{resources:?}");
+    fn the_resolution_is_the_xft_dpi_value_or_96_with_a_reason() {
+        assert_eq!(XftDpi::parse(Some("192")), XftDpi::Set(dpi(192.0)));
+        assert_eq!(XftDpi::parse(Some(" 144.5 ")), XftDpi::Set(dpi(144.5)));
+        assert_eq!(XftDpi::parse(None), XftDpi::Unset);
+        assert_eq!(XftDpi::parse(None).dpi(), Dpi::DEFAULT);
+        // Nonsense or impossible: 96, and the text is kept to be reported.
+        for text in ["large", "0", "-96", "inf", "NaN", "19200", ""] {
+            let parsed = XftDpi::parse(Some(text));
+            assert_eq!(parsed, XftDpi::Unusable(text.to_owned()), "{text:?}");
+            assert_eq!(parsed.dpi(), Dpi::DEFAULT);
         }
+        assert_eq!(
+            XftDpi::parse(Some("large")).to_string(),
+            "96 dpi (Xft.dpi is \"large\", not a resolution in (0, 2000])"
+        );
+        assert_eq!(
+            XftDpi::parse(None).to_string(),
+            "96 dpi (Xft.dpi is not set)"
+        );
+        assert_eq!(XftDpi::parse(Some("192")).to_string(), "192 dpi (Xft.dpi)");
     }
 
     #[test]

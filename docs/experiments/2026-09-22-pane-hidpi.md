@@ -103,7 +103,13 @@ The user's settings, before and after:
 | monospace, 11.25 pt (default) | 144 | 14x27 | — | 14x27 |
 
 The last four rows are also what `tests/pane_hidpi.rs` measures on its own
-Xvfb from a live Alacritty's window.
+Xvfb from a live Alacritty's window. After review it also covers, each against
+a live Alacritty: `*dpi: 192` instead of `Xft.dpi`, two `Xft.dpi` entries
+(the last wins), and `Xft.dpi` only in `~/.Xresources` with no
+`RESOURCE_MANAGER` (all 19x38 at 12 pt); and a pane opened on `:N.1`, which
+takes the first screen's resources as winit does. The pane, its `fc-match`
+and Alacritty run under one private `HOME` and `XDG_CONFIG_HOME`, so a user
+`fonts.conf` cannot make the two sides disagree.
 
 The hinting modes matter, and differ where the pixel size is fractional:
 
@@ -149,9 +155,25 @@ resource and compares with Alacritty itself.
 The faces a pane loads when it opens may now take 5 s per `fc-match`; the
 250 ms bound stays on the drawing path's fallback lookups.
 
-Not matched: winit also reads XSETTINGS' `Xft/DPI` before the resource, and
-falls back to RandR's physical size when neither is set; the pane reads only
-the `Xft.dpi` resource and falls back to 96. On a desktop that sets the
-resolution through an XSETTINGS daemon alone the two can still differ.
+The pane looks `Xft.dpi` up in x11rb's default resource database, the one
+winit uses (`resource_manager::new_from_default`: the first screen's
+`RESOURCE_MANAGER`, else `~/.Xresources`, else `~/.Xdefaults`; wildcards and
+last-entry-wins included).
+
+Open:
+
+- **XSETTINGS and RandR are not matched.** winit reads XSETTINGS' `Xft/DPI`
+  before the resource, and falls back to RandR's physical size when neither
+  is set; the pane falls back to 96. On a desktop that sets the resolution
+  through an XSETTINGS daemon alone, or not at all, the two can differ.
+- **`Hinting::Full` models only native TrueType hinting; autohinting is
+  unverified.** Under full hinting FreeType uses the autohinter when
+  fontconfig says `autohint = true` (crossfont then sets
+  `FT_LOAD_FORCE_AUTOHINT`) or when a TrueType font has no hinting bytecode.
+  The autohinter scales the advance without an integer ppem. The model
+  already skips the integer ppem for fonts without bytecode, but it does not
+  read fontconfig's `autohint`, so a font with bytecode under
+  `autohint = true` gets the native rule. Neither case was measured against
+  Alacritty, and neither were CFF fonts under full hinting.
 
 Decision: [decisions.md](../decisions.md#the-panes-font-size-is-in-points-measured-as-alacritty-measures-2026-09-22).

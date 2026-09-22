@@ -20,7 +20,10 @@
 //!
 //! `WM_TAKE_FOCUS` is deliberately absent: with `input = True` and a user time
 //! of 0 it changes nothing, and announcing it would oblige us to answer it.
-use crate::core::{font::Dpi, geometry::Rect};
+use crate::core::{
+    font::{Dpi, XftDpi},
+    geometry::Rect,
+};
 use anyhow::{Context, Result, ensure};
 use std::{ffi::CString, sync::Arc};
 use x11rb::{
@@ -93,40 +96,33 @@ impl Display {
         Ok(Self { connection, screen })
     }
 
+    /// The resolution the pane sizes its font by; see [`xft_dpi`].
     pub fn dpi(&self) -> Dpi {
-        dpi(&self.connection, self.screen)
+        xft_dpi(&self.connection).dpi()
     }
 }
 
-/// The display's `Xft.dpi`, which is where winit, and so Alacritty, takes its
-/// scale factor from; 96 when nobody set it.
-pub fn dpi(connection: &impl Connection, screen: usize) -> Dpi {
-    resources(connection, screen)
-        .inspect_err(|error| log::debug!("cannot read RESOURCE_MANAGER: {error:#}"))
-        .ok()
-        .flatten()
-        .and_then(|text| Dpi::from_resources(&text))
-        .unwrap_or(Dpi::DEFAULT)
-}
-
-/// The text of the root window's `RESOURCE_MANAGER` property, which `xrdb`
-/// writes; `None` when nothing was loaded.
-fn resources(connection: &impl Connection, screen: usize) -> Result<Option<String>> {
-    let root = connection.setup().roots[screen].root;
-    let reply = connection
-        .get_property(
-            false,
-            root,
-            AtomEnum::RESOURCE_MANAGER,
-            AtomEnum::STRING,
-            0,
-            // The property's length in 32-bit units; a resource database is
-            // a few kilobytes, and this bounds a pathological one at 4 MiB.
-            1 << 20,
-        )?
-        .reply()
-        .context("read the root window's RESOURCE_MANAGER")?;
-    Ok((reply.format == 8).then(|| String::from_utf8_lossy(&reply.value).into_owned()))
+/// The display's `Xft.dpi`, looked up exactly where winit, and so Alacritty,
+/// looks it up: x11rb's default resource database, which is the
+/// `RESOURCE_MANAGER` property of the *first* screen's root window whatever
+/// screen the display names, or `~/.Xresources`, then `~/.Xdefaults`, when
+/// nobody ran `xrdb`, merged with `$XENVIRONMENT` or `~/.Xdefaults-<host>`;
+/// queried as `Xft.dpi`, so `*dpi` matches and the last of equal entries wins.
+///
+/// When the answer is not a usable resolution the pane uses 96, and says why
+/// in the debug log; `spokenpad check` prints the same reason.
+pub fn xft_dpi(connection: &impl Connection) -> XftDpi {
+    let found = match x11rb::resource_manager::new_from_default(connection) {
+        Ok(database) => XftDpi::parse(database.get_string("Xft.dpi", "")),
+        Err(error) => {
+            log::debug!("cannot read the X resource database: {error}");
+            XftDpi::Unset
+        }
+    };
+    if !matches!(found, XftDpi::Set(_)) {
+        log::debug!("pane resolution: {found}");
+    }
+    found
 }
 
 impl Window {
