@@ -74,11 +74,17 @@ those belongs in `src/shell/`.
   `Xft.dpi` to pixels, and cells measured as Alacritty measures them),
   `core/frames.rs`, `core/geometry.rs`, `core/text.rs`; plus the `shell/nvim/rpc.rs` codec, `parse_ownership` and
   `passage::append_paragraph`, still inside their modules.
-- Imperative shell: `shell/daemon.rs` (`run` = lock/socket/signals/devices and the model loader, `serve` =
-  the generic loop), `shell/audio.rs` (`InputBackend` seam; PortAudio impl),
-  `shell/recorder.rs` (recovery WAV), `shell/control.rs` (control socket
-  server and the CLI's client), `shell/inference.rs` (sherpa's transducer
-  and Silero), `shell/dirs.rs` (private directories), `shell/models.rs`
+- Imperative shell: `shell/daemon/` — `mod.rs` (`run` = lock/socket/signals/devices
+  and the model loader; `serve` = the generic loop, one `Loop` method per
+  step of a pass), `engine.rs` (the inference thread), `editor.rs` (the
+  editor thread), `capture.rs` (a capture released or discarded, device
+  events), `transcriptions.rs` (recordings whose text is not all written,
+  and `waiting.tsv`), `requests.rs` (control requests with their clock),
+  `lock.rs` (the per-user daemon lock); `shell/audio.rs` (`InputBackend`
+  seam; PortAudio impl), `shell/recorder.rs` (recovery WAV),
+  `shell/sync.rs` (the capture path's mutex policy), `shell/control.rs`
+  (control socket server and the CLI's client), `shell/inference.rs`
+  (sherpa's transducer and Silero), `shell/dirs.rs` (private directories), `shell/models.rs`
   (downloads and verifies the default models),
   `shell/nvim/mod.rs` (editor lifecycle, both modes, `spokenpad editor`),
   `shell/nvim/passage.rs` (text dictated with no editor open), `shell/wm.rs`

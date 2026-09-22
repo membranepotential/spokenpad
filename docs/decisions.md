@@ -2533,3 +2533,21 @@ section and key, with links to the experiments and decisions they come from.
 Paths that default to an XDG location are shown commented out, so that a
 copied file keeps following `$XDG_DATA_HOME` and `$XDG_STATE_HOME`, and the
 default models keep downloading.
+
+## The daemon is a module per owner; a pass of its loop is a method per step (2026-09-22)
+
+`shell/daemon.rs` had grown to about 2000 lines: the composition root, the
+bodies of the inference and editor threads, the recording bookkeeping, and a
+`serve` of about 500 lines with four levels of nesting (audit P2-009,
+P2-002). It is now `shell/daemon/`: `mod.rs` keeps `run`, `serve` and the
+event loop, and `engine.rs`, `editor.rs`, `capture.rs`,
+`transcriptions.rs`, `requests.rs` and `lock.rs` each hold one owner or one
+piece of bookkeeping. `serve` builds a `Loop` and runs it; each pass calls,
+in order, `poll_device`, `take_requests`, `deliver`, `tick`,
+`dispatch_recordings`, and `show`, and `shut_down` is the stop. The bounds on
+how many requests and results one pass takes are named (audit P3-007).
+Nothing changes in behaviour, and the public paths the tests use
+(`shell::daemon::{serve, Devices, PipelineSource, Loader, Reload}`) stay.
+Rejected: moving the editor thread into `shell/nvim` as the audit suggested;
+it is the daemon's use of an editor session, and `shell/nvim` is another
+owner's.

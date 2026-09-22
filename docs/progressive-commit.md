@@ -209,7 +209,7 @@ a newer one's offset.
 
 A stop of the daemon is not a cancel of what it owes. From its first moment
 every capture with a recovery WAV is on the daemon's list of recordings whose
-text is not all written (`Transcription`, in `shell/daemon.rs`, with a `Stage`:
+text is not all written (`Transcription`, in `shell/daemon/transcriptions.rs`, with a `Stage`:
 capturing, finishing its tail, kept until the model is ready, sent to the
 engine, or left to retry). A user's cancel takes it off; its last `Finished`
 does too. What is still on the list at the stop — a capture held then, which

@@ -31,15 +31,19 @@ the root because both sides read it. Nothing under `core/` may import
   `notice()` are separate: the editor draws the preview below the transcript
   and the notice in the winbar, in every phase, as a headline plus a detail it
   appends only when the window is wide enough.
-- `shell/daemon.rs` splits into `run` and `serve`. `run` is the shell: the
-  per-user lock, first the control socket, then signal handlers and
+- `shell/daemon/mod.rs` holds `run` and `serve`; the two threads `serve`
+  starts are `engine.rs` and `editor.rs` beside it, and its bookkeeping is
+  `capture.rs`, `transcriptions.rs`, `requests.rs` and `lock.rs`. `run` is
+  the shell: the per-user lock, first the control socket, then signal handlers and
   PortAudio, and a loader for the models that the inference thread runs
   while presses are already taken. `serve` is the event loop, generic over
   the audio backend, recognizer and segmenter, handed a pipeline that is
   built already or a loader, and taking its control requests from a plain
   channel, which is what the headless end-to-end tests drive. Until the
   pipeline is built, captures are kept as their recovery WAVs and decoded
-  from them afterwards. Each request
+  from them afterwards. Each pass of the loop is a sequence of `Loop`
+  methods: poll the device, take the requests, deliver results, tick,
+  dispatch kept recordings, drop committed audio, show the winbar. Each request
   reaches the state machine after the clock at its own stamp, so a repeat
   window that closed before the request arrived is closed first. It drains
   requests before inference results and moves
