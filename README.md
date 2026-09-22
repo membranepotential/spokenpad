@@ -55,14 +55,21 @@ applications.
 On Arch Linux and Manjaro, once spokenpad is on the AUR, install it with
 your AUR helper: `yay -S spokenpad` (or `pamac build spokenpad` on Manjaro).
 Until then, build the package from this repository; `makepkg` needs
-`base-devel` and `git`:
+`base-devel` and `git`. The package builds from the source tarball of the
+release tag, which GitHub serves from v0.2.0 on; until that tag is
+published, hand `makepkg` a tarball of your checkout under the same name,
+and it uses that instead of downloading one:
 
 ```sh
 sudo pacman -S --needed base-devel git
 git clone https://github.com/membranepotential/spokenpad
-cd spokenpad/packaging/aur
+cd spokenpad
+git archive --prefix=spokenpad-0.2.0/ -o packaging/aur/spokenpad-0.2.0.tar.gz HEAD
+cd packaging/aur
 makepkg -si
 ```
+
+Once v0.2.0 is tagged, `makepkg -si` in `packaging/aur` alone downloads it.
 
 The package installs:
 
@@ -130,12 +137,14 @@ config. Models and settings stay where they are.
 
 **Other distributions.** Build with Cargo, as in
 [Building from source](#building-from-source), and install the units from
-`packaging/systemd` as your own:
+`packaging/systemd` as your own, from a checkout:
 ```sh
+git clone https://github.com/membranepotential/spokenpad
+cd spokenpad
 packaging/sherpa-archive.sh ~/.cache/spokenpad-sherpa
 SHERPA_ONNX_ARCHIVE_DIR=~/.cache/spokenpad-sherpa cargo install --locked --path . --root ~/.local
-cp packaging/systemd/spokenpad.{socket,service} ~/.config/systemd/user/
 mkdir -p ~/.config/systemd/user/spokenpad.service.d
+cp packaging/systemd/spokenpad.{socket,service} ~/.config/systemd/user/
 cp packaging/systemd/dev.conf.example ~/.config/systemd/user/spokenpad.service.d/dev.conf
 systemctl --user daemon-reload
 systemctl --user enable --now spokenpad.socket
