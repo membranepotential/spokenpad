@@ -18,7 +18,8 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    # ci/** runs the checks on a branch before it is merged.
+    branches: [main, 'ci/**']
   pull_request:
 
 permissions:
