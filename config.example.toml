@@ -387,12 +387,14 @@ window_fraction = 0.33
 # is close but not the same thing. `fc-match monospace` says what you have.
 font_family = "monospace"
 
-# Pane mode only: that font's size, in PIXELS, not points. The window
-# rasterises at a pixel size and has no display resolution to convert a point
-# size from, so this is the honest unit. 16 is about what a terminal at 12pt
-# on a 96dpi screen gives you. The window's size in cells follows from this
-# and window_fraction above.
-font_size = 16.0
+# Pane mode only: that font's size in points, meaning exactly what
+# Alacritty's `font.size` means. The display's `Xft.dpi` (from xrdb; 96 when
+# unset) turns it into pixels, and the cells are measured the way Alacritty
+# measures them, so the same family and size give the same text and the same
+# cells as Alacritty on any screen. 11.25 is Alacritty's default; copy your
+# Alacritty `font.size` here to match it. In [1, 200]. The window's size in
+# cells follows from this and window_fraction above.
+font_size = 11.25
 
 # Where nvim listens for RPC, in every mode. spokenpad reattaches to a live
 # socket rather than opening a second window, and `spokenpad editor` refuses

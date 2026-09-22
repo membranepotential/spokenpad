@@ -28,6 +28,7 @@ use spokenpad::{
     core::{
         control::{Received, Request},
         decode::{Pipeline, Recognizer, Segmenter, TrailingSilence, Worker},
+        font::Points,
     },
     shell::{
         audio::{AudioCapture, CallbackCore, InputBackend, InputStream, Teardown},
@@ -321,7 +322,7 @@ fn abandoned_pane(server: &XServer) -> (PaneHost, PathBuf, tempfile::TempDir) {
                     columns: 40,
                     rows: 8,
                 },
-                size: 16.0,
+                size: Points::try_from(12.0).expect("a point size"),
                 ..Options::default()
             },
             correct_to: None,

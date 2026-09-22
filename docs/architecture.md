@@ -19,6 +19,7 @@ imperative shell, and `config.rs` sits at the root because both sides read it.
 | `core/state.rs` | Total session-state transition function over requests and the clock; the minimum hold, the repeat window, and the limits that end a capture nobody ends | none |
 | `core/frames.rs` | `Frames`: capture-absolute sample offsets, distinct from slice indices | none |
 | `core/geometry.rs` | Which output the pointer is on, and the clamped window rect | none |
+| `core/font.rs` | The pane's font size in points, `Xft.dpi`, and the cell a face makes: Alacritty's and FreeType's arithmetic, rounding included | none |
 | `core/text.rs` | Filler stripping, exact replacements, whitespace repair | none |
 | `core/wm.rs` | i3/sway IPC framing; parsing outputs, tree, config and `no_focus` rules | none |
 | `core/terminal.rs` | The known terminals: how each names its window, where it opens, its argv | none |
@@ -34,7 +35,7 @@ imperative shell, and `config.rs` sits at the root because both sides read it.
 | `shell/nvim/mod.rs` | Editor lifecycle in all three modes (attach, managed spawn, pane), ownership proof, transactional appends, indicator, `spokenpad editor` | Unix socket, window manager |
 | `shell/pane/mod.rs` | The pane: its loop, the renderer, and what `spokenpad check` looks for | X11 |
 | `shell/pane/host.rs` | The pane's thread: the two things the daemon tells it, whether a pane is open, and restarting after a panic | internal channels |
-| `shell/pane/x11.rs` | The window, the properties that keep a window manager from focusing it, and `PutImage` | X11 |
+| `shell/pane/x11.rs` | The window, the properties that keep a window manager from focusing it, `PutImage`, and the display's `Xft.dpi` | X11 |
 | `shell/pane/ui.rs` | `nvim --embed` over stdio, `nvim_ui_attach`, and the thread that decodes its redraw stream | a child process |
 | `shell/pane/font.rs` | `fc-match` for the face, swash for hinted glyphs, per-grapheme caching, and a character fallback kept off the drawing path: loaded faces first, one answer per Unicode page, a budget per frame and a timeout per process | fontconfig, filesystem |
 | `shell/pane/keyboard.rs` | The layout the X server has loaded, dead keys and Compose | X11, libxkbcommon |
@@ -70,6 +71,8 @@ unit-tested without a device, a thread, or a process. Nothing there may import
 - `core/decode.rs` — offsets, settlement, and what a release still owes.
 - `core/segments.rs` — VAD spans merged into padded, settled decode windows.
 - `core/frames.rs`, `core/geometry.rs`, `core/text.rs` — values and arithmetic.
+- `core/font.rs` — points and `Xft.dpi` to pixels, and a face's tables to a
+  cell, the way Alacritty and FreeType compute them.
 - `core/wm.rs` — the i3 IPC protocol, which sway shares, as values: frames,
   replies, `no_focus` proof, `include` resolution, placement commands.
 - `core/terminal.rs` — the terminal table: window names, focus criteria per

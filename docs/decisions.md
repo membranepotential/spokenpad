@@ -1050,3 +1050,37 @@ coverage. It replays in about two minutes and reproduced the recorded run of
   dataset's hand-checked `spoken` field marks them, the report prints WER per
   group, and `--spoken en --spoken de` scores without them. Dataset version
   `2026-09-21.1`: same audio and references, so older numbers still compare.
+
+## The pane's font size is in points, measured as Alacritty measures (2026-09-22)
+
+On a 192 dpi display the pane's text was half the size of Alacritty's at the
+same setting: `nvim.font_size` was pixels (default 16) and the pane never
+asked the display's resolution. The earlier reason for pixels, that the pane
+"has no display resolution to convert from", was wrong: every X11 toolkit reads
+`Xft.dpi`, and Alacritty does through winit.
+
+- **`nvim.font_size` is now points and means what Alacritty's `font.size`
+  means.** `core/font.rs` repeats Alacritty 0.17's arithmetic, crossfont's
+  and FreeType's rounding included, and matches all 304 cells measured from
+  Alacritty's own window over four fonts, five resolutions and three hinting
+  modes ([experiment](experiments/2026-09-22-pane-hidpi.md)). The default is
+  Alacritty's, 11.25 pt; valid sizes are 1 to 200. The key changed unit
+  before any release, so there is no migration: a config with
+  `font_size = 16` now asks for 16 pt.
+- **The resolution is `Xft.dpi` from `RESOURCE_MANAGER`, read when a pane
+  opens**, and 96 when unset. winit also reads XSETTINGS first and RandR's
+  physical size last; those are not reproduced, and `spokenpad check` prints
+  the resolution the pane would use.
+- **Everything else in pixels follows the font rather than a scale factor**:
+  baseline, underline and strikeout as Alacritty's `create_rect` places them,
+  the unfocused cursor's outline at Alacritty's 0.15 of a cell, and underline
+  patterns measured in the underline's thickness. The window's size already
+  came from `nvim.window_fraction` and whole cells.
+- **Rejected: a scale factor on top of a pixel size.** It would be close and
+  never equal, because the cell width is an advance rounded at the scaled
+  size, not a scaled rounded advance, and the user's question was "the same
+  as Alacritty".
+- `tests/pane_hidpi.rs` sets `Xft.dpi` on its Xvfb and compares the pane's
+  cells with a live Alacritty's at 96, 144 and 192 dpi; every earlier pane
+  test ran without `Xft.dpi`, where 16 px is exactly 12 pt, which is why none
+  noticed.

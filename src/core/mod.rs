@@ -7,6 +7,7 @@
 //! process, a socket or a thread belongs on the other side.
 pub mod control;
 pub mod decode;
+pub mod font;
 pub mod frames;
 pub mod geometry;
 pub mod grid;

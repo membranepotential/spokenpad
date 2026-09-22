@@ -35,7 +35,7 @@ use harness::{
 use rmpv::Value;
 use spokenpad::{
     config::{Mode, Nvim},
-    core::{geometry::Rect, state::IndicatorPhase},
+    core::{font::Points, geometry::Rect, state::IndicatorPhase},
     shell::{
         daemon::SHUTDOWN_GRACE,
         nvim::pane_launch,
@@ -79,7 +79,7 @@ fn the_pane_draws_what_neovim_draws() {
                 columns: COLUMNS,
                 rows: ROWS,
             },
-            size: 16.0,
+            size: Points::try_from(12.0).expect("a point size"),
             ..Options::default()
         },
         command,
@@ -505,7 +505,7 @@ fn pane_on(server: &XServer, config: &Nvim, file: &Path) -> Pane {
                 columns: 40,
                 rows: 8,
             },
-            size: 16.0,
+            size: Points::try_from(12.0).expect("a point size"),
             ..Options::default()
         },
         command,

@@ -23,12 +23,14 @@ use x11rb::{
     connection::Connection,
     protocol::{
         xproto::{
-            BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT, ConnectionExt as _, CreateWindowAux,
-            KEY_PRESS_EVENT, KEY_RELEASE_EVENT, MOTION_NOTIFY_EVENT, Window, WindowClass,
+            AtomEnum, BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT, ConnectionExt as _,
+            CreateWindowAux, KEY_PRESS_EVENT, KEY_RELEASE_EVENT, MOTION_NOTIFY_EVENT, PropMode,
+            Window, WindowClass,
         },
         xtest::ConnectionExt as _,
     },
     rust_connection::RustConnection,
+    wrapper::ConnectionExt as _,
 };
 
 /// How long a window manager may take to settle after a map before a test
@@ -58,7 +60,8 @@ pub fn tools_or_skip(programs: &[&str]) -> bool {
     assert!(
         std::env::var_os("SPOKENPAD_ALLOW_MISSING_X11").is_some(),
         "{} not installed; this test needs a headless X server, i3, nvim and \
-         fontconfig (pacman: xorg-server-xvfb i3-wm neovim xorg-setxkbmap). \
+         fontconfig, and the HiDPI test Alacritty (pacman: xorg-server-xvfb i3-wm \
+         neovim xorg-setxkbmap alacritty). \
          Set SPOKENPAD_ALLOW_MISSING_X11=1 to skip it deliberately.",
         missing.join(", ")
     );
@@ -170,6 +173,27 @@ impl XServer {
             .status()
             .expect("run setxkbmap");
         assert!(status.success(), "setxkbmap {layout} failed");
+    }
+
+    /// Replace the X resources on this server, the way `xrdb -load` does:
+    /// the text of the root window's `RESOURCE_MANAGER`. `Xft.dpi` in it is
+    /// what the pane and Alacritty both take the display's resolution from.
+    ///
+    /// Written over the test's own connection rather than with `xrdb`: an
+    /// Xvfb resets, and forgets every property, when its last client
+    /// disconnects, and this connection lives as long as the server.
+    pub fn set_resources(&self, resources: &str) {
+        self.connection
+            .change_property8(
+                PropMode::REPLACE,
+                self.root,
+                AtomEnum::RESOURCE_MANAGER,
+                AtomEnum::STRING,
+                resources.as_bytes(),
+            )
+            .expect("write RESOURCE_MANAGER")
+            .check()
+            .expect("the server accepts RESOURCE_MANAGER");
     }
 
     /// Every synthetic event goes through this: it refuses any display this

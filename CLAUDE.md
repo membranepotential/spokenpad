@@ -58,8 +58,9 @@ those belongs in `src/shell/`.
   `no_focus` proof), `core/terminal.rs` (the terminal table), `core/models.rs` (the pinned
   default model manifest), `core/grid.rs` (nvim's `ext_linegrid` redraw
   events and the screen they fold into), `core/keys.rs` (keysym and modifiers
-  to nvim key notation), `core/frames.rs`, `core/geometry.rs`,
-  `core/text.rs`; plus the `shell/nvim/rpc.rs` codec, `parse_ownership` and
+  to nvim key notation), `core/font.rs` (the pane's point size and
+  `Xft.dpi` to pixels, and cells measured as Alacritty measures them),
+  `core/frames.rs`, `core/geometry.rs`, `core/text.rs`; plus the `shell/nvim/rpc.rs` codec, `parse_ownership` and
   `passage::append_paragraph`, still inside their modules.
 - Imperative shell: `shell/daemon.rs` (`run` = lock/signals/devices, `serve` =
   the generic loop), `shell/audio.rs` (`InputBackend` seam; PortAudio impl),
@@ -97,7 +98,9 @@ those belongs in `src/shell/`.
   `tests/pane_window.rs` proves the window never takes focus;
   `tests/pane_render.rs` runs a real embedded nvim in it and checks the
   drawing against nvim's own screen; `tests/pane_daemon.rs` drives the real
-  `shell::daemon::serve` in pane mode.
+  `shell::daemon::serve` in pane mode; `tests/pane_hidpi.rs` sets `Xft.dpi`
+  and compares the pane's cells with a live Alacritty's (llvmpipe, private
+  `HOME`).
 - `scripts/install.sh` (binary to `~/.local/bin`, user unit; `--uninstall`),
   `scripts/gladia-references.sh` (a development tool that **uploads the
   recordings to Gladia** to build the frozen dataset in `eval-samples/local/`;
@@ -121,7 +124,8 @@ scripts/install.sh                             # deploy: the service runs ~/.loc
 
 Nvim-dependent tests fail loudly when nvim is missing unless
 `SPOKENPAD_ALLOW_MISSING_NVIM` is set; `tests/pane_window.rs` does the same for
-Xvfb and i3 with `SPOKENPAD_ALLOW_MISSING_X11`. That test starts its own X
+Xvfb and i3 with `SPOKENPAD_ALLOW_MISSING_X11`, and `tests/pane_hidpi.rs` for
+Alacritty. That test starts its own X
 server above display `:50` and its own i3 with a generated config; nothing ever
 opens on `:0` or reads the user's i3 configuration. All tests pass while the
 user's service is running: they use temp dirs and never the real state dir or

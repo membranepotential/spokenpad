@@ -156,10 +156,41 @@ non-zero when one is missing.
 `nvim.font_family` is a fontconfig family name and defaults to `monospace`,
 the alias your desktop already points at the font you want. It is a *name*,
 checked once where the configuration is read, so the pane cannot be handed
-something fontconfig would read as pattern syntax. `nvim.font_size`
-is in **pixels**: the pane rasterises at a pixel size and has no display
-resolution to convert a point size from, so a point size here would be a
-number that means something on paper and nothing on the screen.
+something fontconfig would read as pattern syntax.
+
+`nvim.font_size` is in **points** and means exactly what Alacritty's
+`font.size` means: the same family and size give the same text and the same
+cells in both, on any display. `core/font.rs` repeats Alacritty 0.17's
+arithmetic step by step:
+
+- **Scale.** The display's `Xft.dpi`, read from the root window's
+  `RESOURCE_MANAGER` when the pane opens (96 when unset), divided by 96 is
+  winit's scale factor. The size in pixels is `points × dpi / 72`, kept in
+  crossfont's own `f32` steps and asked of the rasteriser in 64ths of a
+  pixel. 12 pt is 16 px at 96 dpi and 32 px at 192.
+- **Metrics.** FreeType's size metrics at that size: ascender rounded up,
+  descender down, line height to the nearest pixel, from the table FreeType
+  trusts (OS/2's typographic values when the font sets `USE_TYPO_METRICS`,
+  `hhea` otherwise). The advance of `0` is rounded as the font's hinting
+  asks: fontconfig's `hintslight` rounds it at the requested size, full
+  hinting of a TrueType font that sets `head.flags` bit 3 at a whole-pixel
+  em, and no hinting keeps the fraction.
+- **Cell.** The width is that advance and the height the larger of the line
+  height and ascender minus descender, both floored. The baseline sits the
+  descent above the cell's bottom; underline and strikethrough are placed
+  where Alacritty's `create_rect` puts them, and the unfocused cursor's
+  outline is 0.15 of a cell wide, Alacritty's default `cursor.thickness`.
+  The underline styles are measured in the underline's thickness, so they
+  grow with the font too.
+
+The match is exact rather than close: 304 cells measured from Alacritty's
+own window on an Xvfb, over four fonts, five resolutions and all three
+hinting modes, equal the pane's, and `tests/pane_hidpi.rs` checks it again
+against a live Alacritty at 96, 144 and 192 dpi
+([experiment](experiments/2026-09-22-pane-hidpi.md)). Only `Xft.dpi` is read:
+a desktop that sets the resolution through an XSETTINGS daemon alone, or not
+at all on a screen whose physical size RandR reports, gets 96 here where
+winit would find another value.
 
 Bold is thickened by hand where fontconfig has no bold face — which is what
 `monospace` resolves to on some machines — and italic falls back to the plain

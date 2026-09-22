@@ -17,6 +17,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use spokenpad::{
     config::{FontFamily, Nvim},
+    core::font::Points,
     shell::{
         nvim::pane_launch,
         pane::{Options, Pane, Sizing, Status},
@@ -42,8 +43,9 @@ struct Args {
     /// A fontconfig family name.
     #[arg(long, default_value = "monospace")]
     family: String,
-    /// Font size in pixels.
-    #[arg(long, default_value_t = 16.0)]
+    /// Font size in points, as Alacritty's `font.size`; the display's
+    /// `Xft.dpi` turns it into pixels.
+    #[arg(long, default_value_t = Points::DEFAULT.get(), value_parser = points)]
     size: f32,
     #[arg(long, default_value_t = 72)]
     columns: u16,
@@ -59,6 +61,12 @@ struct Args {
     /// closed.
     #[arg(long, value_name = "SECONDS")]
     quit_after: Option<f64>,
+}
+
+/// A size clap accepts only when the pane would.
+fn points(text: &str) -> Result<f32> {
+    let value: f32 = text.parse().context("a font size is a number")?;
+    Ok(Points::try_from(value)?.get())
 }
 
 fn main() -> Result<()> {
@@ -89,7 +97,7 @@ fn main() -> Result<()> {
             .filter(|name| !name.is_empty())
             .context("pass --display, or run this where $DISPLAY is set")?,
         family: FontFamily::try_from(args.family.clone())?,
-        size: args.size,
+        size: Points::try_from(args.size)?,
         sizing: Sizing::Cells {
             columns: args.columns,
             rows: args.rows,
@@ -102,11 +110,14 @@ fn main() -> Result<()> {
     let mut pane = Pane::open(&options, command)?;
     pane.show()?;
     marker.keep();
+    let metrics = pane.metrics();
     println!(
-        "pane window {} on {} listening at {}",
+        "pane window {} on {} listening at {}, {}x{} pixel cells",
         pane.window().id(),
         args.display.as_deref().unwrap_or("$DISPLAY"),
-        config.socket_path.display()
+        config.socket_path.display(),
+        metrics.width,
+        metrics.height
     );
 
     let deadline = args

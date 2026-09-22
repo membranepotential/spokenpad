@@ -35,6 +35,7 @@ pub mod xkb;
 
 use crate::config::FontFamily;
 use crate::core::{
+    font::{Dpi, Points},
     geometry::Rect,
     grid::{Cell, CursorShape, Damage, RedrawEvent, Rgb, Screen, Style, Underline},
 };
@@ -87,8 +88,9 @@ pub struct Options {
     pub display: String,
     /// A fontconfig family name; `monospace` is the one every desktop has.
     pub family: FontFamily,
-    /// Font size in pixels.
-    pub size: f32,
+    /// Font size in points, turned into pixels by the display's `Xft.dpi`
+    /// exactly as Alacritty does it.
+    pub size: Points,
     pub sizing: Sizing,
     /// How long the editor inside it has to answer `nvim_ui_attach`. The
     /// daemon passes what is left of the one deadline it gave the whole
@@ -105,7 +107,7 @@ impl Default for Options {
         Self {
             display: ":0".to_owned(),
             family: FontFamily::default(),
-            size: 16.0,
+            size: Points::DEFAULT,
             sizing: Sizing::Cells {
                 columns: 72,
                 rows: 12,
@@ -162,7 +164,10 @@ impl Pane {
     /// `command` must already carry `--embed`, and should carry `--listen` too
     /// so the daemon can append to the same editor.
     pub fn open(options: &Options, command: Command) -> Result<Self> {
-        let font = Font::load(&options.family, options.size)?;
+        // The display first: its resolution decides how many pixels a point
+        // is, and so how big the window has to be.
+        let display = x11::Display::connect(&options.display)?;
+        let font = Font::load(&options.family, options.size, display.dpi())?;
         let metrics = font.metrics();
         // A window is a whole number of cells: the pane draws cells, and a
         // partial column at the right edge is a strip nothing ever paints.
@@ -188,7 +193,7 @@ impl Pane {
         };
         let (x, y) = options.position.unwrap_or((0, 0));
         let window = Window::open(
-            &options.display,
+            display,
             Rect {
                 x,
                 y,
@@ -714,15 +719,20 @@ impl Canvas {
             self.blit(&glyph, left, baseline, style.foreground);
         }
         if let Some(underline) = style.underline {
-            let y = baseline.saturating_add_signed(metrics.underline);
-            self.rule(underline, left, y, metrics.width, style.special);
+            self.rule(
+                underline,
+                left,
+                top + metrics.underline.top,
+                metrics.width,
+                style.special,
+            );
         }
         if style.strikethrough {
             self.fill(
                 left,
-                top + metrics.strikethrough,
+                top + metrics.strikeout.top,
                 metrics.width,
-                metrics.thickness,
+                metrics.strikeout.thickness,
                 style.special,
             );
         }
@@ -742,39 +752,44 @@ impl Canvas {
         }
     }
 
-    /// A one-pixel frame, for the cursor of an unfocused pane.
+    /// A frame, for the cursor of an unfocused pane, as thick as Alacritty
+    /// draws its hollow cursor.
     fn outline(&mut self, left: u32, top: u32, width: u32, height: u32, colour: Rgb) {
-        self.fill(left, top, width, 1, colour);
-        self.fill(left, top + height.saturating_sub(1), width, 1, colour);
-        self.fill(left, top, 1, height, colour);
-        self.fill(left + width.saturating_sub(1), top, 1, height, colour);
+        let line = self.metrics.hollow_cursor();
+        self.fill(left, top, width, line, colour);
+        self.fill(left, top + height.saturating_sub(line), width, line, colour);
+        self.fill(left, top, line, height, colour);
+        self.fill(left + width.saturating_sub(line), top, line, height, colour);
     }
 
     /// An underline in one of Neovim's styles.
+    ///
+    /// Every pattern is measured in the underline's own thickness, so it
+    /// scales with the font: one pixel at 96 dpi, two at 192.
     fn rule(&mut self, style: Underline, left: u32, y: u32, width: u32, colour: Rgb) {
-        let thickness = self.metrics.thickness;
+        let unit = self.metrics.underline.thickness;
         match style {
-            Underline::Single => self.fill(left, y, width, thickness, colour),
+            Underline::Single => self.fill(left, y, width, unit, colour),
             Underline::Double => {
-                self.fill(left, y, width, thickness, colour);
-                self.fill(left, y + thickness * 2, width, thickness, colour);
+                self.fill(left, y, width, unit, colour);
+                self.fill(left, y + unit * 2, width, unit, colour);
             }
             Underline::Dotted => {
-                for x in (left..left + width).step_by(2) {
-                    self.fill(x, y, 1, thickness, colour);
+                for x in (left..left + width).step_by(2 * unit as usize) {
+                    self.fill(x, y, unit.min(left + width - x), unit, colour);
                 }
             }
             Underline::Dashed => {
-                for x in (left..left + width).step_by(4) {
-                    self.fill(x, y, 2, thickness, colour);
+                for x in (left..left + width).step_by(4 * unit as usize) {
+                    self.fill(x, y, (2 * unit).min(left + width - x), unit, colour);
                 }
             }
             Underline::Curl => {
-                // A two-pixel zigzag reads as a wave at text sizes and needs
-                // no curve rasteriser.
+                // A zigzag one stroke high reads as a wave at text sizes and
+                // needs no curve rasteriser.
                 for (step, x) in (left..left + width).enumerate() {
-                    let offset = u32::from(step as u32 % 4 < 2);
-                    self.fill(x, y + offset, 1, thickness, colour);
+                    let offset = unit * u32::from(step as u32 / unit % 4 < 2);
+                    self.fill(x, y + offset, 1, unit, colour);
                 }
             }
         }
@@ -1024,14 +1039,18 @@ pub fn requirements(config: &crate::config::Nvim) -> Vec<Requirement> {
             .collect::<Vec<_>>()
             .join(", ")
     });
-    let font = Font::load(&config.font_family, config.font_size).map(|font| {
+    let display = display_summary(config.display.as_deref());
+    // Cells are measured at the display's resolution; with no display to ask,
+    // at the 96 dpi an X server without `Xft.dpi` means.
+    let dpi = display.as_ref().map_or(Dpi::DEFAULT, |(_, dpi)| *dpi);
+    let font = Font::load(&config.font_family, config.font_size, dpi).map(|font| {
         let metrics = font.metrics();
         format!(
-            "{:?} at {} px: {}x{} pixel cells",
+            "\"{}\" at {} on {dpi}: {}x{} pixel cells",
             config.font_family, config.font_size, metrics.width, metrics.height
         )
     });
-    let display = display_summary(config.display.as_deref());
+    let display = display.map(|(summary, _)| summary);
     vec![
         Requirement {
             what: "X libraries",
@@ -1048,8 +1067,9 @@ pub fn requirements(config: &crate::config::Nvim) -> Vec<Requirement> {
     ]
 }
 
-/// The display a pane would open on, and the monitors it would choose from.
-fn display_summary(display: Option<&str>) -> Result<String> {
+/// The display a pane would open on, the monitors it would choose from, and
+/// its resolution.
+fn display_summary(display: Option<&str>) -> Result<(String, Dpi)> {
     let name = display
         .context("$DISPLAY was not set when spokenpad started")?
         .to_owned();
@@ -1058,15 +1078,19 @@ fn display_summary(display: Option<&str>) -> Result<String> {
     let (connection, screen) = x11rb::xcb_ffi::XCBConnection::connect(Some(&cstring))
         .with_context(|| format!("connect to {name}"))?;
     let rect = place::window(&connection, screen, 1.0)?;
+    let dpi = x11::dpi(&connection, screen);
     let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some_and(|value| !value.is_empty());
-    Ok(format!(
-        "{name}, {}x{} usable{}",
-        rect.width,
-        rect.height,
-        match wayland {
-            true => " (through Xwayland: the pane opens in a corner, not at the pointer)",
-            false => "",
-        }
+    Ok((
+        format!(
+            "{name}, {}x{} usable, {dpi}{}",
+            rect.width,
+            rect.height,
+            match wayland {
+                true => " (through Xwayland: the pane opens in a corner, not at the pointer)",
+                false => "",
+            }
+        ),
+        dpi,
     ))
 }
 

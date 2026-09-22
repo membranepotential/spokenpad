@@ -18,7 +18,10 @@
 mod harness;
 
 use harness::{I3, SETTLE, XServer, click, find_key, move_pointer, press_key};
-use spokenpad::{core::geometry::Rect, shell::pane::x11::Window as Pane};
+use spokenpad::{
+    core::geometry::Rect,
+    shell::pane::x11::{Display, Window as Pane},
+};
 use std::{thread::sleep, time::Duration};
 use x11rb::{
     connection::Connection,
@@ -81,8 +84,9 @@ impl Watched {
     }
 
     fn at(server: &XServer, rect: Rect) -> Self {
+        let display = Display::connect(&server.display).expect("connect to the test display");
         let window =
-            Pane::open(&server.display, rect, "spokenpad dictation").expect("open the pane window");
+            Pane::open(display, rect, "spokenpad dictation").expect("open the pane window");
         Self {
             window,
             key_press: 0,

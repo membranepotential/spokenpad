@@ -20,7 +20,7 @@
 //!
 //! `WM_TAKE_FOCUS` is deliberately absent: with `input = True` and a user time
 //! of 0 it changes nothing, and announcing it would oblige us to answer it.
-use crate::core::geometry::Rect;
+use crate::core::{font::Dpi, geometry::Rect};
 use anyhow::{Context, Result, ensure};
 use std::{ffi::CString, sync::Arc};
 use x11rb::{
@@ -78,14 +78,63 @@ pub struct Window {
     low_byte_first: bool,
 }
 
+/// A connection to an X display, before any window exists on it: what the
+/// pane needs to know about the display to decide how big its window is.
+pub struct Display {
+    connection: XCBConnection,
+    screen: usize,
+}
+
+impl Display {
+    pub fn connect(display: &str) -> Result<Self> {
+        let name = CString::new(display).context("the display name contains a NUL")?;
+        let (connection, screen) = XCBConnection::connect(Some(&name))
+            .with_context(|| format!("connect to the X display {display}"))?;
+        Ok(Self { connection, screen })
+    }
+
+    pub fn dpi(&self) -> Dpi {
+        dpi(&self.connection, self.screen)
+    }
+}
+
+/// The display's `Xft.dpi`, which is where winit, and so Alacritty, takes its
+/// scale factor from; 96 when nobody set it.
+pub fn dpi(connection: &impl Connection, screen: usize) -> Dpi {
+    resources(connection, screen)
+        .inspect_err(|error| log::debug!("cannot read RESOURCE_MANAGER: {error:#}"))
+        .ok()
+        .flatten()
+        .and_then(|text| Dpi::from_resources(&text))
+        .unwrap_or(Dpi::DEFAULT)
+}
+
+/// The text of the root window's `RESOURCE_MANAGER` property, which `xrdb`
+/// writes; `None` when nothing was loaded.
+fn resources(connection: &impl Connection, screen: usize) -> Result<Option<String>> {
+    let root = connection.setup().roots[screen].root;
+    let reply = connection
+        .get_property(
+            false,
+            root,
+            AtomEnum::RESOURCE_MANAGER,
+            AtomEnum::STRING,
+            0,
+            // The property's length in 32-bit units; a resource database is
+            // a few kilobytes, and this bounds a pathological one at 4 MiB.
+            1 << 20,
+        )?
+        .reply()
+        .context("read the root window's RESOURCE_MANAGER")?;
+    Ok((reply.format == 8).then(|| String::from_utf8_lossy(&reply.value).into_owned()))
+}
+
 impl Window {
     /// Create the window with the property set above. It is **not** mapped:
     /// the caller decides when it appears, and nothing before [`Self::map`]
     /// can change what the window manager will do with it.
-    pub fn open(display: &str, rect: Rect, title: &str) -> Result<Self> {
-        let name = CString::new(display).context("the display name contains a NUL")?;
-        let (connection, screen) = XCBConnection::connect(Some(&name))
-            .with_context(|| format!("connect to the X display {display}"))?;
+    pub fn open(display: Display, rect: Rect, title: &str) -> Result<Self> {
+        let Display { connection, screen } = display;
         let connection = Arc::new(connection);
         check_visual(&connection, screen)?;
         let low_byte_first = connection.setup().image_byte_order == ImageOrder::LSB_FIRST;

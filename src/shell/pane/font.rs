@@ -19,7 +19,11 @@
 //! spent [`FALLBACK_BUDGET`] asking stops and leaves the rest to the next
 //! one, which is what [`Font::deferred`] tells the caller; and a single
 //! `fc-match` that does not answer is killed after [`MATCH_TIMEOUT`].
-use crate::config::FontFamily;
+pub use crate::core::font::CellMetrics;
+use crate::{
+    config::FontFamily,
+    core::font::{self as metrics, Dpi, FaceMetrics, Hinting, PixelSize, Points, Tables},
+};
 use anyhow::{Context, Result, bail, ensure};
 use std::{
     collections::HashMap,
@@ -45,9 +49,11 @@ impl Face {
         italic: false,
     };
 
-    /// The fontconfig pattern for this face of the given family.
-    fn pattern(self, family: &FontFamily) -> String {
-        let mut pattern = family.to_string();
+    /// The fontconfig pattern for this face of the given family at a size.
+    /// The size is in it because Alacritty's pattern has it: a fontconfig
+    /// rule may choose a file or a hinting style by pixel size.
+    fn pattern(self, family: &FontFamily, size: PixelSize) -> String {
+        let mut pattern = format!("{family}:pixelsize={}", size.pixels());
         if self.bold {
             pattern.push_str(":bold");
         }
@@ -65,21 +71,6 @@ impl Face {
     pub fn of(bold: bool, italic: bool) -> Self {
         Self { bold, italic }
     }
-}
-
-/// What one cell of the grid measures, in pixels.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CellMetrics {
-    pub width: u32,
-    pub height: u32,
-    /// Distance from the top of the cell down to the baseline.
-    pub baseline: u32,
-    /// Where an underline sits, as a distance below the baseline.
-    pub underline: i32,
-    /// How thick an underline or strikethrough is drawn.
-    pub thickness: u32,
-    /// Distance from the top of the cell down to a strikethrough.
-    pub strikethrough: u32,
 }
 
 /// A rasterised grapheme, positioned relative to the pen: `left` from the pen
@@ -163,7 +154,7 @@ pub struct Font {
     page_of: HashMap<u32, Option<usize>>,
     context: ScaleContext,
     metrics: CellMetrics,
-    size: f32,
+    size: PixelSize,
     family: FontFamily,
 }
 
@@ -187,14 +178,15 @@ enum Rendered {
 }
 
 impl Font {
-    /// Load the family at the given pixel size. `family` is a fontconfig
-    /// pattern name; `"monospace"` is the one every desktop defines.
-    pub fn load(family: &FontFamily, size: f32) -> Result<Self> {
-        ensure!(
-            (4.0..=400.0).contains(&size),
-            "font size {size} is outside 4..400 pixels"
-        );
-        let plain = match_face(Face::PLAIN, family)?;
+    /// Load the family at a point size on a display of the given resolution,
+    /// measuring its cells the way Alacritty does. `family` is a fontconfig
+    /// family name; `"monospace"` is the one every desktop defines.
+    pub fn load(family: &FontFamily, points: Points, dpi: Dpi) -> Result<Self> {
+        let size = PixelSize::new(points, dpi);
+        let Answer {
+            found: plain,
+            hinting,
+        } = read_match(&Face::PLAIN.pattern(family, size))?;
         let faces = [
             Face::PLAIN,
             Face {
@@ -214,7 +206,7 @@ impl Font {
         for face in faces {
             let found = match face {
                 Face::PLAIN => plain.clone(),
-                face => match_face(face, family)?,
+                face => read_match(&face.pattern(family, size))?.found,
             };
             let substituted = face != Face::PLAIN && found == plain;
             loaded.push(Loaded {
@@ -228,9 +220,10 @@ impl Font {
         let faces: [Loaded; 4] = loaded
             .try_into()
             .map_err(|_| anyhow::anyhow!("expected four faces"))?;
-        let metrics = measure(&faces[0], size)?;
+        let metrics = measure(&faces[0], size, hinting)?;
         log::debug!(
-            "pane font {family:?} at {size}px: {} cell {}x{}, baseline {}",
+            "pane font \"{family}\" at {points} on {dpi} ({size}, {hinting:?} hinting): \
+             {}, cell {}x{}, baseline {}",
             plain.0.display(),
             metrics.width,
             metrics.height,
@@ -310,7 +303,7 @@ impl Font {
             Fallback::Nothing => &faces[index],
             Fallback::Deferred => return Rendered::Deferred,
         };
-        Rendered::Settled(rasterise(loaded, context, *size, text))
+        Rendered::Settled(rasterise(loaded, context, size.pixels(), text))
     }
 
     /// The face that draws a character the family does not cover, loading it
@@ -365,7 +358,7 @@ impl Font {
                 })
                 .ok()?;
             log::debug!(
-                "pane font: {} for {character:?}, which {:?} does not cover",
+                "pane font: {} for {character:?}, which \"{}\" does not cover",
                 found.0.display(),
                 self.family
             );
@@ -393,28 +386,31 @@ fn covers(face: &Loaded, character: char) -> bool {
 /// The font fontconfig picks for one character, preferring the configured
 /// family's own idea of a substitute.
 fn match_character(family: &FontFamily, character: char) -> Result<Matched> {
-    read_match(&format!("{family}:charset={:x}", character as u32))
+    read_match(&format!("{family}:charset={:x}", character as u32)).map(|answer| answer.found)
 }
 
 /// A font file and the face inside it.
 type Matched = (PathBuf, u32);
+
+/// What fontconfig answered for a pattern: the file, and the hinting it
+/// asks for, which is what decides how FreeType rounds the advance.
+struct Answer {
+    found: Matched,
+    hinting: Hinting,
+}
 
 /// `fc-match`, which is fontconfig's own answer to "which file is this?".
 ///
 /// The family needs no checking here: [`FontFamily`] is parsed where the
 /// configuration is read, and cannot hold anything fontconfig would take as
 /// pattern syntax.
-fn match_face(face: Face, family: &FontFamily) -> Result<Matched> {
-    read_match(&face.pattern(family))
-}
-
-fn read_match(pattern: &str) -> Result<Matched> {
+fn read_match(pattern: &str) -> Result<Answer> {
     // Not `output()`: that waits for as long as the process takes, and this
     // runs in the thread that draws the window. A fontconfig rebuilding a
     // stale cache over a network mount would otherwise hold the pane for as
     // long as it liked.
     let mut child = Command::new("fc-match")
-        .arg("--format=%{file}\n%{index}\n")
+        .arg("--format=%{file}\n%{index}\n%{hinting}\n%{hintstyle}\n%{antialias}\n")
         .arg(pattern)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -442,50 +438,52 @@ fn read_match(pattern: &str) -> Result<Matched> {
         bail!("fc-match printed no file for {pattern:?}");
     };
     ensure!(!file.is_empty(), "fc-match found no font for {pattern:?}");
-    Ok((
-        PathBuf::from(file),
-        index.trim().parse().unwrap_or_default(),
-    ))
+    // An element the pattern does not have prints as an empty line, which is
+    // fontconfig saying nothing and crossfont taking its default.
+    let mut field = || {
+        lines
+            .next()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    };
+    let boolean = |value: Option<&str>| value.map(|value| value == "True");
+    let hinting = boolean(field());
+    let hintstyle = field().and_then(|value| value.parse().ok());
+    let antialias = boolean(field());
+    Ok(Answer {
+        found: (
+            PathBuf::from(file),
+            index.trim().parse().unwrap_or_default(),
+        ),
+        hinting: Hinting::from_fontconfig(hinting, hintstyle, antialias),
+    })
 }
 
-/// A cell is as wide as the font advances and as tall as a line of it.
+/// The cell this face makes at this size, measured as Alacritty measures it:
+/// the tables go to [`metrics::cell_metrics`], which does FreeType's and
+/// Alacritty's arithmetic.
 ///
-/// The width comes from a glyph rather than from `max_width`, because a
-/// monospace face advances every glyph the same and `max_width` counts
-/// whatever the widest outline happens to be.
-fn measure(face: &Loaded, size: f32) -> Result<CellMetrics> {
+/// The width is the advance of `0`, the glyph crossfont loads for it; a face
+/// that maps no `0` gives `.notdef`'s advance, as FreeType would.
+fn measure(face: &Loaded, size: PixelSize, hinting: Hinting) -> Result<CellMetrics> {
     let font = face.font()?;
-    let metrics = font.metrics(&[]).scale(size);
-    let charmap = font.charmap();
-    let advance = ['M', 'x', '0']
-        .into_iter()
-        .map(|character| charmap.map(character))
-        .find(|glyph| *glyph != 0)
-        .map(|glyph| font.glyph_metrics(&[]).scale(size).advance_width(glyph))
-        .filter(|advance| *advance > 0.0)
-        .unwrap_or(metrics.average_width);
+    let table = |name: &[u8; 4]| font.table(swash::tag_from_bytes(name));
+    let tables = Tables {
+        head: table(b"head").context("the font has no head table")?,
+        hhea: table(b"hhea").context("the font has no hhea table")?,
+        os2: table(b"OS/2"),
+        post: table(b"post"),
+        truetype: table(b"glyf").is_some(),
+        fpgm: table(b"fpgm").map_or(0, <[u8]>::len),
+        prep: table(b"prep").map_or(0, <[u8]>::len),
+    };
+    let zero = font.charmap().map('0');
+    let advance = font.glyph_metrics(&[]).advance_width(zero);
     ensure!(
-        advance > 0.0,
-        "the font advances no width at {size} pixels; it is not usable as a grid font"
+        advance > 0.0 && advance <= f32::from(u16::MAX),
+        "the font advances no width; it is not usable as a grid font"
     );
-    let width = advance.ceil().max(1.0) as u32;
-    let height = (metrics.ascent + metrics.descent + metrics.leading)
-        .ceil()
-        .max(1.0) as u32;
-    let baseline = metrics.ascent.ceil().max(0.0) as u32;
-    let thickness = metrics.stroke_size.round().max(1.0) as u32;
-    // `underline_offset` is negative below the baseline; the renderer wants a
-    // distance downwards, and a zero offset would draw on the baseline itself.
-    let underline = (-metrics.underline_offset).round() as i32;
-    let strikethrough = baseline.saturating_sub(metrics.strikeout_offset.round().max(0.0) as u32);
-    Ok(CellMetrics {
-        width,
-        height,
-        baseline,
-        underline: underline.max(1),
-        thickness,
-        strikethrough,
-    })
+    metrics::cell_metrics(&FaceMetrics::parse(tables)?, size, advance as u16, hinting)
 }
 
 /// Rasterise one grapheme: the base character, with any combining marks drawn
@@ -576,17 +574,12 @@ fn rasterise(face: &Loaded, context: &mut ScaleContext, size: f32, text: &str) -
     })
 }
 
-/// Whether the font this pane needs can be found at all.
-pub fn available() -> bool {
-    match_face(Face::PLAIN, &FontFamily::default()).is_ok()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn font_or_skip() -> Option<Font> {
-        if !available() {
+        if read_match(FontFamily::default().as_str()).is_err() {
             assert!(
                 std::env::var_os("SPOKENPAD_ALLOW_MISSING_X11").is_some(),
                 "fc-match found no monospace font; the pane cannot draw without one. \
@@ -594,7 +587,10 @@ mod tests {
             );
             return None;
         }
-        Some(Font::load(&FontFamily::default(), 16.0).expect("load the system monospace font"))
+        Some(
+            Font::load(&FontFamily::default(), Points::DEFAULT, Dpi::DEFAULT)
+                .expect("load the system monospace font"),
+        )
     }
 
     #[test]
@@ -604,7 +600,10 @@ mod tests {
         assert!(metrics.width > 0 && metrics.height > 0, "{metrics:?}");
         assert!(metrics.baseline > 0, "{metrics:?}");
         assert!(metrics.baseline <= metrics.height, "{metrics:?}");
-        assert!(metrics.thickness >= 1, "{metrics:?}");
+        for rule in [metrics.underline, metrics.strikeout] {
+            assert!(rule.thickness >= 1, "{metrics:?}");
+            assert!(rule.top + rule.thickness <= metrics.height, "{metrics:?}");
+        }
     }
 
     #[test]
@@ -752,8 +751,29 @@ mod tests {
     }
 
     #[test]
-    fn an_unusable_size_is_refused_before_anything_is_loaded() {
-        assert!(Font::load(&FontFamily::default(), 0.0).is_err());
-        assert!(Font::load(&FontFamily::default(), 1e6).is_err());
+    fn a_display_twice_as_dense_is_the_same_as_twice_the_points() {
+        // What the user reported: 16 pixels on a 192 dpi display is half the
+        // size of the same text in Alacritty. A point size scaled by the
+        // display is what makes the two agree, and it means resolution and
+        // size are interchangeable: 12 pt at 192 dpi is 24 pt at 96.
+        if font_or_skip().is_none() {
+            return;
+        }
+        let family = FontFamily::default();
+        let points = |value| Points::try_from(value).unwrap();
+        let dense = Font::load(&family, points(12.0), Dpi::new(192.0).unwrap()).unwrap();
+        let large = Font::load(&family, points(24.0), Dpi::DEFAULT).unwrap();
+        let plain = Font::load(&family, points(12.0), Dpi::DEFAULT).unwrap();
+        assert_eq!(dense.metrics(), large.metrics());
+        let (dense, plain) = (dense.metrics(), plain.metrics());
+        // Twice the pixels, give or take the rounding of each.
+        assert!(
+            dense.width.abs_diff(2 * plain.width) <= 2,
+            "{dense:?} {plain:?}"
+        );
+        assert!(
+            dense.height.abs_diff(2 * plain.height) <= 2,
+            "{dense:?} {plain:?}"
+        );
     }
 }

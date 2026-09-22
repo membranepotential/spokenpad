@@ -1,5 +1,5 @@
 //! TOML is validated once, before starting threads or loading native code.
-use crate::core::terminal::Terminal;
+use crate::core::{font::Points, terminal::Terminal};
 use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 use std::{
@@ -450,12 +450,10 @@ pub struct Nvim {
     /// they want; naming one here overrides it, which is worth having because
     /// what `monospace` resolves to may have no bold or italic face at all.
     pub font_family: FontFamily,
-    /// The pane's font size, in pixels.
-    ///
-    /// Pixels rather than points because the pane rasterises at a pixel size
-    /// and has no display resolution to convert from: a point size would be
-    /// a number that means something on paper and nothing here.
-    pub font_size: f32,
+    /// The pane's font size, in points, meaning exactly what Alacritty's
+    /// `font.size` means: the display's `Xft.dpi` turns it into pixels, so
+    /// the same number gives the same cells in both, on any screen.
+    pub font_size: Points,
     /// The X display a pane opens on, read from `$DISPLAY` when the
     /// configuration is loaded rather than looked up when a window is wanted.
     ///
@@ -496,7 +494,7 @@ impl Default for Nvim {
             file_template: "dictation-%Y-%m-%d-%H%M%S.md".into(),
             window_fraction: 0.33,
             font_family: FontFamily::default(),
-            font_size: 16.,
+            font_size: Points::DEFAULT,
             // Filled in by `Config::load`; `Default` is what a test builds,
             // and a test says which display it means.
             display: None,
@@ -688,10 +686,6 @@ impl Config {
                 && self.nvim.window_fraction > 0.
                 && self.nvim.window_fraction <= 1.,
             "nvim.window_fraction must be in (0,1]"
-        );
-        ensure!(
-            self.nvim.font_size.is_finite() && (4.0..=400.0).contains(&self.nvim.font_size),
-            "nvim.font_size must be a pixel size in [4,400]"
         );
         ensure!(
             self.nvim.startup_timeout_s.is_finite()
@@ -1058,9 +1052,9 @@ mod tests {
         let managed = Config::parse("[nvim]\nmode = 'managed'\nterminal = 'foot'", None).unwrap();
         assert_eq!(managed.nvim.mode, Mode::Managed);
         assert_eq!(managed.nvim.terminal, Terminal::Foot);
-        let pane = Config::parse("[nvim]\nmode = 'pane'\nfont_size = 18.0", None).unwrap();
+        let pane = Config::parse("[nvim]\nmode = 'pane'\nfont_size = 13.5", None).unwrap();
         assert_eq!(pane.nvim.mode, Mode::Pane);
-        assert_eq!(pane.nvim.font_size, 18.0);
+        assert_eq!(pane.nvim.font_size.get(), 13.5);
         // A key another mode reads is harmless here, and the other way round,
         // so switching modes needs no other edit. That is deliberate: unlike
         // `[asr]`, where a hotword under a family that cannot use it would
@@ -1076,14 +1070,22 @@ mod tests {
     }
 
     #[test]
-    fn the_panes_font_is_a_family_name_and_a_pixel_size() {
+    fn the_panes_font_is_a_family_name_and_a_point_size() {
+        // Alacritty's default, so an unconfigured pane matches an
+        // unconfigured Alacritty.
+        assert_eq!(Config::default().nvim.font_size.get(), 11.25);
+        // A whole number is a size too, as it is in Alacritty's `font.size`.
+        let whole = Config::parse("[nvim]\nfont_size = 12", None).unwrap();
+        assert_eq!(whole.nvim.font_size.get(), 12.0);
         for bad in [
             "font_family = ''",
             "font_family = 'monospace:bold'",
             "font_family = 'mono,serif'",
             "font_size = 0.0",
+            "font_size = 0.5",
             "font_size = 1e6",
-            "font_size = 3.9",
+            "font_size = 250",
+            "font_size = nan",
         ] {
             assert!(
                 Config::parse(&format!("[nvim]\nmode = 'pane'\n{bad}"), None).is_err(),

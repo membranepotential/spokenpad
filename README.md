@@ -301,7 +301,7 @@ does.
    [nvim]
    mode = "pane"
    # font_family = "monospace"   # whatever `fc-match monospace` gives
-   # font_size = 16.0            # pixels
+   # font_size = 11.25           # points, as Alacritty's font.size
    ```
 2. Import `DISPLAY` (and `XAUTHORITY`) into systemd, as in install step 4 —
    the window is X11 even on Wayland.
@@ -329,7 +329,7 @@ cannot pass silently. Keys are not configured here; see
 | `asr.vocabulary` | `[]` | words to bias Parakeet towards, such as `["kubectl", "nginx"]`; switches to beam search, which sometimes drops a sentence ([docs/asr.md](docs/asr.md)) |
 | `nvim.mode` | `"attach"` | `attach`: you run `spokenpad editor`; `managed`: the daemon opens a terminal on i3 or sway; `pane`: the daemon opens a window it draws itself |
 | `nvim.terminal` | `"alacritty"` | managed mode only: the terminal for that window |
-| `nvim.font_family`, `nvim.font_size` | `"monospace"`, `16.0` | pane mode only: the font it draws with, sized in pixels |
+| `nvim.font_family`, `nvim.font_size` | `"monospace"`, `11.25` | pane mode only: the font it draws with, sized in points exactly as Alacritty's `font.size` (scaled by the display's `Xft.dpi`), so the same numbers give the same cells |
 | `nvim.init` | your Neovim config | `"bundled"` opens the window about 3× faster; pair it with `nvim.colorscheme` |
 | `nvim.copy_to_clipboard` | `false` | copy the whole buffer to `+` after every release |
 
