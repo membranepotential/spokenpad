@@ -5,6 +5,8 @@ text appears in a Neovim window that never takes focus. Speech recognition runs
 locally on the CPU, and nothing is ever pasted or typed into other
 applications.
 
+![The spokenpad dictation window floating over an editor mid-dictation: committed text at the top, a grey live preview below it, and a winbar showing a latched recording with a level meter.](docs/screenshot.png)
+
 ## Features
 
 - **Push-to-talk, or latch.** Hold a key while you speak. Press Shift with
