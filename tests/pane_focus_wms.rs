@@ -77,6 +77,10 @@ use x11rb::{
 
 const PATIENCE: Duration = Duration::from_secs(20);
 
+/// Pixels a window manager's frame border may push a pane clamped to the
+/// monitor's edge past it; see [`placement`].
+const FRAME_BORDER_SLACK: i32 = 2;
+
 /// How long a control or ablation window waits, unmapped, between being
 /// created and having a property rewritten by the test.
 ///
@@ -303,6 +307,10 @@ impl Report {
 
 fn story(desktop: &mut dyn Desktop) -> Report {
     let mut report = Report::new(desktop.describe());
+    // The pane's cells follow `Xft.dpi`, which the display carries; without
+    // it the pane would read the user's own `~/.Xresources`. 96 makes the
+    // default 72x20 pane the 648x360 pixels it is on a stock display.
+    desktop.server().set_resources("Xft.dpi:\t96\n");
 
     // 1. The application the user is dictating into.
     let holder = focus_holder(desktop);
@@ -768,12 +776,17 @@ fn placement(desktop: &dyn Desktop, pane: Window, holder: Window) -> Placement {
         .map_state
         == MapState::VIEWABLE;
     let (x, y, width, height) = rect;
+    // The pane clamps its own rectangle onto the monitor; a window manager
+    // that frames it then offsets it by its border, which the pane cannot know
+    // before the map. Openbox's one-pixel border pushes a pane clamped to the
+    // right edge one pixel over it.
+    let slack = FRAME_BORDER_SLACK;
     let on_screen = x >= 0
         && y >= 0
         && width > 0
         && height > 0
-        && x + width as i32 <= i32::from(SCREEN.0)
-        && y + height as i32 <= i32::from(SCREEN.1);
+        && x + width as i32 <= i32::from(SCREEN.0) + slack
+        && y + height as i32 <= i32::from(SCREEN.1) + slack;
     Placement {
         rect,
         viewable,

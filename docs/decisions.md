@@ -1350,3 +1350,25 @@ pane. The hard rule cannot depend on an environment variable being right.
 - Rejected: `WAYLAND_DISPLAY` or `XDG_CURRENT_DESKTOP` as the test. They
   describe the session, not the X server the pane opens on, and are as easily
   missing from the user manager as `$SWAYSOCK`.
+
+## The pane is sized in cells, the managed terminal in screen fractions (2026-09-22)
+
+The user decided the pane's size is columns by lines, like Alacritty's
+`window.dimensions`.
+
+- **`nvim.pane_dimensions = { columns = 72, lines = 20 }`** sizes the pane.
+  Both are non-zero by type (`NonZeroU16`), so a zero-cell pane cannot be
+  configured. A grid larger than the monitor under the pointer is cut to as
+  many whole cells as fit (`Dimensions::fit`); the corner still goes to the
+  pointer, clamped so the window is wholly on the monitor. The pane measures
+  its font first, so this happens on the pane's thread: the daemon now hands
+  it the monitor and pointer (`place::Target`) instead of a pixel rectangle.
+- **Default 72x20**: at the default 11.25 pt that is 648x360 pixels at 96 dpi,
+  a third of a 1920x1080 screen each way — what the pane was at
+  `window_fraction = 0.33` — and the same third of a 3840x2160 screen at
+  192 dpi.
+- **`nvim.window_fraction` is now managed mode's alone.** The daemon cannot
+  know a terminal's cell size, so that window stays in pixels. One concept
+  per mode; neither key does anything in the other mode.
+- `[nvim]` is re-read for every new window, so a changed size applies to the
+  next pane.

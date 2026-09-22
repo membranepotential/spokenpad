@@ -17,10 +17,10 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use spokenpad::{
     config::{FontFamily, Nvim},
-    core::font::Points,
+    core::{font::Points, geometry::Dimensions},
     shell::{
         nvim::pane_launch,
-        pane::{Options, Pane, Sizing, Status},
+        pane::{Options, Pane, Status},
     },
 };
 use std::{
@@ -98,12 +98,9 @@ fn main() -> Result<()> {
             .context("pass --display, or run this where $DISPLAY is set")?,
         family: FontFamily::try_from(args.family.clone())?,
         size: Points::try_from(args.size)?,
-        sizing: Sizing::Cells {
-            columns: args.columns,
-            rows: args.rows,
-        },
+        dimensions: Dimensions::new(args.columns, args.rows).expect("a grid of at least one cell"),
         attach_timeout: Duration::from_secs_f64(config.startup_timeout_s),
-        position: None,
+        target: None,
         title: "spokenpad dictation".to_owned(),
     };
     let (command, marker) = pane_launch(&config, &file)?;

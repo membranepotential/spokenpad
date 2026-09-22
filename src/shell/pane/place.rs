@@ -1,10 +1,11 @@
 //! Where the pane opens, and how big.
 //!
 //! The same rule managed mode uses, and the same pure functions decide it:
-//! [`geometry::pick_output`] chooses the monitor and [`geometry::placement`]
-//! puts a window of `nvim.window_fraction` of that monitor at the pointer,
-//! clamped fully on-screen. What is here is only the asking: the monitors
-//! from RandR, and the pointer from the X server itself.
+//! [`geometry::pick_output`] chooses the monitor, and the pane then puts its
+//! `nvim.pane_dimensions`, cut down to what fits on that monitor, at the
+//! pointer with [`geometry::placement`], clamped fully on-screen. What is
+//! here is only the asking: the monitors from RandR, and the pointer from
+//! the X server itself.
 //!
 //! Managed mode asks the window manager over its IPC socket, because it has
 //! to talk to i3 or sway anyway to prove the `no_focus` rule. The pane needs
@@ -25,13 +26,21 @@ use x11rb::{
     xcb_ffi::XCBConnection,
 };
 
-/// The rectangle a pane should open in.
-pub fn window(connection: &XCBConnection, screen: usize, fraction: f64) -> Result<Rect> {
+/// Where a pane opens: the monitor, and the pointer its top-left corner goes
+/// to when the pointer can be read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Target {
+    pub monitor: Rect,
+    pub pointer: Option<(i32, i32)>,
+}
+
+/// The monitor under the pointer, and the pointer.
+pub fn target(connection: &XCBConnection, screen: usize) -> Result<Target> {
     let outputs = outputs(connection, screen)?;
     let pointer = pointer(connection, screen);
-    let output = geometry::pick_output(&outputs, pointer)
+    let monitor = geometry::pick_output(&outputs, pointer)
         .context("the X server reports no usable screen")?;
-    Ok(geometry::placement(output, pointer, fraction))
+    Ok(Target { monitor, pointer })
 }
 
 /// The monitors, from RandR.

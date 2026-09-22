@@ -40,9 +40,6 @@ const BACKSTOP: Duration = Duration::from_secs(3600);
 pub struct Opening {
     pub command: Command,
     pub options: Options,
-    /// The top-left corner the pane should be moved to once the window
-    /// manager has taken the window. `None` leaves it where it opened.
-    pub correct_to: Option<(i32, i32)>,
 }
 
 enum Work {
@@ -259,20 +256,8 @@ fn serve(work: Receiver<Work>, shared: Arc<Shared>) {
 }
 
 fn open(opening: Opening) -> Result<Pane> {
-    let Opening {
-        command,
-        options,
-        correct_to,
-    } = opening;
+    let Opening { command, options } = opening;
     let mut pane = Pane::open(&options, command)?;
     pane.show()?;
-    if let Some((x, y)) = correct_to {
-        // The position asked for before the map gets the window close; this
-        // corrects for whatever frame the window manager drew around it. It
-        // is a few pixels, and it happens before Neovim has drawn anything.
-        if let Err(error) = pane.place_at(x, y) {
-            log::debug!("could not correct the pane's position: {error:#}");
-        }
-    }
     Ok(pane)
 }

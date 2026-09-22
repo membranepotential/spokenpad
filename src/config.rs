@@ -1,5 +1,5 @@
 //! TOML is validated once, before starting threads or loading native code.
-use crate::core::{font::Points, terminal::Terminal};
+use crate::core::{font::Points, geometry::Dimensions, terminal::Terminal};
 use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 use std::{
@@ -444,7 +444,13 @@ pub struct Nvim {
     pub socket_path: PathBuf,
     pub dictation_dir: PathBuf,
     pub file_template: String,
+    /// Managed mode: the terminal window's size, as a fraction of each axis
+    /// of the monitor it opens on. The daemon cannot know the terminal's
+    /// cell size, so it sizes that window in pixels.
     pub window_fraction: f64,
+    /// Pane mode: the pane's size in cells, as Alacritty's
+    /// `window.dimensions`, cut down to what fits on the monitor.
+    pub pane_dimensions: Dimensions,
     /// The pane's font, as a fontconfig family name. `monospace` is the alias
     /// every desktop defines and most people have already pointed at the font
     /// they want; naming one here overrides it, which is worth having because
@@ -505,6 +511,7 @@ impl Default for Nvim {
             dictation_dir: state_dir().join("dictation"),
             file_template: "dictation-%Y-%m-%d-%H%M%S.md".into(),
             window_fraction: 0.33,
+            pane_dimensions: Dimensions::DEFAULT,
             font_family: FontFamily::default(),
             font_size: Points::DEFAULT,
             // Filled in by `Config::load`; `Default` is what a test builds,
@@ -987,6 +994,9 @@ mod tests {
             "[preview]\nmax_seconds=nan",
             "[vad]\nthreshold=nan",
             "[nvim]\nwindow_fraction=inf",
+            "[nvim]\npane_dimensions = { columns = 0, lines = 20 }",
+            "[nvim]\npane_dimensions = { columns = 72 }",
+            "[nvim]\npane_dimensions = { columns = 72, lines = 20, rows = 3 }",
             "[nvim]\nfile_template='../x'",
             "[nvim]\nfile_template='%Q'",
             "[nvim]\neditor=[]",
@@ -1175,6 +1185,16 @@ mod tests {
         let pane = Config::parse("[nvim]\nmode = 'pane'\nfont_size = 13.5", None).unwrap();
         assert_eq!(pane.nvim.mode, Mode::Pane);
         assert_eq!(pane.nvim.font_size.get(), 13.5);
+        assert_eq!(pane.nvim.pane_dimensions, Dimensions::DEFAULT);
+        let sized = Config::parse(
+            "[nvim]\nmode = 'pane'\npane_dimensions = { columns = 100, lines = 30 }",
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            sized.nvim.pane_dimensions,
+            Dimensions::new(100, 30).unwrap()
+        );
         // A key another mode reads is harmless here, and the other way round,
         // so switching modes needs no other edit. That is deliberate: unlike
         // `[asr]`, where a hotword under a family that cannot use it would

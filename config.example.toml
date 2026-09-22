@@ -391,13 +391,21 @@ transparent = true
 # interpolated into window-manager criteria.
 window_instance = "spokenpad"
 
-# Managed and pane modes: size of the window, as a fraction of each screen
-# axis. It opens with its top-left corner at the mouse pointer, clamped fully
+# Managed mode only: size of the terminal window, as a fraction of each
+# screen axis (spokenpad cannot know your terminal's cell size, so this one is
+# in pixels; the pane uses pane_dimensions below). It opens with its top-left corner at the mouse pointer, clamped fully
 # on screen, so it lands beside whatever you are reading. Under Wayland the
 # pointer cannot be read -- sway tells a client nothing, and Xwayland answers
 # with where the pointer last was over an X window -- so there it opens in a
 # corner of the chosen output instead.
 window_fraction = 0.33
+
+# Pane mode only: the pane's size in character cells, as Alacritty's
+# `window.dimensions`. A grid larger than the monitor under the pointer is cut
+# to as many whole cells as fit. 72x20 at the default font is 648x360 pixels at
+# 96 dpi, about a third of a 1920x1080 screen each way. Its top-left corner
+# goes to the pointer, as for the managed window above.
+pane_dimensions = { columns = 72, lines = 20 }
 
 # Pane mode only: the font the window draws with, as a fontconfig family name
 # -- a name, not a pattern, so no colon, comma or backslash.
@@ -417,7 +425,7 @@ font_family = "monospace"
 # reads neither. `spokenpad check` prints the resolution it found and why.
 # 11.25 is Alacritty's default; copy your
 # Alacritty `font.size` here to match it. In [1, 200]. The window's size in
-# cells follows from this and window_fraction above.
+# pixels follows from this and pane_dimensions above.
 font_size = 11.25
 
 # Where nvim listens for RPC, in every mode. spokenpad reattaches to a live

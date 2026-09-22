@@ -1,3 +1,5 @@
+use std::num::NonZeroU16;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rect {
     pub x: i32,
@@ -48,9 +50,56 @@ pub fn pick_output(outputs: &[Output], pointer: Option<(i32, i32)>) -> Option<Re
         .or_else(|| outputs.first())
         .map(|output| output.rect)
 }
-pub fn placement(output: Rect, anchor: Option<(i32, i32)>, fraction: f64) -> Rect {
-    let width = (f64::from(output.width) * fraction) as u32;
-    let height = (f64::from(output.height) * fraction) as u32;
+/// A window's size in character cells, as Alacritty's `window.dimensions`:
+/// `{ columns = 72, lines = 20 }`. Neither can be zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Dimensions {
+    pub columns: NonZeroU16,
+    pub lines: NonZeroU16,
+}
+
+impl Dimensions {
+    /// 72 by 20: at the default 11.25 pt, 648x360 pixels at 96 dpi, which is
+    /// about a third of a 1920x1080 screen each way, as the pane used to be;
+    /// and the same third of a 3840x2160 screen at 192 dpi.
+    pub const DEFAULT: Self = Self {
+        columns: NonZeroU16::new(72).expect("not zero"),
+        lines: NonZeroU16::new(20).expect("not zero"),
+    };
+
+    /// `columns` by `lines`, or `None` if either is zero.
+    pub fn new(columns: u16, lines: u16) -> Option<Self> {
+        Some(Self {
+            columns: NonZeroU16::new(columns)?,
+            lines: NonZeroU16::new(lines)?,
+        })
+    }
+
+    /// These dimensions, cut down to as many cells of `cell` pixels (width,
+    /// height) as fit on `output`, and never below one cell each way.
+    pub fn fit(self, output: Rect, (cell_width, cell_height): (u32, u32)) -> Self {
+        let fitting = |wanted: NonZeroU16, room: u32, cell: u32| {
+            let most = u16::try_from(room / cell.max(1)).unwrap_or(u16::MAX);
+            NonZeroU16::new(wanted.get().min(most)).unwrap_or(NonZeroU16::MIN)
+        };
+        Self {
+            columns: fitting(self.columns, output.width, cell_width),
+            lines: fitting(self.lines, output.height, cell_height),
+        }
+    }
+}
+
+/// `fraction` of `output` on each axis, in pixels, at least one.
+pub fn fraction_of(output: Rect, fraction: f64) -> (u32, u32) {
+    let scale = |extent: u32| ((f64::from(extent) * fraction) as u32).max(1);
+    (scale(output.width), scale(output.height))
+}
+
+/// A window of `width` x `height` pixels on `output`, with its top-left
+/// corner at `anchor` (the pointer) or, with none, in the bottom-right
+/// corner; clamped so the whole window is on the output.
+pub fn placement(output: Rect, anchor: Option<(i32, i32)>, (width, height): (u32, u32)) -> Rect {
     let width = width.max(1).min(output.width);
     let height = height.max(1).min(output.height);
     let right = output.x + (output.width - width) as i32;
@@ -75,7 +124,7 @@ mod tests {
             height: 1080,
         };
         assert_eq!(
-            placement(r, Some((-1, 1079)), 0.5),
+            placement(r, Some((-1, 1079)), fraction_of(r, 0.5)),
             Rect {
                 x: -960,
                 y: 540,
@@ -96,6 +145,31 @@ mod tests {
         );
         assert_eq!(pick_output(&[], Some((0, 0))), None);
         assert_eq!(pick_output(&[], None), None);
+    }
+
+    #[test]
+    fn dimensions_are_cut_to_the_output_and_never_to_zero() {
+        let cells = |columns, lines| Dimensions {
+            columns: NonZeroU16::new(columns).unwrap(),
+            lines: NonZeroU16::new(lines).unwrap(),
+        };
+        let output = Rect {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        };
+        // 9x18 cells: 213 columns and 60 lines fit.
+        assert_eq!(cells(72, 20).fit(output, (9, 18)), cells(72, 20));
+        assert_eq!(cells(500, 500).fit(output, (9, 18)), cells(213, 60));
+        // A cell wider than the output still leaves one.
+        assert_eq!(cells(72, 20).fit(output, (4000, 4000)), cells(1, 1));
+        // The window is then clamped whole onto the output at the pointer.
+        let rect = placement(output, Some((1900, 1000)), (72 * 9, 20 * 18));
+        assert_eq!(
+            (rect.x, rect.y, rect.width, rect.height),
+            (1920 - 648, 1080 - 360, 648, 360)
+        );
     }
 
     fn screen(x: i32, primary: bool) -> Output {

@@ -23,14 +23,14 @@ pub use passage::DetachedWrite;
 use crate::{
     config::{self, Mode, Nvim},
     core::{
-        geometry::{Rect, pick_output, placement},
+        geometry::{Rect, fraction_of, pick_output, placement},
         session::NoticeText,
         state::IndicatorPhase,
         terminal::Terminal,
         wm::Criterion,
     },
     shell::{
-        pane::{host::PaneHost, x11},
+        pane::{host::PaneHost, place, x11},
         wm::{self, Wm},
     },
 };
@@ -749,13 +749,13 @@ impl NvimSession {
     }
 
     fn try_open_pane(&mut self) -> Result<bool> {
-        use crate::shell::pane::{Options, Sizing, host::Opening};
+        use crate::shell::pane::{Options, host::Opening};
 
         // One deadline for the whole thing: the window, and the editor
         // answering inside it. Two would let a slow window spend the
         // editor's budget as well as its own.
         let deadline = Instant::now() + Duration::from_secs_f64(self.config.startup_timeout_s);
-        let (rect, display, manager) = pane_geometry(&self.config)?;
+        let (target, display, manager) = pane_target(&self.config)?;
         refuse_pane_focus_on_sway(&self.config, &manager)?;
         let mut fresh = NewFileGuard::claim(&self.config)?;
         let (command, marker) = pane_launch(&self.config, fresh.path())?;
@@ -772,15 +772,11 @@ impl NvimSession {
                     display,
                     family: self.config.font_family.clone(),
                     size: self.config.font_size,
-                    sizing: Sizing::Pixels {
-                        width: rect.width,
-                        height: rect.height,
-                    },
+                    dimensions: self.config.pane_dimensions,
                     attach_timeout: deadline.saturating_duration_since(Instant::now()),
-                    position: Some((rect.x, rect.y)),
+                    target: Some(target),
                     title: "spokenpad dictation".to_owned(),
                 },
-                correct_to: Some((rect.x, rect.y)),
             },
             deadline,
         )?;
@@ -921,7 +917,7 @@ fn window_placement(wm: &Wm, fraction: f64) -> Option<Rect> {
         .ok()?;
     let pointer = wm.pointer();
     let output = pick_output(&outputs, pointer)?;
-    Some(placement(output, pointer, fraction))
+    Some(placement(output, pointer, fraction_of(output, fraction)))
 }
 
 /// The outcome of one attempt to adopt a freshly spawned editor.
@@ -1534,16 +1530,16 @@ pub fn pane_launch(config: &Nvim, target: &Path) -> Result<(Command, OwnershipMa
     Ok((command, marker))
 }
 
-/// Where a pane should open: `nvim.window_fraction` of the monitor under the
-/// pointer, at the pointer, clamped on-screen.
+/// Where a pane should open: the monitor under the pointer, and the pointer.
+/// The pane sizes itself from `nvim.pane_dimensions` once it knows its font.
 ///
 /// The X connection this asks over is opened and closed here rather than
 /// handed to the pane: the pane opens its own, and one short-lived connection
 /// per window is cheaper than threading one through. Returns the display name
 /// too, so the pane opens on the one that was measured, and the window manager
 /// that runs it.
-fn pane_geometry(config: &Nvim) -> Result<(Rect, String, x11::Manager)> {
-    use crate::shell::pane::{place, xkb};
+fn pane_target(config: &Nvim) -> Result<(place::Target, String, x11::Manager)> {
+    use crate::shell::pane::xkb;
 
     let display = config.display.clone().context(
         "nvim.mode = \"pane\" needs an X display and $DISPLAY was not set when \
@@ -1555,8 +1551,11 @@ fn pane_geometry(config: &Nvim) -> Result<(Rect, String, x11::Manager)> {
         std::ffi::CString::new(display.clone()).context("the display name contains a NUL")?;
     let (connection, screen) = x11rb::xcb_ffi::XCBConnection::connect(Some(&name))
         .with_context(|| format!("connect to the X display {display}"))?;
-    let rect = place::window(&connection, screen, config.window_fraction)?;
-    Ok((rect, display, x11::manager(&connection, screen)))
+    Ok((
+        place::target(&connection, screen)?,
+        display,
+        x11::manager(&connection, screen),
+    ))
 }
 
 /// sway focuses every window it maps unless a `no_focus` rule matches it,

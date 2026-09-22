@@ -29,13 +29,14 @@ use spokenpad::{
         control::{Received, Request},
         decode::{Pipeline, Recognizer, Segmenter, TrailingSilence},
         font::Points,
+        geometry::Dimensions,
     },
     shell::{
         audio::{AudioCapture, CallbackCore, InputBackend, InputStream, Teardown},
         daemon::{Devices, PipelineSource, serve},
         nvim::pane_launch,
         pane::{
-            Options, Sizing,
+            Options,
             host::{Opening, PaneHost},
         },
     },
@@ -318,14 +319,10 @@ fn abandoned_pane(server: &XServer) -> (PaneHost, PathBuf, tempfile::TempDir) {
             command,
             options: Options {
                 display: server.display.clone(),
-                sizing: Sizing::Cells {
-                    columns: 40,
-                    rows: 8,
-                },
+                dimensions: Dimensions::new(40, 8).expect("a grid of at least one cell"),
                 size: Points::try_from(12.0).expect("a point size"),
                 ..Options::default()
             },
-            correct_to: None,
         },
         Instant::now(),
     );

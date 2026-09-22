@@ -25,10 +25,13 @@ mod harness;
 use harness::{Killed, XServer, screenshot_dir, tools_or_skip, write_png};
 use spokenpad::{
     config::{FontFamily, Nvim},
-    core::font::{Dpi, Points},
+    core::{
+        font::{Dpi, Points},
+        geometry::Dimensions,
+    },
     shell::{
         nvim::pane_launch,
-        pane::{Options, Pane, Sizing, font::Font, x11::Display},
+        pane::{Options, Pane, font::Font, x11::Display},
     },
 };
 use std::{
@@ -253,10 +256,7 @@ fn open_pane(display: &str, root: &Path, file: &Path, family: &FontFamily, size:
             display: display.to_owned(),
             family: family.clone(),
             size,
-            sizing: Sizing::Cells {
-                columns: COLUMNS,
-                rows: ROWS,
-            },
+            dimensions: Dimensions::new(COLUMNS, ROWS).expect("a grid of at least one cell"),
             ..Options::default()
         },
         command,

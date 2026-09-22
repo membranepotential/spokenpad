@@ -35,12 +35,16 @@ use harness::{
 use rmpv::Value;
 use spokenpad::{
     config::{Mode, Nvim},
-    core::{font::Points, geometry::Rect, state::IndicatorPhase},
+    core::{
+        font::Points,
+        geometry::{Dimensions, Rect},
+        state::IndicatorPhase,
+    },
     shell::{
         daemon::SHUTDOWN_GRACE,
         nvim::pane_launch,
         nvim::{IndicatorState, NvimSession},
-        pane::{Options, Pane, Sizing, Status},
+        pane::{Options, Pane, Status, place::Target},
     },
 };
 use std::{
@@ -75,10 +79,7 @@ fn the_pane_draws_what_neovim_draws() {
     let mut pane = Pane::open(
         &Options {
             display: server.display.clone(),
-            sizing: Sizing::Cells {
-                columns: COLUMNS,
-                rows: ROWS,
-            },
+            dimensions: Dimensions::new(COLUMNS, ROWS).expect("a grid of at least one cell"),
             size: Points::try_from(12.0).expect("a point size"),
             ..Options::default()
         },
@@ -479,6 +480,84 @@ fn the_pane_draws_what_neovim_draws() {
 /// The editor configuration these panes run with: a socket and a dictation
 /// directory under `root`, and the bundled dictation init read from the
 /// repository rather than materialised into the user's state directory.
+/// `nvim.pane_dimensions` is a grid in cells, as Alacritty's
+/// `window.dimensions`; on a monitor too small for it the pane keeps as many
+/// cells as fit, and lies wholly on the monitor with its corner as close to
+/// the pointer as that allows. Neovim is told the grid the window has.
+#[test]
+fn the_pane_is_sized_in_cells_and_cut_to_the_monitor() {
+    if !harness::tools_or_skip(&["Xvfb", "nvim", "fc-match"]) {
+        return;
+    }
+    let server = XServer::start();
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let config = dictation_config(directory.path());
+    let monitor = Rect {
+        x: 0,
+        y: 0,
+        width: 1280,
+        height: 800,
+    };
+    for (columns, lines) in [(40, 10), (1000, 1000)] {
+        let file = config.dictation_dir.join(format!("sized-{columns}.md"));
+        std::fs::write(&file, "").expect("create the dictation file");
+        let (command, _marker) = pane_launch(&config, &file).expect("build the nvim command");
+        let mut pane = Pane::open(
+            &Options {
+                display: server.display.clone(),
+                dimensions: Dimensions::new(columns, lines).expect("a grid"),
+                size: Points::try_from(12.0).expect("a point size"),
+                target: Some(Target {
+                    monitor,
+                    pointer: Some((1100, 700)),
+                }),
+                ..Options::default()
+            },
+            command,
+        )
+        .expect("open the pane");
+        pane.show().expect("map the pane");
+        sleep(SETTLE);
+        let metrics = pane.metrics();
+        let (width, height) = (
+            monitor.width / metrics.width,
+            monitor.height / metrics.height,
+        );
+        let expected = (
+            columns.min(u16::try_from(width).unwrap()),
+            lines.min(u16::try_from(height).unwrap()),
+        );
+        assert_eq!(pane.size(), expected, "{columns}x{lines}");
+        assert_eq!(
+            nvim_size(&mut pane),
+            expected,
+            "nvim's grid for {columns}x{lines}"
+        );
+        let rect = pane.window().geometry().expect("the pane's geometry");
+        println!(
+            "{columns}x{lines} asked: {:?} cells, window {rect:?}",
+            pane.size()
+        );
+        assert_eq!(
+            (rect.width, rect.height),
+            (
+                u32::from(expected.0) * metrics.width,
+                u32::from(expected.1) * metrics.height
+            )
+        );
+        assert!(
+            rect.x >= 0
+                && rect.y >= 0
+                && rect.x + rect.width as i32 <= 1280
+                && rect.y + rect.height as i32 <= 800,
+            "not wholly on the monitor: {rect:?}"
+        );
+        // As close to the pointer as the monitor allows.
+        assert_eq!(rect.x, 1100.min(1280 - rect.width as i32));
+        assert_eq!(rect.y, 700.min(800 - rect.height as i32));
+    }
+}
+
 fn dictation_config(root: &Path) -> Nvim {
     let dictation = root.join("dictation");
     std::fs::create_dir_all(&dictation).expect("make the dictation directory");
@@ -501,10 +580,7 @@ fn pane_on(server: &XServer, config: &Nvim, file: &Path) -> Pane {
     let mut pane = Pane::open(
         &Options {
             display: server.display.clone(),
-            sizing: Sizing::Cells {
-                columns: 40,
-                rows: 8,
-            },
+            dimensions: Dimensions::new(40, 8).expect("a grid of at least one cell"),
             size: Points::try_from(12.0).expect("a point size"),
             ..Options::default()
         },

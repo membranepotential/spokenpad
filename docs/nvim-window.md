@@ -341,9 +341,15 @@ buffer, and the log says that too.
 
 ### Where it opens
 
-`nvim.window_fraction` of the monitor under the pointer, with its top-left
-corner at the pointer, clamped fully on-screen — the same rule managed mode
-uses and the same pure functions in `core/geometry.rs` decide it. The
+`nvim.pane_dimensions` cells — `{ columns = 72, lines = 20 }` by default, as
+Alacritty's `window.dimensions` — on the monitor under the pointer, with its
+top-left corner at the pointer, clamped fully on-screen. A grid larger than
+the monitor is cut to as many whole cells as fit (`Dimensions::fit`), and
+Neovim is told the grid the window has. The default is 648x360 pixels at the
+default 11.25 pt and 96 dpi: a third of a 1920x1080 screen each way, what the
+pane was before it was sized in cells; at 192 dpi it is the same third of a
+3840x2160 screen. The monitor and corner follow the same rule managed mode
+uses, and the same pure functions in `core/geometry.rs` decide them. The
 monitors come from RandR and the pointer from the X server itself, rather
 than from a window manager's IPC socket, so this works under a window manager
 spokenpad has never heard of.
@@ -471,8 +477,10 @@ is only who is asked. Managed mode asks the window manager over its IPC
 socket, because it has to talk to i3 or sway anyway to prove the rule; pane
 mode asks X directly ([above](#where-it-opens)).
 
-The window is **a third of the screen on each axis** (`nvim.window_fraction`,
-0.33) with its **top-left corner at the mouse pointer**, on whichever monitor
+The managed terminal is **a third of the screen on each axis**
+(`nvim.window_fraction`, 0.33; the daemon cannot know the terminal's cell
+size, so this one is in pixels), the pane `nvim.pane_dimensions` cells, both
+with the **top-left corner at the mouse pointer**, on whichever monitor
 the pointer is on (on i3, read with `xdotool` in managed mode and with
 `QueryPointer` in pane mode; sway gives a client no way to ask, and Xwayland
 answers with a stale position, so on Wayland the window opens in a corner of

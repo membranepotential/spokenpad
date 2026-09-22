@@ -36,7 +36,7 @@ pub mod xkb;
 use crate::config::FontFamily;
 use crate::core::{
     font::{Dpi, Points},
-    geometry::Rect,
+    geometry::{self, Dimensions, Rect},
     grid::{Cell, CursorShape, Damage, RedrawEvent, Rgb, Screen, Style, Underline},
 };
 use anyhow::{Context, Result, bail, ensure};
@@ -67,19 +67,6 @@ pub enum Event {
     Editor(FromEditor),
 }
 
-/// How big the pane should be.
-///
-/// Two ways, because there are two callers with two different questions. The
-/// daemon knows how much of the screen the window may take and does not know
-/// the font; a test knows the grid it wants to check.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Sizing {
-    /// Exactly this many cells, whatever that comes to in pixels.
-    Cells { columns: u16, rows: u16 },
-    /// As many whole cells as fit in this many pixels.
-    Pixels { width: u32, height: u32 },
-}
-
 /// What the pane is told to be when it opens.
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -91,14 +78,16 @@ pub struct Options {
     /// Font size in points, turned into pixels by the display's `Xft.dpi`
     /// exactly as Alacritty does it.
     pub size: Points,
-    pub sizing: Sizing,
+    /// The grid, in cells. With a `target`, it is cut down to what fits on
+    /// the target's monitor.
+    pub dimensions: Dimensions,
     /// How long the editor inside it has to answer `nvim_ui_attach`. The
     /// daemon passes what is left of the one deadline it gave the whole
     /// open, so this cannot outlive it.
     pub attach_timeout: Duration,
-    /// Where the top-left corner should go, or `None` to let the window
-    /// manager decide.
-    pub position: Option<(i32, i32)>,
+    /// The monitor to open on and the pointer to put the top-left corner at,
+    /// or `None` to open at the origin and let the window manager decide.
+    pub target: Option<place::Target>,
     pub title: String,
 }
 
@@ -108,12 +97,9 @@ impl Default for Options {
             display: ":0".to_owned(),
             family: FontFamily::default(),
             size: Points::DEFAULT,
-            sizing: Sizing::Cells {
-                columns: 72,
-                rows: 12,
-            },
+            dimensions: Dimensions::DEFAULT,
             attach_timeout: Duration::from_secs(20),
-            position: None,
+            target: None,
             title: "spokenpad dictation".to_owned(),
         }
     }
@@ -142,6 +128,9 @@ pub struct Pane {
     canvas: Canvas,
     columns: u16,
     rows: u16,
+    /// The top-left corner the pane was placed at, which [`Self::show`]
+    /// moves it to again once it is mapped; `None` without a target.
+    origin: Option<(i32, i32)>,
     /// Rows changed since the last frame was drawn.
     pending: Damage,
     /// Whether what is pending is a whole frame. Neovim ends one with
@@ -171,14 +160,14 @@ impl Pane {
         let metrics = font.metrics();
         // A window is a whole number of cells: the pane draws cells, and a
         // partial column at the right edge is a strip nothing ever paints.
-        let (columns, rows) = match options.sizing {
-            Sizing::Cells { columns, rows } => (columns, rows),
-            Sizing::Pixels { width, height } => (
-                (width / metrics.width).clamp(1, u16::MAX.into()) as u16,
-                (height / metrics.height).clamp(1, u16::MAX.into()) as u16,
-            ),
+        // On a monitor, no more cells than fit on it.
+        let dimensions = match &options.target {
+            Some(target) => options
+                .dimensions
+                .fit(target.monitor, (metrics.width, metrics.height)),
+            None => options.dimensions,
         };
-        ensure!(columns > 0 && rows > 0, "the pane needs at least one cell");
+        let (columns, rows) = (dimensions.columns.get(), dimensions.lines.get());
         let width = metrics.width * u32::from(columns);
         let height = metrics.height * u32::from(rows);
         // X11 counts a window's size in 16 bits, so a grid that would not fit
@@ -191,15 +180,19 @@ impl Pane {
                 metrics.height
             ),
         };
-        let (x, y) = options.position.unwrap_or((0, 0));
+        let size = (u32::from(width), u32::from(height));
+        let placed = options
+            .target
+            .as_ref()
+            .map(|target| geometry::placement(target.monitor, target.pointer, size));
         let window = Window::open(
             display,
-            Rect {
-                x,
-                y,
-                width: u32::from(width),
-                height: u32::from(height),
-            },
+            placed.unwrap_or(Rect {
+                x: 0,
+                y: 0,
+                width: size.0,
+                height: size.1,
+            }),
             &options.title,
         )?;
         let keyboard = Keyboard::new(window.connection())?;
@@ -224,6 +217,7 @@ impl Pane {
             canvas: Canvas::new(width, height, metrics),
             columns,
             rows,
+            origin: placed.map(|rect| (rect.x, rect.y)),
             pending: Damage::NONE,
             frame_ready: false,
             focused: false,
@@ -243,8 +237,19 @@ impl Pane {
     }
 
     /// Map the window. It will not take the focus; see [`x11`].
+    ///
+    /// With a target, the window is then moved to the corner it was placed
+    /// at: the position asked for before the map gets it close, and this
+    /// corrects for whatever frame the window manager drew around it. It is
+    /// a few pixels, and it happens before Neovim has drawn anything.
     pub fn show(&mut self) -> Result<()> {
-        self.window.map()
+        self.window.map()?;
+        if let Some((x, y)) = self.origin
+            && let Err(error) = self.place_at(x, y)
+        {
+            log::debug!("could not correct the pane's position: {error:#}");
+        }
+        Ok(())
     }
 
     /// Move the window's top-left corner, keeping the size it was opened at.
@@ -1077,7 +1082,7 @@ fn display_summary(display: Option<&str>) -> Result<(String, Dpi)> {
     let cstring = std::ffi::CString::new(name.clone()).context("the display name has a NUL")?;
     let (connection, screen) = x11rb::xcb_ffi::XCBConnection::connect(Some(&cstring))
         .with_context(|| format!("connect to {name}"))?;
-    let rect = place::window(&connection, screen, 1.0)?;
+    let rect = place::target(&connection, screen)?.monitor;
     let resolution = x11::xft_dpi(&connection);
     let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some_and(|value| !value.is_empty());
     Ok((
