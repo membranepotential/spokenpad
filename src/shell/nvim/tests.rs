@@ -1036,10 +1036,9 @@ fn chrome_globals_are_set_only_in_an_editor_spokenpad_opened() {
 Spokenpad.dedicated = false
 vim.o.laststatus = 2
 vim.o.showtabline = 2
-vim.o.autowriteall = false
 Spokenpad.setup(Spokenpad.buf, false)
 local adopted = { vim.o.laststatus, vim.o.showtabline,
-  vim.api.nvim_get_option_value("wrap", { win = 0 }), vim.o.autowriteall }
+  vim.api.nvim_get_option_value("wrap", { win = 0 }) }
 Spokenpad.setup(Spokenpad.buf, true)
 return { adopted, vim.o.laststatus, vim.o.showtabline, vim.o.autowriteall }
 "#,
@@ -1053,13 +1052,12 @@ return { adopted, vim.o.laststatus, vim.o.showtabline, vim.o.autowriteall }
         Some(true),
         "adopting skipped the window-local prose settings"
     );
-    assert_eq!(user[3].as_bool(), Some(false), "adopting set autowriteall");
     assert_eq!(adopted[1].as_i64(), Some(0), "dedicated kept a statusline");
     assert_eq!(adopted[2].as_i64(), Some(0), "dedicated kept a tabline");
     assert_eq!(
         adopted[3].as_bool(),
-        Some(true),
-        "a dedicated editor's :q would refuse an unsaved buffer"
+        Some(false),
+        "'autowriteall' would write the transcript with the user's autocommands"
     );
 }
 
@@ -1132,6 +1130,48 @@ fn typing_into_the_dictation_buffer_saves_it_at_once() {
     assert_eq!(fs::read_to_string(&path).unwrap(), " typed\n");
 }
 
+/// Leaving the dictation buffer — `:edit`, typed in one go with a change, as
+/// a mapping or a macro runs it — writes it first, with spokenpad's own
+/// write: the user's format-on-save does not run on it.
+#[test]
+fn leaving_an_edited_dictation_buffer_writes_it_without_the_users_autocommands() {
+    if !nvim_or_skip() {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let mut config = headless(directory.path());
+    let formatted = directory.path().join("formatted");
+    config.editor.extend([
+        "--cmd".to_owned(),
+        format!(
+            "autocmd BufWritePre * call writefile(['ran'], '{}')",
+            formatted.display()
+        ),
+    ]);
+    let other = directory.path().join("other.txt");
+    fs::write(&other, "other\n").unwrap();
+    let (mut session, path, _editor) = dictating(&config);
+    session.append("dictated", false).unwrap();
+    session.append("second", false).unwrap();
+    // A change whose own write has not run yet, as with typeahead.
+    lua(
+        &mut session,
+        "vim.o.eventignore = 'TextChanged,TextChangedI,TextChangedP,InsertLeave'",
+    );
+
+    type_into(&session, &format!("ggdd:edit {}<CR>", other.display()));
+    wait_for_file(&path, "\nsecond\n");
+    assert!(
+        !formatted.exists(),
+        "leaving the buffer ran the user's format-on-save on the transcript"
+    );
+    assert_eq!(
+        lua(&mut session, "return vim.fn.expand('%:t')").as_str(),
+        Some("other.txt"),
+        "the editor did not move to the other file"
+    );
+}
+
 /// `:q` on a dictation buffer the user has just edited writes it and quits,
 /// also when the change has not been saved on its own yet -- a typist faster
 /// than the change events, simulated by ignoring them -- and with
@@ -1155,7 +1195,7 @@ fn quitting_an_edited_dictation_buffer_writes_it_and_quits() {
     session.append("dictated", false).unwrap();
     lua(
         &mut session,
-        "vim.o.eventignore = 'TextChanged,TextChangedI,TextChangedP'",
+        "vim.o.eventignore = 'TextChanged,TextChangedI,TextChangedP,InsertLeave'",
     );
 
     type_into(&session, "A and edited<Esc>:q<CR>");

@@ -374,13 +374,13 @@ fn the_pane_draws_what_neovim_draws() {
     // in the buffer is a change whose own write did not happen, and in this
     // mode closing the window ends the editor — so the pane has to write
     // first. Attach mode never faces this: its editor outlives the daemon.
-    // Ignoring the change events stands for that write not happening.
+    // Ignoring the events that write stands for that write not happening.
     call(
         &mut pane,
         "nvim_set_option_value",
         vec![
             Value::from("eventignore"),
-            Value::from("TextChanged,TextChangedI,TextChangedP"),
+            Value::from("TextChanged,TextChangedI,TextChangedP,InsertLeave"),
             Value::Map(Vec::new()),
         ],
         PATIENCE,

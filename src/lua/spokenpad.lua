@@ -34,6 +34,11 @@ local PREVIEW_GUTTER = 2  -- breathing room so wrapped text never touches the ed
 -- Only for a winbar built before any window shows the buffer; every real one
 -- is measured against the window it is about to be set on.
 local DEFAULT_WINBAR_WIDTH = 80
+-- How long after the last change in Insert mode the dictation buffer is
+-- written. Every write fsyncs ('fsync' is on by default), and on slow
+-- storage a write per keystroke would stall Neovim's main loop -- the
+-- daemon's appends included. Leaving Insert mode writes at once.
+local INSERT_SAVE_DELAY_MS = 300
 
 -- Speech barely moves a linear meter, so the same perceptual curve the Qt
 -- overlay used (level ^ 0.6) is applied before picking a bar glyph.
@@ -81,6 +86,9 @@ if previous then
   M.last_append_id = previous.last_append_id
   M.last_append_buf = previous.last_append_buf
   M.last_append_result = previous.last_append_result
+  -- The one timer for Insert-mode writes; a reload restarts it with this
+  -- chunk's callback the next time a change arrives.
+  M.save_timer = previous.save_timer
 end
 
 --- Highlight groups, linked to the colourscheme rather than hard-coded, so the
@@ -574,6 +582,21 @@ local function save(buf)
   end)
 end
 
+--- `save`, once Insert mode has been quiet for `INSERT_SAVE_DELAY_MS`: each
+--- change restarts the wait.
+local function save_soon(buf)
+  if buf ~= M.buf then
+    return
+  end
+  M.save_timer = M.save_timer or vim.uv.new_timer()
+  M.save_timer:stop()
+  M.save_timer:start(INSERT_SAVE_DELAY_MS, 0, vim.schedule_wrap(function()
+    if M.buf then
+      save(M.buf)
+    end
+  end))
+end
+
 --- Bind to the dictation buffer. Idempotent: called on every (re)connection.
 ---
 --- `dedicated` says whether this editor was opened by spokenpad for dictation
@@ -611,22 +634,32 @@ function M.setup(buf, dedicated)
       render()
     end,
   })
-  -- The dictation file is a scratch pad the user never has to save: every
-  -- change is written at once, in Insert mode keystroke by keystroke, so an
-  -- editor that dies loses nothing typed into it. A write of a file this
-  -- small costs a millisecond or two.
-  vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI", "TextChangedP" }, {
+  -- The dictation file is a scratch pad the user never has to save: a
+  -- change in Normal mode is written at once, one in Insert mode once the
+  -- typing pauses, and leaving Insert mode writes at once too, so an editor
+  -- that dies loses at most the last moment of typing.
+  vim.api.nvim_create_autocmd({ "TextChanged", "InsertLeave", "BufLeave" }, {
     group = group,
     buffer = buf,
     callback = function(args)
       save(args.buf)
     end,
   })
-  -- TextChanged waits for typeahead, so `dd:q` typed in one go reaches the
-  -- `:quit` with the buffer still modified. QuitPre runs before `:quit`,
-  -- `:wq` and `:qall` look at what is unsaved, from whichever buffer they
-  -- are typed in.
-  vim.api.nvim_create_autocmd("QuitPre", {
+  vim.api.nvim_create_autocmd({ "TextChangedI", "TextChangedP" }, {
+    group = group,
+    buffer = buf,
+    callback = function(args)
+      save_soon(args.buf)
+    end,
+  })
+  -- TextChanged waits for typeahead, so `dd:q` typed in one go, or run by a
+  -- mapping, reaches the `:quit` with the buffer still modified. QuitPre
+  -- runs before `:quit`, `:wq` and `:qall` look at what is unsaved, from
+  -- whichever buffer they are typed in, and VimLeavePre before any other
+  -- way out; BufLeave above covers `:edit` and `:bnext`. That is also why
+  -- 'autowriteall' is not set: it would write this buffer with the user's
+  -- autocommands, format-on-save included.
+  vim.api.nvim_create_autocmd({ "QuitPre", "VimLeavePre" }, {
     group = group,
     callback = function()
       if M.buf then
@@ -634,11 +667,6 @@ function M.setup(buf, dedicated)
       end
     end,
   })
-  -- And `:q` writes whatever else the user opened in this editor, rather
-  -- than refusing with E37. Global, so only where the editor is spokenpad's.
-  if M.dedicated then
-    vim.o.autowriteall = true
-  end
   render()
   -- The preview belongs to the capture, not to the buffer it was last drawn
   -- in: a daemon that re-pins mid-recording pushes the same indicator state

@@ -1912,3 +1912,32 @@ Review of the close that cancels a capture found two faults.
   whose job ignores `SIGTERM`, and adds `:q` followed at once by a key
   press: the new capture keeps recording in a new pane that stays open. With
   the previous detection it fails at the `:q`.
+
+## The dictation file is saved on leaving it, not through 'autowriteall', and Insert mode is debounced (2026-09-22)
+
+Review of the save-on-every-change entry above found two faults.
+
+- `'autowriteall'` wrote the dictation buffer *with* the user's
+  autocommands, and not only on `:q`: on `:edit`, `:bnext`, `:!` and
+  `:make` too. A change whose own write had not run yet — `TextChanged`
+  waits while keys are queued, as in a mapping or a macro like
+  `dd:bnext<CR>` — was then written through a format-on-save. Chosen
+  instead: `'autowriteall'` is not set, and the dictation buffer is written
+  with spokenpad's own write (`silent lockmarks noautocmd write`) on
+  `BufLeave`, `QuitPre` and `VimLeavePre`. Measured on 0.12.5: `QuitPre`
+  runs before `:quit` refuses a modified buffer, so `:q` still writes and
+  quits; a test with every change event and `InsertLeave` ignored fails
+  when the `QuitPre` write is removed. Another file opened in the dictation
+  editor is the user's to save.
+- Every Insert-mode keystroke ran a full write, and `'fsync'` is on by
+  default, so every keystroke fsynced; on slow storage that stalls Neovim's
+  main loop and the daemon's appends with it. Chosen: Insert-mode changes
+  are written 300 ms after the last one (a `vim.uv` timer that each change
+  restarts); `TextChanged`, `InsertLeave`, `BufLeave`, `QuitPre` and
+  `VimLeavePre` still write at once. The claim that a write costs "a
+  millisecond or two" is gone from the docs.
+- Tests: leaving an edited dictation buffer with `:edit` in one go with the
+  change writes it without the user's `BufWritePre` (fails without the
+  `BufLeave` write); `:q` with `InsertLeave` ignored too still writes and
+  quits; a dedicated editor leaves `'autowriteall'` off. The debounce itself
+  has no timing test: one would race the machine's load.

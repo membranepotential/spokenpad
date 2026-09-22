@@ -525,11 +525,14 @@ utterance with `noautocmd write` — or, with no editor open, by the daemon
 itself into the pending passage (see [attach mode](#dictating-with-no-editor-open)).
 
 The file is a scratch pad you never save by hand. **Every change you make in
-it is written at once**, in every mode: `spokenpad.lua` writes the dictation
-buffer on `TextChanged`, `TextChangedI` and `TextChangedP`, so in Insert mode
-that is every keystroke. On a file this small a write costs a millisecond or
-two, and saving only on leaving Insert mode would lose a paragraph typed
-into an editor that then died. The write is the same one an append makes,
+it is written promptly**, in every mode: `spokenpad.lua` writes the
+dictation buffer at once on `TextChanged` (a change in Normal mode),
+`InsertLeave` and `BufLeave`, and in Insert mode 300 ms after the last
+change (`TextChangedI` and `TextChangedP` restart a timer). Every write
+fsyncs, since `'fsync'` is on by default, and on slow storage a write per
+keystroke would stall Neovim's main loop, the daemon's appends included;
+saving only on leaving Insert mode would lose a paragraph typed into an
+editor that then died. The write is the same one an append makes,
 `silent lockmarks noautocmd write`: no autocommand of yours runs, so a
 format-on-save cannot reflow a transcript, and the `'[` and `']` marks stay
 where your change put them. It writes only the dictation buffer, only when
@@ -540,12 +543,14 @@ the next append or the pane's close to try again.
 
 **`:q` always writes and quits.** A `QuitPre` autocommand writes the
 dictation buffer the same way before `:quit`, `:wq` or `:qall` looks at what
-is unsaved, which covers a change typed so fast that its change event has
-not run yet. In an editor spokenpad opened — a pane, or `spokenpad editor` —
-`'autowriteall'` is set as well (it applies to `:quit`, `:qall`, `:exit` and
-`:xit`, `:help 'autowriteall'`), so another file you opened there is written
-on `:q` too, with your autocommands, as Neovim writes it. An editor
-spokenpad only adopted keeps its own `'autowriteall'`.
+is unsaved, and `VimLeavePre` before any other way out. That covers a change
+whose own write has not run: a `TextChanged` waits while keys are still
+queued, so `dd:q` typed in one go, or run by a mapping or a macro, reaches
+the `:quit` with the buffer modified. `BufLeave` covers `:edit` and
+`:bnext` the same way. `'autowriteall'` is not set: it would write the
+dictation buffer with your autocommands, format-on-save included, on `:edit`,
+`:bnext`, `:!` and `:make` as well. Another file you open in the dictation
+editor is yours to save.
 
 A window is a passage. Closing it ends the passage, and the next dictation
 opens a new window on a new file rather than appending under everything said
