@@ -21,7 +21,7 @@ pub(crate) mod rpc;
 pub use passage::DetachedWrite;
 
 use crate::{
-    config::{self, Mode, Nvim},
+    config::{self, Mode, Nvim, PaneLayout},
     core::{session::NoticeText, state::IndicatorPhase, wm::Criterion},
     shell::{
         pane::{host::PaneHost, place, x11},
@@ -888,7 +888,7 @@ impl NvimSession {
             Some(host) => host,
             None => self.pane.insert(PaneHost::start()?),
         };
-        host.open(
+        let (columns, rows) = host.open(
             Opening {
                 command,
                 options: Options {
@@ -904,6 +904,19 @@ impl NvimSession {
             },
             deadline,
         )?;
+        // What was asked and what was applied, every time: a pane that
+        // floats where `pane_layout = "tiled"` was set is then settled by the
+        // log rather than by a guess. The size is the grid at the map; a
+        // window manager that tiles the pane resizes it afterwards.
+        log::info!(
+            "{}",
+            pane_opened(
+                self.config.pane_layout,
+                layout,
+                manager.name.as_deref(),
+                (columns, rows)
+            )
+        );
         // The editor is waited for on its own socket, which cannot tell a
         // slow start from one that died sourcing a broken configuration. The
         // pane can: it drops a pane whose editor is gone, and this flag goes
@@ -996,6 +1009,23 @@ impl NvimSession {
             path: target.to_owned(),
         }))
     }
+}
+
+/// The log line for a pane that just opened: the layout asked for and the one
+/// applied under `manager`, and its grid in cells.
+fn pane_opened(
+    asked: PaneLayout,
+    applied: PaneLayout,
+    manager: Option<&str>,
+    (columns, rows): (u16, u16),
+) -> String {
+    let under = manager.unwrap_or("an unnamed window manager");
+    let why = if asked == applied {
+        String::new()
+    } else {
+        format!(" (asked {asked}: {under} is not proven to keep a {asked} pane unfocused)")
+    };
+    format!("opened the pane {applied}{why} under {under}, {columns}x{rows} cells")
 }
 
 /// The outcome of one attempt to adopt a freshly spawned editor.

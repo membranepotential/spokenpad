@@ -54,6 +54,11 @@ struct Args {
     /// Use spokenpad's bundled nvim configuration instead of the user's.
     #[arg(long)]
     bundled: bool,
+    /// Open it as an ordinary window, as `nvim.pane_layout = "tiled"` does,
+    /// rather than as a floating utility window. Unlike the daemon this does
+    /// not check that the window manager is one that keeps it unfocused.
+    #[arg(long)]
+    tiled: bool,
     /// Write the window's pixels here as a PNG before exiting.
     #[arg(long, value_name = "PATH")]
     screenshot: Option<PathBuf>,
@@ -101,7 +106,10 @@ fn main() -> Result<()> {
         dimensions: Dimensions::new(args.columns, args.rows).expect("a grid of at least one cell"),
         attach_timeout: Duration::from_secs_f64(config.startup_timeout_s),
         target: None,
-        layout: PaneLayout::Floating,
+        layout: match args.tiled {
+            true => PaneLayout::Tiled,
+            false => PaneLayout::Floating,
+        },
         title: "spokenpad dictation".to_owned(),
     };
     let (command, marker) = pane_launch(&config, &file)?;

@@ -393,6 +393,16 @@ pub enum PaneLayout {
     Tiled,
 }
 
+impl std::fmt::Display for PaneLayout {
+    /// As the configuration spells it.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Floating => "floating",
+            Self::Tiled => "tiled",
+        })
+    }
+}
+
 /// A fontconfig family name, checked once where it enters the program.
 ///
 /// Not a pattern: the pane appends `:bold` and `:charset=…` to it, so a value

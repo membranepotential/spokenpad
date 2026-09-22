@@ -47,7 +47,7 @@ pub struct Opening {
 enum Work {
     Open {
         opening: Box<Opening>,
-        answer: SyncSender<Result<()>>,
+        answer: SyncSender<Result<(u16, u16)>>,
     },
     Close,
 }
@@ -118,12 +118,14 @@ impl PaneHost {
     }
 
     /// Open a pane and wait until its window is up, or say why it is not.
+    /// Returns the grid it opened with, columns and rows: what was asked
+    /// for, cut to the monitor.
     ///
     /// `deadline` is the caller's, for the whole operation; the editor inside
     /// gets what is left of it through `options.attach_timeout`. There is one
     /// deadline and one owner: if this returns an error, no window is left
     /// behind, because the thread drops a pane nobody is waiting for.
-    pub fn open(&mut self, opening: Opening, deadline: Instant) -> Result<()> {
+    pub fn open(&mut self, opening: Opening, deadline: Instant) -> Result<(u16, u16)> {
         // A panic on the pane thread used to disable pane mode for the life
         // of the daemon. It costs one window, not the feature.
         if self.thread.as_ref().is_some_and(JoinHandle::is_finished) {
@@ -271,7 +273,7 @@ fn serve(work: Receiver<Work>, shared: Arc<Shared>) {
                 match open(*opening) {
                     Ok(opened) => {
                         shared.took(&opened);
-                        if answer.send(Ok(())).is_err() {
+                        if answer.send(Ok(opened.size())).is_err() {
                             // The caller gave up waiting. Keeping this window
                             // would orphan it: a live editor on the dictation
                             // socket that no session owns, which every later

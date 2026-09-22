@@ -1955,3 +1955,28 @@ fn a_stopping_daemon_gives_up_on_an_append_within_the_grace() {
         assert!(possible.contains(&written.as_str()), "{label}: {written:?}");
     }
 }
+
+/// The line a pane logs when it opens says the layout asked for and the one
+/// applied, and why they differ, so a pane that floats where "tiled" was set
+/// is explained by the log.
+#[test]
+fn an_opened_pane_logs_its_layout_as_asked_and_as_applied() {
+    assert_eq!(
+        pane_opened(PaneLayout::Tiled, PaneLayout::Tiled, Some("i3"), (72, 20)),
+        "opened the pane tiled under i3, 72x20 cells"
+    );
+    assert_eq!(
+        pane_opened(
+            PaneLayout::Tiled,
+            PaneLayout::Floating,
+            Some("awesome"),
+            (72, 20)
+        ),
+        "opened the pane floating (asked tiled: awesome is not proven to keep a tiled pane \
+         unfocused) under awesome, 72x20 cells"
+    );
+    assert_eq!(
+        pane_opened(PaneLayout::Floating, PaneLayout::Floating, None, (40, 8)),
+        "opened the pane floating under an unnamed window manager, 40x8 cells"
+    );
+}

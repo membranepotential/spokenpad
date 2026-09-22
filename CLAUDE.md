@@ -101,7 +101,7 @@ those belongs in `src/shell/`.
   with the counts WER hides: empty chunks, lost endings, chunk seams that
   wrote a word twice), `examples/verify_native.rs` (JSON dump of segments and
   progressive commits), `examples/pane.rs` (opens the pane on a given
-  display, and can write a screenshot).
+  display, floating or `--tiled`, and can write a screenshot).
 - `tests/harness/mod.rs` is the headless desktop the pane tests share (its own
   Xvfb above `:50`, its own i3, XTEST input that refuses any other display).
   `tests/pane_window.rs` proves the window never takes focus on i3, and

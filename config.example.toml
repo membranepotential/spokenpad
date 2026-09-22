@@ -401,7 +401,11 @@ pane_dimensions = { columns = 72, lines = 20 }
 # keeps some window managers from focusing it, so it is allowed only where it
 # is proven never to take the focus: i3, sway, Openbox and KWin. Anywhere
 # else the pane opens floating, and a notification says why. Your click
-# still focuses it. Applies to the next window after you save.
+# still focuses it. Applies to the next window after you save. The log says
+# which layout each pane opened with; one logged as tiled that floats all
+# the same is floated by a rule in your window manager's config -- on i3 the
+# old managed-mode `for_window [instance="spokenpad"] floating enable`
+# matches the pane too, since i3 does not anchor criteria.
 pane_layout = "floating"
 
 # Pane mode only: the font the window draws with, as a fontconfig family name

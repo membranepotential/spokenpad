@@ -413,6 +413,24 @@ Under any other window manager, or none, the pane opens floating; the log
 says why every time, and one desktop notification per daemon session. On
 sway an empty workspace refuses both layouts alike.
 
+Every pane logs one line when it opens, with the layout asked for and the one
+applied, the window manager, and the grid in cells at the map (a tiled pane
+is resized to its tile afterwards):
+
+```
+opened the pane tiled under i3, 72x20 cells
+opened the pane floating (asked tiled: awesome is not proven to keep a tiled pane unfocused) under awesome, 72x20 cells
+```
+
+A pane logged as tiled that still floats is floated by the window manager's
+configuration. i3 and sway read a criterion's value as a pattern that may
+match anywhere in the name, so a rule written for a window named `spokenpad`
+— such as the `for_window [instance="spokenpad"] floating enable` that the
+package shipped for managed mode until 2026-09-22 — matches `spokenpad-pane`
+too, and floats a tiled pane on i3 4.25.1
+([experiment](experiments/2026-09-22-tiled-pane-floats-under-managed-rule.md)).
+Delete such a rule, or anchor it (`instance="^spokenpad$"`).
+
 ### Where it opens
 
 `nvim.pane_dimensions` cells — `{ columns = 72, lines = 20 }` by default, as

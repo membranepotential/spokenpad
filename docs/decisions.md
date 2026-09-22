@@ -1864,3 +1864,22 @@ wants closing the window to cancel the recording.
   (the recording stops growing, speech after the close is never written
   anywhere, no file or window opens), and once with its editor killed (the
   capture goes on and a new pane opens with its text).
+
+## The pane logs the layout it opened with (2026-09-22)
+
+The user set `nvim.pane_layout = "tiled"` on i3 4.25.1 and saw a floating
+pane; the log said nothing about the layout, and the headless i3 test tiles
+it.
+
+- Chosen: one INFO line per pane that opens: the layout asked for and the
+  one applied, why they differ when they do, the window manager, and the
+  grid in cells at the map.
+- Found: the managed-mode rule the package shipped,
+  `for_window [instance="spokenpad"] floating enable`, matches the pane's
+  instance `spokenpad-pane`, because i3 does not anchor criteria, and floats
+  a tiled pane on i3 4.25.1
+  ([experiment](experiments/2026-09-22-tiled-pane-floats-under-managed-rule.md)).
+  The rule is gone from the package with managed mode; nothing in the pane
+  changes. That the user's configuration carries it is not verified; the
+  docs say how to check and to delete or anchor it.
+- `examples/pane.rs` takes `--tiled`, which the experiment used.
