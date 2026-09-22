@@ -2160,3 +2160,15 @@ kept its old mode although the docs promise 0600.
 - Test: `a_rescue_takes_a_new_private_file` plants a 0644 rescue and a
   symlink at the next name; both stay untouched and the text lands, 0600, in
   the name after them. It fails on the old code.
+
+## The pane's shared state survives a panicked thread (2026-09-22)
+
+The 2026-09-22 audit (P2-008): `audio.rs` and `recorder.rs` recover the guard
+of a poisoned mutex, and `pane/host.rs` panicked on one with `expect`. A panic
+on the pane thread while it held the waker or the close record would then
+also panic the daemon's editor thread at its next question.
+
+- Chosen: `host.rs` recovers the guard too, and logs it. That is sound here:
+  every critical section on its `Shared` is one assignment, `take` or read
+  of an `Option`, so a panic inside one cannot leave the value half written.
+- Test: `a_poisoned_close_record_is_still_read`.

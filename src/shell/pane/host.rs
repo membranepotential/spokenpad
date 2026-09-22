@@ -24,7 +24,7 @@ use anyhow::{Context, Result, bail};
 use std::{
     process::Command,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, MutexGuard,
         atomic::{AtomicBool, Ordering},
         mpsc::{
             Receiver, RecvTimeoutError, Sender, SyncSender, TryRecvError, channel, sync_channel,
@@ -71,20 +71,32 @@ struct Shared {
     closed_by_user: Mutex<Option<Instant>>,
 }
 
+/// The guard, also of a mutex a thread panicked while holding. Every
+/// critical section on [`Shared`] is one assignment, `take` or read of an
+/// `Option` (the waker's `wake` reads it), so a panic inside one cannot leave
+/// the value half written: it is as good as before, and the daemon's editor
+/// thread, which asks these on every press, keeps working.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poisoned| {
+        log::warn!("a thread panicked while it held the pane's shared state; using it as it is");
+        poisoned.into_inner()
+    })
+}
+
 impl Shared {
     fn took(&self, pane: &Pane) {
-        *self.waker.lock().expect("the pane waker") = Some(pane.waker());
+        *lock(&self.waker) = Some(pane.waker());
         self.alive.store(true, Ordering::Release);
     }
 
     fn gave_up(&self) {
         self.alive.store(false, Ordering::Release);
-        *self.waker.lock().expect("the pane waker") = None;
+        *lock(&self.waker) = None;
     }
 
     /// Make the pane's loop come round, so a command just sent is acted on.
     fn knock(&self) {
-        if let Some(waker) = self.waker.lock().expect("the pane waker").as_ref()
+        if let Some(waker) = lock(&self.waker).as_ref()
             && let Err(error) = waker.wake()
         {
             log::debug!("could not wake the pane: {error:#}");
@@ -155,20 +167,12 @@ impl PaneHost {
     /// they did since the last time this was asked: the moment the window
     /// manager's request or Neovim's word that it is quitting arrived.
     pub fn take_closed_by_user(&self) -> Option<Instant> {
-        self.shared
-            .closed_by_user
-            .lock()
-            .expect("the pane's close")
-            .take()
+        lock(&self.shared.closed_by_user).take()
     }
 
     /// Whether a close by the user is recorded and not taken yet.
     pub fn closed_by_user_pending(&self) -> bool {
-        self.shared
-            .closed_by_user
-            .lock()
-            .expect("the pane's close")
-            .is_some()
+        lock(&self.shared.closed_by_user).is_some()
     }
 
     /// Say in the pane, or stop saying, that the daemon is waiting for a call
@@ -244,7 +248,7 @@ fn serve(work: Receiver<Work>, shared: Arc<Shared>) {
                         match ending {
                             Ending::ByUser { at } => {
                                 log::info!("the dictation pane closed: the user closed it");
-                                *shared.closed_by_user.lock().expect("the pane's close") = Some(at);
+                                *lock(&shared.closed_by_user) = Some(at);
                             }
                             Ending::EditorDied => log::warn!(
                                 "the dictation pane closed: its editor went away without being told to quit"
@@ -276,7 +280,7 @@ fn serve(work: Receiver<Work>, shared: Arc<Shared>) {
             Work::Open { opening, answer } => {
                 // A close recorded for the pane before this one is that
                 // pane's; the one about to open must not inherit it.
-                *shared.closed_by_user.lock().expect("the pane's close") = None;
+                *lock(&shared.closed_by_user) = None;
                 // Any pane still open is replaced, not stacked: one window is
                 // one passage, and the caller only asks when it has none.
                 pane = None;
@@ -318,4 +322,28 @@ fn open(opening: Opening) -> Result<Pane> {
     let mut pane = Pane::open(&options, command)?;
     pane.show()?;
     Ok(pane)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A thread that panics while it holds the close record does not take
+    /// the daemon's editor thread down with it the next time it asks.
+    #[test]
+    fn a_poisoned_close_record_is_still_read() {
+        let shared = Arc::new(Shared::default());
+        let at = Instant::now();
+        let holder = Arc::clone(&shared);
+        let panicked = std::thread::spawn(move || {
+            let mut closed = holder.closed_by_user.lock().unwrap();
+            *closed = Some(at);
+            panic!("while holding the lock");
+        })
+        .join();
+        assert!(panicked.is_err());
+        assert!(shared.closed_by_user.is_poisoned());
+        assert_eq!(lock(&shared.closed_by_user).take(), Some(at));
+        assert_eq!(*lock(&shared.closed_by_user), None);
+    }
 }
