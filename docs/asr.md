@@ -21,8 +21,9 @@ files are loaded; the functional core sees only the `Recognizer` trait.
 Each file is found by its role: `<role>.int8.onnx` is preferred over
 `<role>.onnx`, and a `<prefix>-` is allowed before the role, as in Whisper's
 `tiny.en-encoder.int8.onnx`; `tokens` is `tokens.txt` or
-`<prefix>-tokens.txt`. A missing file, or two files for one role, stops
-start-up with exit code 2 and names the directory.
+`<prefix>-tokens.txt`. A missing file, or two files for one role, makes
+`check` and `transcribe` exit with code 2 and name the directory; the daemon
+says so in the dictation window and tries again at the next press.
 
 Every family reads 16 kHz mono, the only rate `audio.sample_rate` accepts.
 
@@ -105,9 +106,10 @@ Run as a NeMo transducer (`model_type = "nemo_transducer"`). The files
 pinned Hugging Face revision, verifying the pinned size and sha256 of every
 file, and puts them in
 `$XDG_DATA_HOME/spokenpad/models/parakeet-tdt-0.6b-v3-int8/`, the default
-`asr.model_dir`. The daemon, `check` and `transcribe` do this on their own
-the first time they find the default directory missing or incomplete, before
-loading the model — see [decisions.md](decisions.md#model-download-moves-into-the-binary).
+`asr.model_dir`. `check` and `transcribe` do this on their own the first
+time they find the default directory missing or incomplete, before loading
+the model, and the daemon does it in the background while it already records
+— see [decisions.md](decisions.md#model-download-moves-into-the-binary-2026-09-21).
 
 ### Speed on a CPU
 

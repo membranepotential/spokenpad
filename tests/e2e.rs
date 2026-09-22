@@ -32,13 +32,14 @@ use spokenpad::{
         },
         frames::Frames,
         segments::{VAD_WINDOW, merge_spans, settling_silence},
+        session::Preparing,
         state::REPEAT_WINDOW,
         terminal::Terminal,
     },
     shell::{
         audio::{AudioCapture, CallbackCore, InputBackend, InputStream, Teardown},
         control::{ControlServer, Socket},
-        daemon::{Devices, serve},
+        daemon::{Devices, Loader, PipelineSource, serve},
         inference::{Transcriber, load_segmenter},
         recorder::read_capture,
     },
@@ -289,6 +290,9 @@ struct Harness {
     socket: PathBuf,
     dictation: PathBuf,
     recordings: PathBuf,
+    /// Ends the loader's current attempt, when [`Settings::loading`] asked
+    /// for one.
+    loader: Option<Sender<Result<(), String>>>,
     served: Option<JoinHandle<Result<()>>>,
     /// The editor `open_editor` started, reaped when the harness is dropped.
     user_editor: Option<Child>,
@@ -314,6 +318,12 @@ struct Settings {
     /// Mirrors `capture.silence_timeout_s`. Off unless a test asks, so no
     /// other test can end on the clock while it is thinking.
     silence_timeout_s: f64,
+    /// Build the pipeline on the inference thread, as the daemon does, each
+    /// attempt ending when the test calls [`Harness::load`].
+    loading: bool,
+    /// Mirrors `preview.max_seconds`: also the window a recording made
+    /// before the model was ready is transcribed in.
+    max_seconds: f64,
 }
 
 impl Default for Settings {
@@ -330,6 +340,8 @@ impl Default for Settings {
             socket: false,
             copy_to_clipboard: false,
             silence_timeout_s: 0.,
+            loading: false,
+            max_seconds: 30.,
         }
     }
 }
@@ -362,6 +374,7 @@ impl Harness {
         config.nvim.startup_timeout_s = 10.0;
         config.preview.interval_ms = settings.interval_ms;
         config.capture.silence_timeout_s = settings.silence_timeout_s;
+        config.preview.max_seconds = settings.max_seconds;
         config.validate().expect("harness config is valid");
 
         let calls = Arc::new(Mutex::new(Vec::new()));
@@ -372,18 +385,38 @@ impl Harness {
             config.recording.clone(),
         )
         .expect("open the synthetic microphone");
-        let worker = Worker::new(Pipeline {
-            recognizer: Counting {
-                words: settings.words,
-                delay: settings.delay,
-                calls: Arc::clone(&calls),
-            },
-            segmenter: settings
-                .vad
-                .clone()
-                .map(Chunker::Speech)
-                .or_else(|| settings.chunk.map(Chunker::Fixed)),
-        });
+        let build = {
+            let (words, delay, calls) = (settings.words, settings.delay, Arc::clone(&calls));
+            let (vad, chunk) = (settings.vad.clone(), settings.chunk);
+            move || Pipeline {
+                recognizer: Counting {
+                    words,
+                    delay,
+                    calls: Arc::clone(&calls),
+                },
+                segmenter: vad
+                    .clone()
+                    .map(Chunker::Speech)
+                    .or_else(|| chunk.map(Chunker::Fixed)),
+            }
+        };
+        let (pipeline, loader) = if settings.loading {
+            // Each attempt reports a download, then waits for the test to say
+            // how it ends.
+            let (outcome, outcomes) = mpsc::channel::<Result<(), String>>();
+            let load: Loader<Counting, Chunker> = Box::new(move |step| {
+                step(Preparing::Downloading { done: 1, total: 4 });
+                outcomes
+                    .recv()
+                    .map_err(|_| anyhow::anyhow!("the test ended"))?
+                    .map_err(anyhow::Error::msg)?;
+                step(Preparing::Loading);
+                Ok(build())
+            });
+            (PipelineSource::Load(load), Some(outcome))
+        } else {
+            (PipelineSource::Ready(build()), None)
+        };
         let (requests, received) = mpsc::channel();
         // Where `spokenpad start` looks, given the harness's runtime dir.
         let control = settings.socket.then(|| {
@@ -402,7 +435,7 @@ impl Harness {
                 Devices {
                     capture,
                     requests: received,
-                    worker,
+                    pipeline,
                 },
                 stop,
                 None,
@@ -418,9 +451,20 @@ impl Harness {
             socket,
             dictation,
             recordings,
+            loader,
             served: Some(served),
             user_editor: None,
         }
+    }
+
+    /// Lets the loader's attempt end: `Ok` builds the pipeline, `Err` fails
+    /// with that reason.
+    fn load(&self, outcome: Result<(), &str>) {
+        self.loader
+            .as_ref()
+            .expect("the harness loads its pipeline")
+            .send(outcome.map_err(str::to_owned))
+            .expect("the loader is waiting");
     }
 
     fn send(&self, request: Request) {
@@ -1460,6 +1504,100 @@ fn a_capture_that_runs_through_a_long_pause_is_still_committed_whole() {
     h.finish();
 }
 
+/// The daemon takes presses before its speech model is ready. While the model
+/// downloads and loads, a capture is kept on disk only and the window says
+/// so; once the model is ready the recording is transcribed the way a live
+/// capture would have been, every sample exactly once, and the next press
+/// decodes as it goes again.
+#[test]
+fn a_capture_made_before_the_model_is_ready_is_transcribed_once_it_is() {
+    if !nvim_available() {
+        return;
+    }
+    let h = Harness::start(Settings {
+        loading: true,
+        vad: Some(brisk_vad()),
+        words: false,
+        max_seconds: 3.0,
+        ..Settings::default()
+    });
+    h.press(true);
+    h.say(&tone(1.5));
+    h.say(&vec![0.0; RATE as usize * 2]);
+    h.say(&tone(1.5));
+    h.press_only(true);
+    h.release_for_good();
+    wait_until("the window says the model is on its way", || {
+        h.indicator("notice")
+            .contains("downloading the speech model")
+            && h.indicator("notice_detail").contains("25%; ")
+    });
+    wait_until("the window counts the recording", || {
+        h.indicator("notice_detail").contains("1 recording waiting")
+    });
+    assert!(h.text().is_empty(), "nothing is decoded without a model");
+    assert!(h.calls().is_empty(), "{:?}", h.calls());
+
+    h.load(Ok(()));
+    let loud = loud_samples(&h.recovery_wav().0);
+    assert_eq!(
+        loud,
+        3 * RATE as usize,
+        "the recording holds all the speech"
+    );
+    wait_until("the recording is transcribed, every sample once", || {
+        counted(&h.text()) == loud
+    });
+    wait_until("the notice clears once nothing waits", || {
+        h.indicator("notice").trim().is_empty()
+    });
+
+    h.press(false);
+    h.say(&tone(1.0));
+    h.release();
+    wait_until("a capture after the load decodes as before", || {
+        counted(&h.text()) == loud + RATE as usize
+    });
+    h.finish();
+}
+
+/// A model that cannot be had (offline, a failed download, a broken file)
+/// does not stop the daemon: the window says why, what is recorded is kept,
+/// and the next press tries again. Every recording is transcribed once it
+/// works.
+#[test]
+fn a_model_that_fails_to_load_keeps_the_recordings_and_the_next_press_retries() {
+    if !nvim_available() {
+        return;
+    }
+    let h = Harness::start(Settings {
+        loading: true,
+        ..Settings::default()
+    });
+    h.press(false);
+    h.say(&tone(1.0));
+    h.release_for_good();
+    h.load(Err("the network is unreachable"));
+    wait_until("the window names the failure", || {
+        h.indicator("notice").contains("no speech model")
+    });
+    let detail = h.indicator("notice_detail");
+    assert!(
+        detail.contains("the network is unreachable") && detail.contains("1 recording kept"),
+        "{detail}"
+    );
+
+    h.press(false);
+    h.say(&tone(1.0));
+    h.release_for_good();
+    h.load(Ok(()));
+    wait_until("both recordings are transcribed", || {
+        h.text().matches("word").count() == 4
+    });
+    assert_eq!(h.calls().len(), 2, "each decoded once: {:?}", h.calls());
+    h.finish();
+}
+
 /// The latch the user forgot. Nobody presses anything: the microphone keeps
 /// delivering silence, and the capture ends by itself, decodes its tail, says
 /// why in the winbar, and closes its recovery WAV. The next press then starts
@@ -1846,7 +1984,7 @@ fn real_models_transcribe_the_kennedy_sample() {
 
     let mut transcriber = Transcriber::new(&config.asr, RATE).expect("load the CPU recognizer");
     transcriber.warm_up().expect("warm up");
-    let worker = Worker::new(Pipeline {
+    let pipeline = PipelineSource::Ready(Pipeline {
         recognizer: transcriber,
         segmenter: load_segmenter(&config.vad, RATE),
     });
@@ -1868,7 +2006,7 @@ fn real_models_transcribe_the_kennedy_sample() {
             Devices {
                 capture,
                 requests: received,
-                worker,
+                pipeline,
             },
             stop,
             None,

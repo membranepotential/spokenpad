@@ -86,11 +86,26 @@ The shell owns everything that can fail for reasons outside the program:
 `shell::logging`.
 
 `shell::daemon::run` is the imperative shell proper — it takes the per-user
-lock, registers signal handlers, opens PortAudio, loads the models, and
-then listens on the control socket. `shell::daemon::serve` is the event loop
-over whatever devices it is handed: it is generic over the audio backend, the recognizer and the segmenter,
-takes a `Receiver<Received>` of control requests and a stop flag, and
-touches no process-global state. That is the seam `tests/e2e.rs` drives
+lock, listens on the control socket (its own, or the one systemd passed in),
+registers signal handlers and opens PortAudio, in that order, so that the
+press that socket-activated the daemon is read and stamped at once. The
+models come last and off the main thread: `run` hands `serve` a loader, which
+the inference thread runs — downloading the default models if they are
+missing, then building the recognizer and the segmenter — while the loop
+already takes presses. `shell::daemon::serve` is the event loop over whatever
+devices it is handed: it is generic over the audio backend, the recognizer and
+the segmenter, takes a `Receiver<Received>` of control requests, a pipeline
+that is either built already or a loader, and a stop flag, and touches no
+process-global state.
+
+Until the pipeline is built, a capture is recorded to its recovery WAV only:
+the loop drops its in-memory audio as it arrives, and at the release queues
+the WAV. Once the inference thread reports `Ready`, each queued WAV goes to it
+as `Work::Recording` and is decoded a `preview.max_seconds` window at a time
+through the same `Worker::tick` and `Worker::finish` a live capture uses. The
+speech model's state (`core::session::Recognition`) becomes a winbar notice
+that shows when it outranks the capture's own. A failed load is reported and
+retried at the next press; the daemon does not exit over it. That is the seam `tests/e2e.rs` drives
 headlessly, directly and through a real control socket.
 
 ## Event and data flow
@@ -190,6 +205,9 @@ is a held key and the length limit is what bounds it.
 - Silence the VAD heard nothing in advances the committed offset without a
   decode, one split threshold behind the end of the audio.
 - Release decodes only the range after the committed offset.
+- A capture made before the pipeline was built is decoded from its recovery
+  WAV once it is, through the same tick-then-finish path, so the same rules
+  hold for it; only a window and the open tail of it are ever in memory.
 - Preview may re-decode only the bounded open tail and cannot reach the file.
   With no segmenter loaded, no preview tick is issued at all.
 - A capture the VAD finds no speech in is not decoded at all: no chunks, no

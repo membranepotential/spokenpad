@@ -632,7 +632,8 @@ swallowed as a repeat. Rejected: a client-supplied timestamp; the two
 processes of a pair race for the CPU before they can read the clock, so it
 orders them no better than arrival does. Rejected: queueing requests while
 the model loads; the socket is bound last, and until then the CLI says no
-daemon is listening.
+daemon is listening. (Reversed on 2026-09-22 for socket activation: see
+[Presses are taken before the model is ready](#presses-are-taken-before-the-model-is-ready-2026-09-22).)
 
 ## Model download moves into the binary (2026-09-21)
 
@@ -1124,3 +1125,55 @@ focus sampled every 5 ms
   because Xwayland runs with `-terminate` and otherwise outlived sway by
   several seconds. KWin 6 has no `kwin_x11` in the `kwin` package, so X11
   KWin is not covered.
+
+## Presses are taken before the model is ready (2026-09-22)
+
+The daemon now listens first and loads its models last. `run` takes the lock,
+serves the control socket, registers signals and opens PortAudio; the models
+are built on the inference thread by a loader, while the loop already takes
+presses. This reverses "the socket is bound last" from
+[Control by socket](#control-by-socket-not-by-reading-the-keyboard).
+
+- **Why.** Under socket activation (`spokenpad.socket`) the press that starts
+  the daemon is waiting on the socket. With the old order it waited for the
+  model to load, about 10 s, and for a 670 MB download on the first run: past
+  any sensible client timeout, and every request was stamped when it was read,
+  so that late. Now it is answered 13 ms after it connected (debug build,
+  `systemd-socket-activate`, `tests/cli.rs`), and the capture it starts records
+  from the moment the microphone opens.
+- **What a capture does before the model is ready.** It goes to its recovery
+  WAV only: the loop drops its in-memory audio as it arrives, so the
+  constant-RAM rule holds through a download of any length. At the release the
+  WAV is queued. When the inference thread reports `Ready`, each queued WAV is
+  transcribed in order, a `preview.max_seconds` window at a time through the
+  same `Worker::tick` and `Worker::finish` a live capture uses, so every sample
+  is decoded once and the tail at the end. Such a capture has no preview and
+  no silence timeout: the settings that depend on the segmenter apply from the
+  next capture after the load (`Session::configure`).
+- **The winbar says what is happening.** The speech model's state
+  (`core::session::Recognition`) becomes a notice — "downloading the speech
+  model" with its percentage, "loading the speech model", "transcribing
+  recordings", "no speech model" with the reason — with a count of the
+  recordings that wait. It ranks with the capture notices, and the window
+  shows whichever ranks higher.
+- **A model that cannot be had does not stop the daemon.** A failed download,
+  a missing configured `model_dir`, or a file that does not load is reported
+  in the winbar and the log, the recordings are kept, and the next press runs
+  the loader again. Exiting instead would lose the presses queued on systemd's
+  socket and, repeated, trip the unit's start limit.
+- **The automatic download stays**, for the default models only, as decided in
+  [Model download moves into the binary](#model-download-moves-into-the-binary-2026-09-21),
+  and now runs in the background. Whether anything is missing is decided by
+  file size alone: hashing the set took seconds at every start. A file of the
+  right size with the wrong bytes fails to load and says so; `spokenpad
+  fetch-models` hashes every file and replaces it.
+- **With `recording.enabled = false`** a capture made before the model is
+  ready has nowhere to go and is lost, with "capture not kept" in the winbar.
+- **Recordings still waiting when the daemon stops** are named in the log for
+  `spokenpad transcribe`.
+- Rejected: holding captures made before the model is ready in memory and
+  queueing their decode behind the load. A first-run download takes minutes,
+  and memory would grow with every word for that long.
+- Rejected: a daemon that only answers "run `spokenpad fetch-models`" while
+  its model is missing. The user chose to keep the automatic download and to
+  record meanwhile.

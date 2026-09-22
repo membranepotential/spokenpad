@@ -1,10 +1,11 @@
 //! Four owners: main/session, control socket, inference, and editor; recorder
 //! owns disk I/O.
 //!
-//! [`run`] is the imperative shell: it takes the per-user lock, registers
-//! signals, opens PortAudio, loads the models and listens on the control
-//! socket. [`serve`] is the event loop over whatever devices it is handed,
-//! which is what the headless end-to-end tests drive.
+//! [`run`] is the imperative shell: it takes the per-user lock, listens on the
+//! control socket, registers signals and opens PortAudio, and hands the
+//! inference thread a loader that downloads and loads the models while
+//! presses are already accepted. [`serve`] is the event loop over whatever
+//! devices it is handed, which is what the headless end-to-end tests drive.
 use crate::{
     config::Config,
     core::{
@@ -14,15 +15,17 @@ use crate::{
             Worker,
         },
         frames::Frames,
-        session::{Notice, RecordingStatus, Session},
+        session::{Notice, Preparing, Recognition, RecordingStatus, Session},
         state::{Cause, Command, DiscardReason, Event, State},
         text::Processor,
     },
     shell::{
         audio::{AudioCapture, CaptureEvent, Captured, InputBackend, PostRoll},
         control::{ControlServer, Socket},
-        inference::{Transcriber, load_segmenter},
+        inference::{SpeechSegmenter, Transcriber, load_segmenter},
+        models::ensure_defaults,
         nvim::{AppendFailure, CopyOutcome, IndicatorState, NvimSession},
+        recorder::CaptureReader,
     },
 };
 use anyhow::{Context, Result, ensure};
@@ -33,7 +36,7 @@ use std::{
         fd::AsRawFd,
         unix::fs::{DirBuilderExt, OpenOptionsExt},
     },
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -62,7 +65,28 @@ pub struct Devices<B: InputBackend, R, S> {
     pub capture: AudioCapture<B>,
     /// Control requests. The sender being dropped means the socket closed.
     pub requests: Receiver<Received>,
-    pub worker: Worker<R, S>,
+    pub pipeline: PipelineSource<R, S>,
+}
+
+/// Builds the recognizer and the segmenter on the inference thread, telling
+/// it each step as it begins. Called again, at the next press, after it
+/// failed.
+pub type Loader<R, S> = Box<dyn FnMut(&mut dyn FnMut(Preparing)) -> Result<Pipeline<R, S>> + Send>;
+
+/// Where the event loop's pipeline comes from.
+pub enum PipelineSource<R, S> {
+    /// Built already: the loop is ready from its first press.
+    Ready(Pipeline<R, S>),
+    /// Built by the inference thread while the loop already accepts presses.
+    /// Until it is, captures are kept on disk and transcribed afterwards.
+    Load(Loader<R, S>),
+}
+
+/// A capture made before the speech model was ready: its recovery WAV, and
+/// the utterance it was.
+struct Waiting {
+    path: PathBuf,
+    id: UtteranceId,
 }
 
 /// Control requests in arrival order, each preceded by the clock at its own
@@ -170,14 +194,30 @@ enum Work {
         utterance: Arc<Utterance>,
         kind: TickKind,
     },
-    Finish {
-        audio: Vec<f32>,
-        start: Frames,
+    Finish(Tail),
+    /// Transcribe a recording made before the model was ready.
+    Recording {
+        path: PathBuf,
         utterance: Arc<Utterance>,
     },
+    /// Try the loader again: the last attempt failed.
+    Load,
     Quit,
 }
+/// What a released capture still holds for its final decode: the audio
+/// after `start`, everything before it having been committed.
+struct Tail {
+    audio: Vec<f32>,
+    start: Frames,
+    utterance: Arc<Utterance>,
+}
 enum ResultEvent {
+    Preparing(Preparing),
+    Ready {
+        segmenter: bool,
+        elapsed: Duration,
+    },
+    Unavailable(String),
     Commit(Commit),
     Tick {
         id: UtteranceId,
@@ -192,12 +232,14 @@ enum ResultEvent {
 }
 
 /// Everything the editor's winbar shows, replaced wholesale, never merged.
-fn indicator_of(session: &Session, level: f32) -> IndicatorState {
+/// `status` is the speech model's notice, shown when it outranks the
+/// capture's own.
+fn indicator_of(session: &Session, level: f32, status: Option<Notice>) -> IndicatorState {
     IndicatorState {
         phase: session.state.indicator_phase(),
         level: f64::from(level),
         preview: session.preview().to_owned(),
-        notice: session.notice().map(Notice::text),
+        notice: session.shown_notice(status).as_ref().map(Notice::text),
         latched: session.state.latched(),
         previewing: session.previewing(),
     }
@@ -417,38 +459,75 @@ fn daemon_lock() -> Result<File> {
 /// otherwise the daemon binds its own.
 pub fn run(config: Config, inherited: Option<Socket>, dump_dir: Option<&Path>) -> Result<()> {
     let _lock = daemon_lock()?;
-    let stopping = Arc::new(AtomicBool::new(false));
-    signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&stopping))?;
-    signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&stopping))?;
-    log::info!("loading CPU recognizer");
-    let mut transcriber = Transcriber::new(&config.asr, config.audio.sample_rate)?;
-    transcriber.warm_up()?;
-    let worker = Worker::new(Pipeline {
-        recognizer: transcriber,
-        segmenter: load_segmenter(&config.vad, config.audio.sample_rate),
-    });
-    let capture = AudioCapture::new(config.audio.clone(), config.recording.clone())?;
+    // Served first, before anything slow: under socket activation the press
+    // that started this daemon is waiting on the socket, and a request is
+    // stamped when it is read. The model loads later, on the inference
+    // thread, and what is recorded meanwhile is kept until it has.
     let (requests_tx, requests) = mpsc::channel();
-    // Bound last: a request is accepted only once it can be acted on, and
-    // the CLI says "no daemon" rather than queueing presses behind a model
-    // that is still loading.
     let path = crate::config::control_socket();
     let socket = match inherited {
         Some(socket) => socket,
         None => Socket::bind(&path)?,
     };
     let _control = ControlServer::start(socket, requests_tx)?;
-    log::info!("model ready; listening on {}", path.display());
+    log::info!("listening on {}", path.display());
+    let stopping = Arc::new(AtomicBool::new(false));
+    signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&stopping))?;
+    signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&stopping))?;
+    let capture = AudioCapture::new(config.audio.clone(), config.recording.clone())?;
+    let (asr, vad, rate) = (
+        config.asr.clone(),
+        config.vad.clone(),
+        config.audio.sample_rate,
+    );
+    let load: Loader<Transcriber, SpeechSegmenter> = Box::new(move |step| {
+        ensure_defaults(&asr, &vad, |done, total| {
+            step(Preparing::Downloading { done, total });
+        })?;
+        step(Preparing::Loading);
+        log::info!("loading CPU recognizer");
+        let mut recognizer = Transcriber::new(&asr, rate)?;
+        recognizer.warm_up()?;
+        Ok(Pipeline {
+            recognizer,
+            segmenter: load_segmenter(&vad, rate),
+        })
+    });
     serve(
         &config,
         Devices {
             capture,
             requests,
-            worker,
+            pipeline: PipelineSource::Load(load),
         },
         stopping,
         dump_dir,
     )
+}
+
+/// Turns previews and the silence timeout on as far as the pipeline that
+/// loaded allows.
+fn configure(session: &mut Session, config: &Config, segmenter: bool) {
+    // Without a segmenter nothing ever settles, so a preview would re-decode
+    // the whole growing capture. That is the one thing this project refuses.
+    let previews = config.preview.enabled && segmenter;
+    if config.preview.enabled && !previews {
+        log::warn!("no VAD model: previews are off and the capture is decoded at release");
+    }
+    // Only a tick can report speech, so without one there is no silence to
+    // measure and a latch is bounded by its length alone.
+    let silence = previews.then(|| config.capture.silence_timeout()).flatten();
+    match silence {
+        Some(timeout) => log::info!(
+            "a latched capture ends by itself after {:.0}s without speech",
+            timeout.as_secs_f64()
+        ),
+        None => log::info!(
+            "no silence timeout: a capture ends at the {}-hour limit or the in-memory ceiling",
+            crate::core::state::MAX_CAPTURE.as_secs() / 3600
+        ),
+    }
+    session.configure(previews, silence);
 }
 
 /// The event loop. Touches no process-global state: no lock, no signals, no
@@ -467,42 +546,38 @@ where
     let Devices {
         mut capture,
         requests,
-        mut worker,
+        pipeline,
     } = devices;
     let mut requests = Requests::new(requests);
     let rate = config.audio.sample_rate;
-    // Without a segmenter nothing ever settles, so a preview would re-decode
-    // the whole growing capture. That is the one thing this project refuses.
-    let previews = config.preview.enabled && worker.pipeline.segmenter.is_some();
-    if config.preview.enabled && !previews {
-        log::warn!("no VAD model: previews are off and the capture is decoded at release");
-    }
     let processor = Processor::new(&config.text)?;
+    // No previews and no silence timeout until a pipeline says what it can do.
+    let mut session = Session::new(
+        false,
+        Duration::from_millis(config.preview.interval_ms),
+        None,
+    );
+    let mut recognition = match &pipeline {
+        PipelineSource::Ready(pipeline) => {
+            configure(&mut session, config, pipeline.segmenter.is_some());
+            Recognition::Ready
+        }
+        PipelineSource::Load(_) => Recognition::Preparing(Preparing::Loading),
+    };
+    // Captures made before the model was ready, not yet sent to it; and those
+    // sent to it and not transcribed yet.
+    let mut waiting: VecDeque<Waiting> = VecDeque::new();
+    let mut transcribing: Vec<Waiting> = Vec::new();
+    // Whether the capture that is recording, or was last, decodes as it goes.
+    // One made before the model was ready does not: it is on disk only.
+    let mut live = false;
+    let window = ((config.preview.max_seconds * f64::from(rate)) as usize).max(1);
 
     let (work_tx, work_rx) = mpsc::channel();
     let (result_tx, results) = mpsc::channel();
     let engine = thread::Builder::new()
         .name("spokenpad-asr".into())
-        .spawn(move || engine_thread(&mut worker, &work_rx, &result_tx))?;
-
-    // Only a tick can report speech, so without one there is no silence to
-    // measure and a latch is bounded by its length alone.
-    let silence = previews.then(|| config.capture.silence_timeout()).flatten();
-    match silence {
-        Some(timeout) => log::info!(
-            "a latched capture ends by itself after {:.0}s without speech",
-            timeout.as_secs_f64()
-        ),
-        None => log::info!(
-            "no silence timeout: a capture ends at the {}-hour limit or the in-memory ceiling",
-            crate::core::state::MAX_CAPTURE.as_secs() / 3600
-        ),
-    }
-    let mut session = Session::new(
-        previews,
-        Duration::from_millis(config.preview.interval_ms),
-        silence,
-    );
+        .spawn(move || engine_thread(pipeline, window, rate, &work_rx, &result_tx))?;
     let (editor_tx, editor_rx) = mpsc::channel();
     let editor_config = config.nvim.clone();
     let editor = thread::Builder::new()
@@ -540,6 +615,11 @@ where
                 };
                 match command {
                     Command::Start => {
+                        live = recognition == Recognition::Ready;
+                        if let Recognition::Unavailable(_) = recognition {
+                            send(&work_tx, Work::Load)?;
+                            recognition = Recognition::Preparing(Preparing::Loading);
+                        }
                         if let Err(e) = capture.start_capture() {
                             // The press cleared the previous notice; cancel
                             // first, then say why nothing is being recorded.
@@ -569,7 +649,11 @@ where
                         // only once the post-roll has arrived.
                         send(
                             &editor_tx,
-                            EditorWork::Indicator(indicator_of(&session, 0.)),
+                            EditorWork::Indicator(indicator_of(
+                                &session,
+                                0.,
+                                recognition.notice(waiting.len() + transcribing.len()),
+                            )),
                         )?;
                         let (captured, postroll) = capture.finish_capture(released, || {
                             stopping.load(Ordering::Acquire) || requests.start_waiting()
@@ -581,7 +665,25 @@ where
                             // can only add its notice here.
                             debug_assert_eq!(command, Command::Nothing);
                         }
-                        release(&mut session, &capture, captured, config, dump_dir, &work_tx)?;
+                        // The dump holds what is decoded, and a capture made
+                        // before the model was ready decodes from its WAV.
+                        let tail = release(
+                            &mut session,
+                            &capture,
+                            captured,
+                            config,
+                            dump_dir.filter(|_| live),
+                        )?;
+                        if live {
+                            send(&work_tx, Work::Finish(tail))?;
+                        } else {
+                            keep(
+                                &mut session,
+                                tail.utterance.id,
+                                capture.recording_status(),
+                                &mut waiting,
+                            );
+                        }
                     }
                     Command::Discard(reason) => {
                         capture.stop_capture();
@@ -600,6 +702,20 @@ where
             }
             for event in results.try_iter().take(128) {
                 match event {
+                    ResultEvent::Preparing(step) => {
+                        recognition = Recognition::Preparing(step);
+                    }
+                    ResultEvent::Ready { segmenter, elapsed } => {
+                        log::info!("speech model ready after {:.1}s", elapsed.as_secs_f64());
+                        configure(&mut session, config, segmenter);
+                        recognition = Recognition::Ready;
+                    }
+                    ResultEvent::Unavailable(reason) => {
+                        log::error!(
+                            "no speech model: {reason}; captures are kept, and the next press tries again"
+                        );
+                        recognition = Recognition::Unavailable(reason);
+                    }
                     ResultEvent::Commit(c) => commit(c, &mut session, &processor, &editor_tx)?,
                     ResultEvent::Tick {
                         id,
@@ -652,6 +768,14 @@ where
                                 log::debug!("release transcript: {text:?}");
                             }
                             Err(e) => log::error!("decode failed for utterance {}: {e:#}", id.0),
+                        }
+                        if let Some(at) = transcribing.iter().position(|t| t.id == id) {
+                            transcribing.remove(at);
+                            log::info!(
+                                "transcribed the recording of utterance {}; {} to go",
+                                id.0,
+                                waiting.len() + transcribing.len()
+                            );
                         }
                         session.finish(id);
                         // Every `Commit` of this utterance was sent on this
@@ -725,9 +849,26 @@ where
                     },
                 )?;
             }
-            // Audio the worker has committed is never read again; the
-            // recovery WAV keeps the whole capture either way.
-            capture.discard_before(session.committed_hint);
+            if recognition == Recognition::Ready {
+                for recording in waiting.drain(..) {
+                    send(
+                        &work_tx,
+                        Work::Recording {
+                            path: recording.path.clone(),
+                            utterance: Utterance::new(recording.id.0),
+                        },
+                    )?;
+                    transcribing.push(recording);
+                }
+            }
+            // Audio the worker has committed is never read again, and a
+            // capture that does not decode as it goes is read back from its
+            // recording: the recovery WAV keeps the whole capture either way.
+            capture.discard_before(if live {
+                session.committed_hint
+            } else {
+                capture.captured_frames()
+            });
             let level = if session.state.recording() {
                 capture.level()
             } else {
@@ -735,7 +876,11 @@ where
             };
             send(
                 &editor_tx,
-                EditorWork::Indicator(indicator_of(&session, level)),
+                EditorWork::Indicator(indicator_of(
+                    &session,
+                    level,
+                    recognition.notice(waiting.len() + transcribing.len()),
+                )),
             )?;
             ensure!(
                 !requests.exhausted() && !engine.is_finished() && !editor.is_finished(),
@@ -769,15 +914,25 @@ where
             // Same ordering guarantee as in the main loop: this utterance's
             // commits were drained from the same channel, in order, by the
             // arm above, on an earlier pass of this same `for`.
-            ResultEvent::Finished { .. } => {
+            ResultEvent::Finished { id, .. } => {
+                transcribing.retain(|t| t.id != id);
                 if config.nvim.copy_to_clipboard
                     && let Err(e) = send(&editor_tx, EditorWork::Copy)
                 {
                     log::error!("could not queue a shutdown clipboard copy: {e:#}");
                 }
             }
-            ResultEvent::Tick { .. } => {}
+            ResultEvent::Tick { .. }
+            | ResultEvent::Preparing(_)
+            | ResultEvent::Ready { .. }
+            | ResultEvent::Unavailable(_) => {}
         }
+    }
+    for Waiting { path, .. } in waiting.into_iter().chain(transcribing) {
+        log::warn!(
+            "{} was recorded before the speech model was ready and is not transcribed; recover it with `spokenpad transcribe`",
+            path.display()
+        );
     }
     // Sent last: everything the editor still has to write is already queued
     // ahead of it, and the bounded join gives it time to land.
@@ -814,11 +969,23 @@ fn commit(
     )
 }
 
+/// The inference thread: builds the pipeline if it was not handed one ready,
+/// then decodes what the event loop sends it. `window` is the most audio one
+/// step of a recording's transcription reads, as a preview tick does.
 fn engine_thread<R: Recognizer, S: Segmenter>(
-    worker: &mut Worker<R, S>,
+    pipeline: PipelineSource<R, S>,
+    window: usize,
+    rate: u32,
     work_rx: &Receiver<Work>,
     result_tx: &Sender<ResultEvent>,
 ) {
+    let mut worker = match pipeline {
+        PipelineSource::Ready(pipeline) => Worker::new(pipeline),
+        PipelineSource::Load(loader) => match load(loader, work_rx, result_tx) {
+            Some(worker) => worker,
+            None => return,
+        },
+    };
     while let Ok(work) = work_rx.recv() {
         let sent = match work {
             Work::Tick {
@@ -837,11 +1004,11 @@ fn engine_thread<R: Recognizer, S: Segmenter>(
                     elapsed: started.elapsed(),
                 })
             }
-            Work::Finish {
+            Work::Finish(Tail {
                 audio,
                 start,
                 utterance,
-            } => {
+            }) => {
                 let started = Instant::now();
                 let result = worker.finish(&audio, start, &utterance, |c| {
                     let _ = result_tx.send(ResultEvent::Commit(c));
@@ -852,6 +1019,20 @@ fn engine_thread<R: Recognizer, S: Segmenter>(
                     elapsed: started.elapsed(),
                 })
             }
+            Work::Recording { path, utterance } => {
+                let started = Instant::now();
+                let result = decode_recording(&mut worker, &path, &utterance, window, rate, |c| {
+                    let _ = result_tx.send(ResultEvent::Commit(c));
+                })
+                .with_context(|| format!("transcribe {}", path.display()));
+                result_tx.send(ResultEvent::Finished {
+                    id: utterance.id,
+                    result,
+                    elapsed: started.elapsed(),
+                })
+            }
+            // Loaded already.
+            Work::Load => Ok(()),
             Work::Quit => break,
         };
         if sent.is_err() {
@@ -860,15 +1041,90 @@ fn engine_thread<R: Recognizer, S: Segmenter>(
     }
 }
 
-/// Everything that happens between the key release and the decode request.
+/// Runs `loader` until it builds the pipeline: once now, and again at every
+/// [`Work::Load`] after a failure. `None` when told to stop first.
+fn load<R: Recognizer, S: Segmenter>(
+    mut loader: Loader<R, S>,
+    work_rx: &Receiver<Work>,
+    result_tx: &Sender<ResultEvent>,
+) -> Option<Worker<R, S>> {
+    loop {
+        let started = Instant::now();
+        let loaded = loader(&mut |step| {
+            let _ = result_tx.send(ResultEvent::Preparing(step));
+        });
+        match loaded {
+            Ok(pipeline) => {
+                let ready = ResultEvent::Ready {
+                    segmenter: pipeline.segmenter.is_some(),
+                    elapsed: started.elapsed(),
+                };
+                return result_tx.send(ready).is_ok().then(|| Worker::new(pipeline));
+            }
+            Err(e) => result_tx
+                .send(ResultEvent::Unavailable(format!("{e:#}")))
+                .ok()?,
+        }
+        // Nothing to decode can come before the pipeline is built: the event
+        // loop keeps every capture on disk until it hears `Ready`.
+        loop {
+            match work_rx.recv().ok()? {
+                Work::Load => break,
+                Work::Quit => return None,
+                Work::Tick { .. } | Work::Finish(_) | Work::Recording { .. } => {
+                    log::error!("inference work arrived before the speech model loaded; dropped");
+                }
+            }
+        }
+    }
+}
+
+/// Transcribes a recording made before the model was ready, the way a live
+/// capture of it would have been: settled chunks committed a window at a
+/// time, then the tail decoded as the release decodes it. Only a window and
+/// the open tail are ever in memory.
+fn decode_recording<R: Recognizer, S: Segmenter>(
+    worker: &mut Worker<R, S>,
+    path: &Path,
+    utterance: &Arc<Utterance>,
+    window: usize,
+    rate: u32,
+    mut commit: impl FnMut(Commit),
+) -> Result<(String, usize)> {
+    let mut reader = CaptureReader::open(path, rate)?;
+    let mut held = Vec::with_capacity(window);
+    let mut start = Frames::ZERO;
+    loop {
+        let wanted = window.saturating_sub(held.len());
+        if reader.read(&mut held, wanted)? < wanted {
+            break;
+        }
+        let through = worker
+            .tick(&held, start, utterance, TickKind::Commits, &mut commit)?
+            .map_or(start, |tail| tail.through);
+        let settled = through.since(start).min(held.len());
+        if settled == 0 {
+            // A window of unbroken speech: like a live capture's open tail,
+            // the rest is decoded at the end, as a whole.
+            reader.read(&mut held, usize::MAX)?;
+            break;
+        }
+        held.drain(..settled);
+        start += settled;
+    }
+    utterance.release();
+    worker.finish(&held, start, utterance, commit)
+}
+
+/// Everything that happens between the key release and the decode request:
+/// the measurements, the notices they call for, and the dump.
 fn release<B: InputBackend>(
     session: &mut Session,
     capture: &AudioCapture<B>,
     taken: Captured,
     config: &Config,
     dump_dir: Option<&Path>,
-    work_tx: &Sender<Work>,
-) -> Result<()> {
+) -> Result<Tail> {
     let rate = config.audio.sample_rate;
     let held = match session.state {
         State::Transcribing { started, released } => released.saturating_duration_since(started),
@@ -920,14 +1176,38 @@ fn release<B: InputBackend>(
         .as_ref()
         .context("capture has no utterance")?
         .clone();
-    send(
-        work_tx,
-        Work::Finish {
-            audio: samples,
-            start,
-            utterance,
-        },
-    )
+    Ok(Tail {
+        audio: samples,
+        start,
+        utterance,
+    })
+}
+
+/// Releases a capture made before the speech model was ready. There is
+/// nothing to decode now, so the session goes back to idle; the recording is
+/// the capture from here on, transcribed once the model is ready.
+fn keep(
+    session: &mut Session,
+    id: UtteranceId,
+    recording: RecordingStatus,
+    waiting: &mut VecDeque<Waiting>,
+) {
+    session.finish(id);
+    match recording {
+        RecordingStatus::Recorded(path) | RecordingStatus::Truncated(path) => {
+            log::info!(
+                "the speech model is not ready; {} is transcribed once it is",
+                path.display()
+            );
+            waiting.push_back(Waiting { path, id });
+        }
+        RecordingStatus::NotRecorded => {
+            log::error!(
+                "the speech model is not ready and nothing was recorded: this capture is lost"
+            );
+            session.notify(Notice::NotKept);
+        }
+    }
 }
 
 fn note_postroll(postroll: PostRoll, session: &mut Session) {
@@ -1011,6 +1291,55 @@ fn log_recording(status: RecordingStatus) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::decode::{Segment, Split, TrailingSilence};
+
+    /// Counts the samples it is given.
+    struct Count;
+    impl Recognizer for Count {
+        fn transcribe(&mut self, samples: &[f32], _: TrailingSilence) -> Result<String> {
+            Ok(samples.len().to_string())
+        }
+    }
+    /// Blocks of a fixed size, each settled once audio follows it.
+    struct Blocks(usize);
+    impl Segmenter for Blocks {
+        fn split(&mut self, samples: &[f32]) -> Result<Split> {
+            let segments = (0..samples.len())
+                .step_by(self.0)
+                .map(|start| {
+                    let end = (start + self.0).min(samples.len());
+                    Segment {
+                        window: start..end,
+                        speech_end: end,
+                        settled: end < samples.len(),
+                    }
+                })
+                .collect();
+            Ok(Split {
+                segments,
+                silent_through: 0,
+            })
+        }
+    }
+
+    /// A recording made before the model was ready is committed a window at
+    /// a time, never read whole, and every sample is decoded exactly once.
+    #[test]
+    fn a_recording_is_transcribed_a_window_at_a_time_every_sample_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("capture.wav");
+        crate::shell::recorder::dump_capture(&path, &[0.5; 10_000], 16_000).unwrap();
+        let mut worker = Worker::new(Pipeline {
+            recognizer: Count,
+            segmenter: Some(Blocks(1_000)),
+        });
+        let mut commits = Vec::new();
+        decode_recording(&mut worker, &path, &Utterance::new(1), 3_000, 16_000, |c| {
+            commits.push(c.text.parse::<usize>().unwrap())
+        })
+        .unwrap();
+        assert_eq!(commits, vec![1_000; 10], "one commit per block, each once");
+    }
 
     /// Every request is preceded by the clock at its own stamp, and a drain
     /// ends with the clock at the current time, once.

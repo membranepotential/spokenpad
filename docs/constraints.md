@@ -235,7 +235,7 @@ one.
 Since 2026-09-21, `spokenpad fetch-models` and the daemon/`check`/
 `transcribe`'s own automatic download before loading a still-default model
 are the only code in this project that opens a network connection — see
-[decisions.md](decisions.md#model-download-moves-into-the-binary). Every URL
+[decisions.md](decisions.md#model-download-moves-into-the-binary-2026-09-21). Every URL
 fetched is a literal constant in
 [`core/models.rs`](../src/core/models.rs), never built from configuration,
 an argument, or anything read from a file, and every download is verified

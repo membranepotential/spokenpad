@@ -39,6 +39,85 @@ pub enum Notice {
     SilenceTimeout,
     /// A capture ran for [`MAX_CAPTURE`] and ended itself.
     LengthLimit,
+    /// The speech model was not ready, so the capture was to be kept on disk
+    /// until it is, and no recording was written.
+    NotKept,
+    /// The rest are not about a capture but about the speech model, and come
+    /// from [`Recognition::notice`]; `waiting` counts the recordings made
+    /// while it was not ready, which it transcribes once it is.
+    ModelDownloading {
+        percent: u8,
+        waiting: usize,
+    },
+    ModelLoading {
+        waiting: usize,
+    },
+    ModelUnavailable {
+        reason: String,
+        waiting: usize,
+    },
+    TranscribingRecordings(usize),
+}
+
+/// How far the daemon is from transcribing, as the inference thread reports
+/// it while it downloads and loads the speech model. The daemon accepts
+/// presses from its first moment: until this is `Ready`, what they record is
+/// kept on disk and transcribed afterwards.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Recognition {
+    Preparing(Preparing),
+    Ready,
+    /// Neither the download nor the load worked, for this reason. The next
+    /// press tries again.
+    Unavailable(String),
+}
+
+/// The two steps before the speech model is ready.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Preparing {
+    /// The default model files are downloading: `done` of `total` bytes.
+    Downloading { done: u64, total: u64 },
+    /// The files are in place and the recognizer is being built.
+    Loading,
+}
+
+impl Recognition {
+    /// What the dictation window says about the speech model, given
+    /// `waiting` recordings it has yet to transcribe. Nothing once it is
+    /// ready and has caught up.
+    pub fn notice(&self, waiting: usize) -> Option<Notice> {
+        match self {
+            Self::Preparing(Preparing::Downloading { done, total }) => {
+                Some(Notice::ModelDownloading {
+                    percent: (done.saturating_mul(100) / (*total).max(1)).min(100) as u8,
+                    waiting,
+                })
+            }
+            Self::Preparing(Preparing::Loading) => Some(Notice::ModelLoading { waiting }),
+            Self::Ready => (waiting > 0).then_some(Notice::TranscribingRecordings(waiting)),
+            Self::Unavailable(reason) => Some(Notice::ModelUnavailable {
+                reason: reason.clone(),
+                waiting,
+            }),
+        }
+    }
+}
+
+/// "3 recordings", "1 recording".
+fn recordings(count: usize) -> String {
+    match count {
+        1 => "1 recording".into(),
+        n => format!("{n} recordings"),
+    }
+}
+
+/// What happens to what is dictated before the model is ready.
+fn kept(waiting: usize) -> String {
+    let promise = "dictation is recorded and transcribed once it is ready";
+    match waiting {
+        0 => promise.into(),
+        n => format!("{promise}; {} waiting", recordings(n)),
+    }
 }
 
 /// A notice as the winbar draws it: a headline short enough to stand beside the
@@ -70,25 +149,41 @@ impl Notice {
     /// was lost outranks news about a capture that ended cleanly: the two
     /// auto-stops below lost nothing, and everything spoken is in the editor.
     ///
+    /// The speech model's own notices rank in the same list, because the
+    /// window shows one notice: the capture's, unless the model's outranks
+    /// it ([`Session::shown_notice`]). A model that cannot load at all is
+    /// worse news than a gap in one capture; one that is on its way is less
+    /// than anything that went wrong with the capture just made.
+    ///
     /// 1. `MemoryCap` — the capture is over and the audio is only in a WAV.
     /// 2. `CaptureIncomplete` — most of what was said never arrived.
     /// 3. `MicrophoneUnavailable` — audio is missing and did not come back.
-    /// 4. `MicrophoneGap` — audio came back, with a hole in the recording.
-    /// 5. `LengthLimit` — the capture ran to the length limit and ended.
-    /// 6. `SilenceTimeout` — a latch was quiet long enough to end.
-    /// 7. `NearlySilent` — everything arrived and may still be worth nothing.
-    /// 8. `HeldTooBriefly` — nothing was recorded, and nothing was lost.
-    /// 9. `PreviewPaused` — cosmetic: only the live tail stopped.
+    /// 4. `NotKept` — the whole capture is gone: no model, no recording.
+    /// 5. `ModelUnavailable` — nothing is transcribed until it loads.
+    /// 6. `MicrophoneGap` — audio came back, with a hole in the recording.
+    /// 7. `LengthLimit` — the capture ran to the length limit and ended.
+    /// 8. `SilenceTimeout` — a latch was quiet long enough to end.
+    /// 9. `NearlySilent` — everything arrived and may still be worth nothing.
+    /// 10. `HeldTooBriefly` — nothing was recorded, and nothing was lost.
+    /// 11. `ModelDownloading` — transcription waits, and nothing is lost.
+    /// 12. `ModelLoading` — the same, for seconds.
+    /// 13. `TranscribingRecordings` — the wait is over; text is on its way.
+    /// 14. `PreviewPaused` — cosmetic: only the live tail stopped.
     pub fn priority(&self) -> u8 {
         match self {
-            Self::MemoryCap(_) => 8,
-            Self::CaptureIncomplete => 7,
-            Self::MicrophoneUnavailable => 6,
-            Self::MicrophoneGap => 5,
-            Self::LengthLimit => 4,
-            Self::SilenceTimeout => 3,
-            Self::NearlySilent => 2,
-            Self::HeldTooBriefly => 1,
+            Self::MemoryCap(_) => 13,
+            Self::CaptureIncomplete => 12,
+            Self::MicrophoneUnavailable => 11,
+            Self::NotKept => 10,
+            Self::ModelUnavailable { .. } => 9,
+            Self::MicrophoneGap => 8,
+            Self::LengthLimit => 7,
+            Self::SilenceTimeout => 6,
+            Self::NearlySilent => 5,
+            Self::HeldTooBriefly => 4,
+            Self::ModelDownloading { .. } => 3,
+            Self::ModelLoading { .. } => 2,
+            Self::TranscribingRecordings(_) => 1,
             Self::PreviewPaused => 0,
         }
     }
@@ -105,6 +200,11 @@ impl Notice {
             Self::MemoryCap(_) => "memory limit reached",
             Self::SilenceTimeout => "stopped after silence",
             Self::LengthLimit => "reached the time limit",
+            Self::NotKept => "capture not kept",
+            Self::ModelDownloading { .. } => "downloading the speech model",
+            Self::ModelLoading { .. } => "loading the speech model",
+            Self::ModelUnavailable { .. } => "no speech model",
+            Self::TranscribingRecordings(_) => "transcribing recordings",
         }
     }
     /// Why it happened, or what to do about it. The memory-cap detail names the
@@ -142,6 +242,26 @@ impl Notice {
             Self::LengthLimit => format!(
                 "a capture ends after {} hours; press the key to dictate again",
                 MAX_CAPTURE.as_secs() / 3600
+            )
+            .into(),
+            Self::NotKept => {
+                "the speech model was not ready and no recording was written (recording.enabled is off, or the disk failed)"
+                    .into()
+            }
+            Self::ModelDownloading { percent, waiting } => {
+                format!("{percent}%; {}", kept(*waiting)).into()
+            }
+            Self::ModelLoading { waiting } => kept(*waiting).into(),
+            Self::ModelUnavailable { reason, waiting } => {
+                let kept = match waiting {
+                    0 => String::new(),
+                    n => format!("{} kept; ", recordings(*n)),
+                };
+                format!("{reason}; {kept}press the key to try again").into()
+            }
+            Self::TranscribingRecordings(waiting) => format!(
+                "{} made while the speech model was not ready",
+                recordings(*waiting)
             )
             .into(),
         }
@@ -186,6 +306,9 @@ pub struct Session {
     interval: Duration,
     enabled: bool,
     silence: Option<Duration>,
+    /// Previews and silence timeout waiting for the capture that is recording
+    /// to end: see [`Session::configure`].
+    configured: Option<(bool, Option<Duration>)>,
     previews: Previews,
     warned_tick_failure: bool,
 }
@@ -209,11 +332,39 @@ impl Session {
             pending: None,
             interval,
             enabled,
+            configured: None,
             previews: Previews::Running,
             warned_tick_failure: false,
         }
     }
+    /// Replaces what [`Session::new`] was given, once the speech model has
+    /// loaded and it is known whether a segmenter came with it. A capture
+    /// that is recording keeps what it began with -- one made before the
+    /// model was ready has no ticks, and so no speech to reset a silence
+    /// timeout -- and the change takes effect once it ends.
+    pub fn configure(&mut self, enabled: bool, silence: Option<Duration>) {
+        self.configured = Some((enabled, silence));
+        self.apply_configuration();
+    }
+    fn apply_configuration(&mut self) {
+        if !self.state.recording()
+            && let Some((enabled, silence)) = self.configured.take()
+        {
+            self.enabled = enabled;
+            self.silence = silence;
+        }
+    }
+    /// The notice the window shows: this capture's own, unless `status`, the
+    /// speech model's ([`Recognition::notice`]), outranks it.
+    pub fn shown_notice(&self, status: Option<Notice>) -> Option<Notice> {
+        match (&self.notice, status) {
+            (Some(own), Some(status)) if status.priority() > own.priority() => Some(status),
+            (Some(own), _) => Some(own.clone()),
+            (None, status) => status,
+        }
+    }
     pub fn event(&mut self, event: Event) -> Command {
+        self.apply_configuration();
         let (state, command) = state::step(self.state, event, self.silence);
         self.state = state;
         match command {
@@ -624,11 +775,22 @@ mod tests {
             Notice::MemoryCap(RecordingStatus::NotRecorded),
             Notice::CaptureIncomplete,
             Notice::MicrophoneUnavailable,
+            Notice::NotKept,
+            Notice::ModelUnavailable {
+                reason: String::new(),
+                waiting: 0,
+            },
             Notice::MicrophoneGap,
             Notice::LengthLimit,
             Notice::SilenceTimeout,
             Notice::NearlySilent,
             Notice::HeldTooBriefly,
+            Notice::ModelDownloading {
+                percent: 0,
+                waiting: 0,
+            },
+            Notice::ModelLoading { waiting: 0 },
+            Notice::TranscribingRecordings(1),
             Notice::PreviewPaused,
         ];
         for pair in ranked.windows(2) {
@@ -640,6 +802,74 @@ mod tests {
             );
         }
     }
+    /// The window shows one notice: the capture's own, unless the speech
+    /// model's outranks it. A model on its way never hides what went wrong
+    /// with the capture; a model that cannot load hides a nearly silent one.
+    #[test]
+    fn the_model_status_shows_only_when_it_outranks_the_captures_notice() {
+        let mut s = Session::new(false, Duration::from_secs(1), None);
+        let loading = Recognition::Preparing(Preparing::Loading).notice(0);
+        assert_eq!(
+            s.shown_notice(loading.clone()),
+            loading,
+            "no notice of its own"
+        );
+        s.notify(Notice::MicrophoneGap);
+        assert_eq!(s.shown_notice(loading), Some(Notice::MicrophoneGap));
+        let broken = Recognition::Unavailable("offline".into()).notice(2);
+        assert_eq!(s.shown_notice(broken.clone()), broken);
+        assert_eq!(s.shown_notice(None), Some(Notice::MicrophoneGap));
+    }
+
+    #[test]
+    fn a_ready_model_says_nothing_once_it_has_caught_up() {
+        assert_eq!(Recognition::Ready.notice(0), None);
+        assert_eq!(
+            Recognition::Ready.notice(3),
+            Some(Notice::TranscribingRecordings(3))
+        );
+        let downloading = Recognition::Preparing(Preparing::Downloading {
+            done: 335,
+            total: 670,
+        })
+        .notice(1)
+        .unwrap();
+        assert_eq!(
+            downloading.detail(),
+            "50%; dictation is recorded and transcribed once it is ready; 1 recording waiting"
+        );
+        let unavailable = Recognition::Unavailable("offline".into())
+            .notice(0)
+            .unwrap();
+        assert_eq!(unavailable.detail(), "offline; press the key to try again");
+    }
+
+    /// A capture made before the model loaded has no ticks, so it must not
+    /// gain a silence timeout, or previews, halfway through: the new settings
+    /// wait for it to end.
+    #[test]
+    fn a_new_configuration_waits_for_the_capture_that_is_recording() {
+        let silence = Some(Duration::from_secs(5));
+        let mut s = Session::new(false, Duration::from_millis(200), None);
+        let begun = Instant::now();
+        latch(&mut s, begun);
+        s.configure(true, silence);
+        let later = begun + Duration::from_secs(60);
+        assert!(!s.tick_due(later), "the running capture stays tick-less");
+        assert_eq!(
+            s.event(Event::Clock { now: later }),
+            Command::Nothing,
+            "and has no silence timeout"
+        );
+        latch(&mut s, later);
+        assert!(!s.state.recording(), "the second press ended the latch");
+        start(&mut s);
+        assert!(
+            s.tick_due(Instant::now() + Duration::from_secs(1)),
+            "the next capture ticks"
+        );
+    }
+
     /// A preview that stopped is cosmetic; a microphone that dropped audio is
     /// not. The pause still happens -- it just does not take the winbar.
     #[test]

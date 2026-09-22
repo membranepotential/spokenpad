@@ -27,12 +27,12 @@ use spokenpad::{
     config::{Config, Mode, Nvim},
     core::{
         control::{Received, Request},
-        decode::{Pipeline, Recognizer, Segmenter, TrailingSilence, Worker},
+        decode::{Pipeline, Recognizer, Segmenter, TrailingSilence},
         font::Points,
     },
     shell::{
         audio::{AudioCapture, CallbackCore, InputBackend, InputStream, Teardown},
-        daemon::{Devices, serve},
+        daemon::{Devices, PipelineSource, serve},
         nvim::pane_launch,
         pane::{
             Options, Sizing,
@@ -437,7 +437,7 @@ impl Daemon {
             config.recording.clone(),
         )
         .expect("open the synthetic microphone");
-        let worker = Worker::new(Pipeline {
+        let pipeline = PipelineSource::Ready(Pipeline {
             recognizer: Fixed,
             segmenter: None::<Never>,
         });
@@ -452,7 +452,7 @@ impl Daemon {
                 Devices {
                     capture,
                     requests: received,
-                    worker,
+                    pipeline,
                 },
                 stop,
                 None,

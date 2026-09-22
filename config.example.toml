@@ -98,6 +98,12 @@ silence_timeout_s = 300
 #
 # The cost is ~32 KB per second of speech (16 kHz 16-bit mono), pruned below.
 #
+# Until the speech model is ready -- while it downloads on first use, or for
+# the seconds it takes to load after the daemon starts -- this recording is
+# the only copy of a capture: nothing is held in memory, and the daemon
+# transcribes the file once the model is ready. With recording off, a capture
+# made in that time is lost, and the winbar says "capture not kept".
+#
 # Since 2026-09-21 the audio a capture holds in memory is only its open tail:
 # once a chunk is transcribed its audio is dropped, so a recording costs the
 # same at an hour as at ten seconds (measured: 1.7 MiB over half an hour,
@@ -150,8 +156,9 @@ family = "parakeet"
 # The directory holding the model's files. spokenpad finds each file by its
 # role (encoder.int8.onnx before encoder.onnx, tiny.en-encoder.onnx too).
 # Required for every family but "parakeet", whose default is where
-# `spokenpad fetch-models` puts it (and where the daemon/check/transcribe
-# put it themselves, the first time they find it missing), under
+# `spokenpad fetch-models` puts it (and where the daemon, in the background,
+# and check/transcribe put it themselves the first time they find it
+# missing), under
 # $XDG_DATA_HOME (~/.local/share if unset). A relative path resolves against
 # this file's directory; ~ and $VARS expand.
 model_dir = "~/.local/share/spokenpad/models/parakeet-tdt-0.6b-v3-int8"
@@ -225,7 +232,7 @@ num_threads = 6
 enabled = true
 
 # Silero VAD weights, ~0.6 MB, fetched by `spokenpad fetch-models` (and by
-# the daemon/check/transcribe themselves, at this default path). Resolved
+# the daemon, check and transcribe themselves, at this default path). Resolved
 # like asr.model_dir. If the file is missing and cannot be downloaded,
 # spokenpad logs a warning and decodes whole captures rather than refusing
 # to start.

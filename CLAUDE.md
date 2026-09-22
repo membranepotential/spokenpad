@@ -62,7 +62,7 @@ those belongs in `src/shell/`.
   `Xft.dpi` to pixels, and cells measured as Alacritty measures them),
   `core/frames.rs`, `core/geometry.rs`, `core/text.rs`; plus the `shell/nvim/rpc.rs` codec, `parse_ownership` and
   `passage::append_paragraph`, still inside their modules.
-- Imperative shell: `shell/daemon.rs` (`run` = lock/signals/devices, `serve` =
+- Imperative shell: `shell/daemon.rs` (`run` = lock/socket/signals/devices and the model loader, `serve` =
   the generic loop), `shell/audio.rs` (`InputBackend` seam; PortAudio impl),
   `shell/recorder.rs` (recovery WAV), `shell/control.rs` (control socket
   server and the CLI's client), `shell/inference.rs` (sherpa/Silero, model

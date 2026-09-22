@@ -14,7 +14,7 @@ use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
 use std::{
     collections::HashSet,
     fs::{self, DirBuilder, File, OpenOptions},
-    io::BufWriter,
+    io::{BufReader, BufWriter},
     os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     sync::{
@@ -443,7 +443,60 @@ pub fn dump_capture(path: &Path, samples: &[f32], sample_rate: u32) -> Result<()
 }
 
 pub fn read_capture(path: &Path) -> Result<(Vec<f32>, u32)> {
-    let mut wav =
+    let mut wav = read_back(path)?;
+    let rate = wav.spec().sample_rate;
+    let samples = wav
+        .samples::<i16>()
+        .map(|sample| sample.map(from_pcm16_sample))
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .with_context(|| format!("{}: unreadable PCM samples", path.display()))?;
+    Ok((samples, rate))
+}
+
+/// A recovery WAV read a slice at a time, so that transcribing a long one
+/// holds no more of it in memory than a live capture of it would have.
+pub struct CaptureReader {
+    path: PathBuf,
+    samples: hound::WavIntoSamples<BufReader<File>, i16>,
+}
+
+impl CaptureReader {
+    /// Opens a WAV this daemon recorded, which must be at `rate`.
+    pub fn open(path: &Path, rate: u32) -> Result<Self> {
+        let wav = read_back(path)?;
+        let found = wav.spec().sample_rate;
+        ensure!(
+            found == rate,
+            "{}: recorded at {found}Hz, the recognizer needs {rate}Hz",
+            path.display()
+        );
+        Ok(Self {
+            path: path.to_owned(),
+            samples: wav.into_samples(),
+        })
+    }
+
+    /// Appends up to `count` samples to `into` and says how many it appended:
+    /// fewer than `count` only at the end of the file.
+    pub fn read(&mut self, into: &mut Vec<f32>, count: usize) -> Result<usize> {
+        let before = into.len();
+        for sample in self.samples.by_ref().take(count) {
+            let value = sample
+                .with_context(|| format!("{}: unreadable PCM samples", self.path.display()))?;
+            into.push(from_pcm16_sample(value));
+        }
+        Ok(into.len() - before)
+    }
+}
+
+fn from_pcm16_sample(value: i16) -> f32 {
+    (f32::from(value) / FULL_SCALE).clamp(-1.0, 1.0)
+}
+
+/// Opens a WAV for reading back, refusing anything this daemon does not
+/// write: it has to be mono 16-bit PCM, no longer than one capture can be.
+fn read_back(path: &Path) -> Result<WavReader<BufReader<File>>> {
+    let wav =
         WavReader::open(path).with_context(|| format!("{}: not a readable wav", path.display()))?;
     let spec = wav.spec();
     ensure!(
@@ -470,12 +523,7 @@ pub fn read_capture(path: &Path) -> Result<(Vec<f32>, u32)> {
         "{}: {seconds:.0}s of audio exceeds the {MAX_RECOVERY_SECONDS:.0}s recovery limit",
         path.display()
     );
-    let samples = wav
-        .samples::<i16>()
-        .map(|sample| sample.map(|value| (f32::from(value) / FULL_SCALE).clamp(-1.0, 1.0)))
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .with_context(|| format!("{}: unreadable PCM samples", path.display()))?;
-    Ok((samples, spec.sample_rate))
+    Ok(wav)
 }
 
 pub(crate) fn prune_recordings(
@@ -748,6 +796,26 @@ mod tests {
         assert_eq!(to_pcm16_sample(-half), 0);
         assert_eq!(to_pcm16_sample(2.0), i16::MAX);
         assert_eq!(to_pcm16_sample(-2.0), -32_767);
+    }
+
+    /// Read a slice at a time, a recording gives back what the whole-file
+    /// read gives, and a short read marks its end.
+    #[test]
+    fn a_recording_reads_back_in_slices() {
+        let temporary = tempdir().unwrap();
+        let path = temporary.path().join("capture.wav");
+        let samples: Vec<f32> = (0..10).map(|i| i as f32 / 20.0).collect();
+        dump_capture(&path, &samples, 16_000).unwrap();
+        let (whole, _) = read_capture(&path).unwrap();
+        let mut reader = CaptureReader::open(&path, 16_000).unwrap();
+        let mut sliced = Vec::new();
+        assert_eq!(reader.read(&mut sliced, 4).unwrap(), 4);
+        assert_eq!(reader.read(&mut sliced, 4).unwrap(), 4);
+        assert_eq!(reader.read(&mut sliced, 4).unwrap(), 2, "the end");
+        assert_eq!(reader.read(&mut sliced, 4).unwrap(), 0);
+        assert_eq!(sliced, whole);
+        let error = CaptureReader::open(&path, 8_000).err().unwrap();
+        assert!(error.to_string().contains("16000Hz"), "{error}");
     }
 
     #[test]

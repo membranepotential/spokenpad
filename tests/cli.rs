@@ -1,5 +1,8 @@
 //! Process-boundary checks: errors must not turn into plausible transcription.
-use std::process::{Command, Output};
+use std::{
+    process::{Command, Output},
+    time::{Duration, Instant},
+};
 use tempfile::TempDir;
 
 fn command(directory: &TempDir) -> Command {
@@ -171,6 +174,107 @@ fn a_control_command_without_a_daemon_says_so() {
     }
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
 }
+/// Socket activation as `spokenpad.socket` does it, with systemd's own
+/// `systemd-socket-activate`: it binds the socket and starts the daemon on
+/// the first connection, which that very press is waiting on. The daemon
+/// answers it before it loads a model -- here it has none, and stays up
+/// saying so -- and leaves systemd's socket in place when it stops.
+///
+/// No microphone is opened: nothing starts a capture and the pre-roll is
+/// off. No model is downloaded: both model paths are configured, so neither
+/// is the default spokenpad fetches.
+#[test]
+fn a_socket_activated_daemon_answers_the_press_that_started_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir(root.join("spokenpad")).unwrap();
+    std::fs::write(
+        root.join("spokenpad/config.toml"),
+        format!(
+            "[asr]\nmodel_dir = '{0}/no-model'\n[vad]\nmodel = '{0}/no-vad.onnx'\n[audio]\npreroll_ms = 0\n",
+            root.display()
+        ),
+    )
+    .unwrap();
+    let socket = root.join("spokenpad.sock");
+    let log = root.join("daemon.log");
+    let mut activator = Command::new("systemd-socket-activate")
+        .env("XDG_STATE_HOME", root)
+        .env("XDG_CONFIG_HOME", root)
+        .env("XDG_DATA_HOME", root)
+        .env("XDG_RUNTIME_DIR", root)
+        // Its child gets only what it is told to pass on, as a unit's
+        // service gets only the user manager's environment.
+        .args(["-E", "XDG_STATE_HOME", "-E", "XDG_CONFIG_HOME"])
+        .args(["-E", "XDG_DATA_HOME", "-E", "XDG_RUNTIME_DIR"])
+        .arg("--listen")
+        .arg(&socket)
+        .arg(env!("CARGO_BIN_EXE_spokenpad"))
+        .arg("--log-file")
+        .arg(&log)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("systemd-socket-activate is part of systemd");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !socket.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "systemd-socket-activate never listened"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let pressed = Instant::now();
+    let first = command(&dir).arg("cancel").output().unwrap();
+    let answered = pressed.elapsed();
+    assert_eq!(
+        code(&first),
+        0,
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    eprintln!("the first press was answered {answered:?} after it connected");
+    assert!(answered < Duration::from_secs(2), "{answered:?}");
+
+    // The load fails, and the daemon stays: presses keep being answered.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !std::fs::read_to_string(&log)
+        .unwrap_or_default()
+        .contains("no speech model")
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the load never reported its failure: {}",
+            std::fs::read_to_string(&log).unwrap_or_default()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let again = command(&dir).arg("cancel").output().unwrap();
+    assert_eq!(
+        code(&again),
+        0,
+        "{}",
+        String::from_utf8_lossy(&again.stderr)
+    );
+    assert!(
+        activator.try_wait().unwrap().is_none(),
+        "the daemon is still running"
+    );
+
+    // SAFETY: kill sends SIGTERM to a child this test spawned and has not
+    // reaped, so its pid still names it.
+    unsafe { libc::kill(activator.id() as libc::pid_t, libc::SIGTERM) };
+    let status = activator.wait().unwrap();
+    assert!(status.success(), "the daemon stops cleanly: {status}");
+    assert!(
+        socket.exists(),
+        "systemd's socket is not the daemon's to remove"
+    );
+    let log = std::fs::read_to_string(&log).unwrap();
+    assert!(log.contains("listening on"), "{log}");
+}
+
 /// A config from before the control socket names what replaced `[hotkey]`.
 #[test]
 fn a_hotkey_table_in_the_config_points_to_the_bindings() {

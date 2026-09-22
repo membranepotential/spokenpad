@@ -56,7 +56,8 @@ applications.
    the default models (about 670 MB) to `~/.local/share/spokenpad/models`,
    verifying every file against a pinned sha256, then prints
    `Configuration valid; CPU recognizer ready; VAD ready.` To fetch them
-   ahead of time instead, run `spokenpad fetch-models`.
+   ahead of time instead, run `spokenpad fetch-models`. If you skip this,
+   the daemon downloads them itself, and records what you dictate meanwhile.
 3. Enable the service:
    ```sh
    systemctl --user enable --now spokenpad
@@ -202,9 +203,27 @@ a sentence explaining it, added only when the window is wide enough for all of
 it. A narrow window gives up the level meter first, then the explanation, but
 never the phase label or the headline. When two things happen to the same
 capture, the more serious one is shown: memory limit reached > capture
-incomplete > microphone unavailable > microphone gap > reached the time limit >
-stopped after silence > nearly silent > held too briefly > preview paused. The
-log always has the full sentence and paths.
+incomplete > microphone unavailable > capture not kept > no speech
+model > microphone gap > reached the time limit > stopped after silence >
+nearly silent > held too briefly > downloading the speech model > loading the
+speech model > transcribing recordings > preview paused. The speech model's
+notices are not about one capture: they stay until the model is ready and has
+caught up. The log always has the full sentence and paths.
+
+- **Dictation works from the first press, before the speech model is ready.**
+  The daemon answers presses as soon as it starts and loads the model
+  afterwards (a few seconds; the first time, after downloading it). A capture
+  made meanwhile goes to its recording only, holding nothing in memory, and
+  the winbar says "loading the speech model" or "downloading the speech
+  model" with the percentage and how many recordings wait. Once the model is
+  ready, each recording is transcribed into the window in order, as it would
+  have been live ("transcribing recordings"), just without a preview while
+  you speak.
+- **A model that cannot be had does not stop dictation.** Offline on the
+  first run, a failed download, a broken file, or a missing configured
+  `asr.model_dir`: the winbar says "no speech model" and why, the recordings
+  are kept, and the next press tries again. Only the default models are ever
+  downloaded; for a model you configured, fix the path and press again.
 
 - **Recording continues for a quarter second after you let go**
   (`audio.postroll_ms`), so a word still sounding at key-up is not cut off.
@@ -368,10 +387,11 @@ Global options: `-c/--config PATH`, `--model-dir DIR`, `-v/--verbose` (debug
 log to stderr), `--log-file PATH` (`none` for no file). The daemon also takes
 `--dump-audio DIR`, which saves each capture as decoded.
 
-Exit codes: `2` model files missing, `4` the WAV given to `transcribe` is
-unreadable or not 16 kHz, `1` anything else, including `start`, `stop`,
-`toggle` or `cancel` finding no daemon listening. systemd does not restart
-the service after `2`.
+Exit codes: `2` model files missing (`check`, `transcribe`), `4` the WAV
+given to `transcribe` is unreadable or not 16 kHz, `1` anything else,
+including `start`, `stop`, `toggle` or `cancel` finding no daemon listening.
+The daemon itself does not exit over a missing model: it records, says so in
+the winbar, and tries again at the next press.
 
 ## Accuracy and speed
 

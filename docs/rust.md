@@ -6,7 +6,7 @@ Python reference used during the port is retired, see
 [decisions.md](decisions.md#the-python-reference-implementation-is-dropped).
 Setup is one POSIX shell script, `scripts/install.sh`; the binary downloads
 its own default models (`fetch-models` subcommand, `core::models` and
-`shell::models`, see [decisions.md](decisions.md#model-download-moves-into-the-binary)).
+`shell::models`, see [decisions.md](decisions.md#model-download-moves-into-the-binary-2026-09-21)).
 Evaluation is `examples/eval.rs` (see [evaluation.md](evaluation.md)).
 
 ## Ownership and ordering
@@ -30,10 +30,14 @@ the root because both sides read it. Nothing under `core/` may import
   and the notice in the winbar, in every phase, as a headline plus a detail it
   appends only when the window is wide enough.
 - `shell/daemon.rs` splits into `run` and `serve`. `run` is the shell: the
-  per-user lock, signal handlers, PortAudio, the models, and last the control
-  socket. `serve` is the event loop, generic over the audio backend,
-  recognizer and segmenter and taking its control requests from a plain
-  channel, which is what the headless end-to-end tests drive. Each request
+  per-user lock, first the control socket, then signal handlers and
+  PortAudio, and a loader for the models that the inference thread runs
+  while presses are already taken. `serve` is the event loop, generic over
+  the audio backend, recognizer and segmenter, handed a pipeline that is
+  built already or a loader, and taking its control requests from a plain
+  channel, which is what the headless end-to-end tests drive. Until the
+  pipeline is built, captures are kept as their recovery WAVs and decoded
+  from them afterwards. Each request
   reaches the state machine after the clock at its own stamp, so a repeat
   window that closed before the request arrived is closed first. It drains
   requests before inference results and moves
@@ -89,8 +93,11 @@ the root because both sides read it. Nothing under `core/` may import
   capture did.
 - `shell/control.rs` listens on `$XDG_RUNTIME_DIR/spokenpad.sock` (mode
   0600), serves one connection at a time in arrival order, stamps each
-  request when it is read, queues it for the loop and answers `ok`. A socket
-  file nobody answers on is replaced; a live one or a non-socket is refused.
+  request when it is read, queues it for the loop and answers `ok`. Under
+  socket activation it takes over the socket systemd passed as descriptor 3
+  (`Socket::Inherited`), never probes it and never removes it. A socket it
+  binds itself replaces a file nobody answers on; a live one or a non-socket
+  is refused.
   The same module is the client `spokenpad start|stop|toggle|cancel` use; that
   path reads no config and loads no model.
 - `shell/nvim/mod.rs` owns the socket and pinned dictation buffer in both
@@ -128,10 +135,11 @@ All sections reject unknown fields, wrong types, non-finite durations, and
 invalid ranges. A model path set in a config resolves against that config's
 directory; leaving the key out keeps the default under
 `$XDG_DATA_HOME/spokenpad/models` (`~/.local/share` if unset), which
-`spokenpad fetch-models` fills, and which the daemon, `check` and
-`transcribe` fill on their own before loading a still-default Parakeet or
-Silero model (never for a configured `model_dir` or another `asr.family`,
-whose absence stays the plain "missing model" error). `[asr]` is parsed into a typed
+`spokenpad fetch-models` fills, and which `check` and `transcribe` fill on
+their own before loading a still-default Parakeet or Silero model, and the
+daemon in the background while it already records (never for a configured
+`model_dir` or another `asr.family`, whose absence stays the plain "missing
+model" error). `[asr]` is parsed into a typed
 `Model` per `asr.family`, and a key the family cannot use is rejected.
 `audio.sample_rate` must be **16000** — the Silero window is 512 samples at
 that rate and every supported model family reads it, and nothing resamples in

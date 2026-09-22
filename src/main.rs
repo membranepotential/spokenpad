@@ -2,11 +2,11 @@ use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand};
 use spokenpad::{
     config::{self, Config},
-    core::{control::Request, decode::Pipeline, models::files_to_ensure, text::Processor},
+    core::{control::Request, decode::Pipeline, text::Processor},
     shell::{
         control::Socket,
         inference::{Transcriber, load_segmenter, model_config},
-        models::{FetchEvent, all_present, fetch_models},
+        models::{FetchEvent, ensure_defaults, fetch_models},
         pane,
     },
 };
@@ -229,11 +229,6 @@ fn run(args: Args) -> Result<u8> {
             }
         }
         None => {
-            ensure_default_models(&config);
-            if let Err(e) = model_config(&config.asr) {
-                log::error!("{e:#}");
-                return Ok(2);
-            }
             if let Some(p) = &args.dump_audio {
                 std::fs::create_dir_all(p)?;
             }
@@ -243,51 +238,20 @@ fn run(args: Args) -> Result<u8> {
     Ok(0)
 }
 /// Downloads whichever default model files this configuration would load
-/// but does not have yet: only the default Parakeet weights and/or the
-/// default Silero VAD, and only when `asr`/`vad` are still pointed at them
-/// (see `core::models::files_to_ensure`). A user-configured `model_dir` or
-/// another `asr.family` is never touched, so its absence stays the plain
-/// "missing ASR model" error `model_config` raises next.
+/// but does not have yet (see `shell::models::ensure_defaults`). A
+/// user-configured `model_dir` or another `asr.family` is never touched, so
+/// its absence stays the plain "missing ASR model" error `model_config`
+/// raises next.
 ///
 /// Never fails the caller: a download that cannot complete (offline, DNS, a
 /// corrupted mirror) is logged and left for that same "missing model" error
 /// to report clearly with its own exit code, rather than adding a second
 /// error path for the same underlying problem.
 fn ensure_default_models(config: &Config) {
-    let files = files_to_ensure(&config.asr, &config.vad);
-    if files.is_empty() {
-        return;
-    }
-    let dest = config::models_dir();
-    match all_present(&dest, &files) {
-        Ok(true) => return,
-        Ok(false) => {}
-        Err(e) => {
-            log::warn!(
-                "could not check default models in {}: {e:#}",
-                dest.display()
-            );
-            return;
-        }
-    }
-    log::info!("downloading missing default models into {}", dest.display());
-    if let Err(e) = fetch_models(&dest, &files, report_fetch_event_log) {
+    if let Err(e) = ensure_defaults(&config.asr, &config.vad, |done, total| {
+        log::debug!("downloaded {done} of {total} bytes");
+    }) {
         log::error!("could not download default models: {e:#}");
-    }
-}
-/// Progress for the daemon's own automatic download: `Info` for what
-/// changed, `Debug` for the download bytes so `-v`/the log file can show it
-/// without either flooding the journal by default.
-fn report_fetch_event_log(event: FetchEvent<'_>) {
-    match event {
-        FetchEvent::Present(f) => log::debug!("model {} already present", f.relative_path),
-        FetchEvent::Downloading(f) => {
-            log::info!("downloading {} ({} bytes)", f.relative_path, f.size);
-        }
-        FetchEvent::Progress { file, downloaded } => {
-            log::debug!("{}: {downloaded}/{} bytes", file.relative_path, file.size);
-        }
-        FetchEvent::Verified(f) => log::info!("verified {}", f.relative_path),
     }
 }
 /// Progress for `spokenpad fetch-models`: one line per file, plus an

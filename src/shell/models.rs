@@ -4,7 +4,10 @@
 //! downloaded -- before it is used. This is the only network access
 //! anywhere in spokenpad: the URLs are fixed literals in `core::models`,
 //! never built from configuration or user input.
-use crate::core::models::ModelFile;
+use crate::{
+    config::{Asr, Vad, models_dir},
+    core::models::{ModelFile, files_to_ensure},
+};
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 use std::{
@@ -58,13 +61,47 @@ pub fn fetch_models(
     Ok(())
 }
 
-/// True if every one of `files` already sits under `dest_dir` with the
-/// pinned size and sha256 -- checked without any network access, so a caller
-/// can use it to decide whether `fetch_models` has any work to do at all.
-pub fn all_present(dest_dir: &Path, files: &[&ModelFile]) -> Result<bool> {
+/// Downloads the default model files this configuration would load and
+/// does not have yet (see [`files_to_ensure`]): nothing for a
+/// user-configured `model_dir`, `asr.family` or `vad.model`. Reports
+/// `(done, total)` bytes as it goes.
+///
+/// Whether anything is missing is decided by file size alone, which reads no
+/// file, so that the daemon can ask at every start: hashing the 670 MB set
+/// takes seconds. A file of the pinned size with the wrong bytes then fails
+/// to load, and `spokenpad fetch-models`, which hashes every file, replaces
+/// it.
+pub fn ensure_defaults(asr: &Asr, vad: &Vad, mut on_bytes: impl FnMut(u64, u64)) -> Result<()> {
+    let files = files_to_ensure(asr, vad);
+    let dest = models_dir();
+    if all_sized(&dest, &files)? {
+        return Ok(());
+    }
+    log::info!("downloading missing default models into {}", dest.display());
+    let total = files.iter().map(|f| f.size).sum();
+    let mut done = 0;
+    fetch_models(&dest, &files, |event| match event {
+        FetchEvent::Present(file) | FetchEvent::Verified(file) => {
+            log::info!("model {} is in place", file.relative_path);
+            done += file.size;
+            on_bytes(done, total);
+        }
+        FetchEvent::Downloading(file) => {
+            log::info!("downloading {} ({} bytes)", file.relative_path, file.size);
+        }
+        FetchEvent::Progress { downloaded, .. } => on_bytes(done + downloaded, total),
+    })
+}
+
+/// Whether every one of `files` sits under `dest_dir` at its pinned size.
+fn all_sized(dest_dir: &Path, files: &[&ModelFile]) -> Result<bool> {
     for file in files {
-        if !verified(&dest_dir.join(file.relative_path), file)? {
-            return Ok(false);
+        let path = dest_dir.join(file.relative_path);
+        match fs::metadata(&path) {
+            Ok(m) if m.is_file() && m.len() == file.size => {}
+            Ok(_) => return Ok(false),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(e).with_context(|| format!("stat {}", path.display())),
         }
     }
     Ok(true)
@@ -232,6 +269,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let url = serve_once(BODY);
         let file = test_file(url, BODY.len() as u64, BODY_SHA256);
+        assert!(!all_sized(dir.path(), &[&file]).unwrap(), "missing");
 
         let mut events = vec![];
         fetch_models(dir.path(), &[&file], |e| {
@@ -262,7 +300,7 @@ mod tests {
             BODY_SHA256,
         );
 
-        assert!(all_present(dir.path(), &[&file]).unwrap());
+        assert!(all_sized(dir.path(), &[&file]).unwrap());
         let mut events = vec![];
         fetch_models(dir.path(), &[&file], |e| {
             events.push(matches!(e, FetchEvent::Present(_)));
@@ -276,11 +314,14 @@ mod tests {
     fn a_corrupt_existing_file_is_redownloaded() {
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("test-model.bin");
-        fs::write(&dest, b"wrong bytes entirely").unwrap();
+        fs::write(&dest, b"wrong bytes entirely!").unwrap();
         let url = serve_once(BODY);
         let file = test_file(url, BODY.len() as u64, BODY_SHA256);
 
-        assert!(!all_present(dir.path(), &[&file]).unwrap());
+        assert!(
+            all_sized(dir.path(), &[&file]).unwrap(),
+            "the size alone cannot tell"
+        );
         fetch_models(dir.path(), &[&file], |_| {}).unwrap();
         assert_eq!(fs::read(&dest).unwrap(), BODY);
     }
