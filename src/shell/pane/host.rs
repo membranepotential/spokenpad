@@ -20,11 +20,12 @@
 //! whoever sends one also knocks on the window ([`x11::Waker`]), which makes
 //! the blocked `step` return at once.
 use super::{Ending, Options, Pane, Status, x11};
+use crate::shell::sync::lock;
 use anyhow::{Context, Result, bail};
 use std::{
     process::Command,
     sync::{
-        Arc, Mutex, MutexGuard,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
         mpsc::{
             Receiver, RecvTimeoutError, Sender, SyncSender, TryRecvError, channel, sync_channel,
@@ -52,7 +53,12 @@ enum Work {
     Close,
 }
 
-/// What the thread publishes for its handle to read.
+/// What the thread publishes for its handle to read. Its mutexes are taken
+/// with [`lock`], also after a thread panicked holding one: every critical
+/// section is one assignment, `take` or read of an `Option` (the waker's
+/// `wake` reads it), so a panic inside one cannot leave the value half
+/// written, and the daemon's editor thread, which asks on every press, keeps
+/// working.
 #[derive(Default)]
 struct Shared {
     /// Set while a pane is open, so a caller waiting on that pane's editor
@@ -69,18 +75,6 @@ struct Shared {
     /// user's hand; cleared when the next pane is asked for, so a close is
     /// never taken for the next pane's.
     closed_by_user: Mutex<Option<Instant>>,
-}
-
-/// The guard, also of a mutex a thread panicked while holding. Every
-/// critical section on [`Shared`] is one assignment, `take` or read of an
-/// `Option` (the waker's `wake` reads it), so a panic inside one cannot leave
-/// the value half written: it is as good as before, and the daemon's editor
-/// thread, which asks these on every press, keeps working.
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|poisoned| {
-        log::warn!("a thread panicked while it held the pane's shared state; using it as it is");
-        poisoned.into_inner()
-    })
 }
 
 impl Shared {
