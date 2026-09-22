@@ -251,10 +251,9 @@ ever makes a request at all.
 An earlier approach corrected ASR output with fuzzy/edit-distance string
 replacement after decoding. On short technical tokens, edit distance is not
 selective enough: `set` → `sed`, `reset` → `rust` (the
-`[text].replacements` comment in
-[`config.example.toml`](../config.example.toml) names this failure directly,
-and `eval-samples/references.json` names it among the wordings a clip
-exercises).
+`[text]` section of [configuration.md](configuration.md#text) names this
+failure directly, and `eval-samples/references.json` names it among the
+wordings a clip exercises).
 
 **Rule:** vocabulary correction happens inside decoding, by biasing the beam
 search toward configured hotwords (`asr.vocabulary`,

@@ -809,7 +809,8 @@ come back with no background either way. Set it `false` to take the
 colourscheme's own.
 
 Neither of the fast rows is a default this project can pick, because the
-colourscheme name is the user's. `config.example.toml` documents the recipe.
+colourscheme name is the user's. `config.example.toml` gives the recipe
+(`init = "bundled"` with a `colorscheme`).
 
 The bundled config also maps `j`/`k` and the `<Down>`/`<Up>` arrows to move
 by **screen** line. An utterance

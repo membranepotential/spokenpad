@@ -20,15 +20,18 @@ and verification. Historical measurements are labelled where retained.
 4. **[nvim-window.md](nvim-window.md)** — the dictation editor: pane and
    attach mode, how the pane is opened, placed and refused focus, and what
    runs inside nvim.
-5. **[asr.md](asr.md)** — the model families, the measured decode speed, and
-   the `bpe.vocab` reconstruction that makes hotword biasing possible.
-6. **[evaluation.md](evaluation.md)** — the regression harness
+5. **[asr.md](asr.md)** — the model, the measured decode speed, and the
+   `bpe.vocab` reconstruction that makes hotword biasing possible.
+6. **[configuration.md](configuration.md)** — every setting of
+   `config.example.toml`: why its default is what it is, and what was
+   measured on the way.
+7. **[evaluation.md](evaluation.md)** — the regression harness
    (`examples/eval.rs`): WER on the local clips and what it is worth.
-7. **[hardware.md](hardware.md)** — what spokenpad needs from the machine:
+8. **[hardware.md](hardware.md)** — what spokenpad needs from the machine:
    the keys' codes, CPU, audio, displays and window manager.
-8. **[decisions.md](decisions.md)** — an ADR-style log of what was chosen,
+9. **[decisions.md](decisions.md)** — an ADR-style log of what was chosen,
    what was rejected, and why.
-9. **[experiments/](experiments/README.md)** — one file per experiment:
+10. **[experiments/](experiments/README.md)** — one file per experiment:
    benchmarks, corpus replays, model comparisons and spikes, with their
    numbers, including the ones that led nowhere.
 

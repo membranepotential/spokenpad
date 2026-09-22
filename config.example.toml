@@ -1,483 +1,168 @@
 # spokenpad configuration
 #
-# Every key below is shown at its default value. Copy this file to
-# ~/.config/spokenpad/config.toml and uncomment/edit only what you need to
-# change -- an absent section or key falls back to its default, but an
-# *unknown* section or key is a hard error (config.rs rejects typos loudly
-# rather than silently ignoring them).
+# Copy this file to ~/.config/spokenpad/config.toml and keep only the lines
+# you change: every key is optional and shown here at its default. An unknown
+# key is an error, so a typo cannot pass silently. Every duration is in
+# seconds. Why each default is what it is: docs/configuration.md.
 #
-# A running daemon reads this file again whenever it opens a dictation window
-# or attaches to one: [nvim] changes apply to that window. Every other
-# section takes effect after `systemctl --user restart spokenpad`.
-
-# There is no [hotkey] section: spokenpad reads no keyboard. Bind keys in
-# your window manager or desktop to `spokenpad start`, `stop`, `toggle` and
-# `cancel` (README, "Bind your keys"). A config that still has [hotkey] is
-# rejected with a message saying so.
+# A running daemon reads this file again for each new dictation window:
+# [nvim] applies there. Every other section needs
+# `systemctl --user restart spokenpad`. `spokenpad check` validates the file.
+#
+# Keys are bound in your window manager, not here: see "Bind your keys" in
+# the README.
 
 [audio]
-# Must be 16000. Silero's VAD window is 512 samples at 16 kHz and every
-# supported ASR model reads the same rate; nothing resamples in between, so
-# any other value is rejected at startup rather than silently degrading.
+# Must be 16000: the models read 16 kHz.
 sample_rate = 16000
 
-# Audio retained before the key goes down, so the first word isn't clipped.
-# This costs an always-open input stream -- the mic stays live the whole
-# time spokenpad runs. Set to 0 to disable pre-roll; the stream is then
-# opened lazily on keypress instead, at the cost of clipping quick starts.
+# Audio kept from before the key goes down, so the first word is not
+# clipped. 0 closes the microphone between presses.
 preroll_seconds = 0.25
 
-# Audio still captured after the key comes up, because the last syllable is
-# often still sounding at that moment: without it the final word is clipped.
-# It runs from the `stop`: the decode waits this long (plus up to 100 ms for
-# the device), and never less than the 150 ms in which a `start` still counts
-# as the key's auto-repeat. A `start` after that ends the wait at once, so a
-# quick re-press never loses its first word to the previous capture. Discards
-# (a tap held too briefly, `spokenpad cancel`) take no post-roll. 0 to
-# disable; at most 1.
+# Audio still captured after the key comes up, for the word still sounding.
+# At most 1.
 postroll_seconds = 0.25
 
-# PortAudio device-name query: case-insensitive, ordered words matched against
-# the device name and host API. Omit to use the default input device.
+# The input device, as words matched against PortAudio's device names.
+# Left out, the default input device.
 # device = "USB ALSA"
 
 [capture]
-# When a capture nobody is ending ends by itself.
-#
-# A latched capture (`spokenpad toggle`) has no key down: forget it and the
-# daemon records until something stops it. After this many seconds without
-# speech, it stops itself. That is an ordinary stop -- the tail is decoded,
-# everything spoken is kept, and the winbar says "stopped after silence"
-# until the next press.
-#
-# The clock runs from the last text the recogniser produced, not from the
-# last key press, so thinking pauses do not count and five minutes is
-# genuinely five minutes of nothing said. Raise it if you dictate with longer
-# pauses. 0 turns it off; the limits below still apply. Must be 0, or between
-# 1 and 3600 -- a value of a few seconds ends a capture between sentences.
-#
-# It must also be at least twice preview.interval_seconds, and the daemon refuses
-# to start otherwise, naming both keys. Only a preview tick produces text, so
-# the earliest a capture can report speech is one tick after the key press: a
-# timeout shorter than two ticks would end a capture you are talking into,
-# having given it no chance to say so.
-#
-# It applies to a key that is not down. A push-to-talk key held down re-fires
-# its binding every few tens of milliseconds, and so does the Shift+key that
-# latched a capture -- its repeats fire the toggle binding. Ending such a
-# capture would only let the next repeat start the one after it, so the rule
-# skips a latch that has been re-pressed within the last second
-# (KEY_SETTLED in core/state.rs) and the length limit bounds it instead. A
-# key left under a book is therefore bounded the same way whichever binding
-# it is on.
-#
-# It is off for a capture made before the speech model is ready: nothing
-# decodes it while it runs, so there is no silence to measure.
+# A latched capture (`spokenpad toggle`) that hears no speech this long ends
+# by itself, keeping everything said. 0 turns it off. Raise it if you pause
+# longer while you think.
 silence_timeout_seconds = 300
 
-# Two limits have no setting at all, because they are not preferences:
-#
-#   * No capture runs longer than 4 hours (MAX_CAPTURE in core/state.rs).
-#     A WAV's RIFF sizes are 32-bit and overflow at about 37 hours, and
-#     `spokenpad transcribe` refuses a longer recording rather than
-#     allocating for it; the limit is what keeps the safety net readable.
-#     `shell/recorder.rs` derives its own limit from this one plus the widest
-#     pre-roll and post-roll this file allows, so the two cannot drift apart.
-#   * The in-memory ceiling ends a capture too (see [recording] below).
-#
-# Both decode the tail and keep what was said, like the silence timeout.
-
 [recording]
-# Every capture is written to a wav while you are speaking, independently of
-# decoding. This is the safety net, and it is ON by default: an opt-in one is
-# switched off exactly when it turns out to have been needed.
-#
-# On 2026-09-08 a 13m41s hold hit the in-memory ceiling, the audio past it was
-# dropped inside the realtime callback -- the only copy that existed -- and
-# 3m41s of dictation was gone, with nothing in the log to say so. With a
-# recording, a decode that fails, is cancelled, or stops short is no longer a
-# loss: `spokenpad transcribe <wav>` decodes the file through the same VAD and
-# model the daemon uses and prints the transcript.
-#
-# The cost is ~32 KB per second of speech (16 kHz 16-bit mono), pruned below.
-#
-# Until the speech model is ready -- while it downloads on first use, or for
-# the seconds it takes to load after the daemon starts -- this recording is
-# the only copy of a capture: nothing is held in memory, and the daemon
-# transcribes the file once the model is ready; pruning (below) passes over
-# a recording until it is transcribed. Such a capture ends at 60 minutes, the
-# ceiling of a live one. With recording off, a capture made in that time is
-# lost, and the winbar says "capture not kept".
-#
-# Since 2026-09-21 the audio a capture holds in memory is only its open tail:
-# once a chunk is transcribed its audio is dropped, so a recording costs the
-# same at an hour as at ten seconds (measured: 1.7 MiB over half an hour,
-# against 116 MiB before). That incident cannot repeat with a VAD model loaded.
-#
-# The ceiling is still there for the cases where nothing is committed while
-# you speak, and so nothing can be dropped: a preview.interval_seconds long enough
-# that few ticks fire. It is 3600 seconds of *held* audio
-# (MAX_UTTERANCE_SECONDS in audio.rs), a compile-time constant rather than a
-# setting: it is a bound on how much of this machine's RAM one capture may
-# occupy (~230 MB/hour at 16 kHz), not a policy. Reaching it ends the capture:
-# the tail is decoded, the winbar says so and names the WAV, and that WAV is
-# finished and closed there like any other capture's -- it is NOT carried on
-# past the ceiling. The recovery file is written before the ceiling is
-# consulted, so the cap can never truncate what it holds. Until 2026-09-21 the
-# ceiling only stopped the decoding and the daemon kept writing to disk with
-# nothing reading it.
-# Every capture is bounded in length as well: see [capture] above.
+# Write every capture to a WAV while you speak: the safety net that
+# `spokenpad transcribe` recovers from. Keep it on.
 enabled = true
 
-# Where the recordings go. Created mode 0700 if it does not exist; one that
-# exists keeps the permissions you gave it (the daemon warns when others can
-# list it). Each file is mode 0600 -- a capture holds whatever you dictated.
-# Defaults to $XDG_STATE_HOME/spokenpad/audio (~/.local/state/spokenpad/audio).
-# ~ and $VAR are expanded; an unset $VAR is an error rather than a literal
-# directory named after it.
-#
-# GIVE THIS A DIRECTORY OF ITS OWN: spokenpad prunes it (see max_total_bytes
-# below). Only the `capture-*.wav` files it writes are ever deleted -- nothing
-# else in the directory is touched -- but a folder that is only ever spokenpad's
-# leaves no room for that promise to be wrong.
+# Where the WAVs go, by default under $XDG_STATE_HOME. Give it a directory
+# of its own: spokenpad prunes it.
 # dir = "~/.local/state/spokenpad/audio"
 
-# Size budget for that directory, enforced oldest-first at startup and once
-# per capture. 5 GiB is ~46 hours of speech. Age is deliberately not a
-# criterion: a recording is pruned because something newer needs the space,
-# never because it got old. The capture being written is never pruned.
+# Space the WAVs may take before the oldest are pruned: 5 GiB, about 46 hours.
 max_total_bytes = 5368709120
 
 [asr]
-# The directory holding the model: a NeMo transducer such as Parakeet TDT,
-# the default. spokenpad finds each file by its role (encoder.int8.onnx
-# before encoder.onnx, tokens.txt). The default is where `spokenpad
-# fetch-models` puts it (and where the daemon, in the background, and
-# check/transcribe put it themselves the first time they find it missing),
-# under $XDG_DATA_HOME (~/.local/share if unset). A relative path resolves
-# against this file's directory; ~ and $VARS expand. See docs/asr.md.
-model_dir = "~/.local/share/spokenpad/models/parakeet-tdt-0.6b-v3-int8"
+# The speech model: a NeMo transducer. The default is Parakeet TDT 0.6B v3,
+# which spokenpad downloads on first use to $XDG_DATA_HOME/spokenpad/models.
+# Set it only to use another model; a set path is never downloaded to.
+# model_dir = "~/.local/share/spokenpad/models/parakeet-tdt-0.6b-v3-int8"
 
-# CPU threads for decoding.
+# CPU threads per decode.
 num_threads = 6
 
-# "greedy_search" or "modified_beam_search". Left out, it is greedy_search,
-# unless `vocabulary` below is set: hotwords exist only in beam search.
-# Beam search on Parakeet TDT returns nothing, or an invented "Yeah.", for
-# clear speech about one time in five (upstream sherpa-onnx issue #3267);
-# replaying 170 real captures, it left 19 speech chunks empty against 4 for
-# greedy. Use it only if you need `vocabulary`. The defect is specific to TDT
-# models: on a NeMo transducer that is not TDT, such as
-# parakeet-unified-en-0.6b, beam search and hotwords both work.
+# "greedy_search", or "modified_beam_search", which vocabulary needs. Beam
+# search on Parakeet TDT sometimes drops a sentence; leave it out.
 # decoding = "greedy_search"
 
-# Per-token bias applied to each phrase in `vocabulary`; implies beam search.
-# Measured on Parakeet: 1.5 fixes "mkir" -> "mkdir"; above ~3.0 it starts
-# firing on unrelated audio; 6.0 rewrites ordinary words.
-# hotwords_score = 1.5
-
-# Words and phrases to bias the decoder toward, e.g. project names or
-# commands that are otherwise misheard. Setting it switches to
-# modified_beam_search, with the failure rate described above.
+# Words the decoder should favour, such as project names it mishears.
+# Setting it switches to beam search.
 # vocabulary = ["kubectl", "spokenpad", "nginx"]
 
+# How strongly each vocabulary phrase is favoured. Above about 3 it rewrites
+# ordinary words.
+# hotwords_score = 1.5
+
 [vad]
-# Voice activity detection. The capture is split at silence and each speech
-# segment decoded in turn, in one pass -- no region is ever decoded twice.
-#
-# This is a CORRECTNESS setting before it is anything else. Parakeet returns
-# an EMPTY STRING when speech is a small fraction of the window it is given:
-# the same 0.53s of speech decodes to "D home." with no padding, "Did the
-# home?" with 2s of silence each side, and "" with 5s. In use that is pressing
-# the key, saying two words, and getting nothing back.
-#
-# A chunk this finds speech in that still decodes to an empty string is
-# decoded once more without the second of trailing silence the recogniser
-# normally appends; some short utterances only come back that way.
-#
-# It does NOT make decoding faster -- measured 12.3-12.6x real-time whole-buffer
-# against 11.0-11.7x segmented. What it changes is WHEN text appears: the first
-# chunk lands after ~1s instead of after the whole recording, so a five-minute
-# latched passage starts arriving immediately rather than all at once at the
-# end.
-#
-# It is also MORE ACCURATE on real dictation, which the five reference clips
-# get backwards: there it scores 18.7% aggregate WER against 14.3% whole-buffer
-# (`cargo run --release --example=eval`, and `-- --whole`), but over 181 real
-# captures it wins on all eight model and decoder settings tried, by 0.2 to 9.3
-# WER points, and loses 5 reference words off the ends of captures against 95.
-# A chunk bounds what one bad decode can destroy; a whole five-minute dictation
-# on one decode does not
-# (docs/experiments/2026-09-21-live-path-against-whole-file.md).
-#
-# It also decides what NOT to decode: a capture this finds no speech in is not
-# handed to the recogniser at all. Silence does not decode to an empty string,
-# it decodes to invented words -- an empty half-second press came back "Thank
-# you." and the words landed in the file. The detector is always on; until
-# 2026-09-22 `enabled = false` turned it off.
+# The voice activity detector: it decides what is speech and cuts it into
+# chunks that are decoded while you speak. It is always on.
 
-# Silero VAD weights, ~0.6 MB, fetched by `spokenpad fetch-models` (and by
-# the daemon, check and transcribe themselves, at this default path). Resolved
-# like asr.model_dir. If the file is missing and cannot be downloaded,
-# spokenpad logs a warning and decodes whole captures rather than refusing
-# to start.
-model = "~/.local/share/spokenpad/models/silero_vad.onnx"
+# The detector's weights, downloaded with the speech model.
+# model = "~/.local/share/spokenpad/models/silero_vad.onnx"
 
-# Speech probability above which a frame counts as speech. This is also the
-# knob for the silence rule above: what the detector misses entirely is never
-# decoded, so lower it if a quiet voice or a distant microphone is being
-# dropped, and raise it if room noise is being transcribed.
+# How sure the detector must be that a frame is speech. Lower it if a quiet
+# voice is dropped; raise it if room noise is transcribed.
 threshold = 0.5
 
-# Silence needed to end a segment -- the sentence-boundary knob. Too low and a
-# sentence is chopped at every breath, which costs quality: the recogniser
-# capitalises each segment as a fresh start, so mid-sentence splits leave
-# stray capitals. Too high and segments grow until delivery stops feeling
-# incremental.
+# Silence that ends a run of speech. Lower cuts sentences at every breath.
 min_silence_seconds = 0.35
 
-# Shortest run that counts as speech, so a cough does not become a segment.
+# The shortest run that counts as speech, so a cough does not.
 min_speech_seconds = 0.15
 
-# Hard cap on a single detected run of speech, cutting it even mid-sentence.
-# Nothing is lost -- the audio continues in the next one.
+# The longest run before the detector cuts it; nothing is lost at the cut.
 max_speech_seconds = 20.0
 
-# Speech to accumulate before closing a chunk and decoding it. Detected runs
-# are MERGED up to this, because a boundary costs accuracy -- the model sees no
-# context across one. Measured: decoding every run separately scored 37.7% WER
-# against 33.7% for the whole buffer, while merging to 10s scored 33.4%.
-# Lower it for text sooner at some cost in accuracy.
+# Speech gathered into one chunk before it is decoded. Lower gives text
+# sooner and costs accuracy.
 chunk_seconds = 10.0
 
-# Real audio kept either side of a chunk, beyond what the detector marked.
-# Silero's boundaries clip word onsets and endings; 0.5s beat 0.2s by 2-4 WER
-# points at every chunk size tried.
+# Audio kept around a chunk, and around the first and last chunk of a capture.
 pad_seconds = 0.5
-
-# A wider margin before the FIRST chunk and after the LAST one. The edges of a
-# capture are where losing audio costs something: a word clipped off the front
-# is the first word of the sentence, while one trimmed from the middle of a
-# pause is nobody's loss. Applies only to chunks that already hold 3s of
-# speech, so a brief utterance in a quiet capture keeps its tight trim -- a
-# chunk swamped by silence is exactly what makes the recogniser return
-# nothing, which is the bug this whole section exists to prevent.
 edge_pad_seconds = 2.0
 
 [text]
-# Strip standalone filler words (see `fillers` below) from the transcript.
+# Remove filler words, as whole words, ignoring case.
 strip_fillers = true
-
-# Removed only as whole words, case-insensitively, never as substrings of
-# another word ("um" won't touch "umbrella").
 fillers = ["uh", "um", "erm", "hmm"]
 
-# Exact, whole-word, case-sensitive substitutions applied after decoding. A
-# key may begin or end with punctuation ("e.g.", "c++"); like any key, it
-# matches only where no letter or digit touches it. Deliberately NOT fuzzy: the tool this project replaced used edit-distance
-# matching and turned "set" into "sed" and "reset" into "rust". Prefer
-# asr.vocabulary above for fixing misheard technical terms -- biasing what
-# the decoder hears beats rewriting what it already got wrong.
+# Exact, whole-word, case-sensitive replacements, in the order written.
 # replacements = { teh = "the" }
 replacements = {}
 
-# Append a trailing space to the injected text, useful if you always type
-# a word immediately after dictating.
+# Add a space after each transcript.
 trailing_space = false
 
 [nvim]
-# Where the transcript goes: a neovim buffer, appended to over nvim's
-# msgpack-RPC socket and saved after every utterance. Nothing is ever pasted
-# into the window you are working in, and no keystrokes are synthesised
-# anywhere -- see docs/constraints.md and docs/nvim-window.md.
-
-# Who opens that neovim.
-#
-#   "attach"   you do: run `spokenpad editor` in any terminal, on any desktop
-#              (X11 or Wayland, any window manager). The daemon never opens a
-#              window, so it can never take focus. With no editor open,
-#              dictation goes straight into the dictation file, and the next
-#              `spokenpad editor` opens on it.
-#   "pane"     (the default) the daemon does, in a window it draws itself, on the first
-#              key-down. No terminal, and no rule to install in your config:
-#              the window carries the properties that make a window manager
-#              refuse it focus, and keep it on top. sway reads none of them,
-#              so there the daemon adds a no_focus rule for the pane over
-#              sway's IPC before each window; it finds sway from the display,
-#              and its socket through SWAYSOCK or in XDG_RUNTIME_DIR, and
-#              refuses to open the pane when it cannot reach sway (sway's
-#              /etc/sway/config.d/50-systemd-user.conf imports SWAYSOCK).
-#              Needs an X display -- on Wayland, through Xwayland, so import
-#              DISPLAY into the user manager. New in 2026-09; verified
-#              headless on i3, sway, Openbox and KWin (Wayland and X11), so
-#              try it before you rely on it. `spokenpad check` says whether
-#              this machine can. It is the default. With no X display
-#              (Wayland without Xwayland) it cannot open, the text goes to
-#              the dictation file, and the notification says to use
-#              "attach".
-#
-# "managed", the daemon opening a floating terminal on i3 or sway, was removed
-# on 2026-09-22: the pane does the same without a rule in your config. A
-# config that still sets it, or `terminal`, `window_instance` or
-# `window_fraction`, is refused with a message that says so.
+# "pane": spokenpad opens its own window, which never takes the focus (X11,
+# or Wayland through Xwayland). "attach": you run `spokenpad editor` in a
+# terminal, on any desktop.
 mode = "pane"
 
-# The editor. The init, colourscheme, `--listen <socket>` and the dictation
-# file are appended to this, so anything here comes first. Pane mode puts
-# `--embed` right after it.
+# The Neovim command.
 editor = ["nvim"]
 
-# nvim config for the dictation editor, in every mode.
-#
-#   unset       your own ~/.config/nvim -- everything you have, and its cost
-#   "bundled"   spokenpad's own: no plugins, chrome off before the first frame
-#   "NONE"      a bare nvim
-#   <a path>    that file
-#
-# Measured on a full LazyVim setup, key-down to a placed window answering RPC:
-# 0.73s unset against 0.21s bundled. The window is for watching a transcript
-# land rather than for editing, so a whole plugin set is startup cost with
-# little to show for it -- and the two things it did show for it survive
-# `bundled`: the yank flash is built into nvim, and `colorscheme` below loads
-# a theme without the configuration it normally lives in (0.23s with one).
-#
-# spokenpad strips the chrome and sets prose wrapping over RPC whatever is
-# loaded, and writes committed text with `noautocmd` so a format-on-save
-# cannot reflow a transcript.
+# Neovim's configuration: left out, your own. "bundled" opens the window
+# about 3.5x faster; pair it with colorscheme. "NONE", or a path, also work.
 # init = "bundled"
 
-# Colourscheme for the editor. With init = "bundled" this is what still makes
-# it look like your editor: only the one plugin directory providing the named
-# scheme is put on the runtimepath, so the colours arrive without the startup
-# cost of everything around them. Harmless with a full config, where it just
-# switches theme. Unset by default.
+# A colourscheme to load, for example with init = "bundled".
 # colorscheme = "tokyonight-moon"
 
-# Let the terminal's background show through. It is what makes `colorscheme`
-# above look right: a theme loaded straight from its plugin directory is the
-# theme's DEFAULTS, not the theme as you configured it, so one you run with
-# `transparent = true` arrives opaque here and paints a block of its own
-# background inside your terminal's border. Set false to take the
-# colourscheme's own background instead.
+# Let the terminal's background show through the colourscheme's.
 transparent = true
 
-# Pane mode only: the pane's size in character cells, as Alacritty's
-# `window.dimensions`. A grid larger than the monitor under the pointer is cut
-# to as many whole cells as fit. The window adds a fixed margin of 4 pixels at
-# 96 dpi on every side (8 at 192 dpi), in the editor's background colour, as
-# Alacritty's `window.padding = { x = 4, y = 4 }` would. 72x20 at the default
-# font is 656x368 pixels at 96 dpi, about a third of a 1920x1080 screen each
-# way. It opens beside the pointer, never under it: its frame 20 pixels at
-# 96 dpi (40 at 192) right of and below the pointer, or left of or above it
-# where the monitor has no room, so a nudge of the mouse does not focus it
-# under focus-follows-mouse. A pane too large to fit beside the pointer
-# either way opens centred around it. Under Wayland the pointer cannot be
-# read -- Xwayland answers with where it last was over an X window -- so
-# there it asks for the monitor's bottom-right corner instead.
+# Pane mode: the window's size in character cells, as Alacritty's
+# window.dimensions, cut to what fits on the monitor.
 pane_dimensions = { columns = 72, lines = 20 }
 
-# Pane mode only: "floating" (the default) opens the pane above your windows
-# beside the pointer. "tiled" makes it an ordinary window: i3 and sway tile it
-# beside the window you are typing in, at the size of its tile; Openbox, KWin
-# and other stacking window managers have no tiles and show it beside the
-# pointer as they would a floating one. A tiled pane gives up the window type that
-# keeps some window managers from focusing it, so it is allowed only where it
-# is proven never to take the focus: i3, sway, Openbox and KWin. Anywhere
-# else the pane opens floating, and a notification says why. Your click, or
-# under focus-follows-mouse your pointer moving into it, still focuses it. Applies to the next window after you save. The log says
-# which layout each pane opened with; one logged as tiled that floats all
-# the same is floated by a rule in your window manager's config -- on i3 the
-# old managed-mode `for_window [instance="spokenpad"] floating enable`
-# matches the pane too, since i3 does not anchor criteria.
+# Pane mode: "floating" above your windows beside the pointer, or "tiled"
+# beside your window on i3 and sway.
 pane_layout = "floating"
 
-# Pane mode only: the font the window draws with, as a fontconfig family name
-# -- a name, not a pattern, so no colon, comma or backslash.
-# "monospace" is the alias your desktop already points at the font you want,
-# so start there. Name one here if what it resolves to has no bold or italic
-# face -- spokenpad thickens the strokes itself where bold is missing, which
-# is close but not the same thing. `fc-match monospace` says what you have.
+# Pane mode: the font, as a fontconfig family name, and its size in points,
+# as Alacritty's font.size (scaled by the X resource Xft.dpi).
 font_family = "monospace"
-
-# Pane mode only: that font's size in points, meaning exactly what
-# Alacritty's `font.size` means. The X resource `Xft.dpi` (from xrdb, or
-# ~/.Xresources when xrdb never ran) turns it into pixels, and the cells are
-# measured the way Alacritty measures them, so the same family and size give
-# the same text and the same cells as Alacritty on any screen -- provided
-# Xft.dpi is set. Without it the pane uses 96 dpi, while Alacritty would ask
-# an XSETTINGS daemon (Xft/DPI) or RandR's physical screen size; the pane
-# reads neither. `spokenpad check` prints the resolution it found and why.
-# 11.25 is Alacritty's default; copy your
-# Alacritty `font.size` here to match it. In [1, 200]. The window's size in
-# pixels follows from this and pane_dimensions above.
 font_size = 11.25
 
-# Where nvim listens for RPC, in every mode. spokenpad reattaches to a live
-# socket rather than opening a second window, and `spokenpad editor` refuses
-# to start a second editor on it.
-#
-# Defaults to $XDG_RUNTIME_DIR/spokenpad-nvim.sock, falling back to the state
-# directory if that variable is unset. Both ~ and $VAR are expanded here --
-# but a $VAR that is not actually set is a hard error rather than a literal
-# directory named "$XDG_RUNTIME_DIR" in your home.
+# Where Neovim listens for the daemon.
 # socket_path = "$XDG_RUNTIME_DIR/spokenpad-nvim.sock"
 
-# Directory holding the dictation files, and the strftime template for their
-# names -- one file per EDITOR, saved after every single utterance.
-#
-# Closing the editor ends the passage: the next dictation starts a new file
-# rather than appending under everything you said an hour ago. While it stays
-# open every utterance goes into it, across a daemon restart included. With
-# no editor open, utterances go into one file of their own until an editor
-# opens on it. Include a time in the template, not just a date, or two
-# sessions in one day share a page.
-#
-# A real file rather than a scratch buffer, deliberately: a transcript that
-# disappears because a buffer was closed is the same class of failure as one
-# dropped by a streaming decoder, which is the failure this project exists to
-# eliminate. Defaults to $XDG_STATE_HOME/spokenpad/dictation, and to
-# ~/.local/state/spokenpad/dictation when XDG_STATE_HOME is unset.
-dictation_dir = "~/.local/state/spokenpad/dictation"
+# The dictation files: one per editor, named by this strftime template. Keep
+# a time in it, or two sessions in one day share a file. The directory
+# defaults to $XDG_STATE_HOME/spokenpad/dictation.
+# dictation_dir = "~/.local/state/spokenpad/dictation"
 file_template = "dictation-%Y-%m-%d-%H%M%S.md"
 
-# Pane mode only: how long to wait for the pane and the nvim inside it to be
-# ready: the window open, nvim listening on the socket, its ownership nonce
-# set, AND your own startup handlers finished. Generous on purpose -- a first-ever open took 13.5s while
-# a plugin manager did one-time work, and killing a healthy editor mid-startup
-# is the worse failure.
+# How long a new window's Neovim may take to start. Raise it if your
+# configuration installs plugins on first start.
 startup_timeout_seconds = 20.0
 
-# Send a desktop notification (notify-send) when dictation starts going to a
-# file because no editor is open -- once per such file, not per utterance --
-# and when closing the dictation window cancelled the recording it showed.
+# A desktop notification when text goes to a file because no window is open.
 notify = true
 
-# After every release, copy the whole dictation buffer -- every press in
-# this window, plus anything typed by hand -- to the `+` register, through
-# whatever clipboard provider nvim's own `setreg` resolves (wl-copy, xclip
-# or xsel). Off by default: dictation already lands in the file, so a
-# clipboard write is an opt-in convenience, not something to assume it's
-# wanted. With this off, no copy request is ever sent to the editor.
+# After each release, copy the whole dictation buffer to the clipboard.
 copy_to_clipboard = false
 
 [preview]
-# The tick of progressive commit (docs/progressive-commit.md): every
-# interval_seconds while the key is held, the audio since the committed offset is
-# split at silence, each chunk that has settled is decoded ONCE and appended
-# to the dictation buffer, and the open tail -- the sentence being spoken now
-# -- is decoded for the live preview below it.
-#
-# The preview is cosmetic only: virtual text in nvim, replaced every tick,
-# never written to the file. What reaches the buffer is each chunk decoded
-# exactly once, when it settles or at key release. The tick is always on.
-
-# Minimum time between ticks, in seconds; at least 0.2. The real gap is
-# max(interval - last_decode, last_decode), so the worker stays idle at least
-# half the time however long the passage gets.
+# How often, while you speak, finished chunks are committed and the sentence
+# you are in is previewed. At least 0.2.
 interval_seconds = 1.1
 
-# Backstop on how much uncommitted audio a preview may decode. The tick only
-# ever decodes the open tail, at most one chunk, and this is reached only if a
-# chunk does not settle. Past this many seconds previews pause, the
-# winbar says so, and they resume by themselves once the tail is short again.
+# The most unfinished audio one preview reads; past it the preview pauses
+# while text keeps landing.
 max_seconds = 30.0

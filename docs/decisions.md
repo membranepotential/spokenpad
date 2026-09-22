@@ -2521,3 +2521,15 @@ and the reason a config did not load were in the detail.
   said why. It ranks above only "preview paused". Closing the pane, which
   also cancels, sets no notice: that window is gone, and the desktop
   notification says it.
+
+## The example config is a quickstart; the reasons live in docs/configuration.md (2026-09-22)
+
+`config.example.toml` had grown to about 500 lines, four in five of them
+comments: measurements, incident dates, and implementation detail before the
+line a new user needed (audit P2-003). It is now each key at its default with
+one or two lines on what it does and when to change it, about 170 lines. The
+reasons and the numbers moved to [configuration.md](configuration.md), per
+section and key, with links to the experiments and decisions they come from.
+Paths that default to an XDG location are shown commented out, so that a
+copied file keeps following `$XDG_DATA_HOME` and `$XDG_STATE_HOME`, and the
+default models keep downloading.
