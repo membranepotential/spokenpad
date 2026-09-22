@@ -2092,3 +2092,39 @@ shipped nothing; its experiment names the commit that holds it. Both are
 deleted. `scripts/gladia-references.sh`, which uploads the author's
 recordings to Gladia, is useful to the author alone: it is git-ignored and
 kept only in the author's checkout; the docs call it local.
+
+## The model download is bounded and takes a lock (2026-09-22)
+
+The 2026-09-22 audit (P2-014) found the download on ureq's defaults: no
+timeout at all, redirects to plain HTTP followed, and the body read to its
+end however long. A stalled connection held the daemon's loader forever, and
+a misbehaving mirror could fill the disk before the sha256 check rejected the
+file. The fresh-user walkthrough (P9) found that the daemon's own download
+and `fetch-models` or `check` wrote the same `<file>.part` without a lock.
+
+- Chosen: one `ureq::Agent` with `https_only` (ureq checks it on every
+  redirect hop), at most 5 redirects, 30 s each for resolving, connecting,
+  sending and receiving the response headers, and a body budget of 30 s
+  plus the pinned size at 64 KiB/s. The body is never read past the pinned
+  size, and the `.part` file is removed on every failure, not only on a hash
+  mismatch. Every download into a models directory holds an `flock` on
+  `.fetch.lock` there; a second process says it waits, waits, and then finds
+  the files in place.
+- Rejected: a per-read timeout. ureq 3 bounds the whole body, not each read,
+  so a stall mid-body ends only when the budget does (about 2.8 h for the
+  encoder). Range requests in chunks would detect it sooner, at the cost of
+  a resume protocol and one redirect round trip per chunk.
+- Rejected: unique `.part` names per process. Two processes would still
+  download the same 670 MB twice, and a killed one would leave its part
+  behind under a name nobody reuses.
+- Kept: `fetch-models` still downloads `test_en.wav`, which the daemon's own
+  download skips (walkthrough P6): the real-model tests in `tests/e2e.rs`
+  read it.
+- Added for C9: `shell::models::terminal_progress` draws one progress line
+  on stderr when it is a terminal, and `report_on_stderr` is
+  `fetch-models`' reporter; `main.rs` wires them in separately.
+- Tests: `shell::models` — a body longer than the pin is cut off at the pin,
+  a connection cut short leaves no `.part`, plain HTTP is refused before any
+  connection, a second download waits for the lock and then downloads
+  nothing; the ignored `a_real_download_…` fetches one file from each real
+  host through its redirects.
