@@ -14,8 +14,10 @@ never takes focus. Fully local, CPU-only. Next milestone: public release.
 - hover-focus (implementer, on that branch) — pane opens >= 20 px from the
   pointer, hover may focus it (user 09-22) — running.
 - first CI run on push of 1b21933 — queued.
-- audit + security review, fresh-user walkthrough, README screenshot —
-  starting (user 09-22: push allowed, release waits for the user's go).
+- audit (8 lenses, security + bugs on Opus; report in scratchpad
+  reviews/2026-09-22-2100, not the repo), fresh-user walkthrough (headless,
+  private HOME, null mic), README screenshot — running. User 09-22: push
+  allowed, release waits for the user's go.
 
 ## Next
 1. User live check: typing elsewhere ok, `Grüße @ € {}` ok; still to try:
