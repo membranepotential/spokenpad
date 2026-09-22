@@ -2649,3 +2649,24 @@ crashes at start was started again by every key-up as well as every press.
   running; with the socket active, both wait on it in the order they
   connected.
 - Test: `only_start_and_toggle_start_the_socket`.
+
+## The pane takes the manager's display with a config that does not load (2026-09-23)
+
+The entry of 2026-09-22 above applied the user manager's session only to a
+config file that reloaded. When the file no longer loaded, the next window
+kept the settings in use, with the display the daemon started with: after
+importing `DISPLAY` it could still say that neither spokenpad nor the user
+manager had one.
+
+- Chosen: `Reload` is now two steps, the file (`load`) and the session the
+  window opens in (`session`), and the editor thread applies the second to
+  whichever settings the window opens with: the file's, or those in use when
+  the file does not load. `session` is `with_manager_session` only for a
+  control socket systemd passed in (`Socket::Inherited`), and the settings
+  unchanged otherwise, as before.
+- Behaviour, stated once: the next pane opens on the display the user
+  manager got last, not on the one of the session that pressed the key. A
+  second X login of the same user that imports its `DISPLAY` (say `:1` on
+  tty2) moves the first session's next pane to `:1`. Only the same user is
+  affected: the manager is per user, and so is the daemon.
+- Test: `a_config_that_does_not_load_still_takes_the_managers_session`.

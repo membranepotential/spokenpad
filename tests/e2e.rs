@@ -448,16 +448,20 @@ impl Harness {
         } else {
             (PipelineSource::Ready(build()), None)
         };
-        let reload: Reload = {
-            let harness = config.clone();
-            let file = settings.config_file.clone();
-            Box::new(move || {
-                let mut fresh = harness.clone();
-                if let Some(file) = &file {
-                    fresh.nvim.copy_to_clipboard = Config::load(Some(file))?.nvim.copy_to_clipboard;
-                }
-                Ok(fresh)
-            })
+        let reload = Reload {
+            load: {
+                let harness = config.clone();
+                let file = settings.config_file.clone();
+                Box::new(move || {
+                    let mut fresh = harness.clone();
+                    if let Some(file) = &file {
+                        fresh.nvim.copy_to_clipboard =
+                            Config::load(Some(file))?.nvim.copy_to_clipboard;
+                    }
+                    Ok(fresh)
+                })
+            },
+            session: std::convert::identity,
         };
         let (requests, received) = mpsc::channel();
         // Where `spokenpad start` looks, given the harness's runtime dir.
@@ -2608,10 +2612,13 @@ fn real_models_transcribe_the_kennedy_sample() {
                 capture,
                 requests: received,
                 pipeline,
-                reload: Box::new({
-                    let config = config.clone();
-                    move || Ok(config.clone())
-                }),
+                reload: Reload {
+                    load: Box::new({
+                        let config = config.clone();
+                        move || Ok(config.clone())
+                    }),
+                    session: std::convert::identity,
+                },
             },
             stop,
             None,

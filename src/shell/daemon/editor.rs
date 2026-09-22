@@ -65,8 +65,9 @@ enum Sink {
 
 /// The `[nvim]` settings the next window opens with: what the file says now.
 /// A file that no longer loads keeps the settings in use, and the window
-/// says why. Changes to any other section only take effect at a restart,
-/// which is logged once per distinct set of them.
+/// says why. Either way they take the session the window opens in, such as
+/// the display the user manager has now. Changes to any other section only
+/// take effect at a restart, which is logged once per distinct set of them.
 fn reconfigure(
     nvim: &mut NvimSession,
     running: &Config,
@@ -74,7 +75,7 @@ fn reconfigure(
     reported: &mut Vec<&'static str>,
     events: &Sender<ResultEvent>,
 ) {
-    match reload() {
+    match (reload.load)() {
         Ok(fresh) => {
             let restart = running.restart_needed(&fresh);
             if restart != *reported && !restart.is_empty() {
@@ -84,11 +85,12 @@ fn reconfigure(
                 );
             }
             *reported = restart;
-            nvim.reconfigure(fresh.nvim);
+            nvim.reconfigure((reload.session)(fresh.nvim));
         }
         Err(e) => {
             log::error!("config not reloaded: {e:#}; the window keeps the settings in use");
             let _ = events.send(ResultEvent::ConfigInvalid(crate::config::summary(&e)));
+            nvim.reconfigure((reload.session)(nvim.settings().clone()));
         }
     }
 }
@@ -278,5 +280,37 @@ fn report_user_close(nvim: &mut NvimSession, events: &Sender<ResultEvent>) {
         log::info!("the user closed the dictation pane; the next text opens no window of its own");
         // The loop is gone only while this thread is being stopped.
         let _ = events.send(ResultEvent::WindowClosed { at });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Nvim;
+
+    /// A config file that no longer loads keeps the settings in use for the
+    /// next window, but not their session: a daemon systemd started takes
+    /// the display the user manager has now either way.
+    #[test]
+    fn a_config_that_does_not_load_still_takes_the_managers_session() {
+        let running = Config::default();
+        let mut nvim = NvimSession::new(Nvim {
+            display: Some(":0".into()),
+            ..running.nvim.clone()
+        });
+        let mut reload = Reload {
+            load: Box::new(|| anyhow::bail!("expected a table")),
+            session: |nvim| Nvim {
+                display: Some(":1".into()),
+                ..nvim
+            },
+        };
+        let (events, received) = mpsc::channel();
+        reconfigure(&mut nvim, &running, &mut reload, &mut Vec::new(), &events);
+        assert!(matches!(
+            received.try_recv(),
+            Ok(ResultEvent::ConfigInvalid(_))
+        ));
+        assert_eq!(nvim.settings().display.as_deref(), Some(":1"));
     }
 }

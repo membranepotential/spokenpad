@@ -37,7 +37,7 @@ use spokenpad::{
     },
     shell::{
         audio::{AudioCapture, CallbackCore, InputBackend, InputStream, Teardown},
-        daemon::{Devices, PipelineSource, serve},
+        daemon::{Devices, PipelineSource, Reload, serve},
         nvim::pane_launch,
         pane::{
             Options,
@@ -694,10 +694,13 @@ impl Daemon {
                     capture,
                     requests: received,
                     pipeline,
-                    reload: Box::new({
-                        let config = config.clone();
-                        move || Ok(config.clone())
-                    }),
+                    reload: Reload {
+                        load: Box::new({
+                            let config = config.clone();
+                            move || Ok(config.clone())
+                        }),
+                        session: std::convert::identity,
+                    },
                 },
                 stop,
                 None,

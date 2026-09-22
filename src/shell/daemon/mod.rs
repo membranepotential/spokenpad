@@ -28,7 +28,7 @@ use self::{
     transcriptions::{Stage, Transcription, Transcriptions, begin, finished, keep, persist},
 };
 use crate::{
-    config::{Config, Source},
+    config::{Config, Nvim, Source},
     core::{
         control::{Received, Request},
         decode::{
@@ -153,10 +153,17 @@ fn join_bounded(handle: JoinHandle<()>, name: &str) {
     }
 }
 
-/// Reads the configuration again. The editor thread calls it before each
-/// new dictation window, so that `[nvim]` changes apply to that window
-/// without a restart.
-pub type Reload = Box<dyn FnMut() -> Result<Config> + Send>;
+/// What each new dictation window opens with. The editor thread asks before
+/// each one, so that `[nvim]` changes apply to that window without a
+/// restart.
+pub struct Reload {
+    /// Reads the configuration again.
+    pub load: Box<dyn FnMut() -> Result<Config> + Send>,
+    /// Gives the `[nvim]` settings a window opens with the session it opens
+    /// in: the settings the file has now or, when it no longer loads, those
+    /// in use.
+    pub session: fn(Nvim) -> Nvim,
+}
 
 /// The imperative shell: acquire the machine's resources, then serve.
 /// `config` was read from `source`, which each new dictation window reads
@@ -232,17 +239,16 @@ pub fn run(
 
 /// What each new dictation window reads: `source` again, and for the daemon
 /// systemd started on its socket, the display and sockets the user manager
-/// has by then (`with_manager_session`). A daemon started in a terminal, or
-/// by a test, keeps the environment it was given.
+/// has by then (`with_manager_session`), whether or not `source` still
+/// loads. A daemon started in a terminal, or by a test, keeps the
+/// environment it was given.
 fn reload_from(source: Source, socket: &Socket) -> Reload {
-    match socket {
-        Socket::Inherited(_) => Box::new(move || {
-            source.load().map(|mut config| {
-                config.nvim = crate::shell::nvim::with_manager_session(config.nvim);
-                config
-            })
-        }),
-        Socket::Bound { .. } => Box::new(move || source.load()),
+    Reload {
+        load: Box::new(move || source.load()),
+        session: match socket {
+            Socket::Inherited(_) => crate::shell::nvim::with_manager_session,
+            Socket::Bound { .. } => std::convert::identity,
+        },
     }
 }
 

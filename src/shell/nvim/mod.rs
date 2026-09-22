@@ -269,6 +269,11 @@ impl NvimSession {
         self.config = config;
     }
 
+    /// The settings the next window opens with.
+    pub fn settings(&self) -> &Nvim {
+        &self.config
+    }
+
     pub fn path(&self) -> Option<&Path> {
         self.connection.as_ref().map(|open| open.path.as_path())
     }
