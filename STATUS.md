@@ -16,7 +16,9 @@ never takes focus. Fully local, CPU-only. Next milestone: public release.
   fix all incl. big splits; remove other ASR families, vad.enabled,
   preview.enabled; durations in _seconds; never log transcript text; plus
   walkthrough fixes, xclip dependency, CLI starts the socket) — two lanes
-  starting: core/daemon/config, and edges.
+  running: core/daemon/config (A+B done), and edges (group 1 done).
+  After merge (me): wire shell/models terminal_progress into main.rs;
+  nvim/** + pane/** create_dir_all -> shell::dirs::create_private.
 
 ## Next
 1. User live check after i3 reload: pane_layout = "tiled"; hover focuses the
