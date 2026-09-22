@@ -291,6 +291,30 @@ fn serve(listener: &UnixListener, sender: &Sender<Received>, stop: &AtomicBool) 
     }
 }
 
+/// Answers every connection already waiting on `socket` with `reply`, and
+/// forwards nothing: for a daemon that cannot serve and is about to exit.
+/// Under socket activation a waiting connection would start it again at
+/// once; answered, each press starts it at most once.
+pub fn refuse_pending(socket: Socket, reply: Reply) {
+    let (Socket::Bound { listener, .. } | Socket::Inherited(listener)) = socket;
+    if let Err(e) = listener.set_nonblocking(true) {
+        log::warn!("could not answer waiting presses: {e}");
+        return;
+    }
+    while let Ok((mut stream, _)) = listener.accept() {
+        let answered = (|| -> io::Result<()> {
+            stream.set_nonblocking(false)?;
+            stream.set_read_timeout(Some(REQUEST_TIMEOUT))?;
+            stream.set_write_timeout(Some(REQUEST_TIMEOUT))?;
+            read_line(&mut stream)?;
+            stream.write_all(reply.encode().as_bytes())
+        })();
+        if let Err(e) = answered {
+            log::debug!("could not answer a waiting press: {e}");
+        }
+    }
+}
+
 /// Blocks until a client connects or [`STOP_POLL`] passes.
 fn wait_readable(listener: &UnixListener) {
     let mut descriptor = libc::pollfd {
@@ -495,6 +519,25 @@ mod tests {
         assert_eq!(received.request, Request::Toggle);
         drop(server);
         assert!(path.exists(), "systemd's socket file stays");
+    }
+
+    /// A daemon that cannot serve answers the presses already waiting, so
+    /// that under socket activation they do not start it again.
+    #[test]
+    fn waiting_presses_are_answered_by_a_daemon_that_cannot_serve() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("control.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let client = {
+            let path = path.clone();
+            thread::spawn(move || send(&path, Request::Start))
+        };
+        thread::sleep(Duration::from_millis(100));
+        refuse_pending(Socket::Inherited(listener), Reply::AnotherDaemon);
+        assert!(matches!(
+            client.join().unwrap(),
+            Err(SendError::Refused(Reply::AnotherDaemon))
+        ));
     }
 
     #[test]

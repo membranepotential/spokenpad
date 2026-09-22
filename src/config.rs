@@ -553,6 +553,28 @@ impl Source {
         config.validate()?;
         Ok(config)
     }
+
+    /// What the daemon runs on: the file, or the defaults and the reason
+    /// when the file does not load. The daemon has taken presses by the time
+    /// it reads the file, and must not exit over it; each new dictation
+    /// window reads the file again and says why it failed.
+    pub fn load_or_defaults(&self) -> (Config, Option<anyhow::Error>) {
+        match self.load() {
+            Ok(config) => (config, None),
+            Err(error) => {
+                let mut config = Config::default();
+                config.nvim.display = session_display();
+                (config, Some(error))
+            }
+        }
+    }
+}
+
+/// The session's X display, read once, when the config is: everything after
+/// takes it as a value, so nothing has to ask the environment at the moment
+/// it wants a window.
+fn session_display() -> Option<String> {
+    env::var("DISPLAY").ok().filter(|name| !name.is_empty())
 }
 
 impl Config {
@@ -578,10 +600,7 @@ impl Config {
     /// Only the default location may be absent.
     pub fn load(path: Option<&Path>) -> Result<Self> {
         let mut config = Self::read_from(path)?;
-        // The one place the session's environment is read. Everything below
-        // this takes the display as a value, so nothing has to ask the
-        // environment at the moment it wants a window.
-        config.nvim.display = env::var("DISPLAY").ok().filter(|name| !name.is_empty());
+        config.nvim.display = session_display();
         Ok(config)
     }
 
@@ -877,6 +896,12 @@ mod tests {
         assert!(source.load().unwrap().nvim.copy_to_clipboard);
         std::fs::write(&path, "[nvim]\ncopy_to_clipboard = 3\n").unwrap();
         assert!(source.load().is_err());
+        let (config, error) = source.load_or_defaults();
+        assert!(!config.nvim.copy_to_clipboard, "the defaults");
+        assert!(
+            format!("{:#}", error.expect("and why")).contains("copy_to_clipboard"),
+            "the error names the key"
+        );
     }
 
     #[test]

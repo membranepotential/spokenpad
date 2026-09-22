@@ -89,7 +89,7 @@ pub trait InputStream {
 /// Opens input streams that feed a [`CallbackCore`].
 pub trait InputBackend {
     type Stream: InputStream;
-    fn open(&self, config: &Audio, core: Arc<CallbackCore>) -> Result<Self::Stream>;
+    fn open(&mut self, config: &Audio, core: Arc<CallbackCore>) -> Result<Self::Stream>;
 }
 
 /// Non-fatal conditions the device reported to the capture callback.
@@ -358,24 +358,24 @@ pub struct AudioCapture<B: InputBackend = PortAudioBackend> {
 }
 
 impl AudioCapture<PortAudioBackend> {
-    /// Initialises PortAudio and opens the configured input device.
-    pub fn new(audio: Audio, recording: Recording) -> Result<Self> {
-        Self::with_backend(PortAudioBackend::new()?, audio, recording)
+    /// The microphone through PortAudio, opened once something needs it.
+    pub fn new(audio: Audio, recording: Recording) -> Self {
+        Self::with_backend(PortAudioBackend::default(), audio, recording)
     }
 }
 
 impl<B: InputBackend> AudioCapture<B> {
-    pub fn with_backend(backend: B, audio: Audio, recording: Recording) -> Result<Self> {
+    /// Never fails: a device that cannot be opened now (unplugged, or a
+    /// sound server that is not up yet at login) is retried by
+    /// [`poll`](Self::poll) and at the next [`start_capture`](Self::start_capture),
+    /// and a press meanwhile gets the microphone-unavailable notice. The
+    /// daemon has taken presses by then, and must not exit over it.
+    pub fn with_backend(backend: B, audio: Audio, recording: Recording) -> Self {
         let maximum_frames = audio.sample_rate as usize * MAX_UTTERANCE_SECONDS;
         Self::build(backend, audio, recording, maximum_frames)
     }
 
-    fn build(
-        backend: B,
-        audio: Audio,
-        recording: Recording,
-        maximum_frames: usize,
-    ) -> Result<Self> {
+    fn build(backend: B, audio: Audio, recording: Recording, maximum_frames: usize) -> Self {
         let recorder = Arc::new(CaptureRecorder::new(recording, audio.sample_rate));
         let preroll_frames = audio.preroll_frames();
         let core = Arc::new(CallbackCore {
@@ -402,10 +402,13 @@ impl<B: InputBackend> AudioCapture<B> {
             cap: CapNotice::None,
             next_reopen: None,
         };
-        if preroll_frames > 0 {
-            capture.open_stream()?;
+        if preroll_frames > 0
+            && let Err(error) = capture.open_stream()
+        {
+            capture.next_reopen = Some(Instant::now() + REOPEN_BACKOFF);
+            log::error!("microphone unavailable; retrying: {error:#}");
         }
-        Ok(capture)
+        capture
     }
 
     pub fn start_capture(&mut self) -> Result<()> {
@@ -804,16 +807,14 @@ impl<B: InputBackend> Drop for AudioCapture<B> {
 }
 
 /// The production backend: PortAudio's non-blocking input stream.
+///
+/// PortAudio is initialised at the first open, and again after an open that
+/// failed: it lists the devices when it is initialised, so a sound server
+/// that came up since, or a microphone plugged in since, is only found by a
+/// fresh one.
+#[derive(Default)]
 pub struct PortAudioBackend {
-    portaudio: pa::PortAudio,
-}
-
-impl PortAudioBackend {
-    pub fn new() -> Result<Self> {
-        Ok(Self {
-            portaudio: pa::PortAudio::new().context("initialise PortAudio")?,
-        })
-    }
+    portaudio: Option<pa::PortAudio>,
 }
 
 pub struct PortAudioStream(pa::Stream<pa::NonBlocking, pa::Input<f32>>);
@@ -839,41 +840,55 @@ impl InputStream for PortAudioStream {
 impl InputBackend for PortAudioBackend {
     type Stream = PortAudioStream;
 
-    fn open(&self, config: &Audio, core: Arc<CallbackCore>) -> Result<PortAudioStream> {
-        let device = select_input_device(&self.portaudio, config.device.as_deref())?;
-        let info = self
-            .portaudio
-            .device_info(device)
-            .context("inspect input device")?;
-        if info.max_input_channels < 1 {
-            bail!("audio device {:?} has no input channels", info.name);
-        }
-        let params =
-            pa::StreamParameters::<f32>::new(device, 1, true, info.default_low_input_latency);
-        self.portaudio
-            .is_input_format_supported(params, f64::from(config.sample_rate))
-            .context("input device does not support mono float32 at the configured sample rate")?;
-        let settings = pa::InputStreamSettings::new(
-            params,
-            f64::from(config.sample_rate),
-            pa::FRAMES_PER_BUFFER_UNSPECIFIED,
-        );
-        let callback = move |pa::InputStreamCallbackArgs {
-                                 buffer,
-                                 frames,
-                                 flags,
-                                 ..
-                             }| {
-            core.process(&buffer[..frames], flags.bits());
-            pa::Continue
+    fn open(&mut self, config: &Audio, core: Arc<CallbackCore>) -> Result<PortAudioStream> {
+        let portaudio = match self.portaudio.take() {
+            Some(portaudio) => portaudio,
+            None => pa::PortAudio::new().context("initialise PortAudio")?,
         };
-        let mut stream = self
-            .portaudio
-            .open_non_blocking_stream(settings, callback)
-            .context("open PortAudio input stream")?;
-        stream.start().context("start PortAudio input stream")?;
-        Ok(PortAudioStream(stream))
+        // Kept only when the open works; dropped otherwise, which ends
+        // PortAudio (no stream holds it: every caller closed the old one
+        // first), so the next attempt lists the devices afresh.
+        let stream = open_stream(&portaudio, config, core)?;
+        self.portaudio = Some(portaudio);
+        Ok(stream)
     }
+}
+
+fn open_stream(
+    portaudio: &pa::PortAudio,
+    config: &Audio,
+    core: Arc<CallbackCore>,
+) -> Result<PortAudioStream> {
+    let device = select_input_device(portaudio, config.device.as_deref())?;
+    let info = portaudio
+        .device_info(device)
+        .context("inspect input device")?;
+    if info.max_input_channels < 1 {
+        bail!("audio device {:?} has no input channels", info.name);
+    }
+    let params = pa::StreamParameters::<f32>::new(device, 1, true, info.default_low_input_latency);
+    portaudio
+        .is_input_format_supported(params, f64::from(config.sample_rate))
+        .context("input device does not support mono float32 at the configured sample rate")?;
+    let settings = pa::InputStreamSettings::new(
+        params,
+        f64::from(config.sample_rate),
+        pa::FRAMES_PER_BUFFER_UNSPECIFIED,
+    );
+    let callback = move |pa::InputStreamCallbackArgs {
+                             buffer,
+                             frames,
+                             flags,
+                             ..
+                         }| {
+        core.process(&buffer[..frames], flags.bits());
+        pa::Continue
+    };
+    let mut stream = portaudio
+        .open_non_blocking_stream(settings, callback)
+        .context("open PortAudio input stream")?;
+    stream.start().context("start PortAudio input stream")?;
+    Ok(PortAudioStream(stream))
 }
 
 fn select_input_device(portaudio: &pa::PortAudio, query: Option<&str>) -> Result<pa::DeviceIndex> {
@@ -1020,7 +1035,7 @@ mod tests {
 
     impl InputBackend for TestBackend {
         type Stream = TestStream;
-        fn open(&self, _config: &Audio, core: Arc<CallbackCore>) -> Result<TestStream> {
+        fn open(&mut self, _config: &Audio, core: Arc<CallbackCore>) -> Result<TestStream> {
             self.opens.fetch_add(1, Ordering::Relaxed);
             if self.refuse.load(Ordering::Relaxed) {
                 bail!("no such device");
@@ -1107,9 +1122,36 @@ mod tests {
                 max_total_bytes: 1,
             },
             maximum_frames,
-        )
-        .unwrap();
+        );
         (backend, capture)
+    }
+
+    /// A microphone that cannot be opened when the daemon starts (a sound
+    /// server not up yet at login) does not stop it: the capture is built
+    /// without a stream, a press says the microphone is unavailable, and a
+    /// later press opens it.
+    #[test]
+    fn a_microphone_missing_at_start_is_opened_at_a_later_press() {
+        let backend = TestBackend::default();
+        backend.refuse.store(true, Ordering::Relaxed);
+        let mut capture = AudioCapture::build(
+            backend.clone(),
+            Audio {
+                sample_rate: 1_000,
+                preroll_ms: 100,
+                postroll_ms: TEST_POSTROLL_MS,
+                device: None,
+            },
+            Recording {
+                enabled: false,
+                dir: "/unused".into(),
+                max_total_bytes: 1,
+            },
+            10_000,
+        );
+        assert!(capture.start_capture().is_err(), "still unavailable");
+        backend.refuse.store(false, Ordering::Relaxed);
+        capture.start_capture().expect("opened at the next press");
     }
 
     #[test]
@@ -1308,8 +1350,7 @@ mod tests {
                 max_total_bytes: 1024 * 1024,
             },
             5,
-        )
-        .unwrap();
+        );
 
         capture.start_capture().unwrap();
         backend.feed(&[1.0, 2.0, 3.0]);

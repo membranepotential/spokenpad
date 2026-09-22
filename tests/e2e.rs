@@ -153,7 +153,7 @@ impl InputStream for FakeStream {
 
 impl InputBackend for FakeMicrophone {
     type Stream = FakeStream;
-    fn open(&self, config: &Audio, core: Arc<CallbackCore>) -> Result<FakeStream> {
+    fn open(&mut self, config: &Audio, core: Arc<CallbackCore>) -> Result<FakeStream> {
         if self.unplugged.load(Ordering::Relaxed) {
             anyhow::bail!("no such input device");
         }
@@ -388,8 +388,7 @@ impl Harness {
             microphone.clone(),
             config.audio.clone(),
             config.recording.clone(),
-        )
-        .expect("open the synthetic microphone");
+        );
         let build = {
             let (words, delay, calls) = (settings.words, settings.delay, Arc::clone(&calls));
             let (vad, chunk) = (settings.vad.clone(), settings.chunk);
@@ -1806,8 +1805,7 @@ fn replay_into_capture(minutes: usize, dropping: bool) -> usize {
             dir: "/unused".into(),
             max_total_bytes: 1,
         },
-    )
-    .expect("open the direct microphone");
+    );
     let mut worker = Worker::new(Pipeline {
         recognizer: Counting {
             words: false,
@@ -1897,7 +1895,7 @@ impl InputStream for DirectStream {
 
 impl InputBackend for DirectMicrophone {
     type Stream = DirectStream;
-    fn open(&self, _config: &Audio, core: Arc<CallbackCore>) -> Result<DirectStream> {
+    fn open(&mut self, _config: &Audio, core: Arc<CallbackCore>) -> Result<DirectStream> {
         self.alive.store(true, Ordering::Relaxed);
         *lock(&self.core) = Some(Arc::clone(&core));
         // A real device delivers at once; skip the first-callback stall.
@@ -2067,8 +2065,7 @@ fn real_models_transcribe_the_kennedy_sample() {
         microphone.clone(),
         config.audio.clone(),
         config.recording.clone(),
-    )
-    .unwrap();
+    );
     let (requests, received) = mpsc::channel();
     let stopping = Arc::new(AtomicBool::new(false));
     let stop = Arc::clone(&stopping);

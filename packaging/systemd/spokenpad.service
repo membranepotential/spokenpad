@@ -24,14 +24,17 @@ ExecStart=/usr/bin/spokenpad
 # the journal buys nothing but noise. `journalctl --user -u spokenpad` shows
 # the INFO line per dictation, which is what you want when watching it live.
 
-# A missing or broken speech model does not end the daemon: it records, says
-# so in the dictation window, and tries again at the next press. What still
-# ends it is a failure a retry can clear, such as "another spokenpad daemon
-# holds $XDG_STATE_HOME/spokenpad/daemon.lock" while a daemon started by hand
-# exits. A failure a retry cannot clear, such as an invalid config, stops at
-# systemd's start limit; `systemctl --user status spokenpad` then shows why.
+# Nothing a user can get wrong ends the daemon once it has taken its socket:
+# a missing model, a microphone that is not there yet, or a config file that
+# does not load (it runs on the defaults) are each said in the dictation
+# window and retried. Its one deliberate exit is 3, "another spokenpad daemon
+# holds $XDG_STATE_HOME/spokenpad/daemon.lock" -- one started by hand. It
+# answers the waiting presses before it exits, so that they do not start it
+# again, and it is not restarted: the press after the other daemon stops
+# starts this one. A crash is restarted.
 Restart=on-failure
 RestartSec=3
+RestartPreventExitStatus=3
 
 # The daemon stops itself well inside this: it gives its background threads
 # three seconds, which is also the whole budget a dictation pane has to write

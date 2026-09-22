@@ -261,7 +261,10 @@ caught up. The log always has the full sentence and paths.
   key while speaking" in the winbar. The WAV is still written.
 - **A microphone that stops delivering audio is reopened**, and the capture it
   interrupted is marked as having a gap. While idle the same repair runs
-  quietly, so the pre-roll is ready at the next press.
+  quietly, so the pre-roll is ready at the next press. A microphone that is
+  not there when the daemon starts (unplugged, or a sound server not up yet
+  at login) is looked for the same way; a press meanwhile says "microphone
+  unavailable".
 - **A capture much shorter than the hold, or nearly silent,** says so in the
   winbar.
 - **A capture with no speech in it is not transcribed.** A recogniser given
@@ -419,11 +422,13 @@ Global options: `-c/--config PATH`, `--model-dir DIR`, `-v/--verbose` (debug
 log to stderr), `--log-file PATH` (`none` for no file). The daemon also takes
 `--dump-audio DIR`, which saves each capture as decoded.
 
-Exit codes: `2` model files missing (`check`, `transcribe`), `4` the WAV
-given to `transcribe` is unreadable or not 16 kHz, `1` anything else,
-including `start`, `stop`, `toggle` or `cancel` finding no daemon listening.
-The daemon itself does not exit over a missing model: it records, says so in
-the winbar, and tries again at the next press.
+Exit codes: `2` model files missing (`check`, `transcribe`), `3` another
+spokenpad daemon is already running, `4` the WAV given to `transcribe` is
+unreadable or not 16 kHz, `1` anything else, including `start`, `stop`,
+`toggle` or `cancel` finding no daemon listening. The daemon itself does not
+exit over a missing model, a microphone it cannot open, or a config file
+that does not load (it runs on the defaults): it says so in the winbar and
+tries again at the next press or window.
 
 ## Accuracy and speed
 

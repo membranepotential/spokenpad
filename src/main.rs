@@ -133,7 +133,16 @@ fn run(args: Args) -> Result<u8> {
         path: args.config,
         model_dir: args.model_dir,
     };
-    let config = source.load()?;
+    let config = match command {
+        Some(_) => source.load()?,
+        None => {
+            let (config, invalid) = source.load_or_defaults();
+            if let Some(error) = invalid {
+                log::error!("config not loaded, running on the defaults: {error:#}");
+            }
+            config
+        }
+    };
     match command {
         Some(Action::Editor) => match spokenpad::shell::nvim::open_editor(&config.nvim)? {},
         Some(Action::FetchModels { dir }) => {
@@ -233,10 +242,25 @@ fn run(args: Args) -> Result<u8> {
             }
         }
         None => {
-            if let Some(p) = &args.dump_audio {
-                std::fs::create_dir_all(p)?;
+            // Nothing from here on may end the daemon over a setting: it has
+            // taken presses on its socket, and one that exits leaves them
+            // unanswered while systemd starts it again.
+            let dump = args
+                .dump_audio
+                .filter(|dir| match std::fs::create_dir_all(dir) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        log::error!("not dumping audio: create {}: {e}", dir.display());
+                        false
+                    }
+                });
+            match spokenpad::shell::daemon::run(config, source, inherited, dump.as_deref()) {
+                Err(e) if e.is::<spokenpad::shell::daemon::AnotherDaemon>() => {
+                    eprintln!("spokenpad: {e:#}");
+                    return Ok(3);
+                }
+                result => result?,
             }
-            spokenpad::shell::daemon::run(config, source, inherited, args.dump_audio.as_deref())?;
         }
     }
     Ok(0)

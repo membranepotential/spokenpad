@@ -72,14 +72,19 @@ pub enum Reply {
     UnknownRequest,
     /// The daemon is shutting down and will not act on anything more.
     ShuttingDown,
+    /// systemd started a daemon for this press, but another spokenpad
+    /// daemon of this user is running (one started by hand) and holds the
+    /// lock.
+    AnotherDaemon,
 }
 
 impl Reply {
-    const ALL: [Self; 4] = [
+    const ALL: [Self; 5] = [
         Self::Accepted,
         Self::Malformed,
         Self::UnknownRequest,
         Self::ShuttingDown,
+        Self::AnotherDaemon,
     ];
 
     fn as_str(self) -> &'static str {
@@ -88,6 +93,7 @@ impl Reply {
             Self::Malformed => "error malformed request",
             Self::UnknownRequest => "error unknown request",
             Self::ShuttingDown => "error shutting down",
+            Self::AnotherDaemon => "error another daemon is running",
         }
     }
 

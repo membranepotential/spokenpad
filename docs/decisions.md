@@ -1197,11 +1197,23 @@ script and as few setup steps as possible.
   per-user lock.
 - **Models are not packaged.** `spokenpad fetch-models` is the one explicit
   step, and optional: the daemon downloads the default models itself.
-- **Restart policy.** `RestartPreventExitStatus=2` is dropped with exit 2: a
-  missing model no longer ends the daemon. `Restart=on-failure` stays for
-  failures a retry can clear; one that cannot, such as an invalid config,
-  stops at systemd's start limit. `TimeoutStopSec=10` stays above the
-  three-second shutdown budget of a pane.
+- **No exit a user can cause.** A daemon that exits leaves the presses
+  queued on systemd's socket unanswered, and systemd starts it again for
+  them until the unit's start limit fails the socket. So once the socket is
+  adopted, nothing the user can get wrong ends the daemon: a missing model
+  is downloaded or retried, a microphone that cannot be opened at start (a
+  sound server not up yet at login) is retried by the watchdog and at each
+  press, with PortAudio initialised afresh so it sees devices that appeared
+  since, and a config file that does not load is replaced by the defaults,
+  with the error in the log and in the first window. The one deliberate
+  exit is `3`, another daemon holding the per-user lock (one started by
+  hand): it answers the waiting presses first (`Reply::AnotherDaemon`), and
+  the unit has `RestartPreventExitStatus=3`, so each press starts it at most
+  once. `Restart=on-failure` stays for crashes. A unit that passes the wrong
+  socket still fails loudly: serving a socket the key bindings do not
+  connect to would look like a working daemon that hears nothing.
+  `TimeoutStopSec=10` stays above the three-second shutdown budget of a
+  pane.
 - **Development** runs a build of one's own through the drop-in
   `packaging/systemd/dev.conf.example` (`ExecStart=%h/.local/bin/spokenpad`)
   after `cargo install --locked --path . --root ~/.local`.

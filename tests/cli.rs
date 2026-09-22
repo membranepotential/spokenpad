@@ -198,32 +198,7 @@ fn a_socket_activated_daemon_answers_the_press_that_started_it() {
     .unwrap();
     let socket = root.join("spokenpad.sock");
     let log = root.join("daemon.log");
-    let mut activator = Command::new("systemd-socket-activate")
-        .env("XDG_STATE_HOME", root)
-        .env("XDG_CONFIG_HOME", root)
-        .env("XDG_DATA_HOME", root)
-        .env("XDG_RUNTIME_DIR", root)
-        // Its child gets only what it is told to pass on, as a unit's
-        // service gets only the user manager's environment.
-        .args(["-E", "XDG_STATE_HOME", "-E", "XDG_CONFIG_HOME"])
-        .args(["-E", "XDG_DATA_HOME", "-E", "XDG_RUNTIME_DIR"])
-        .arg("--listen")
-        .arg(&socket)
-        .arg(env!("CARGO_BIN_EXE_spokenpad"))
-        .arg("--log-file")
-        .arg(&log)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("systemd-socket-activate is part of systemd");
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !socket.exists() {
-        assert!(
-            Instant::now() < deadline,
-            "systemd-socket-activate never listened"
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    let mut activator = activate(root, &log);
 
     let pressed = Instant::now();
     let first = command(&dir).arg("cancel").output().unwrap();
@@ -273,6 +248,67 @@ fn a_socket_activated_daemon_answers_the_press_that_started_it() {
     );
     let log = std::fs::read_to_string(&log).unwrap();
     assert!(log.contains("listening on"), "{log}");
+}
+
+/// Starts `systemd-socket-activate` on `root/spokenpad.sock`, which starts
+/// the daemon, logging to `log`, at the first connection. Returns once it
+/// listens.
+fn activate(root: &std::path::Path, log: &std::path::Path) -> std::process::Child {
+    let socket = root.join("spokenpad.sock");
+    let activator = Command::new("systemd-socket-activate")
+        .env("XDG_STATE_HOME", root)
+        .env("XDG_CONFIG_HOME", root)
+        .env("XDG_DATA_HOME", root)
+        .env("XDG_RUNTIME_DIR", root)
+        // Its child gets only what it is told to pass on, as a unit's
+        // service gets only the user manager's environment.
+        .args(["-E", "XDG_STATE_HOME", "-E", "XDG_CONFIG_HOME"])
+        .args(["-E", "XDG_DATA_HOME", "-E", "XDG_RUNTIME_DIR"])
+        .arg("--listen")
+        .arg(&socket)
+        .arg(env!("CARGO_BIN_EXE_spokenpad"))
+        .arg("--log-file")
+        .arg(log)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("systemd-socket-activate is part of systemd");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !socket.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "systemd-socket-activate never listened"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    activator
+}
+
+/// A daemon started by hand holds the per-user lock. The one systemd starts
+/// for a press answers that press -- another daemon is running -- and exits
+/// with 3, which the unit does not restart on; the press does not wait, and
+/// does not start it again.
+#[test]
+fn a_socket_activated_daemon_that_finds_another_answers_and_exits_three() {
+    use std::os::fd::AsRawFd;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir(root.join("spokenpad")).unwrap();
+    let lock = std::fs::File::create(root.join("spokenpad/daemon.lock")).unwrap();
+    // SAFETY: flock borrows the descriptor `lock` owns for the whole call and
+    // retains no pointer.
+    let held = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    assert_eq!(held, 0, "the test holds the lock the other daemon would");
+    let log = root.join("daemon.log");
+    let mut activator = activate(root, &log);
+
+    let press = command(&dir).arg("start").output().unwrap();
+    assert_eq!(code(&press), 1);
+    let stderr = String::from_utf8_lossy(&press.stderr);
+    assert!(stderr.contains("another daemon is running"), "{stderr}");
+    let status = activator.wait().unwrap();
+    assert_eq!(status.code(), Some(3), "{status}");
+    drop(lock);
 }
 
 /// A config from before the control socket names what replaced `[hotkey]`.

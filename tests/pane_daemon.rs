@@ -435,8 +435,7 @@ impl Daemon {
             microphone.clone(),
             config.audio.clone(),
             config.recording.clone(),
-        )
-        .expect("open the synthetic microphone");
+        );
         let pipeline = PipelineSource::Ready(Pipeline {
             recognizer: Fixed,
             segmenter: None::<Never>,
@@ -564,7 +563,11 @@ impl InputStream for Stream {
 impl InputBackend for Microphone {
     type Stream = Stream;
 
-    fn open(&self, config: &spokenpad::config::Audio, core: Arc<CallbackCore>) -> Result<Stream> {
+    fn open(
+        &mut self,
+        config: &spokenpad::config::Audio,
+        core: Arc<CallbackCore>,
+    ) -> Result<Stream> {
         let stop = Arc::new(AtomicBool::new(false));
         let frames = (config.sample_rate as usize / 50).max(1);
         let mouth = Arc::clone(&self.mouth);

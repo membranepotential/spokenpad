@@ -9,7 +9,7 @@
 use crate::{
     config::{Config, Source},
     core::{
-        control::{Received, Request},
+        control::{Received, Reply, Request},
         decode::{
             Commit, Pipeline, Preview, Recognizer, Segmenter, TickKind, Utterance, UtteranceId,
             Worker,
@@ -21,7 +21,7 @@ use crate::{
     },
     shell::{
         audio::{AudioCapture, CaptureEvent, Captured, InputBackend, PostRoll},
-        control::{ControlServer, Socket},
+        control::{ControlServer, Socket, refuse_pending},
         inference::{SpeechSegmenter, Transcriber, load_segmenter},
         models::ensure_defaults,
         nvim::{AppendFailure, CopyOutcome, IndicatorState, NvimSession},
@@ -487,6 +487,20 @@ fn editor_thread(
     nvim.close();
 }
 
+/// Another daemon of this user holds the lock: the one exit of a daemon that
+/// has taken over its socket. `main` gives it exit code 3, which the unit
+/// does not restart on.
+#[derive(Debug)]
+pub struct AnotherDaemon(std::io::Error);
+
+impl std::fmt::Display for AnotherDaemon {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "another spokenpad daemon is running ({})", self.0)
+    }
+}
+
+impl std::error::Error for AnotherDaemon {}
+
 /// Holds the lock for the daemon lifetime. Never unlink a lock another process may hold.
 fn daemon_lock() -> Result<File> {
     let dir = crate::config::state_dir();
@@ -504,11 +518,9 @@ fn daemon_lock() -> Result<File> {
         .open(dir.join("daemon.lock"))?;
     // SAFETY: flock borrows a valid owned file descriptor and retains no pointer.
     let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    ensure!(
-        result == 0,
-        "another spokenpad Rust daemon is running ({})",
-        std::io::Error::last_os_error()
-    );
+    if result != 0 {
+        return Err(AnotherDaemon(std::io::Error::last_os_error()).into());
+    }
     Ok(file)
 }
 
@@ -522,7 +534,20 @@ pub fn run(
     inherited: Option<Socket>,
     dump_dir: Option<&Path>,
 ) -> Result<()> {
-    let _lock = daemon_lock()?;
+    let _lock = match daemon_lock() {
+        Ok(lock) => lock,
+        Err(e) => {
+            // A press queued on systemd's socket would start this daemon
+            // again the moment it exits, and again: each is answered first,
+            // so that a press starts it at most once.
+            if let Some(socket) = inherited
+                && e.is::<AnotherDaemon>()
+            {
+                refuse_pending(socket, Reply::AnotherDaemon);
+            }
+            return Err(e);
+        }
+    };
     // Served first, before anything slow: under socket activation the press
     // that started this daemon is waiting on the socket, and a request is
     // stamped when it is read. The model loads later, on the inference
@@ -538,7 +563,7 @@ pub fn run(
     let stopping = Arc::new(AtomicBool::new(false));
     signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&stopping))?;
     signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&stopping))?;
-    let capture = AudioCapture::new(config.audio.clone(), config.recording.clone())?;
+    let capture = AudioCapture::new(config.audio.clone(), config.recording.clone());
     let (asr, vad, rate) = (
         config.asr.clone(),
         config.vad.clone(),
