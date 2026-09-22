@@ -834,6 +834,54 @@ fn a_prompt_at_startup_does_not_keep_the_pane_from_opening() {
     );
 }
 
+/// `:restart` (Neovim 0.12) runs `VimLeavePre` as a quit does, and then the
+/// process exits. It is not the user closing the pane: the pane ends as when
+/// the editor dies, so the daemon does not cancel the capture.
+#[test]
+fn a_restart_is_not_the_users_close() {
+    if !harness::tools_or_skip(&["Xvfb", "nvim", "fc-match"]) {
+        return;
+    }
+    let server = XServer::start();
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let config = dictation_config(directory.path());
+    let file = config.dictation_dir.join("dictation-2026-09-22-000000.md");
+    std::fs::write(&file, "").expect("create the dictation file");
+    let mut pane = pane_on(&server, &config, &file);
+    let restarts = call(
+        &mut pane,
+        "nvim_exec_lua",
+        vec![
+            Value::from("return vim.fn.exists(':restart')"),
+            Value::Array(Vec::new()),
+        ],
+        PATIENCE,
+    );
+    if restarts.as_u64() != Some(2) {
+        eprintln!("skipping: this Neovim has no `:restart`");
+        return;
+    }
+    assert_eq!(
+        quit_notices(&mut pane),
+        1,
+        "the quit notice was not registered"
+    );
+
+    let _restarted = KillNaming(config.socket_path.clone());
+    call(
+        &mut pane,
+        "nvim_input",
+        vec![Value::from(":restart<CR>")],
+        PATIENCE,
+    );
+    let ending = wait_for(PATIENCE, "the pane to finish", || finished(&mut pane));
+    assert_eq!(
+        ending,
+        Ending::EditorDied,
+        "an editor that `:restart` ended was read as the user's close"
+    );
+}
+
 // ------------------------------------------------------------------ helpers
 
 /// How many quit notices (the pane's `VimLeavePre`
@@ -861,6 +909,34 @@ fn finished(pane: &mut Pane) -> Option<Ending> {
     match pane.step(Duration::from_millis(50)) {
         Ok(Status::Finished(ending)) => Some(ending),
         _ => None,
+    }
+}
+
+/// Kills, when dropped, every process that names the socket on its command
+/// line: the server a `:restart` starts and leaves waiting for a UI that
+/// handles its `restart` event. The socket is in the test's own directory, so
+/// nothing else names it.
+struct KillNaming(PathBuf);
+
+impl Drop for KillNaming {
+    fn drop(&mut self) {
+        let needle = self.0.as_os_str().as_encoded_bytes();
+        for entry in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
+            let Some(pid) = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse::<libc::pid_t>().ok())
+            else {
+                continue;
+            };
+            let named = std::fs::read(entry.path().join("cmdline"))
+                .is_ok_and(|cmdline| cmdline.split(|byte| *byte == 0).any(|arg| arg == needle));
+            if named {
+                // SAFETY: `kill` takes no pointers; it signals one process
+                // found by this test's own socket path.
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+            }
+        }
     }
 }
 

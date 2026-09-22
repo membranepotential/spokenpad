@@ -1965,3 +1965,33 @@ press repeated it.
   window is mapped while Neovim reports `blocking`, the notice is registered
   once `<CR>` answers the prompt, and `:q` is then the user's close. With the
   registration awaited, the pane does not open.
+
+## `:restart` is not the user's close (2026-09-22)
+
+The same review: the quit notice keyed on `v:dying` alone, and the review
+held that `:restart` (Neovim 0.12) runs `VimLeavePre` with `v:dying` at 0 and
+then keeps the process, so a later crash would read as the user's close.
+Measured on 0.12.5 over `--embed`, with the notice reporting `v:dying` and
+`v:exitreason` from `VimLeavePre`: `:q`, `:q!`, `:wq`, `:qa`, `:cq` and `ZZ`
+report 0 and `quit`; `:restart` and `:restart!` report 0 and `restart` or
+`restart!`. The process does not stay: after `:restart` the old one exits
+(its channel closes), and the new server it starts, with the same argv, waits
+for a UI that handles the `restart` event, answering on the old `--listen`
+socket with no window. So the flag set by the notice is never followed by
+another life of the same process, but `:restart` itself read as the user's
+close and cancelled the capture.
+
+- Chosen: on 0.12 and later the notice also needs `v:exitreason` at `quit`,
+  so `:restart` ends the pane as the editor dying: the capture goes on. The
+  version is checked with `has("nvim-0.12")`, which added both `:restart`
+  and `v:exitreason` (`news.txt` of 0.12 lists both as new); an unknown
+  `v:` variable reads as `nil` on 0.12.5 rather than failing, so testing the
+  value alone would read every quit on 0.11 as a crash. The flag is never
+  cleared: `VimLeavePre` runs once the exit can no longer be cancelled.
+- Rejected: clearing the flag. No process outlives a `VimLeavePre` with
+  `v:exitreason` at `quit`, so there is nothing to clear it for.
+- Not done: the server `:restart` leaves on the socket. Handling the
+  `restart` UI event, or ending that server, is a separate change.
+- Test: `tests/pane_render.rs` runs `:restart` in a pane and expects
+  `Ending::EditorDied`; it fails with the `v:dying` check alone. It skips on
+  a Neovim without `:restart`, and kills the server `:restart` started.

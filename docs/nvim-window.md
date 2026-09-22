@@ -336,9 +336,9 @@ that is not a gap; for CJK input it is, and `attach` is the answer there.
   taken for the next pane's.
 - **You `:q` in it.** The same, from the other end, a running recording
   cancelled included. When the pane attaches, it registers a `VimLeavePre`
-  autocommand in its Neovim that, with `v:dying` at 0 — a quit Neovim was
-  told to do: `:q`, `:wq`, `:qa`, `:cq` — sends a notification on the pane's
-  own channel before any channel closes. That notification is what makes an
+  autocommand in its Neovim that, with `v:dying` at 0 and `v:exitreason` at
+  `quit` — a quit Neovim was told to do: `:q`, `:q!`, `:wq`, `:qa`, `:cq` —
+  sends a notification on the pane's own channel before any channel closes. That notification is what makes an
   exit your close, not the exit status or its timing: Neovim closes its
   channels and then waits up to two seconds for its jobs (a language server
   that ignores `SIGTERM`), and the pane does not wait for the process at all.
@@ -348,7 +348,13 @@ that is not a gap; for CJK input it is, and `attach` is the answer there.
 - **The editor dies.** Killed, crashed, or taken down by a deadly signal
   (which sets `v:dying`): it says nothing before its channel closes, so it
   is not your close. The pane goes, a recording goes on, and its next text
-  opens a new pane on the pending passage — nothing is lost to a crash. In attach mode the daemon cannot tell `:q` in an editor it did not
+  opens a new pane on the pending passage — nothing is lost to a crash.
+  `:restart` (Neovim 0.12) counts as the editor dying too: it runs
+  `VimLeavePre` with `v:exitreason` at `restart`, and then the process
+  exits. Neovim starts a new server for a UI that handles its `restart`
+  event, which the pane does not, so that server is left running without a
+  window, on the pane's `--listen` socket. Before 0.12 there is no
+  `v:exitreason` and no `:restart`, and the notice needs `v:dying` alone. In attach mode the daemon cannot tell `:q` in an editor it did not
   start from that editor dying, so there quitting the editor never cancels
   a recording.
 - **The daemon restarts.** The window goes with it — it is a thread of that

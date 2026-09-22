@@ -258,7 +258,8 @@ needs no word to end the passage: the editor dies with the window, its socket
 goes with it, and the next key-down finds a dead socket and asks for a new
 pane. What the thread does record is whether the user closed it — the window
 manager's `WM_DELETE_WINDOW`, or Neovim announcing on the pane's channel, from
-`VimLeavePre` with `v:dying` at 0, that it was told to quit — and when, stamped
+`VimLeavePre` with `v:dying` at 0 and `v:exitreason` at `quit`, that it was
+told to quit (`:restart` is not) — and when, stamped
 as that arrives, and cleared when the next pane is asked for. The
 editor thread asks after every piece of work and every 66 ms, stops opening
 panes for text until the next key press, and sends the time to the event

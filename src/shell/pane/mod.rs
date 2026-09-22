@@ -123,11 +123,11 @@ pub enum Status {
 pub enum Ending {
     /// The user closed it, at `at`: the window manager asked
     /// (`WM_DELETE_WINDOW`), or Neovim said it was quitting because it was
-    /// told to (`:q`, `:wq`, `:qa`, `:cq`). The daemon cancels a capture that
-    /// was running.
+    /// told to (`:q`, `:q!`, `:wq`, `:qa`, `:cq`). The daemon cancels a
+    /// capture that was running.
     ByUser { at: Instant },
-    /// Neovim went away without saying so — killed, crashed, a deadly signal
-    /// — or the pane lost its sources of events. Nothing the user meant: the
+    /// Neovim went away without saying so — killed, crashed, a deadly
+    /// signal, `:restart` — or the pane lost its sources of events. Nothing the user meant: the
     /// capture goes on, and its next text opens a new pane.
     EditorDied,
 }
@@ -140,6 +140,13 @@ pub enum Ending {
 /// independent of how long the process then takes to exit — Neovim waits up
 /// to two seconds for its jobs, an LSP among them — and a crash can never
 /// produce it.
+///
+/// `:restart` (Neovim 0.12) runs `VimLeavePre` too, with `v:dying` at 0, and
+/// then the process exits; its new server waits for a UI that handles the
+/// `restart` event, which the pane does not. That is not the user closing the
+/// pane either, so the notice also needs `v:exitreason` at `quit`, which
+/// every quit above sets and `:restart` does not. Before 0.12 there is
+/// neither.
 const ANNOUNCE_LEAVING: &str = r#"
 local channel
 for _, chan in ipairs(vim.api.nvim_list_chans()) do
@@ -150,10 +157,11 @@ end
 if not channel then
   return
 end
+local reasoned = vim.fn.has("nvim-0.12") == 1
 vim.api.nvim_create_autocmd("VimLeavePre", {
   group = vim.api.nvim_create_augroup("SpokenpadPane", { clear = true }),
   callback = function()
-    if vim.v.dying == 0 then
+    if vim.v.dying == 0 and (not reasoned or vim.v.exitreason == "quit") then
       pcall(vim.rpcnotify, channel, "spokenpad_leaving")
     end
   end,
@@ -192,7 +200,8 @@ pub struct Pane {
     /// Whether the editor has already exited, so nothing tries to talk to it.
     editor_gone: bool,
     /// When Neovim said it was quitting because it was told to
-    /// ([`ANNOUNCE_LEAVING`]); its channel closes a moment later.
+    /// ([`ANNOUNCE_LEAVING`]); its channel closes a moment later. Never
+    /// cleared: `VimLeavePre` runs once the exit can no longer be cancelled.
     leaving: Option<Instant>,
     /// Whether the last row says that the daemon is waiting for a call
     /// Neovim holds behind a half-typed command ([`HELD_NOTICES`]).
