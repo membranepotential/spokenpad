@@ -535,9 +535,20 @@ impl Harness {
         });
     }
     fn captures(&self) -> usize {
-        fs::read_dir(&self.recordings)
-            .map(|entries| entries.flatten().count())
-            .unwrap_or(0)
+        self.wavs().len()
+    }
+    /// The recovery WAVs, oldest first; the directory also holds the list of
+    /// those waiting to be transcribed.
+    fn wavs(&self) -> Vec<PathBuf> {
+        let mut files: Vec<_> = fs::read_dir(&self.recordings)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|e| e == "wav"))
+            .collect();
+        files.sort();
+        files
     }
     fn release(&self) {
         self.send(Request::Stop);
@@ -581,13 +592,7 @@ impl Harness {
             .unwrap_or_default()
     }
     fn recovery_wav(&self) -> (Vec<f32>, u32) {
-        let mut files: Vec<_> = fs::read_dir(&self.recordings)
-            .expect("recording directory")
-            .flatten()
-            .map(|entry| entry.path())
-            .collect();
-        files.sort();
-        read_capture(files.last().expect("a recovery WAV")).expect("readable WAV")
+        read_capture(self.wavs().last().expect("a recovery WAV")).expect("readable WAV")
     }
 
     /// Evaluate a Vim expression inside the running editor, waiting for it to
@@ -1675,11 +1680,10 @@ fn recordings_left_at_a_stop_are_transcribed_at_the_next_start() {
     h.press(false);
     h.say(&tone(0.5));
     h.release_for_good();
-    let loud: usize = fs::read_dir(&h.recordings)
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .filter(|path| path.extension().is_some_and(|e| e == "wav"))
-        .map(|path| loud_samples(&read_capture(&path).unwrap().0))
+    let loud: usize = h
+        .wavs()
+        .iter()
+        .map(|path| loud_samples(&read_capture(path).unwrap().0))
         .sum();
     assert_eq!(
         loud,
@@ -1703,9 +1707,13 @@ fn recordings_left_at_a_stop_are_transcribed_at_the_next_start() {
     );
     assert_eq!(dictated(&h), before, "{saved}");
 
-    let h = h.restart(settings(false, Duration::ZERO));
+    let h = h.restart(settings(true, Duration::ZERO));
+    // Until each is transcribed, a crash of this daemon leaves them listed.
+    thread::sleep(Duration::from_millis(300));
+    assert_eq!(fs::read_to_string(&list).unwrap(), saved, "kept as it was");
+    h.load(Ok(()));
     wait_until("the rest of both is transcribed", || dictated(&h) == loud);
-    assert!(!list.exists(), "the list is taken, and used once");
+    wait_until("the list goes once nothing is left", || !list.exists());
     thread::sleep(Duration::from_millis(300));
     assert_eq!(dictated(&h), loud, "nothing is written twice");
     h.finish();
@@ -1752,10 +1760,12 @@ fn a_waiting_recording_that_vanished_is_reported_lost() {
 }
 
 /// A recording that becomes unreadable after part of it was transcribed is
-/// not reported lost: its text so far is in the file, and the window says
-/// from where to recover the rest.
+/// not reported lost: its text so far is in the file, the window says so,
+/// and it stays listed for the next start, from where its text reaches. That
+/// start finds the file shorter than its text, and says the rest is gone
+/// rather than advising a recovery that would fail the same way.
 #[test]
-fn a_recording_that_fails_partway_says_from_where_to_recover_it() {
+fn a_recording_that_fails_partway_is_left_to_the_next_start() {
     if !nvim_available() {
         return;
     }
@@ -1767,15 +1777,12 @@ fn a_recording_that_fails_partway_says_from_where_to_recover_it() {
         delay: Duration::from_millis(500),
         ..Settings::default()
     });
+    let list = h.recordings.join("waiting.tsv");
     h.press(true);
     h.say(&tone(4.0));
     h.press_only(true);
     h.release_for_good();
-    let recording = fs::read_dir(&h.recordings)
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .find(|path| path.extension().is_some_and(|e| e == "wav"))
-        .expect("a recording");
+    let recording = h.wavs().pop().expect("a recording");
     h.load(Ok(()));
     wait_until("the first window's text is written", || {
         counted(&h.text()) > 0
@@ -1793,17 +1800,74 @@ fn a_recording_that_fails_partway_says_from_where_to_recover_it() {
             .contains("recording partly transcribed")
     });
     let detail = h.indicator("notice_detail");
-    let from: f64 = detail
-        .trim()
-        .rsplit_once("spokenpad transcribe --from ")
-        .and_then(|(_, seconds)| seconds.parse().ok())
-        .unwrap_or_else(|| panic!("no offset to recover from: {detail}"));
     assert!(
-        from > 0. && from < 4.,
-        "from where the written text ends: {detail}"
+        detail.contains("the next start tries the rest again"),
+        "{detail}"
     );
-    assert!(counted(&h.text()) < 4 * RATE as usize, "{}", h.text());
+    let listed = fs::read_to_string(&list).expect("listed for the next start");
+    let through: usize = listed
+        .split('\t')
+        .next()
+        .and_then(|frames| frames.parse().ok())
+        .unwrap_or_else(|| panic!("{listed}"));
+    assert!(
+        through > 0 && through < 4 * RATE as usize,
+        "from where its text reaches: {listed}"
+    );
+
+    // A capture running opens the window the notice shows in, and the next
+    // press would clear it.
+    let h = h.restart(Settings {
+        loading: true,
+        ..Settings::default()
+    });
+    h.press(true);
+    h.load(Ok(()));
+    wait_until("the next start says the rest is gone", || {
+        h.indicator("notice").contains("recording shortened")
+    });
+    let detail = h.indicator("notice_detail");
+    assert!(!detail.contains("--from"), "{detail}");
+    wait_until("nothing is left to list", || !list.exists());
     h.finish();
+}
+
+/// A recording whose transcription fails while the daemon stops is not
+/// dropped: it stays listed, from where its text reaches.
+#[test]
+fn a_recording_that_fails_during_the_stop_stays_listed() {
+    let h = Harness::start(Settings {
+        mode: Mode::Attach,
+        loading: true,
+        vad: Some(brisk_vad()),
+        words: false,
+        max_seconds: 1.0,
+        delay: Duration::from_millis(1_500),
+        ..Settings::default()
+    });
+    h.press(true);
+    h.say(&tone(4.0));
+    h.press_only(true);
+    h.release_for_good();
+    let recording = h.wavs().pop().expect("a recording");
+    h.load(Ok(()));
+    wait_until("the first window's text is written", || dictated(&h) > 0);
+    // The next window the transcription reads fails, during the stop.
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&recording)
+        .unwrap()
+        .set_len(44)
+        .unwrap();
+    let mut h = h;
+    h.stop();
+    let listed = fs::read_to_string(h.recordings.join("waiting.tsv")).expect("listed");
+    let through: usize = listed
+        .split('\t')
+        .next()
+        .and_then(|frames| frames.parse().ok())
+        .unwrap_or_else(|| panic!("{listed}"));
+    assert!(through > 0, "from where its text reaches: {listed}");
 }
 
 /// A model that cannot be had (offline, a failed download, a broken file)

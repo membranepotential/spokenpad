@@ -15,7 +15,7 @@ use crate::{
             Worker,
         },
         frames::Frames,
-        session::{Notice, Preparing, Recognition, RecordingStatus, Session},
+        session::{Notice, Preparing, Recognition, RecordingStatus, Rest, Session},
         state::{Cause, Command, DiscardReason, Event, State},
         text::Processor,
     },
@@ -87,13 +87,35 @@ pub enum PipelineSource<R, S> {
 }
 
 /// A capture made before the speech model was ready, or left untranscribed
-/// by the last daemon: its recovery WAV, the utterance it is, and how far
-/// into the WAV its transcription has committed text.
+/// by the last daemon: its recovery WAV, the utterance it is, how far into
+/// the WAV its transcription has committed text, and where this daemon's
+/// attempt at it began.
 struct Waiting {
     path: PathBuf,
     id: UtteranceId,
     through: Frames,
+    from: Frames,
 }
+
+/// A recording ends, or stops being readable, before the text already written
+/// from it does: it was cut or replaced since, and its rest is gone.
+#[derive(Debug)]
+struct ShorterThanItsText {
+    recorded: f64,
+    through: f64,
+}
+
+impl std::fmt::Display for ShorterThanItsText {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "it ends at {:.2}s, before the {:.2}s its text already reaches",
+            self.recorded, self.through
+        )
+    }
+}
+
+impl std::error::Error for ShorterThanItsText {}
 
 /// Control requests in arrival order, each preceded by the clock at its own
 /// stamp, so a repeat window that closed before a request arrived is closed
@@ -731,9 +753,11 @@ where
         }
         PipelineSource::Load(_) => Recognition::Preparing(Preparing::Loading),
     };
-    // Captures made before the model was ready, not yet sent to it; and those
-    // sent to it and not transcribed yet. The first are those the last daemon
-    // left, from where their text reached.
+    // Captures made before the model was ready, not yet sent to it; those
+    // sent to it and not transcribed yet; and those whose transcription
+    // failed partway, for the next start. The first are those the last
+    // daemon left, from where their text reached. All three are on the list
+    // the next start reads (`persist`).
     let mut waiting: VecDeque<Waiting> = capture
         .take_unfinished()
         .into_iter()
@@ -747,10 +771,12 @@ where
                 path,
                 id: session.reserve_id(),
                 through,
+                from: through,
             }
         })
         .collect();
     let mut transcribing: Vec<Waiting> = Vec::new();
+    let mut retry: Vec<Waiting> = Vec::new();
     // Whether the capture that is recording, or was last, decodes as it goes.
     // One made before the model was ready does not: it is on disk only.
     let mut live = false;
@@ -876,6 +902,10 @@ where
                             send(&work_tx, Work::Finish(tail))?;
                         } else {
                             keep(&mut session, tail.utterance.id, &capture, &mut waiting);
+                            let _ = persist(
+                                &capture,
+                                waiting.iter().chain(&transcribing).chain(&retry),
+                            );
                         }
                     }
                     Command::Discard(reason) => {
@@ -956,12 +986,11 @@ where
                         result,
                         elapsed,
                     } => {
-                        let result_failed = result.is_err();
-                        match result {
+                        match &result {
                             Ok((text, frames)) => {
                                 log::info!(
                                     "decoded the last {:.1}s in {:.2}s (utterance {})",
-                                    Frames(frames).seconds(rate),
+                                    Frames(*frames).seconds(rate),
                                     elapsed.as_secs_f64(),
                                     id.0
                                 );
@@ -970,37 +999,21 @@ where
                             Err(e) => log::error!("decode failed for utterance {}: {e:#}", id.0),
                         }
                         if let Some(at) = transcribing.iter().position(|t| t.id == id) {
-                            let Waiting { path, through, .. } = transcribing.remove(at);
+                            let recording = transcribing.remove(at);
                             let to_go = waiting.len() + transcribing.len();
-                            match (result_failed, through) {
-                                (false, _) => {
-                                    capture.release_recording(&path);
-                                    log::info!("transcribed {}; {to_go} to go", path.display());
-                                }
-                                (true, Frames::ZERO) => {
-                                    capture.release_recording(&path);
-                                    log::error!(
-                                        "{} was not transcribed; {to_go} to go",
-                                        path.display()
-                                    );
-                                    session.notify(Notice::RecordingLost(path));
-                                }
-                                // Its text through `through` is written; the
-                                // rest is the user's to recover, from there,
-                                // so the recording stays kept from pruning.
-                                (true, through) => {
-                                    let seconds = through.seconds(rate);
-                                    log::error!(
-                                        "{} was transcribed through {seconds:.2}s only; recover the rest with `spokenpad transcribe --from {seconds:.2} {}`; {to_go} to go",
-                                        path.display(),
-                                        path.display()
-                                    );
-                                    session.notify(Notice::RecordingPartlyTranscribed {
-                                        path,
-                                        through: Duration::from_secs_f64(seconds),
-                                    });
-                                }
-                            }
+                            settle(
+                                recording,
+                                result.as_ref().err(),
+                                rate,
+                                &capture,
+                                &mut session,
+                                &mut retry,
+                            );
+                            log::info!("{to_go} recordings to go");
+                            let _ = persist(
+                                &capture,
+                                waiting.iter().chain(&transcribing).chain(&retry),
+                            );
                         }
                         session.finish(id);
                         // Every `Commit` of this utterance was sent on this
@@ -1140,8 +1153,18 @@ where
             // Same ordering guarantee as in the main loop: this utterance's
             // commits were drained from the same channel, in order, by the
             // arm above, on an earlier pass of this same `for`.
-            ResultEvent::Finished { id, .. } => {
-                transcribing.retain(|t| t.id != id);
+            ResultEvent::Finished { id, result, .. } => {
+                if let Some(at) = transcribing.iter().position(|t| t.id == id) {
+                    let recording = transcribing.remove(at);
+                    settle(
+                        recording,
+                        result.as_ref().err(),
+                        rate,
+                        &capture,
+                        &mut session,
+                        &mut retry,
+                    );
+                }
                 if let Err(e) = send(&editor_tx, EditorWork::Copy) {
                     log::error!("could not queue a shutdown clipboard copy: {e:#}");
                 }
@@ -1155,12 +1178,14 @@ where
     }
     // The next start transcribes the rest; only if it cannot know about them
     // does the user have to.
+    let saved = persist(&capture, waiting.iter().chain(&transcribing).chain(&retry));
     let unfinished: Vec<Unfinished> = waiting
         .into_iter()
         .chain(transcribing)
+        .chain(retry)
         .map(|Waiting { path, through, .. }| Unfinished { path, through })
         .collect();
-    match capture.save_unfinished(&unfinished) {
+    match saved {
         Ok(()) => {
             for Unfinished { path, through } in &unfinished {
                 log::warn!(
@@ -1170,8 +1195,7 @@ where
                 );
             }
         }
-        Err(e) => {
-            log::error!("the next start cannot transcribe what this one did not: {e:#}");
+        Err(()) => {
             for Unfinished { path, through } in &unfinished {
                 if *through == Frames::ZERO {
                     log::warn!(
@@ -1198,6 +1222,86 @@ where
     let _ = editor_tx.send(EditorWork::Quit);
     join_bounded(editor, "editor");
     result
+}
+
+/// Rewrites the list the next start reads (`waiting.tsv`): every recording
+/// not transcribed yet, with how far its text reaches. Called when one is
+/// added or finished and at the stop, never per commit, so after a crash the
+/// next start may write again the text committed since the last call.
+fn persist<'a, B: InputBackend>(
+    capture: &AudioCapture<B>,
+    recordings: impl Iterator<Item = &'a Waiting>,
+) -> Result<(), ()> {
+    let unfinished: Vec<Unfinished> = recordings
+        .map(|recording| Unfinished {
+            path: recording.path.clone(),
+            through: recording.through,
+        })
+        .collect();
+    capture.save_unfinished(&unfinished).map_err(|e| {
+        log::error!("the next start cannot know what is left to transcribe: {e:#}");
+    })
+}
+
+/// Says what became of a recording's transcription, and puts on `retry` one
+/// that failed after getting further than its last attempt, for the next
+/// start. Every other one is released from the pruning's keeping, except one
+/// the user is told to recover by hand.
+fn settle<B: InputBackend>(
+    recording: Waiting,
+    error: Option<&anyhow::Error>,
+    rate: u32,
+    capture: &AudioCapture<B>,
+    session: &mut Session,
+    retry: &mut Vec<Waiting>,
+) {
+    let path = &recording.path;
+    let seconds = recording.through.seconds(rate);
+    match error {
+        None => {
+            capture.release_recording(path);
+            log::info!("transcribed {}", path.display());
+        }
+        Some(e) if e.is::<ShorterThanItsText>() => {
+            capture.release_recording(path);
+            log::error!(
+                "{} is shorter than the text already written from it; the rest is gone",
+                path.display()
+            );
+            session.notify(Notice::RecordingShortened(recording.path));
+        }
+        Some(_) if recording.through == Frames::ZERO => {
+            capture.release_recording(path);
+            log::error!("{} was not transcribed", path.display());
+            session.notify(Notice::RecordingLost(recording.path));
+        }
+        Some(_) if recording.through > recording.from => {
+            log::error!(
+                "{} was transcribed through {seconds:.2}s only; the next start tries the rest again",
+                path.display()
+            );
+            session.notify(Notice::RecordingPartlyTranscribed {
+                path: path.clone(),
+                through: Duration::from_secs_f64(seconds),
+                rest: Rest::NextStart,
+            });
+            retry.push(recording);
+        }
+        // It failed where it failed before: trying again would too. Kept
+        // from pruning, since the notice sends the user to it.
+        Some(_) => {
+            log::error!(
+                "{} failed at {seconds:.2}s again; recover the rest with `spokenpad transcribe --from {seconds:.2} {}`",
+                path.display(),
+                path.display()
+            );
+            session.notify(Notice::RecordingPartlyTranscribed {
+                path: recording.path,
+                through: Duration::from_secs_f64(seconds),
+                rest: Rest::ByHand,
+            });
+        }
+    }
 }
 
 /// Hands one decoded commit to the editor thread. The event loop and the
@@ -1358,14 +1462,14 @@ fn decode_recording<R: Recognizer, S: Segmenter>(
     mut commit: impl FnMut(Commit),
 ) -> Result<(String, usize)> {
     let mut reader = CaptureReader::open(path, rate)?;
-    let skipped = reader.skip(from.get())?;
-    ensure!(
-        skipped == from.get(),
-        "{} ends at {:.2}s, before the {:.2}s its text already reaches",
-        path.display(),
-        Frames(skipped).seconds(rate),
-        from.seconds(rate)
-    );
+    let skipped = reader.skip(from.get());
+    if skipped < from.get() {
+        return Err(ShorterThanItsText {
+            recorded: Frames(skipped).seconds(rate),
+            through: from.seconds(rate),
+        }
+        .into());
+    }
     worker.resume(utterance, from);
     let mut held = Vec::with_capacity(window);
     let mut start = from;
@@ -1482,6 +1586,7 @@ fn keep<B: InputBackend>(
                 path,
                 id,
                 through: Frames::ZERO,
+                from: Frames::ZERO,
             });
         }
         RecordingStatus::NotRecorded => {

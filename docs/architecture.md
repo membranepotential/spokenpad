@@ -29,7 +29,7 @@ imperative shell, and `config.rs` sits at the root because both sides read it.
 | `shell/inference.rs` | CPU-only models; the sherpa recognizer and the Silero detector | ONNX Runtime |
 | `shell/control.rs` | Bind the control socket, or take over the one systemd passed (socket activation); stamp and forward each request; the client the CLI uses | Unix socket |
 | `shell/audio.rs` | Pre-roll, immutable capture chunks, dropping committed audio, the memory ceiling, stream repair (backed off while the microphone stays missing) | PortAudio (behind `InputBackend`) |
-| `shell/recorder.rs` | Persist every capture independently of decode, prune the directory, and hand the recordings a stopping daemon left untranscribed to the next start (`waiting.tsv`) | filesystem |
+| `shell/recorder.rs` | Persist every capture independently of decode, prune the directory, and keep the list of recordings not transcribed yet for the next start (`waiting.tsv`) | filesystem |
 | `core/grid.rs` | Neovim's `ext_linegrid` redraw events, typed, and the screen they fold into; which rows each one changed | none |
 | `core/keys.rs` | A keysym, its modifiers and the text a layout produced, as the notation `nvim_input` reads | none |
 | `shell/nvim/mod.rs` | Editor lifecycle in all three modes (attach, managed spawn, pane), ownership proof, transactional appends, indicator, `spokenpad editor` | Unix socket, window manager |

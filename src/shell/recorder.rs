@@ -30,10 +30,11 @@ const DIR_MODE: u32 = 0o700;
 const FILE_MODE: u32 = 0o600;
 const CAPTURE_PREFIX: &str = "capture-";
 const CAPTURE_SUFFIX: &str = ".wav";
-/// The recordings a stopping daemon had not finished transcribing, in the
+/// The recordings the daemon has yet to finish transcribing, in the
 /// recording directory: one line each, the frames its text already reaches,
-/// a tab, and the file's name. Written at the stop, taken (read and removed)
-/// at the next start, which transcribes the rest.
+/// a tab, and the file's name. Rewritten whenever one is added or finished,
+/// and at the stop; read at the next start, which transcribes the rest.
+/// Removed once none is left.
 const WAITING_LIST: &str = "waiting.tsv";
 const MAX_SAME_SECOND: usize = 100;
 const FULL_SCALE: f32 = 32_767.0;
@@ -108,7 +109,7 @@ struct Lifecycle {
     last: Option<Arc<RecordingState>>,
 }
 
-/// A recording the daemon had not finished transcribing when it stopped.
+/// A recording the daemon has not finished transcribing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Unfinished {
     pub path: PathBuf,
@@ -132,11 +133,11 @@ pub struct CaptureRecorder {
 }
 
 impl CaptureRecorder {
-    /// Takes the recordings the last daemon left unfinished, and keeps them
+    /// Reads the recordings the last daemon left unfinished, and keeps them
     /// from the pruning here and later, until each is released.
     pub fn new(config: Recording, sample_rate: u32) -> Self {
         let unfinished = if config.enabled {
-            take_waiting_list(&config.dir)
+            read_waiting_list(&config.dir)
         } else {
             Vec::new()
         };
@@ -166,13 +167,20 @@ impl CaptureRecorder {
         std::mem::take(&mut *lock(&self.unfinished))
     }
 
-    /// Writes the recordings this daemon did not finish transcribing where
-    /// the next start takes them from. Nothing is written for none.
+    /// Writes the recordings this daemon has not finished transcribing where
+    /// the next start reads them from, replacing the list; removes it for
+    /// none. No `fsync`: this runs on the event loop, and the list only has
+    /// to survive the process, not the machine.
     pub fn save_unfinished(&self, unfinished: &[Unfinished]) -> Result<()> {
-        if unfinished.is_empty() {
-            return Ok(());
-        }
         let path = self.config.dir.join(WAITING_LIST);
+        if unfinished.is_empty() {
+            return match fs::remove_file(&path) {
+                Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                    Err(error).with_context(|| format!("remove {}", path.display()))
+                }
+                _ => Ok(()),
+            };
+        }
         let staging = self.config.dir.join(format!("{WAITING_LIST}.new"));
         let mut text = String::new();
         for Unfinished { path, through } in unfinished {
@@ -193,7 +201,6 @@ impl CaptureRecorder {
                 .custom_flags(libc::O_NOFOLLOW)
                 .open(&staging)?;
             file.write_all(text.as_bytes())?;
-            file.sync_all()?;
             fs::rename(&staging, &path)
         })()
         .with_context(|| format!("write {}", path.display()))
@@ -570,14 +577,15 @@ impl CaptureReader {
     }
 
     /// Passes over up to `count` samples without keeping them, and says how
-    /// many it passed: fewer than `count` only at the end of the file.
-    pub fn skip(&mut self, count: usize) -> Result<usize> {
-        let mut skipped = 0;
-        for sample in self.samples.by_ref().take(count) {
-            sample.with_context(|| format!("{}: unreadable PCM samples", self.path.display()))?;
-            skipped += 1;
-        }
-        Ok(skipped)
+    /// many it passed: fewer than `count` where the file ends, or where it
+    /// stops being readable (a file cut short keeps the length its header
+    /// claims).
+    pub fn skip(&mut self, count: usize) -> usize {
+        self.samples
+            .by_ref()
+            .take(count)
+            .take_while(Result::is_ok)
+            .count()
     }
 }
 
@@ -726,12 +734,10 @@ fn is_capture_name(name: &str) -> bool {
     name.starts_with(CAPTURE_PREFIX) && name.ends_with(CAPTURE_SUFFIX) && !name.contains('/')
 }
 
-/// Reads and removes the waiting list in `directory`. Every recording on it
-/// is transcribed from where its text reached, so the list is used once: a
-/// list that cannot be removed is not used at all, since a later start would
-/// write the same text again. Lines that do not name a recording that is
-/// there are skipped.
-fn take_waiting_list(directory: &Path) -> Vec<Unfinished> {
+/// Reads the waiting list in `directory`. It stays until the daemon rewrites
+/// it, so a daemon that dies before then leaves it to the next. Lines that do
+/// not name a recording that is there are skipped.
+fn read_waiting_list(directory: &Path) -> Vec<Unfinished> {
     let path = directory.join(WAITING_LIST);
     let text = match fs::read_to_string(&path) {
         Ok(text) => text,
@@ -744,13 +750,6 @@ fn take_waiting_list(directory: &Path) -> Vec<Unfinished> {
             return Vec::new();
         }
     };
-    if let Err(error) = fs::remove_file(&path) {
-        log::error!(
-            "could not remove {}: {error}; the recordings on it are not transcribed, recover them with `spokenpad transcribe --from SECONDS`:\n{text}",
-            path.display()
-        );
-        return Vec::new();
-    }
     text.lines()
         .filter_map(|line| {
             let parsed = line.split_once('\t').and_then(|(through, name)| {
@@ -962,18 +961,19 @@ mod tests {
         let error = CaptureReader::open(&path, 8_000).err().unwrap();
         assert!(error.to_string().contains("16000Hz"), "{error}");
         let mut reader = CaptureReader::open(&path, 16_000).unwrap();
-        assert_eq!(reader.skip(7).unwrap(), 7);
+        assert_eq!(reader.skip(7), 7);
         let mut rest = Vec::new();
         assert_eq!(reader.read(&mut rest, 4).unwrap(), 3);
         assert_eq!(rest, whole[7..]);
-        assert_eq!(reader.skip(4).unwrap(), 0, "the end");
+        assert_eq!(reader.skip(4), 0, "the end");
     }
 
-    /// What a stopping daemon had not transcribed is handed to the next
-    /// start, once, with how far its text reached, and pruning passes over it
-    /// until it is released however far over budget the directory is.
+    /// What a daemon had not transcribed reaches every later start with how
+    /// far its text reached, until a daemon saves a list without it, and
+    /// pruning passes over it until it is released however far over budget
+    /// the directory is.
     #[test]
-    fn unfinished_recordings_reach_the_next_start_once_and_are_kept() {
+    fn unfinished_recordings_reach_the_next_start_and_are_kept() {
         let temporary = tempdir().unwrap();
         let directory = temporary.path().join("audio");
         let recording = Recording {
@@ -1012,8 +1012,14 @@ mod tests {
         let second = CaptureRecorder::new(recording.clone(), 16_000);
         assert!(older.exists() && newer.exists(), "pruned at the start");
         assert_eq!(second.take_unfinished(), unfinished);
-        assert!(second.take_unfinished().is_empty(), "taken once");
-        assert!(!list.exists(), "a third start gets nothing");
+        assert!(second.take_unfinished().is_empty(), "handed over once");
+        assert!(list.exists(), "kept until rewritten: a crash keeps it");
+        assert_eq!(
+            CaptureRecorder::new(recording.clone(), 16_000).take_unfinished(),
+            unfinished,
+            "a start after a crash gets it again"
+        );
+        second.save_unfinished(&unfinished[1..]).unwrap();
         second.start();
         second.write(&[0.5; 64]);
         second.stop();
@@ -1022,6 +1028,12 @@ mod tests {
         second.start();
         second.stop();
         assert!(!older.exists(), "released, it is pruned like any other");
+        assert_eq!(
+            CaptureRecorder::new(recording.clone(), 16_000).take_unfinished(),
+            unfinished[1..]
+        );
+        second.save_unfinished(&[]).unwrap();
+        assert!(!list.exists(), "removed once nothing is left");
         drop(second);
         assert!(
             CaptureRecorder::new(recording, 16_000)
@@ -1045,7 +1057,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            take_waiting_list(&directory),
+            read_waiting_list(&directory),
             [Unfinished {
                 path: present,
                 through: Frames(16),

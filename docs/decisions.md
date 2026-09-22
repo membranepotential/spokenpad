@@ -1507,55 +1507,62 @@ into the same limit.
 - A socket that is not the one the key bindings use still exits `1`, and is
   meant to hit the limit: it is a broken unit, not something a user did.
 
-## Recordings left at a stop are transcribed at the next start (2026-09-22)
+## Recordings not transcribed yet are listed for the next start (2026-09-22)
 
 A daemon that stopped with recordings still waiting to be transcribed named
 them in the log for `spokenpad transcribe --from`. But the next start pruned
 the recording directory with nothing kept, so the file the log pointed to
 could be gone by the time the user read it.
 
-- **Now the stop writes the list, and the next start transcribes it.** The
-  recordings still waiting or being transcribed go to `waiting.tsv` in the
-  recording directory, one line each: the frames the text already written
-  reaches, and the file name. The next `CaptureRecorder::new` takes the list
-  (reads, then removes it) and keeps those recordings from pruning until
-  each is transcribed, and the event loop queues them as if they had just
-  been released. Once the model is ready each is transcribed from where its
-  text reached (`Worker::resume`), without a press; the window counts them
-  like any recording made before the model was ready.
-- **Exactly once.** The offset is the last commit the stopping daemon
-  handed to its editor, so the text before it is not written again. The list
-  is used once: removed by the start that takes it, and not used at all when
-  it cannot be removed. A daemon that crashes after taking it does not
-  transcribe those recordings a second time, and no longer protects them
-  from pruning either.
+- **The list.** `waiting.tsv` in the recording directory names every
+  recording the daemon has not finished transcribing, one line each: the
+  frames the text already written reaches, and the file name. The daemon
+  rewrites it when one is added (a capture kept before the model is ready),
+  when one is finished, and at the stop, with the offsets as they are then;
+  it removes the file once nothing is left. It never writes it per commit,
+  and it does not `fsync` it: this runs on the event loop, and the list only
+  has to survive the process.
+- **The next start** reads the list, keeps those recordings from pruning
+  until each is transcribed, and queues them as if they had just been
+  released. Once the model is ready each is transcribed from where its text
+  reached (`Worker::resume`, `CaptureReader::skip`), without a press; the
+  window counts them like any recording made before the model was ready.
+- **A crash keeps the list**, since the start only reads it. The price: the
+  offsets are those of the last rewrite, so after a crash the text committed
+  since then is written a second time. After a clean stop every sample is
+  decoded once.
 - **The log still names the recordings** at the stop, each with how far it
   got and that the next start does the rest. If the list cannot be written,
-  the stop falls back to the old lines for `spokenpad transcribe --from`.
+  the stop falls back to the lines for `spokenpad transcribe --from`.
 - A line that does not name a recording in the directory (a plain file name
   `capture-*.wav` that is there) is skipped and logged: the list is read
   from disk, and nothing outside the recording directory is opened.
 - Rejected: never pruning WAVs newer than the last stop. It keeps the file,
   but leaves the transcription to the user and the offset to a log line.
-- Rejected: writing the list at every commit, so that a crash keeps it too.
-  That is a file write on the event loop per commit, for a case the
-  recovery WAVs already cover by hand.
+- Rejected: rewriting the list at every commit, which would make a crash
+  cost nothing twice. That is a file write on the event loop per commit.
 
 ## A recording that fails partway is not reported lost (2026-09-22)
 
 A recording made before the model was ready whose transcription failed
-after some of its text was written said "recording lost", although the text
-up to that point was in the file and the rest was still in the WAV. Now it
-says "recording partly transcribed", with the offset to recover the rest
-from: "… failed after 12.34s; recover the rest with spokenpad transcribe
---from 12.34" (`Notice::RecordingPartlyTranscribed`), and the log says the
-same with the whole path, as the stop does.
+after some of its text was written said "recording lost", although that
+text was in the file and the rest was still in the WAV. Now what the window
+says depends on how far it got, whether the failure came during the run or
+during the stop:
 
-- **It ranks just below "recording lost"**: a whole capture gone is worse
-  news than the rest of one, which can still be recovered.
-- **The recording stays kept** from pruning for the rest of the daemon's
-  run, since the notice sends the user to it. A lost one, which failed
-  before any text, is released as before.
-- It is not retried or put on the list for the next start: a transcription
-  that failed once on the same file is likely to fail again, and the
-  notice already names what to run.
+- **Nothing written: "recording lost"**, as before; the recording is
+  released.
+- **Further than its last attempt: "recording partly transcribed … the
+  next start tries the rest again"** (`Rest::NextStart`). It stays on the
+  list with its offset, and the next start resumes it.
+- **No further than its last attempt** (a resumed recording that fails
+  where it stopped): "… failed after 12.34s again; recover the rest with
+  spokenpad transcribe --from 12.34" (`Rest::ByHand`). It leaves the list,
+  so it is not retried at every start, and stays kept from pruning for the
+  rest of the run, since the notice sends the user to it.
+- **The file ends, or stops being readable, before its offset: "recording
+  shortened"**, with the file name, and no `--from`, which would fail the
+  same way. It was cut or replaced since; the rest is gone, and it is
+  released.
+- These rank below "recording lost" and above "no speech model": shortened,
+  then partly transcribed. The log says the same with the whole path.

@@ -45,11 +45,15 @@ pub enum Notice {
     /// A recording kept until the model was ready could not be read back to
     /// transcribe it: deleted, or damaged.
     RecordingLost(PathBuf),
-    /// The same, after its text through `through` was written: the rest is
-    /// recovered with `spokenpad transcribe --from`.
+    /// A recording kept to be transcribed is shorter than the text already
+    /// written from it: the file was cut or replaced, and the rest is gone.
+    RecordingShortened(PathBuf),
+    /// The transcription of a recording failed after its text through
+    /// `through` was written; `rest` says who transcribes the rest.
     RecordingPartlyTranscribed {
         path: PathBuf,
         through: Duration,
+        rest: Rest,
     },
     /// A capture kept on disk while the model was not ready ran to the
     /// in-memory ceiling a live capture has, `minutes` long, and ended.
@@ -87,6 +91,18 @@ pub enum Recognition {
     /// Neither the download nor the load worked, for this reason. The next
     /// press tries again.
     Unavailable(String),
+}
+
+/// Who transcribes the rest of a recording whose transcription failed
+/// partway.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Rest {
+    /// The next start tries it again, from where the text reaches: this
+    /// attempt got further than the last.
+    NextStart,
+    /// The user, with `spokenpad transcribe --from`: it failed where it
+    /// failed before.
+    ByHand,
 }
 
 /// The two steps before the speech model is ready.
@@ -177,26 +193,29 @@ impl Notice {
     /// 3. `MicrophoneUnavailable` — audio is missing and did not come back.
     /// 4. `NotKept` — the whole capture is gone: no model, no recording.
     /// 5. `RecordingLost` — a whole capture is gone after all.
-    /// 6. `RecordingPartlyTranscribed` — the rest of one is, until recovered.
-    /// 7. `ModelUnavailable` — nothing is transcribed until it loads.
-    /// 8. `MicrophoneGap` — audio came back, with a hole in the recording.
-    /// 9. `LengthLimit` — the capture ran to the length limit and ended.
-    /// 10. `KeptTooLong` — the same, at the ceiling of a capture kept on disk.
-    /// 11. `SilenceTimeout` — a latch was quiet long enough to end.
-    /// 12. `ConfigInvalid` — an edit to the config did not take.
-    /// 13. `NearlySilent` — everything arrived and may still be worth nothing.
-    /// 14. `HeldTooBriefly` — nothing was recorded, and nothing was lost.
-    /// 15. `ModelDownloading` — transcription waits, and nothing is lost.
-    /// 16. `ModelLoading` — the same, for seconds.
-    /// 17. `TranscribingRecordings` — the wait is over; text is on its way.
-    /// 18. `PreviewPaused` — cosmetic: only the live tail stopped.
+    /// 6. `RecordingShortened` — the rest of one is gone.
+    /// 7. `RecordingPartlyTranscribed` — the rest of one waits, to be retried
+    ///    or recovered.
+    /// 8. `ModelUnavailable` — nothing is transcribed until it loads.
+    /// 9. `MicrophoneGap` — audio came back, with a hole in the recording.
+    /// 10. `LengthLimit` — the capture ran to the length limit and ended.
+    /// 11. `KeptTooLong` — the same, at the ceiling of a capture kept on disk.
+    /// 12. `SilenceTimeout` — a latch was quiet long enough to end.
+    /// 13. `ConfigInvalid` — an edit to the config did not take.
+    /// 14. `NearlySilent` — everything arrived and may still be worth nothing.
+    /// 15. `HeldTooBriefly` — nothing was recorded, and nothing was lost.
+    /// 16. `ModelDownloading` — transcription waits, and nothing is lost.
+    /// 17. `ModelLoading` — the same, for seconds.
+    /// 18. `TranscribingRecordings` — the wait is over; text is on its way.
+    /// 19. `PreviewPaused` — cosmetic: only the live tail stopped.
     pub fn priority(&self) -> u8 {
         match self {
-            Self::MemoryCap(_) => 17,
-            Self::CaptureIncomplete => 16,
-            Self::MicrophoneUnavailable => 15,
-            Self::NotKept => 14,
-            Self::RecordingLost(_) => 13,
+            Self::MemoryCap(_) => 18,
+            Self::CaptureIncomplete => 17,
+            Self::MicrophoneUnavailable => 16,
+            Self::NotKept => 15,
+            Self::RecordingLost(_) => 14,
+            Self::RecordingShortened(_) => 13,
             Self::RecordingPartlyTranscribed { .. } => 12,
             Self::ModelUnavailable { .. } => 11,
             Self::MicrophoneGap => 10,
@@ -227,6 +246,7 @@ impl Notice {
             Self::LengthLimit => "reached the time limit",
             Self::NotKept => "capture not kept",
             Self::RecordingLost(_) => "recording lost",
+            Self::RecordingShortened(_) => "recording shortened",
             Self::RecordingPartlyTranscribed { .. } => "recording partly transcribed",
             Self::KeptTooLong { .. } => "reached the time limit",
             Self::ConfigInvalid(_) => "config not reloaded",
@@ -282,8 +302,27 @@ impl Notice {
                 file_name(path)
             )
             .into(),
-            Self::RecordingPartlyTranscribed { path, through } => format!(
-                "{0} failed after {1:.2}s; recover the rest with spokenpad transcribe --from {1:.2}",
+            Self::RecordingShortened(path) => format!(
+                "{} is shorter than the text already written from it; the rest is gone",
+                file_name(path)
+            )
+            .into(),
+            Self::RecordingPartlyTranscribed {
+                path,
+                through,
+                rest: Rest::NextStart,
+            } => format!(
+                "{} failed after {:.2}s; the next start tries the rest again",
+                file_name(path),
+                through.as_secs_f64()
+            )
+            .into(),
+            Self::RecordingPartlyTranscribed {
+                path,
+                through,
+                rest: Rest::ByHand,
+            } => format!(
+                "{0} failed after {1:.2}s again; recover the rest with spokenpad transcribe --from {1:.2}",
                 file_name(path),
                 through.as_secs_f64()
             )
@@ -839,9 +878,11 @@ mod tests {
             Notice::MicrophoneUnavailable,
             Notice::NotKept,
             Notice::RecordingLost(PathBuf::new()),
+            Notice::RecordingShortened(PathBuf::new()),
             Notice::RecordingPartlyTranscribed {
                 path: PathBuf::new(),
                 through: Duration::ZERO,
+                rest: Rest::NextStart,
             },
             Notice::ModelUnavailable {
                 reason: String::new(),
