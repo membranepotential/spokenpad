@@ -472,7 +472,90 @@ impl std::error::Error for SendError {}
 
 /// Sends one request and waits for the daemon's acknowledgement: what
 /// `spokenpad start|stop|toggle|cancel` do.
+///
+/// A key binding runs this, and a window manager throws its stderr away, so
+/// a press that finds nobody listening does what it can before it fails:
+/// when `path` is where `spokenpad.socket` listens, it starts that unit once
+/// (`systemctl --user start spokenpad.socket`: the package enables it, but
+/// only for the next login) and tries again; failing that, it says why in a
+/// desktop notification as well. At any other path — a daemon started by
+/// hand, a test — it only fails.
 pub fn send(path: &Path, request: Request) -> Result<(), SendError> {
+    let recovery = (path == units_socket()).then_some(Recovery {
+        start_socket: || {
+            crate::shell::wm::run(&["systemctl", "--user", "start", "spokenpad.socket"]).map(drop)
+        },
+        notify: |error: &SendError| {
+            let body = error.to_string();
+            if let Err(failed) = crate::shell::wm::run(&[
+                "notify-send",
+                "--app-name=spokenpad",
+                "spokenpad: the key press reached no daemon",
+                &body,
+            ]) {
+                log::debug!("desktop notification unavailable: {failed:#}");
+            }
+        },
+    });
+    send_recovering(path, request, recovery)
+}
+
+/// Where `spokenpad.socket` listens: `%t/spokenpad.sock`, `%t` being the
+/// user manager's runtime directory, which is always this.
+fn units_socket() -> PathBuf {
+    // SAFETY: geteuid takes no arguments, touches no memory and cannot fail.
+    let uid = unsafe { libc::geteuid() };
+    PathBuf::from(format!("/run/user/{uid}/spokenpad.sock"))
+}
+
+/// What a press does when nobody listens on the unit's socket.
+struct Recovery<S, N> {
+    start_socket: S,
+    notify: N,
+}
+
+fn send_recovering<S, N>(
+    path: &Path,
+    request: Request,
+    recovery: Option<Recovery<S, N>>,
+) -> Result<(), SendError>
+where
+    S: FnOnce() -> Result<()>,
+    N: FnOnce(&SendError),
+{
+    let first = send_once(path, request);
+    let Some(Recovery {
+        start_socket,
+        notify,
+    }) = recovery
+    else {
+        return first;
+    };
+    let result = match first {
+        Err(SendError::NoDaemon { ref cause, .. })
+            if matches!(
+                cause.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+            ) =>
+        {
+            match start_socket() {
+                Ok(()) => send_once(path, request),
+                Err(error) => Err(SendError::Failed(error.context(format!(
+                    "no spokenpad daemon is listening on {}, and `systemctl --user start \
+                     spokenpad.socket` failed",
+                    path.display()
+                )))),
+            }
+        }
+        other => other,
+    };
+    if let Err(error) = &result {
+        notify(error);
+    }
+    result
+}
+
+fn send_once(path: &Path, request: Request) -> Result<(), SendError> {
     let mut stream = UnixStream::connect(path).map_err(|cause| SendError::NoDaemon {
         path: path.to_owned(),
         cause,
@@ -706,6 +789,64 @@ mod tests {
         ] {
             assert!(!listener_unusable(&io::Error::from_raw_os_error(passing)));
         }
+    }
+
+    /// A press that finds the unit's socket missing starts it, and is served
+    /// by what then listens; one whose start fails says so, once, where a
+    /// key binding's user sees it.
+    #[test]
+    fn a_press_starts_the_socket_it_finds_missing() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("spokenpad.sock");
+        let (sender, receiver) = mpsc::channel();
+        let mut started = None;
+        let mut notified = Vec::new();
+        send_recovering(
+            &path,
+            Request::Start,
+            Some(Recovery {
+                start_socket: || {
+                    started = Some(ControlServer::start(Socket::bind(&path)?, sender)?);
+                    Ok(())
+                },
+                notify: |error: &SendError| notified.push(error.to_string()),
+            }),
+        )
+        .expect("served once the socket was started");
+        assert!(started.is_some());
+        assert!(notified.is_empty(), "{notified:?}");
+        assert_eq!(receiver.recv().unwrap().request, Request::Start);
+        drop(started);
+
+        let error = send_recovering(
+            &path,
+            Request::Start,
+            Some(Recovery {
+                start_socket: || Err(anyhow::anyhow!("Unit spokenpad.socket not found.")),
+                notify: |error: &SendError| notified.push(error.to_string()),
+            }),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("systemctl --user start spokenpad.socket` failed"),
+            "{error}"
+        );
+        assert_eq!(notified, [error]);
+    }
+
+    /// Only the path `spokenpad.socket` listens on is the unit's: a daemon
+    /// started by hand, or a test's, is never started or reported for.
+    #[test]
+    fn only_the_units_own_socket_is_started() {
+        // SAFETY: geteuid takes no arguments and cannot fail.
+        let uid = unsafe { libc::geteuid() };
+        assert_eq!(
+            units_socket(),
+            PathBuf::from(format!("/run/user/{uid}/spokenpad.sock"))
+        );
+        let directory = tempfile::tempdir().unwrap();
+        assert_ne!(directory.path().join("spokenpad.sock"), units_socket());
     }
 
     /// A daemon that does not know a request is one from before an upgrade.

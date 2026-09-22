@@ -2340,3 +2340,23 @@ open", and the message did not say that a restart was needed.
 - Test: `the_managers_session_replaces_the_one_the_daemon_started_with`
   (the listing's parser; a quoted or empty value is not taken). The hook in
   `shell/daemon.rs` is wired separately.
+
+## A press starts the socket it finds missing (2026-09-22)
+
+The fresh-user walkthrough (C1): after installing, `spokenpad.socket` is
+enabled for the next login only, so a press before then found no socket,
+exited 1 and said why on stderr, which a window manager's `exec` throws
+away: nothing visible happened.
+
+- Chosen: when `spokenpad start|stop|toggle|cancel` finds nothing listening
+  (no socket file, or a refused connection) at the path the unit listens on
+  (`/run/user/<uid>/spokenpad.sock`), it runs `systemctl --user start
+  spokenpad.socket` once, as an argument vector with a 2 s limit, and sends
+  the request again. A press that still fails, for that reason or any other,
+  also says why through `notify-send`.
+- Only at that path: a daemon started by hand, or a test's socket in a
+  temporary directory, is never started or reported for, so no test reaches
+  the user's systemd or their notifications.
+- Test: `a_press_starts_the_socket_it_finds_missing` (the start makes a
+  server appear and the press is served; a failed start is reported once,
+  and the error names the command) and `only_the_units_own_socket_is_started`.
