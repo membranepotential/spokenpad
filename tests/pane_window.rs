@@ -29,7 +29,7 @@ use harness::{
 };
 use spokenpad::{
     core::geometry::Rect,
-    shell::pane::x11::{Display, Window as Pane},
+    shell::pane::x11::{self, Display, Window as Pane},
 };
 use std::{thread::sleep, time::Duration};
 use x11rb::{
@@ -506,7 +506,18 @@ fn the_pane_window_never_takes_focus_on_i3() {
     report.push(observed.row("as shipped, empty workspace"));
     drop(empty);
 
-    println!("\ni3 {}, display {}", i3.version(), server.display);
+    let manager = x11::manager(&server.connection, 0);
+    println!(
+        "\ni3 {}, display {}, window manager on the display: {:?}",
+        i3.version(),
+        server.display,
+        manager.name
+    );
+    assert_eq!(
+        manager.name.as_deref(),
+        Some("i3"),
+        "i3 must not look like sway"
+    );
     println!("| window properties | focused on map | floating | X input focus |");
     println!("|---|---|---|---|");
     for line in report {

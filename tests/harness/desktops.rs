@@ -154,6 +154,11 @@ pub trait Desktop {
     fn sway_socket(&self) -> Option<PathBuf> {
         None
     }
+    /// The `XDG_RUNTIME_DIR` the window manager runs with, where sway puts
+    /// its socket; `None` on every desktop but sway.
+    fn runtime_dir(&self) -> Option<PathBuf> {
+        None
+    }
 
     fn wait_until_managed(&self, window: Window) {
         wait_for(
@@ -183,7 +188,7 @@ pub struct Sway {
     pub server: XServer,
     ipc: Ipc,
     version: String,
-    _private: Private,
+    private: Private,
 }
 
 impl Sway {
@@ -238,7 +243,7 @@ impl Sway {
             server,
             ipc,
             version,
-            _private: private,
+            private,
         }
     }
 
@@ -311,6 +316,10 @@ impl Desktop for Sway {
 
     fn sway_socket(&self) -> Option<PathBuf> {
         Some(self.ipc.socket.clone())
+    }
+
+    fn runtime_dir(&self) -> Option<PathBuf> {
+        Some(self.private.runtime())
     }
 }
 
@@ -837,15 +846,23 @@ fn atom_on(connection: &RustConnection, name: &str) -> Option<u32> {
 /// `_NET_ACTIVE_WINDOW` on the root: the window the window manager says is
 /// active, or `None` when it says none is.
 pub fn active_window(connection: &RustConnection, root: Window) -> Option<Window> {
-    let atom = atom_on(connection, "_NET_ACTIVE_WINDOW")?;
-    connection
-        .get_property(false, root, atom, AtomEnum::WINDOW, 0, 1)
-        .ok()?
-        .reply()
-        .ok()?
-        .value32()?
-        .next()
-        .filter(|window| *window != 0)
+    read_active_window(connection, root).ok().flatten()
+}
+
+/// The same, telling a window manager that names no window apart from a
+/// connection that could not ask.
+fn read_active_window(connection: &RustConnection, root: Window) -> anyhow::Result<Option<Window>> {
+    let atom = connection
+        .intern_atom(false, b"_NET_ACTIVE_WINDOW")?
+        .reply()?
+        .atom;
+    let reply = connection
+        .get_property(false, root, atom, AtomEnum::WINDOW, 0, 1)?
+        .reply()?;
+    Ok(reply
+        .value32()
+        .and_then(|mut values| values.next())
+        .filter(|window| *window != 0))
 }
 
 /// `_NET_CLIENT_LIST` or `_NET_CLIENT_LIST_STACKING` (bottom to top).
@@ -967,9 +984,25 @@ pub struct Samples {
     pub input: BTreeMap<Window, usize>,
     /// What the window manager called focused.
     pub manager: BTreeMap<Option<Window>, usize>,
+    /// Samples that could not be taken: a failed request to the X server or
+    /// the window manager. Any is a measurement that did not happen.
+    pub errors: usize,
 }
 
 impl Samples {
+    /// Fails unless the sampler actually measured: at least one sample, and
+    /// no request that failed. A dead connection must not read as "never
+    /// focused".
+    pub fn assert_measured(&self, stage: &str) {
+        assert!(
+            self.count > 0 && self.errors == 0,
+            "{stage}: the focus sampler took {} samples and failed {} times, so it measured \
+             nothing",
+            self.count,
+            self.errors
+        );
+    }
+
     /// Whether any sample put the focus on one of `windows`.
     pub fn touched(&self, windows: &[Window]) -> bool {
         windows.iter().any(|window| {
@@ -989,23 +1022,25 @@ impl FocusSampler {
         let thread = std::thread::spawn(move || {
             let mut samples = Samples::default();
             while !theirs.load(Ordering::Acquire) {
-                if let Ok(reply) = connection
+                let input = connection
                     .get_input_focus()
                     .map_err(anyhow::Error::from)
-                    .and_then(|cookie| Ok(cookie.reply()?))
-                {
-                    *samples.input.entry(reply.focus).or_default() += 1;
-                }
+                    .and_then(|cookie| Ok(cookie.reply()?.focus));
                 let manager = match &view {
-                    View::Ewmh => active_window(&connection, root),
+                    View::Ewmh => read_active_window(&connection, root),
                     View::Tree(ipc) => ipc
                         .request(spokenpad::core::wm::Message::GetTree, "")
-                        .ok()
-                        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-                        .and_then(|tree| tree_focus(&tree)),
+                        .and_then(|text| Ok(serde_json::from_str::<Value>(&text)?))
+                        .map(|tree| tree_focus(&tree)),
                 };
-                *samples.manager.entry(manager).or_default() += 1;
-                samples.count += 1;
+                match (input, manager) {
+                    (Ok(input), Ok(manager)) => {
+                        *samples.input.entry(input).or_default() += 1;
+                        *samples.manager.entry(manager).or_default() += 1;
+                        samples.count += 1;
+                    }
+                    _ => samples.errors += 1,
+                }
                 sleep(SAMPLE_PERIOD);
             }
             samples

@@ -323,12 +323,19 @@ trailing_space = false
 #              window manager's config proves a no_focus rule for it
 #              (packaging/i3/ or packaging/sway/).
 #   "pane"     the daemon does, in a window it draws itself, on the first
-#              key-down. No terminal, and no window-manager rule to install:
+#              key-down. No terminal, and no rule to install in your config:
 #              the window carries the properties that make a window manager
-#              refuse it focus. Needs an X display -- on Wayland, through
-#              Xwayland, so import DISPLAY into the user manager. New in
-#              2026-09; verified on i3 only so far, so try it before you rely
-#              on it. `spokenpad check` says whether this machine can.
+#              refuse it focus, and keep it on top. sway reads none of them,
+#              so there the daemon adds a no_focus rule for the pane over
+#              sway's IPC before each window; it finds sway from the display,
+#              and its socket through SWAYSOCK or in XDG_RUNTIME_DIR, and
+#              refuses to open the pane when it cannot reach sway (sway's
+#              /etc/sway/config.d/50-systemd-user.conf imports SWAYSOCK).
+#              Needs an X display -- on Wayland, through Xwayland, so import
+#              DISPLAY into the user manager. New in 2026-09; verified
+#              headless on i3, sway, Openbox and KWin (Wayland and X11), so
+#              try it before you rely on it. `spokenpad check` says whether
+#              this machine can.
 mode = "attach"
 
 # Managed mode only: the terminal the window opens in -- "alacritty",

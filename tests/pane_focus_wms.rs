@@ -55,7 +55,7 @@ use spokenpad::{
     core::{font::Points, geometry::Rect},
     shell::{
         nvim::NvimSession,
-        pane::x11::{Display, INSTANCE, Window as PaneWindow},
+        pane::x11::{self, Display, INSTANCE, Window as PaneWindow},
     },
 };
 use std::{
@@ -101,6 +101,96 @@ fn the_pane_never_takes_focus_on_sway() {
     let mut sway = Sway::start();
     let report = story(&mut sway);
     report.assert_never_focused();
+}
+
+/// A daemon whose environment lacks `$SWAYSOCK` — not imported into the user
+/// manager — still finds sway from the display: sway's Xwayland window
+/// manager names itself, the X server names its process, and sway's socket
+/// is `sway-ipc.<uid>.<pid>.sock` in the runtime directory. The pane opens
+/// and is never focused.
+#[test]
+fn the_pane_finds_sway_without_swaysock() {
+    if !harness::tools_or_skip(&["sway", "Xwayland", "nvim", "fc-match"]) {
+        return;
+    }
+    let mut sway = Sway::start();
+    let holder = focus_holder(&mut sway);
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let mut session = NvimSession::new(pane_config(
+        directory.path(),
+        &sway.server.display,
+        None,
+        sway.runtime_dir(),
+    ));
+    let sampler = FocusSampler::start(&sway.server.display, sway.view());
+    session
+        .ensure()
+        .expect("open the pane with sway found from the display")
+        .expect("the pane attached");
+    let pane = pane_window(&sway);
+    sway.wait_until_managed(pane);
+    session
+        .append("Gefunden ohne SWAYSOCK.", false)
+        .expect("append to the pane");
+    sleep(SETTLE);
+    let samples = sampler.finish();
+    samples.assert_measured("sway found from the display");
+    let frames = with_frames(sway.server(), pane);
+    println!(
+        "sway without $SWAYSOCK: pane opened; {} samples, never the pane: {}; the window \
+         manager focuses the holder: {}",
+        samples.count,
+        !samples.touched(&frames),
+        sway.focused() == Some(holder)
+    );
+    assert!(
+        !samples.touched(&frames),
+        "the pane took the focus: {samples:?}"
+    );
+    session.close();
+}
+
+/// With sway running the display and no socket that answers as sway —
+/// `$SWAYSOCK` unset or left over from another session, and no runtime
+/// directory to look in — the pane cannot add its rule, so it must not open:
+/// no window, no focus, and a reason that names `SWAYSOCK`.
+#[test]
+fn the_pane_refuses_a_sway_it_cannot_reach() {
+    if !harness::tools_or_skip(&["sway", "Xwayland", "nvim", "fc-match"]) {
+        return;
+    }
+    let mut sway = Sway::start();
+    focus_holder(&mut sway);
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let dead = directory.path().join("sway-ipc.dead.sock");
+    for (socket, expected) in [
+        (None, "$SWAYSOCK is not set"),
+        (Some(dead.clone()), "where no sway answers"),
+    ] {
+        let mut session = NvimSession::new(pane_config(
+            directory.path(),
+            &sway.server.display,
+            socket,
+            None,
+        ));
+        let sampler = FocusSampler::start(&sway.server.display, sway.view());
+        let error = format!(
+            "{:#}",
+            session
+                .ensure()
+                .expect_err("the pane opened with sway unreachable")
+        );
+        sleep(SETTLE);
+        let samples = sampler.finish();
+        samples.assert_measured("an unreachable sway");
+        println!("sway unreachable: refused: {error}");
+        assert!(error.contains(expected), "{error}");
+        assert!(error.contains("SWAYSOCK"), "{error}");
+        assert!(
+            find_by_instance(sway.server(), INSTANCE).is_none(),
+            "a refused pane left a window"
+        );
+    }
 }
 
 #[test]
@@ -224,10 +314,24 @@ fn story(desktop: &mut dyn Desktop) -> Report {
     // 2 and 3. The pane, opened as the daemon opens it, redrawn while the
     // user types elsewhere.
     let directory = tempfile::tempdir().expect("a temporary directory");
+    // The pane tells sway from every other window manager by what the display
+    // says, so that must not misfire either way.
+    let manager = x11::manager(&desktop.server().connection, 0);
+    report.row(format!(
+        "window manager on the display: {:?}, process {:?}",
+        manager.name, manager.pid
+    ));
+    assert_eq!(
+        manager.name.as_deref() == Some(x11::WLROOTS_WM),
+        desktop.sway_socket().is_some(),
+        "the display names its window manager {:?}",
+        manager.name
+    );
     let mut session = NvimSession::new(pane_config(
         directory.path(),
         &desktop.server().display,
         desktop.sway_socket(),
+        None,
     ));
     let sampler = FocusSampler::start(&desktop.server().display, desktop.view());
     let opened = session.ensure().expect("open the pane");
@@ -398,6 +502,7 @@ fn story(desktop: &mut dyn Desktop) -> Report {
         );
         sleep(SETTLE);
         let samples = sampler.finish();
+        samples.assert_measured("a pane on an empty sway workspace");
         report.row(format!(
             "a pane on an empty workspace: refused ({error}); a pane window exists: {}; \
              {} samples, X input focus seen on {:?}",
@@ -438,6 +543,7 @@ fn story(desktop: &mut dyn Desktop) -> Report {
 }
 
 fn record(report: &mut Report, stage: &str, samples: &Samples, frames: &[Window]) {
+    samples.assert_measured(stage);
     let touched = samples.touched(frames);
     let row =
         format!(
@@ -573,7 +679,12 @@ fn key_presses(server: &XServer, holder: Window) -> usize {
 
 /// The dictation settings a daemon in pane mode would run with, pointed into
 /// `root`, at the test's display and, under sway, at the test's sway.
-fn pane_config(root: &Path, display: &str, sway_socket: Option<PathBuf>) -> Nvim {
+fn pane_config(
+    root: &Path,
+    display: &str,
+    sway_socket: Option<PathBuf>,
+    runtime_dir: Option<PathBuf>,
+) -> Nvim {
     let dictation = root.join("dictation");
     std::fs::create_dir_all(&dictation).expect("make the dictation directory");
     Nvim {
@@ -582,6 +693,7 @@ fn pane_config(root: &Path, display: &str, sway_socket: Option<PathBuf>) -> Nvim
         dictation_dir: dictation,
         display: Some(display.to_owned()),
         sway_socket,
+        runtime_dir,
         init: Some(PathBuf::from(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/src/lua/dictation_init.lua"
@@ -759,6 +871,7 @@ fn control(desktop: &mut dyn Desktop, report: &mut Report) -> bool {
         desktop.wait_until_managed(window.id());
         sleep(SETTLE);
         let samples = sampler.finish();
+        samples.assert_measured(label);
         let frames = with_frames(desktop.server(), window.id());
         let manager = desktop.focused();
         let input = desktop.server().input_focus();

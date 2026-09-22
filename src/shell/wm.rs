@@ -175,7 +175,7 @@ fn request(socket: &Path, message: Message, payload: &str) -> Result<String> {
             .filter(|left| !left.is_zero())
             .context("window manager did not answer in time")
     };
-    let mut stream = UnixStream::connect(socket)
+    let mut stream = connect_by(socket, &remaining)
         .with_context(|| format!("connect to window manager at {}", socket.display()))?;
     stream.set_write_timeout(Some(remaining()?))?;
     stream
@@ -191,6 +191,75 @@ fn request(socket: &Path, message: Message, payload: &str) -> Result<String> {
     let mut body = vec![0_u8; length];
     read_exact_by(&mut stream, &mut body, &remaining)?;
     String::from_utf8(body).context("IPC reply is not UTF-8")
+}
+
+/// `UnixStream::connect` under the deadline.
+///
+/// A blocking connect to a Unix socket waits for as long as the listener's
+/// accept queue is full, which a window manager that has stopped accepting
+/// leaves it forever. So the socket is non-blocking while it connects: a
+/// full queue answers `EAGAIN`, and the connect is retried until the
+/// deadline; the stream is blocking again (with per-call timeouts) after.
+fn connect_by(path: &Path, remaining: &impl Fn() -> Result<Duration>) -> Result<UnixStream> {
+    use std::os::{
+        fd::{FromRawFd as _, OwnedFd},
+        unix::ffi::OsStrExt as _,
+    };
+
+    let bytes = path.as_os_str().as_bytes();
+    // SAFETY: an all-zero `sockaddr_un` is a valid value of the type; the
+    // family and path are filled in below.
+    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    ensure!(
+        bytes.len() < address.sun_path.len(),
+        "socket path is longer than a Unix socket address can hold"
+    );
+    address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    for (slot, byte) in address.sun_path.iter_mut().zip(bytes) {
+        *slot = *byte as libc::c_char;
+    }
+    let length =
+        (std::mem::offset_of!(libc::sockaddr_un, sun_path) + bytes.len() + 1) as libc::socklen_t;
+    // SAFETY: `socket` takes no pointers.
+    let fd = unsafe {
+        libc::socket(
+            libc::AF_UNIX,
+            libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
+            0,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error()).context("create a Unix socket");
+    }
+    // SAFETY: `fd` was just returned by `socket` and nothing else owns it.
+    let socket = unsafe { OwnedFd::from_raw_fd(fd) };
+    loop {
+        // SAFETY: `address` is an initialised `sockaddr_un` at least `length`
+        // bytes long, and `socket` is open for the duration of the call.
+        let connected = unsafe {
+            libc::connect(
+                socket.as_raw_fd(),
+                (&raw const address).cast::<libc::sockaddr>(),
+                length,
+            )
+        };
+        if connected == 0 {
+            break;
+        }
+        let error = std::io::Error::last_os_error();
+        match error.raw_os_error() {
+            Some(libc::EINTR) => {}
+            // The listener's queue is full: it has stopped accepting, or is
+            // slow to. Try again until the deadline says otherwise.
+            Some(libc::EAGAIN) => {
+                std::thread::sleep(remaining()?.min(Duration::from_millis(5)));
+            }
+            _ => return Err(error.into()),
+        }
+    }
+    let stream = UnixStream::from(socket);
+    stream.set_nonblocking(false)?;
+    Ok(stream)
 }
 
 /// `read_exact`, with the socket timeout shrunk to what is left of the
@@ -632,6 +701,36 @@ mod tests {
         let error = Wm::at(socket).err().expect("no reply").to_string();
         assert!(error.contains("did not answer in time"), "{error}");
         assert!(started.elapsed() < Duration::from_secs(4));
+    }
+
+    /// A window manager that has stopped accepting fills its accept queue;
+    /// a blocking connect would then wait forever. This one gives up at the
+    /// deadline.
+    #[test]
+    fn a_full_accept_queue_times_out_instead_of_hanging() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("ipc.sock");
+        let _listener = UnixListener::bind(&socket).unwrap();
+        let mut queued = Vec::new();
+        let error = loop {
+            let deadline = Instant::now() + Duration::from_millis(200);
+            let remaining = || {
+                deadline
+                    .checked_duration_since(Instant::now())
+                    .filter(|left| !left.is_zero())
+                    .context("window manager did not answer in time")
+            };
+            let started = Instant::now();
+            match connect_by(&socket, &remaining) {
+                Ok(stream) => queued.push(stream),
+                Err(error) => {
+                    assert!(started.elapsed() < Duration::from_secs(1));
+                    break error.to_string();
+                }
+            }
+            assert!(queued.len() < 10_000, "the accept queue never filled");
+        };
+        assert!(error.contains("did not answer in time"), "{error}");
     }
 
     #[test]

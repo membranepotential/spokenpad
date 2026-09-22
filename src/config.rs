@@ -464,12 +464,18 @@ pub struct Nvim {
     /// pending passage.
     #[serde(skip)]
     pub display: Option<String>,
-    /// sway's IPC socket, read from `$SWAYSOCK` alongside `display`. When set,
-    /// a pane adds its own `no_focus` rule to sway before it maps, since sway
-    /// reads none of the properties that keep other window managers from
-    /// focusing it. `None` means no sway, and no IPC is attempted.
+    /// `$SWAYSOCK`, read alongside `display`. A pane that finds sway running
+    /// its display adds its own `no_focus` rule over sway's IPC before it
+    /// maps, since sway reads none of the properties that keep other window
+    /// managers from focusing it; this is one of the two places it looks for
+    /// the socket. Unset is an ordinary state.
     #[serde(skip)]
     pub sway_socket: Option<PathBuf>,
+    /// `$XDG_RUNTIME_DIR`, read alongside `display`: the other place, where
+    /// sway puts `sway-ipc.<uid>.<pid>.sock` for the sway whose process runs
+    /// the display.
+    #[serde(skip)]
+    pub runtime_dir: Option<PathBuf>,
     pub startup_timeout_s: f64,
     /// Send a desktop notification when dictated text has to go to the
     /// dictation file because no editor is open.
@@ -505,6 +511,7 @@ impl Default for Nvim {
             // and a test says which display it means.
             display: None,
             sway_socket: None,
+            runtime_dir: None,
             startup_timeout_s: 20.,
             notify: true,
             copy_to_clipboard: false,
@@ -578,15 +585,19 @@ impl Source {
 }
 
 impl Nvim {
-    /// The session's X display and sway socket, read once, when the config
+    /// The session's X display, sway socket and runtime directory, read once, when the config
     /// is: they are environment, not file, and everything after takes them
     /// as values, so nothing has to ask the environment at the moment it
     /// wants a window.
     fn read_session(&mut self) {
         self.display = env::var("DISPLAY").ok().filter(|name| !name.is_empty());
-        self.sway_socket = env::var_os("SWAYSOCK")
-            .filter(|socket| !socket.is_empty())
-            .map(PathBuf::from);
+        let path = |name: &str| {
+            env::var_os(name)
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+        };
+        self.sway_socket = path("SWAYSOCK");
+        self.runtime_dir = path("XDG_RUNTIME_DIR");
     }
 }
 

@@ -329,11 +329,11 @@ does.
 |---|---|---|
 | what opens | your terminal, running nvim | a window spokenpad draws itself |
 | where it works | i3 or sway | X11, and Wayland through Xwayland |
-| setup | a `no_focus` rule in your window manager config | none |
-| how focus is refused | that rule, proven over IPC before the window exists | the window's own properties, read by any window manager |
-| empty workspace | will not open: i3 and sway focus the first window on one | opens, unfocused |
+| setup | a `no_focus` rule in your window manager config | none in your config |
+| how focus is refused | that rule, proven over IPC before the window exists | the window's own properties; on sway, a `no_focus` rule the daemon adds over sway's IPC before each window |
+| empty workspace | will not open: i3 and sway focus the first window on one | opens, unfocused; on sway it will not open, for the same reason |
 | survives a daemon restart | yes, it is your terminal | no, the window belongs to the daemon |
-| verified on | i3, live | i3, headless — **new, try it before you rely on it** |
+| verified on | i3, live | i3, sway, Openbox, KWin (Wayland and X11), headless — **new, try it before you rely on it** |
 
 **Managed:**
 
@@ -360,7 +360,11 @@ does.
    # font_size = 11.25           # points, as Alacritty's font.size
    ```
 2. Import `DISPLAY` (and `XAUTHORITY`) into systemd, as in install step 4 —
-   the window is X11 even on Wayland.
+   the window is X11 even on Wayland. On sway, import `SWAYSOCK` too: sway's
+   own `/etc/sway/config.d/50-systemd-user.conf` does, if your config
+   includes `/etc/sway/config.d/*`. Without it the daemon looks for sway's
+   socket in `$XDG_RUNTIME_DIR` by the process that runs the display, and
+   refuses to open the pane when it cannot reach sway.
 3. `spokenpad check` says whether the libraries, the font and the display are
    all there, and names what is missing. Then restart the service.
 

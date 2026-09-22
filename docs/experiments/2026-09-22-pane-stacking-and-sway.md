@@ -170,3 +170,40 @@ window; `_NET_CLIENT_LIST_STACKING` agrees.
   before every pane.
 
 Decision: [decisions.md](../decisions.md#pane-stays-on-top-and-sway-gets-a-runtime-no_focus-rule-2026-09-22).
+
+## Addendum: finding sway from the display
+
+_Same day, after a review found that a daemon without `$SWAYSOCK` skipped the
+rule and let sway focus the pane._
+
+**Question.** Can the pane tell that sway runs its display, and find sway's
+socket, without the environment?
+
+**Method.** `x11::manager` reads the `_NET_WM_NAME` of the root's
+`_NET_SUPPORTING_WM_CHECK` window and, through the X-Resource extension
+(`QueryClientIds`, `LocalClientPID`), the process that owns it. Every desktop
+in `tests/pane_focus_wms.rs` prints and asserts it, `tests/pane_window.rs` on
+i3. Two new sway tests open the pane with no `$SWAYSOCK` and the runtime
+directory given, and with no socket at all or a dead `$SWAYSOCK`.
+
+**Results.**
+
+| desktop | name on the check window | owning process found |
+|---|---|---|
+| i3 4.25.1 | `i3` | — (not asked) |
+| sway 1.12, Xwayland | `wlroots wm` (as `wlroots/xwayland/xwm.c` sets it) | yes: sway's pid, so `sway-ipc.<uid>.<pid>.sock` in its runtime directory answered as sway |
+| Openbox 3.6.1 | `Openbox` | yes |
+| KWin 6.7.5, Wayland and X11 | `KWin` | yes |
+
+- No `$SWAYSOCK`, runtime directory known: the socket was found by pid, the
+  rule was sent, the pane opened, and 105 samples never named it.
+- No `$SWAYSOCK` and no runtime directory, or `$SWAYSOCK` naming a dead
+  socket: the pane refused to open with a reason naming `SWAYSOCK`; no pane
+  window existed and the sampler, which now fails on any failed sample, saw
+  only the holder.
+
+**Conclusion.** The display identifies sway (as "a wlroots compositor")
+without misfiring on i3, Openbox or KWin, and names sway's process, which
+names its socket. The environment now only adds a second place to look.
+Any wlroots compositor without a reachable sway socket is refused, since
+its focus behaviour is not verified.

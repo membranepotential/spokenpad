@@ -313,13 +313,25 @@ the rule holds depends on `nvim.mode`:
     answer a protocol whose whole purpose is taking focus.
   - **On sway, a `no_focus` rule for exactly `spokenpad-pane` is in force
     before the map.** sway reads none of the properties above and focuses
-    every window it maps unless such a rule matches. The daemon adds it over
+    every window it maps unless such a rule matches. Whether sway runs the
+    display is read from the display (its window manager names itself
+    `wlroots wm`), never from the environment. The daemon adds the rule over
     sway's IPC socket before each pane (`no_focus
-    [instance="^spokenpad-pane$" class="^spokenpad-pane$"]`), opens the pane
-    only if sway answers that it took the rule, and never writes the user's
-    sway configuration. sway focuses the first window on a workspace whatever
-    the rules say, so on an empty focused workspace the pane refuses to open
-    and the text goes to the pending passage.
+    [instance="^spokenpad-pane$" class="^spokenpad-pane$"]`), finding the
+    socket by the process that runs the display or through `$SWAYSOCK`,
+    opens the pane only if sway answers that it took the rule, and never
+    writes the user's sway configuration. When no socket answers as sway —
+    or another wlroots compositor runs the display — the pane refuses to
+    open. sway focuses the first window on a workspace whatever the rules
+    say, so on an empty focused workspace the pane refuses to open too, and
+    the text goes to the pending passage.
+  - **A short gap is accepted.** The empty-workspace check runs over IPC just
+    before the window is created, and the map follows once the editor inside
+    has started, a fraction of a second later. A user who switches to an
+    empty workspace in that moment gets a focused window. Managed mode has
+    the same gap between its check and its spawn. Closing it would need the
+    window manager to decide at map time, which only a rule in its own
+    configuration does.
   - **There is no focus call**, as everywhere else in this project.
 
   The proof runs headless, with the pane opened the way the daemon opens it

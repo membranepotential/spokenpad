@@ -1320,3 +1320,33 @@ and sway gets a rule rather than being left unsupported. Measured in
   harness maps a probe window until Openbox manages it. sway's Xwayland
   window manager sometimes missed a `WM_CLASS` rewritten right after a
   window was created, so the test pauses before its own rewrites.
+
+## The pane finds sway from the display, not from `$SWAYSOCK` (2026-09-22)
+
+A review of the runtime sway rule found that it hung on `$SWAYSOCK`: a daemon
+whose user manager never imported it (no `include /etc/sway/config.d/*`, or
+an import that names only `DISPLAY`) skipped the rule, and sway focused the
+pane. The hard rule cannot depend on an environment variable being right.
+
+- **sway is recognised by the display.** Its Xwayland window manager names
+  itself `wlroots wm` on the root's `_NET_SUPPORTING_WM_CHECK` window; i3,
+  Openbox and KWin name themselves `i3`, `Openbox` and `KWin` (measured, see
+  the [experiment's addendum](experiments/2026-09-22-pane-stacking-and-sway.md#addendum-finding-sway-from-the-display)).
+- **Its socket is found by the process that runs the display.** The
+  X-Resource extension names the process that owns that check window — sway
+  — and sway's socket is `sway-ipc.<uid>.<pid>.sock` in `$XDG_RUNTIME_DIR`,
+  now read with `$DISPLAY` and `$SWAYSOCK`. `$SWAYSOCK` is the second place
+  looked at.
+- **No reachable sway, no pane.** When the display says `wlroots wm` and no
+  socket answers as sway — `$SWAYSOCK` unset or dead, nothing in the runtime
+  directory, or another wlroots compositor — the pane refuses to open, and
+  the desktop notification for the text that went to the file says why and
+  names `SWAYSOCK`. A stale `$SWAYSOCK` under i3 no longer matters at all.
+- **IPC connects under the deadline.** A blocking connect to a window
+  manager whose accept queue is full never returned; the socket now connects
+  non-blocking and retries until the deadline, in managed mode too.
+- **The focus sampler must have measured.** It counts failed samples, and
+  every stage fails unless it took samples and none failed.
+- Rejected: `WAYLAND_DISPLAY` or `XDG_CURRENT_DESKTOP` as the test. They
+  describe the session, not the X server the pane opens on, and are as easily
+  missing from the user manager as `$SWAYSOCK`.

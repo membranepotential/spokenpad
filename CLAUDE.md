@@ -8,7 +8,9 @@ Neovim over msgpack-RPC.
 `nvim.mode = "attach"` (default): the user runs `spokenpad editor` in any
 terminal; `"managed"`: the daemon opens a floating terminal on i3 or sway;
 `"pane"`: the daemon opens a window it draws itself, with `nvim --embed` in
-it, needing no window-manager rule (X11 and Xwayland; verified on i3 only).
+it, needing no rule in the user's config (X11 and Xwayland; verified headless
+on i3, sway, Openbox, KWin Wayland and X11; on sway the daemon adds a
+`no_focus` rule over IPC).
 Rust only, CPU only (sherpa-onnx linked statically: Parakeet TDT by default, Whisper
 or SenseVoice via `asr.family`; Silero VAD).
 
@@ -32,9 +34,13 @@ Design history is `docs/decisions.md`; add an entry when you change behaviour.
 - No window spokenpad opens may take focus. Attach mode opens no window;
   managed mode proves the i3/sway `no_focus` rule over IPC before it spawns a
   graphical editor; pane mode sets `_NET_WM_USER_TIME = 0` (once, never
-  again), `_NET_WM_WINDOW_TYPE_UTILITY` and `WM_HINTS input = True` before the
-  first map, and announces no `WM_TAKE_FOCUS`. The code contains no focus
-  call.
+  again), `_NET_WM_WINDOW_TYPE_UTILITY`, `_NET_WM_STATE_ABOVE` and
+  `WM_HINTS input = True` before the first map, and announces no
+  `WM_TAKE_FOCUS`. When the display names its window manager `wlroots wm`
+  (sway), the pane first adds `no_focus [instance="^spokenpad-pane$"
+  class="^spokenpad-pane$"]` over sway's IPC and refuses to open if sway
+  cannot be reached or the focused workspace is empty. The user's own click
+  may focus a window; nothing else may. The code contains no focus call.
 - Committed speech is decoded exactly once; the release decodes only the tail.
   The one exception: a VAD chunk that decodes to "" is decoded once more
   without trailing silence (`TrailingSilence::Bare`).
@@ -55,7 +61,7 @@ those belongs in `src/shell/`.
   notices), `core/decode.rs` (progressive commits over
   `Recognizer`/`Segmenter` traits), `core/segments.rs` (`merge_spans`: VAD
   spans to padded, settled windows), `core/wm.rs` (i3/sway IPC protocol,
-  `no_focus` proof), `core/terminal.rs` (the terminal table), `core/models.rs` (the pinned
+  `no_focus` proof, the pane's runtime sway rule), `core/terminal.rs` (the terminal table), `core/models.rs` (the pinned
   default model manifest), `core/grid.rs` (nvim's `ext_linegrid` redraw
   events and the screen they fold into), `core/keys.rs` (keysym and modifiers
   to nvim key notation), `core/font.rs` (the pane's point size and
@@ -95,7 +101,9 @@ those belongs in `src/shell/`.
   display, and can write a screenshot).
 - `tests/harness/mod.rs` is the headless desktop the pane tests share (its own
   Xvfb above `:50`, its own i3, XTEST input that refuses any other display).
-  `tests/pane_window.rs` proves the window never takes focus;
+  `tests/pane_window.rs` proves the window never takes focus on i3, and
+  `tests/pane_focus_wms.rs` on sway, Openbox and KWin (Wayland and X11), each
+  in a private headless session (`tests/harness/desktops.rs`);
   `tests/pane_render.rs` runs a real embedded nvim in it and checks the
   drawing against nvim's own screen; `tests/pane_daemon.rs` drives the real
   `shell::daemon::serve` in pane mode; `tests/pane_hidpi.rs` sets `Xft.dpi`

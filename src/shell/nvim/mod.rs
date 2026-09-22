@@ -30,7 +30,7 @@ use crate::{
         wm::Criterion,
     },
     shell::{
-        pane::host::PaneHost,
+        pane::{host::PaneHost, x11},
         wm::{self, Wm},
     },
 };
@@ -171,6 +171,10 @@ pub struct NvimSession {
     /// time one is needed and stopped when this session closes. In the other
     /// modes it stays `None` and nothing here touches X at all.
     pane: Option<PaneHost>,
+    /// Why the last window this session tried to open did not open, until
+    /// one does: the desktop notification for text that went to the file
+    /// says this rather than only that no editor is open.
+    refused: Option<String>,
 }
 
 impl NvimSession {
@@ -182,6 +186,7 @@ impl NvimSession {
             session_nonce: None,
             append_sequence: 0,
             pane: None,
+            refused: None,
         }
     }
 
@@ -232,10 +237,12 @@ impl NvimSession {
 
         let attached = self.attach_existing()?
             || match self.config.mode {
-                Mode::Managed => self.spawn_and_attach()?,
-                Mode::Pane => self.open_pane_and_attach()?,
-                Mode::Attach => false,
-            };
+                Mode::Managed => self.spawn_and_attach(),
+                Mode::Pane => self.open_pane_and_attach(),
+                Mode::Attach => Ok(false),
+            }
+            .inspect(|_| self.refused = None)
+            .inspect_err(|error| self.refused = Some(format!("{error:#}")))?;
         if !attached {
             return Ok(None);
         }
@@ -262,16 +269,20 @@ impl NvimSession {
         if !self.config.notify {
             return;
         }
-        let body = format!(
-            "Saved to {}. Run `spokenpad editor` to see it.",
-            path.display()
-        );
-        if let Err(error) = wm::run(&[
-            "notify-send",
-            "--app-name=spokenpad",
-            "spokenpad: no dictation editor is open",
-            &body,
-        ]) {
+        let (title, body) = match &self.refused {
+            Some(reason) => (
+                "spokenpad: the dictation window could not open",
+                format!("{reason}.\nSaved to {}.", path.display()),
+            ),
+            None => (
+                "spokenpad: no dictation editor is open",
+                format!(
+                    "Saved to {}. Run `spokenpad editor` to see it.",
+                    path.display()
+                ),
+            ),
+        };
+        if let Err(error) = wm::run(&["notify-send", "--app-name=spokenpad", title, &body]) {
             log::debug!("desktop notification unavailable: {error:#}");
         }
     }
@@ -744,10 +755,8 @@ impl NvimSession {
         // answering inside it. Two would let a slow window spend the
         // editor's budget as well as its own.
         let deadline = Instant::now() + Duration::from_secs_f64(self.config.startup_timeout_s);
-        let (rect, display) = pane_geometry(&self.config)?;
-        if let Some(socket) = &self.config.sway_socket {
-            refuse_pane_focus_on_sway(socket)?;
-        }
+        let (rect, display, manager) = pane_geometry(&self.config)?;
+        refuse_pane_focus_on_sway(&self.config, &manager)?;
         let mut fresh = NewFileGuard::claim(&self.config)?;
         let (command, marker) = pane_launch(&self.config, fresh.path())?;
         let value = marker.value().to_owned();
@@ -1531,8 +1540,9 @@ pub fn pane_launch(config: &Nvim, target: &Path) -> Result<(Command, OwnershipMa
 /// The X connection this asks over is opened and closed here rather than
 /// handed to the pane: the pane opens its own, and one short-lived connection
 /// per window is cheaper than threading one through. Returns the display name
-/// too, so the pane opens on the one that was measured.
-fn pane_geometry(config: &Nvim) -> Result<(Rect, String)> {
+/// too, so the pane opens on the one that was measured, and the window manager
+/// that runs it.
+fn pane_geometry(config: &Nvim) -> Result<(Rect, String, x11::Manager)> {
     use crate::shell::pane::{place, xkb};
 
     let display = config.display.clone().context(
@@ -1546,29 +1556,73 @@ fn pane_geometry(config: &Nvim) -> Result<(Rect, String)> {
     let (connection, screen) = x11rb::xcb_ffi::XCBConnection::connect(Some(&name))
         .with_context(|| format!("connect to the X display {display}"))?;
     let rect = place::window(&connection, screen, config.window_fraction)?;
-    Ok((rect, display))
+    Ok((rect, display, x11::manager(&connection, screen)))
 }
 
 /// sway focuses every window it maps unless a `no_focus` rule matches it,
-/// whatever the window says about itself, so before a pane maps under sway
-/// spokenpad adds that rule for the pane's own `WM_CLASS`, and refuses to open
-/// where sway would focus it anyway: as the first window on a workspace.
-fn refuse_pane_focus_on_sway(socket: &Path) -> Result<()> {
-    use crate::{
-        core::wm::{Criterion, Property},
-        shell::{pane::x11, wm::Wm},
-    };
+/// whatever the window says about itself. So when sway runs the display the
+/// pane opens on, spokenpad adds that rule for the pane's own `WM_CLASS`
+/// before the map, and refuses to open where sway would focus it anyway: as
+/// the first window on a workspace.
+///
+/// sway is recognised by the display, not by the environment: its Xwayland
+/// window manager calls itself [`x11::WLROOTS_WM`]. A `$SWAYSOCK` that was
+/// never imported, or is left over from another session, must not be what
+/// decides whether a window takes the focus. sway's socket is looked for
+/// where the sway running the display puts it — `sway-ipc.<uid>.<pid>.sock`
+/// in the runtime directory, `<pid>` being the process the display names as
+/// its window manager — and then at `$SWAYSOCK`. The pane opens only when
+/// one of them answers as sway and takes the rule. Another wlroots
+/// compositor looks the same from the display and has no sway socket, so it
+/// is refused as well: its focus behaviour is not verified.
+fn refuse_pane_focus_on_sway(config: &Nvim, manager: &x11::Manager) -> Result<()> {
+    use crate::core::wm::{Property, WmKind};
+    use std::os::unix::fs::MetadataExt as _;
 
+    if manager.name.as_deref() != Some(x11::WLROOTS_WM) {
+        return Ok(());
+    }
+    // sway names its socket by its own uid, which owns the runtime
+    // directory; reading the owner needs no `getuid`.
+    let discovered = manager
+        .pid
+        .zip(config.runtime_dir.as_ref())
+        .and_then(|(pid, dir)| {
+            let uid = std::fs::metadata(dir).ok()?.uid();
+            Some(dir.join(format!("sway-ipc.{uid}.{pid}.sock")))
+        });
+    let sway = discovered
+        .iter()
+        .chain(config.sway_socket.iter())
+        .find_map(|socket| {
+            Wm::at(socket.clone())
+                .ok()
+                .filter(|wm| wm.kind() == WmKind::Sway)
+        });
+    let Some(sway) = sway else {
+        let socket = match &config.sway_socket {
+            None => "$SWAYSOCK is not set".to_owned(),
+            Some(socket) => format!(
+                "$SWAYSOCK names {}, where no sway answers (left from an earlier session?)",
+                socket.display()
+            ),
+        };
+        bail!(
+            "the pane cannot open: the X display is run by sway or another wlroots \
+             compositor, which focuses every new window unless spokenpad tells it not to over \
+             sway's IPC socket, and no sway socket answers for this display ({socket}). \
+             Import SWAYSOCK into the user manager (`exec systemctl --user \
+             import-environment SWAYSOCK` in the sway config), or set nvim.mode = \"attach\""
+        );
+    };
     let criteria = [
         Criterion::new(Property::Instance, x11::INSTANCE)?,
         Criterion::new(Property::Class, x11::CLASS)?,
     ];
-    Wm::at(socket.to_owned())
-        .and_then(|sway| sway.refuse_focus(&criteria))
-        .context(
-            "the pane cannot open without taking the focus under sway; \
-             nvim.mode = \"attach\" works everywhere",
-        )
+    sway.refuse_focus(&criteria).context(
+        "the pane cannot open without taking the focus under sway; \
+         nvim.mode = \"attach\" works everywhere",
+    )
 }
 
 /// `nvim.init` as the path nvim is given, writing out the bundled one.

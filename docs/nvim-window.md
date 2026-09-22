@@ -138,22 +138,34 @@ it.
 
 **sway reads none of these.** It focuses every window it maps on the focused
 workspace unless a `no_focus` rule matches it (`should_focus` in
-`sway/tree/view.c`). So when `$SWAYSOCK` is set, the daemon sends sway, over
-its IPC socket and before the window exists,
+`sway/tree/view.c`). So before the window exists the daemon asks the display
+which window manager runs it: the name on the root's
+`_NET_SUPPORTING_WM_CHECK` window, which is `wlroots wm` under sway's
+Xwayland (and `i3`, `Openbox`, `KWin` elsewhere). The environment does not
+decide this, since a `$SWAYSOCK` that was never imported, or is left from
+another session, would decide it wrongly. On `wlroots wm` the daemon looks
+for sway's IPC socket where that sway puts it — `sway-ipc.<uid>.<pid>.sock`
+in `$XDG_RUNTIME_DIR`, `<pid>` being the process the X server names as the
+owner of that check window (the X-Resource extension) — and then at
+`$SWAYSOCK`, and sends the first one that answers as sway
 
 ```
 no_focus [instance="^spokenpad-pane$" class="^spokenpad-pane$"]
 ```
 
-and opens the pane only if sway answers that it took the rule. sway accepts
+The pane opens only if sway answers that it took the rule. sway accepts
 `no_focus` at runtime and ignores a rule it already holds, so the rule is sent
 before every pane; a `swaymsg reload` drops it, and the next pane sends it
-again. Nothing is written to your sway configuration. sway focuses the first
-window on a workspace whatever the rules say, so on an empty focused
-workspace the pane does not open, and the text goes to the pending passage
-as it does when no window can open. `$SWAYSOCK` reaches the service through
-sway's own `/etc/sway/config.d/50-systemd-user.conf`, which imports it into
-the user manager.
+again. Nothing is written to your sway configuration. The pane does not open,
+and the text goes to the pending passage with a notification that says why,
+when:
+
+- no socket answers as sway — neither `$SWAYSOCK` nor the one in the runtime
+  directory; another wlroots compositor (labwc, river, Wayfire) looks the
+  same from the display, has no sway socket, and is refused for the same
+  reason, since its focus behaviour is not verified;
+- the focused workspace is empty, since sway focuses the first window on a
+  workspace whatever the rules say.
 
 **Where it is verified.** Each of these runs headless in the test suite,
 with the pane opened the way the daemon opens it and the focus sampled every

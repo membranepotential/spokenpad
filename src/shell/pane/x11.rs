@@ -34,6 +34,7 @@ use x11rb::{
     properties::{WmHints, WmHintsState, WmSizeHints, WmSizeHintsSpecification},
     protocol::{
         Event,
+        res::{ClientIdMask, ClientIdSpec, ConnectionExt as _},
         xproto::{
             AtomEnum, ClientMessageEvent, ConfigureWindowAux, ConnectionExt as _, CreateGCAux,
             CreateWindowAux, EventMask, Gcontext, Gravity, ImageFormat, ImageOrder, PropMode,
@@ -127,6 +128,75 @@ pub fn xft_dpi(connection: &impl Connection) -> XftDpi {
         log::debug!("pane resolution: {found}");
     }
     found
+}
+
+/// The name the X11 window manager of every wlroots compositor — sway among
+/// them — gives itself on its EWMH check window (`wlroots/xwayland/xwm.c`).
+pub const WLROOTS_WM: &str = "wlroots wm";
+
+/// The window manager running an X display, as the display itself tells it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Manager {
+    /// The `_NET_WM_NAME` of the root's `_NET_SUPPORTING_WM_CHECK` window:
+    /// `i3`, `Openbox`, `KWin`, or [`WLROOTS_WM`] under sway's Xwayland.
+    /// `None` when no EWMH window manager is running.
+    pub name: Option<String>,
+    /// The process that owns that check window, from the X-Resource
+    /// extension, when the server can tell. Under Xwayland that is the
+    /// compositor itself.
+    pub pid: Option<u32>,
+}
+
+/// Ask the display which window manager runs it. Anything the display does
+/// not answer is `None`, never an error: the caller decides what an unknown
+/// window manager means.
+pub fn manager(connection: &impl Connection, screen: usize) -> Manager {
+    let root = connection.setup().roots[screen].root;
+    let atom = |name: &[u8]| {
+        connection
+            .intern_atom(false, name)
+            .ok()?
+            .reply()
+            .ok()
+            .map(|reply| reply.atom)
+    };
+    let (Some(check), Some(name), Some(utf8)) = (
+        atom(b"_NET_SUPPORTING_WM_CHECK"),
+        atom(b"_NET_WM_NAME"),
+        atom(b"UTF8_STRING"),
+    ) else {
+        return Manager::default();
+    };
+    let Some(window) = connection
+        .get_property(false, root, check, AtomEnum::WINDOW, 0, 1)
+        .ok()
+        .and_then(|cookie| cookie.reply().ok())
+        .and_then(|reply| reply.value32().and_then(|mut values| values.next()))
+        .filter(|window| *window != 0)
+    else {
+        return Manager::default();
+    };
+    let name = connection
+        .get_property(false, window, name, utf8, 0, 256)
+        .ok()
+        .and_then(|cookie| cookie.reply().ok())
+        .and_then(|reply| String::from_utf8(reply.value).ok())
+        .filter(|name| !name.is_empty());
+    let pid = connection
+        .res_query_client_ids(&[ClientIdSpec {
+            client: window,
+            mask: ClientIdMask::LOCAL_CLIENT_PID,
+        }])
+        .ok()
+        .and_then(|cookie| cookie.reply().ok())
+        .and_then(|reply| {
+            reply
+                .ids
+                .into_iter()
+                .find(|id| id.spec.mask == ClientIdMask::LOCAL_CLIENT_PID)
+                .and_then(|id| id.value.first().copied())
+        });
+    Manager { name, pid }
 }
 
 impl Window {
