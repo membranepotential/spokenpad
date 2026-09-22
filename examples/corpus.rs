@@ -14,7 +14,7 @@
 //!   `preview.interval_ms` of audio over the audio since the committed offset,
 //!   bounded by `preview.max_seconds`, every settled chunk committed once, then
 //!   the release decoding only what is still held.
-//! * `whole` decodes each capture in one pass with no segmenter, like
+//! * `whole` decodes each capture in one pass with no detector, like
 //!   `eval --whole`.
 //!
 //! Everything about the model comes from a config file, so another model, a
@@ -32,7 +32,7 @@ use clap::{Parser, ValueEnum};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use spokenpad::{
-    config::{Config, Decoding, Model},
+    config::{Config, Decoding},
     core::{
         decode::{Pipeline, Recognizer, TickKind, TrailingSilence, Utterance, Worker},
         frames::Frames,
@@ -440,18 +440,14 @@ impl<R: Recognizer> Recognizer for Probe<R> {
 
 type Engine = Worker<Probe<Transcriber>, SpeechSegmenter>;
 
-fn engine(config: &Config, padding: Option<usize>, path: DecodePath) -> Result<Engine> {
+fn engine(config: &Config, padding: Option<usize>) -> Result<Engine> {
     let rate = config.audio.sample_rate;
     let mut recognizer = Transcriber::new(&config.asr, rate)?;
     // Warm up before the probe, so lazy native initialisation is not counted.
     recognizer.warm_up()?;
-    let segmenter = match path {
-        DecodePath::Live => Some(SpeechSegmenter::new(&config.vad, rate)?),
-        DecodePath::Whole => None,
-    };
     Ok(Worker::new(Pipeline {
         recognizer: Probe::new(recognizer, padding),
-        segmenter,
+        segmenter: SpeechSegmenter::new(&config.vad, rate)?,
     }))
 }
 
@@ -507,12 +503,20 @@ fn replay_live(worker: &mut Engine, samples: &[f32], plan: Plan) -> Result<Vec<S
     Ok(texts)
 }
 
+/// One decode of the whole capture, with no detector in front of it.
 fn decode_whole(worker: &mut Engine, samples: &[f32]) -> Result<Vec<String>> {
-    let mut texts = vec![];
-    worker
+    if samples.is_empty() {
+        return Ok(vec![]);
+    }
+    let text = worker
         .pipeline
-        .decode(samples, || false, |text, _| texts.push(text))?;
-    Ok(texts)
+        .recognizer
+        .transcribe(samples, TrailingSilence::Padded)?;
+    Ok(if text.trim().is_empty() {
+        vec![]
+    } else {
+        vec![text]
+    })
 }
 
 // -- results ------------------------------------------------------------------------
@@ -557,7 +561,7 @@ fn run_pass(
             let (next, rows, processor) = (&next, &rows, &processor);
             let corpus = &*corpus;
             handles.push(scope.spawn(move || -> Result<()> {
-                let mut worker = engine(config, plan.padding, plan.path)?;
+                let mut worker = engine(config, plan.padding)?;
                 loop {
                     let i = next.fetch_add(1, Ordering::Relaxed);
                     let Some(entry) = entries.get(i) else {
@@ -862,23 +866,19 @@ fn breakdown<'a>(rows: &'a [Row], key: impl Fn(&'a Row) -> &'a str) -> Option<St
 
 /// Family and decoding method, as the report and the JSON lines name them.
 fn describe(config: &Config) -> (&'static str, String) {
-    match &config.asr.model {
-        Model::Parakeet { decoding } => (
-            "parakeet",
-            match decoding {
-                Decoding::GreedySearch => "greedy_search".to_owned(),
-                Decoding::ModifiedBeamSearch {
-                    vocabulary,
-                    hotwords_score,
-                } => format!(
-                    "modified_beam_search ({} hotword phrases at {hotwords_score})",
-                    vocabulary.len()
-                ),
-            },
-        ),
-        Model::Whisper { .. } => ("whisper", "greedy_search".to_owned()),
-        Model::SenseVoice { .. } => ("sense_voice", "greedy_search".to_owned()),
-    }
+    (
+        "parakeet",
+        match &config.asr.decoding {
+            Decoding::GreedySearch => "greedy_search".to_owned(),
+            Decoding::ModifiedBeamSearch {
+                vocabulary,
+                hotwords_score,
+            } => format!(
+                "modified_beam_search ({} hotword phrases at {hotwords_score})",
+                vocabulary.len()
+            ),
+        },
+    )
 }
 
 fn write_jsonl(
@@ -1264,7 +1264,7 @@ mod tests {
         let run = |kind| {
             let mut worker = Worker::new(Pipeline {
                 recognizer: Probe::new(ByContent, None),
-                segmenter: Some(Chunks),
+                segmenter: Chunks,
             });
             let samples: Vec<f32> = (0..10).map(|i| i as f32).collect();
             let mut commits = vec![];

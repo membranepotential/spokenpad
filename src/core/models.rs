@@ -5,7 +5,7 @@
 //! only describes what is expected and compares it against what a download
 //! (or a directory already on disk) produced -- no I/O, so it is usable from
 //! either side.
-use crate::config::{Asr, Model, Vad, models_dir};
+use crate::config::{Asr, Vad, models_dir};
 use std::path::PathBuf;
 
 /// Which loader a file belongs to, so a configuration that does not use the
@@ -118,7 +118,7 @@ pub fn default_vad_path() -> PathBuf {
 /// True if `asr` is configured to use the default Parakeet model spokenpad
 /// can download for itself -- the default family, at the default directory.
 pub fn asr_uses_default_model(asr: &Asr) -> bool {
-    matches!(asr.model, Model::Parakeet { .. }) && asr.model_dir == default_asr_dir()
+    asr.model_dir == default_asr_dir()
 }
 
 /// True if `vad` is configured to use the default Silero model.
@@ -127,12 +127,12 @@ pub fn vad_uses_default_model(vad: &Vad) -> bool {
 }
 
 /// The default files this configuration would load but a user-configured
-/// `model_dir`/`asr.family`/`vad.model` never triggers a download for:
+/// `model_dir`/`vad.model` never triggers a download for:
 /// only the default Parakeet weights (if `asr` is unmodified from default)
-/// and the default Silero VAD (if `vad` is enabled and unmodified).
+/// and the default Silero VAD (if `vad.model` is unmodified).
 pub fn files_to_ensure(asr: &Asr, vad: &Vad) -> Vec<&'static ModelFile> {
     let asr_default = asr_uses_default_model(asr);
-    let vad_default = vad.enabled && vad_uses_default_model(vad);
+    let vad_default = vad_uses_default_model(vad);
     DEFAULT_MODEL_FILES
         .iter()
         .filter(|f| f.required_for_load)
@@ -182,7 +182,7 @@ mod tests {
         );
 
         let vad = Vad {
-            enabled: false,
+            model: "/somewhere/else.onnx".into(),
             ..Vad::default()
         };
         assert!(

@@ -133,10 +133,11 @@ pressing the key, saying two words, and getting nothing back.
 That measurement has a mirror image. A window with *no* speech in it does not
 come back empty — it comes back invented: a 0.5 s near-silent press (peak
 0.013) was decoded whole and Parakeet returned "Thank you.", which landed in
-the file. So since 2026-09-11, with a VAD model loaded, a capture it finds no
-speech in is not decoded at all. Only the detector may make that call — with
-no VAD model the whole capture is still decoded, because nothing else knows
-better.
+the file. So since 2026-09-11 a capture the detector finds no speech in is
+not decoded at all. Only the detector may make that call, and since
+2026-09-22 it is always loaded: `vad.enabled` is gone, and a detector that
+does not load leaves the speech model unavailable, as a missing recognizer
+does.
 
 The same knife edge has a third face: a short sentence the VAD *did* detect
 can come back empty. Replaying the user's recordings, 4 of 18 captures with
@@ -192,8 +193,7 @@ session, decode and nvim tests:
    same at ten minutes as at ten seconds, and so does the memory: the audio
    behind the committed offset is dropped while the capture runs
    ([progressive-commit.md](progressive-commit.md#what-is-kept-in-memory)).
-   Without a segmenter loaded there is no bounded tail, so **no preview tick is
-   issued at all** and the capture is decoded at release. `[preview].max_seconds`
+   `[preview].max_seconds`
    (30 s) is the remaining backstop for a chunk that somehow never settles:
    past it the tick stops decoding the open tail but keeps committing what has
    settled, so the tail shrinks and previews resume by themselves.

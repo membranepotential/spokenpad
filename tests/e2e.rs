@@ -38,7 +38,7 @@ use spokenpad::{
         audio::{AudioCapture, CallbackCore, InputBackend, InputStream, Teardown},
         control::{ControlServer, Socket},
         daemon::{Devices, Loader, PipelineSource, Reload, SHUTDOWN_GRACE, serve},
-        inference::{Transcriber, load_segmenter},
+        inference::{SpeechSegmenter, Transcriber},
         recorder::read_capture,
     },
 };
@@ -304,6 +304,8 @@ struct Settings {
     preroll_ms: u32,
     postroll_ms: u32,
     interval_ms: u64,
+    /// Fixed-length chunks; neither this nor `vad` is one window over the
+    /// whole capture, which never settles.
     chunk: Option<usize>,
     /// Chunk on the real merge policy instead of `chunk`.
     vad: Option<Vad>,
@@ -410,10 +412,12 @@ impl Harness {
                     delay,
                     calls: Arc::clone(&calls),
                 },
+                // Neither: one open window over whatever holds speech, which
+                // never settles, so the release decodes it.
                 segmenter: vad
                     .clone()
                     .map(Chunker::Speech)
-                    .or_else(|| chunk.map(Chunker::Fixed)),
+                    .unwrap_or(Chunker::Fixed(chunk.unwrap_or(usize::MAX))),
             }
         };
         let (pipeline, loader) = if settings.loading {
@@ -799,9 +803,9 @@ fn press_speak_release_lands_text_in_the_file() {
     wait_until("the transcript reaches the file", || !h.text().is_empty());
     assert_eq!(h.text(), "word word\n");
     assert_eq!(
-        h.calls().len(),
-        1,
-        "without a segmenter the capture is decoded once, at the release: {:?}",
+        h.calls().last(),
+        Some(&16_000),
+        "a window that never settles is decoded whole at the release; before it only previews: {:?}",
         h.calls()
     );
     wait_until("the indicator returns to idle", || {
@@ -992,6 +996,8 @@ fn shutdown_delivers_text_the_engine_produced_on_the_way_out() {
     }
     let mut h = Harness::start(Settings {
         delay: Duration::from_millis(600),
+        // No preview decode: the first call is the release's.
+        interval_ms: 3_600_000,
         ..Settings::default()
     });
     h.press(false);
@@ -1119,7 +1125,12 @@ fn auto_repeat_while_held_is_one_capture() {
     wait_until("the transcript reaches the file", || !h.text().is_empty());
     assert_eq!(h.text(), "word word\n", "one capture, one paragraph");
     assert_eq!(h.captures(), 1, "auto-repeat started a second capture");
-    assert_eq!(h.calls().len(), 1, "decoded once: {:?}", h.calls());
+    assert_eq!(
+        h.calls().last(),
+        Some(&16_000),
+        "decoded whole: {:?}",
+        h.calls()
+    );
     h.finish();
 }
 
@@ -1483,12 +1494,6 @@ fn attach_mode_without_an_editor_keeps_the_text_for_the_next_one() {
     });
     assert_eq!(h.editors(), 0, "attach mode must never open an editor");
     assert_eq!(h.dictation_files(), 1);
-    assert_eq!(
-        h.calls().len(),
-        2,
-        "each capture is decoded exactly once: {:?}",
-        h.calls()
-    );
 
     h.open_editor();
     assert_eq!(
@@ -1504,7 +1509,6 @@ fn attach_mode_without_an_editor_keeps_the_text_for_the_next_one() {
     });
     assert_eq!(h.dictation_files(), 1, "one passage, one file");
     assert_eq!(h.editors(), 1);
-    assert_eq!(h.calls().len(), 3);
     h.finish();
 }
 
@@ -1550,7 +1554,6 @@ fn text_for_an_editor_that_exited_during_the_decode_goes_to_the_pending_passage(
         ["", "word word\n"],
         "the editor's own file stays empty and the text is written once"
     );
-    assert_eq!(h.calls().len(), 1, "decoded once: {:?}", h.calls());
     h.finish();
 }
 
@@ -1607,7 +1610,6 @@ fn an_append_held_when_the_daemon_stops_goes_to_the_pending_passage() {
         !buffer.contains("word"),
         "the editor ran the held append after its connection closed: {buffer:?}"
     );
-    assert_eq!(h.calls().len(), 1, "decoded once: {:?}", h.calls());
     h.finish();
 }
 
@@ -2275,7 +2277,7 @@ fn replay_into_capture(minutes: usize, dropping: bool) -> usize {
             delay: Duration::ZERO,
             calls: Arc::new(Mutex::new(Vec::new())),
         },
-        segmenter: Some(Chunker::Speech(Vad::default())),
+        segmenter: Chunker::Speech(Vad::default()),
     });
     let utterance = Utterance::new(1);
     capture.start_capture().expect("start the capture");
@@ -2392,7 +2394,7 @@ fn silero_split_time_over_a_long_tail() {
     }
     let (source, rate) = read_capture(&sample).expect("read the bundled sample");
     let speech = resample(&source, rate, RATE);
-    let mut segmenter = load_segmenter(&config.vad, RATE).expect("load Silero");
+    let mut segmenter = SpeechSegmenter::new(&config.vad, RATE).expect("load Silero");
 
     for seconds in [30, 60, 270] {
         // Speech and silence in turn, so the detector does the work it would
@@ -2436,7 +2438,7 @@ fn dropping_settled_silence_does_not_move_the_detector_spans() {
     }
     let (source, rate) = read_capture(&sample).expect("read the bundled sample");
     let speech = resample(&source, rate, RATE);
-    let mut segmenter = load_segmenter(&config.vad, RATE).expect("load Silero");
+    let mut segmenter = SpeechSegmenter::new(&config.vad, RATE).expect("load Silero");
 
     let keep = settling_silence(&config.vad, RATE);
     let forgotten = keep + 56 * RATE as usize;
@@ -2522,7 +2524,7 @@ fn real_models_transcribe_the_kennedy_sample() {
     transcriber.warm_up().expect("warm up");
     let pipeline = PipelineSource::Ready(Pipeline {
         recognizer: transcriber,
-        segmenter: load_segmenter(&config.vad, RATE),
+        segmenter: SpeechSegmenter::new(&config.vad, RATE).expect("load Silero"),
     });
     let microphone = FakeMicrophone::default();
     let capture = AudioCapture::with_backend(

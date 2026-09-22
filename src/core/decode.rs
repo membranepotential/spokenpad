@@ -101,23 +101,17 @@ impl Utterance {
     }
 }
 
+/// The recognizer and the voice activity detector that cuts what it hears
+/// into its windows. Both are always there: without the detector nothing
+/// settles, and silence is decoded, which is where the recognizer invents
+/// words.
 pub struct Pipeline<R, S> {
     pub recognizer: R,
-    pub segmenter: Option<S>,
+    pub segmenter: S,
 }
 impl<R: Recognizer, S: Segmenter> Pipeline<R, S> {
     fn split(&mut self, samples: &[f32]) -> Result<Split> {
-        let split = match &mut self.segmenter {
-            Some(s) => s.split(samples)?,
-            None => Split {
-                segments: vec![Segment {
-                    window: 0..samples.len(),
-                    speech_end: samples.len(),
-                    settled: false,
-                }],
-                silent_through: 0,
-            },
-        };
+        let split = self.segmenter.split(samples)?;
         let mut end = 0;
         for s in &split.segments {
             ensure!(
@@ -140,13 +134,12 @@ impl<R: Recognizer, S: Segmenter> Pipeline<R, S> {
     /// decodes to nothing is decoded once more without the trailing silence,
     /// and that result stands. This is the only second decode of committed
     /// audio: it runs only when the first decode produced no text, so every
-    /// window's output still comes from exactly one decode. Without a
-    /// segmenter nothing claims the window holds speech, so it is not retried.
+    /// window's output still comes from exactly one decode.
     fn transcribe_speech(&mut self, window: &[f32]) -> Result<String> {
         let text = self
             .recognizer
             .transcribe(window, TrailingSilence::Padded)?;
-        if !text.trim().is_empty() || self.segmenter.is_none() {
+        if !text.trim().is_empty() {
             return Ok(text);
         }
         let retry = self.recognizer.transcribe(window, TrailingSilence::Bare)?;
@@ -188,10 +181,9 @@ impl<R: Recognizer, S: Segmenter> Pipeline<R, S> {
         if samples.is_empty() || abandoned() {
             return Ok(String::new());
         }
-        // Silence is not decoded. `split` only returns nothing when a VAD model
-        // found no speech at all; the no-segmenter path always yields one
-        // whole-buffer segment, so nothing that knows less than the VAD is
-        // silenced here. The rate is the validated project-wide constant.
+        // Silence is not decoded: `split` only returns nothing when the VAD
+        // found no speech at all. The rate is the validated project-wide
+        // constant.
         if segments.is_empty() {
             log::debug!(
                 "VAD found no speech in {:.1}s; nothing to decode",
@@ -536,7 +528,7 @@ mod tests {
                 replies: vec![],
                 stop: None,
             },
-            segmenter: Some(Quarters),
+            segmenter: Quarters,
         })
     }
     #[test]
@@ -615,19 +607,12 @@ mod tests {
         assert_eq!(w.progress.through, Frames(4));
     }
     #[test]
-    fn cancel_and_no_vad() {
+    fn a_cancelled_final_decode_decodes_nothing() {
         let mut w = worker();
         let u = Utterance::new(1);
         u.cancel();
         w.finish(&[1.; 10], Frames::ZERO, &u, |_| panic!()).unwrap();
         assert!(w.pipeline.recognizer.calls.is_empty());
-        let u = Utterance::new(2);
-        w.pipeline.segmenter = None;
-        w.tick(&[1.; 10], Frames::ZERO, &u, TickKind::Preview, |_| panic!())
-            .unwrap();
-        assert_eq!(w.progress.through, Frames::ZERO);
-        u.release();
-        assert_eq!(w.finish(&[1.; 10], Frames::ZERO, &u, |_| {}).unwrap().1, 10);
     }
     #[test]
     fn empty_chunks_retry_whole_buffer() {
@@ -672,7 +657,7 @@ mod tests {
                 bare,
                 calls: vec![],
             },
-            segmenter: Some(Quarters),
+            segmenter: Quarters,
         })
     }
     #[test]
@@ -739,16 +724,6 @@ mod tests {
         );
     }
     #[test]
-    fn without_a_segmenter_empty_text_is_not_retried() {
-        let mut w = deaf_worker("words");
-        w.pipeline.segmenter = None;
-        let (text, _) = w
-            .finish(&[1.; 8], Frames::ZERO, &Utterance::new(1), |_| {})
-            .unwrap();
-        assert_eq!(text, "");
-        assert_eq!(w.pipeline.recognizer.calls, [TrailingSilence::Padded]);
-    }
-    #[test]
     fn a_capture_the_vad_hears_no_speech_in_is_not_decoded() {
         struct Silent;
         impl Segmenter for Silent {
@@ -762,7 +737,7 @@ mod tests {
                 replies: vec![],
                 stop: None,
             },
-            segmenter: Some(Silent),
+            segmenter: Silent,
         });
         let u = Utterance::new(1);
         assert_eq!(
@@ -808,7 +783,7 @@ mod tests {
                 replies: vec![],
                 stop: None,
             },
-            segmenter: Some(Quiet(4)),
+            segmenter: Quiet(4),
         });
         let u = Utterance::new(1);
         let mut commits = vec![];
@@ -902,7 +877,7 @@ mod tests {
                 replies: vec![],
                 stop: None,
             },
-            segmenter: Some(Unbroken),
+            segmenter: Unbroken,
         });
         let u = Utterance::new(1);
         let mut commits = vec![];
@@ -939,7 +914,7 @@ mod tests {
                 replies: vec![],
                 stop: None,
             },
-            segmenter: Some(Unbroken),
+            segmenter: Unbroken,
         });
         let u = Utterance::new(1);
         w.tick(&[1.; 10], Frames::ZERO, &u, TickKind::Preview, |_| {
@@ -972,7 +947,7 @@ mod tests {
 
         let mut w = Worker::new(Pipeline {
             recognizer: FailsSecond(0),
-            segmenter: Some(Quarters),
+            segmenter: Quarters,
         });
         let mut commits = vec![];
         let failed = w.finish(&[1.; 10], Frames::ZERO, &Utterance::new(2), |c| {
@@ -1008,7 +983,7 @@ mod tests {
         let u = Utterance::new(1);
         let mut p = Pipeline {
             recognizer: Cancel(u.clone()),
-            segmenter: Some(Quarters),
+            segmenter: Quarters,
         };
         assert_eq!(
             p.decode(&[1.; 8], || u.cancelled(), |_, _| panic!("late commit"))
@@ -1281,13 +1256,13 @@ mod long_capture {
         let calls = Rc::new(Cell::new(vec![]));
         let mut worker = Worker::new(Pipeline {
             recognizer: Counter(Rc::clone(&calls)),
-            segmenter: Some(Detector {
+            segmenter: Detector {
                 config: Vad::default(),
                 base: Rc::clone(&base),
                 releasing: Rc::clone(&releasing),
                 windows: Rc::clone(&windows),
                 before: mode == Bookkeeping::Before,
-            }),
+            },
         });
         let mut held = Held {
             buffers: VecDeque::new(),
@@ -1448,13 +1423,13 @@ mod long_capture {
         let config = Vad::default();
         let mut worker = Worker::new(Pipeline {
             recognizer: Counter(Rc::clone(&calls)),
-            segmenter: Some(Detector {
+            segmenter: Detector {
                 config: config.clone(),
                 base: Rc::clone(&base),
                 releasing: Rc::new(Cell::new(false)),
                 windows: Rc::clone(&windows),
                 before: false,
-            }),
+            },
         });
         let utterance = Utterance::new(1);
         let mut through = 0_usize;

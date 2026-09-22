@@ -24,7 +24,7 @@ use crate::{
             AudioCapture, CaptureEvent, Captured, InputBackend, MAX_UTTERANCE_SECONDS, PostRoll,
         },
         control::{ControlServer, Socket, refuse_until},
-        inference::{SpeechSegmenter, Transcriber, load_segmenter},
+        inference::{SpeechSegmenter, Transcriber},
         models::{Repair, ensure_defaults, repair_defaults},
         nvim::{AppendFailure, CopyOutcome, Detached, IndicatorState, NvimSession, Want},
         recorder::{CaptureReader, Unfinished},
@@ -303,7 +303,6 @@ struct Tail {
 enum ResultEvent {
     Preparing(Preparing),
     Ready {
-        segmenter: bool,
         elapsed: Duration,
     },
     Unavailable(String),
@@ -726,7 +725,7 @@ pub fn run(
             recognizer.warm_up()?;
             Ok(Pipeline {
                 recognizer,
-                segmenter: load_segmenter(&vad, rate),
+                segmenter: SpeechSegmenter::new(&vad, rate)?,
             })
         };
         load_with_repair(
@@ -815,22 +814,15 @@ fn load_with_repair<P>(
         Repair::Verified => Err(failure.context(
             "the speech model's files match their pinned sha256, so this machine cannot load it",
         )),
-        Repair::NotOurs => Err(failure.context("check asr.model_dir and asr.family")),
+        Repair::NotOurs => Err(failure.context("check asr.model_dir")),
     }
 }
 
-/// Turns previews and the silence timeout on as far as the pipeline that
-/// loaded allows.
-fn configure(session: &mut Session, config: &Config, segmenter: bool) {
-    // Without a segmenter nothing ever settles, so a preview would re-decode
-    // the whole growing capture. That is the one thing this project refuses.
-    let previews = config.preview.enabled && segmenter;
-    if config.preview.enabled && !previews {
-        log::warn!("no VAD model: previews are off and the capture is decoded at release");
-    }
-    // Only a tick can report speech, so without one there is no silence to
-    // measure and a latch is bounded by its length alone.
-    let silence = previews.then(|| config.capture.silence_timeout()).flatten();
+/// Turns the ticks and the silence timeout on, once the pipeline is ready:
+/// only a tick reports speech, so before then there is no silence to
+/// measure.
+fn configure(session: &mut Session, config: &Config) {
+    let silence = config.capture.silence_timeout();
     match silence {
         Some(timeout) => log::info!(
             "a latched capture ends by itself after {:.0}s without speech",
@@ -841,7 +833,7 @@ fn configure(session: &mut Session, config: &Config, segmenter: bool) {
             crate::core::state::MAX_CAPTURE.as_secs() / 3600
         ),
     }
-    session.configure(previews, silence);
+    session.configure(true, silence);
 }
 
 /// The event loop. Touches no process-global state: no lock, no signals, no
@@ -866,15 +858,15 @@ where
     let mut requests = Requests::new(requests);
     let rate = config.audio.sample_rate;
     let processor = Processor::new(&config.text)?;
-    // No previews and no silence timeout until a pipeline says what it can do.
+    // No ticks and no silence timeout until the pipeline is ready.
     let mut session = Session::new(
         false,
         Duration::from_millis(config.preview.interval_ms),
         None,
     );
     let mut recognition = match &pipeline {
-        PipelineSource::Ready(pipeline) => {
-            configure(&mut session, config, pipeline.segmenter.is_some());
+        PipelineSource::Ready(_) => {
+            configure(&mut session, config);
             Recognition::Ready
         }
         PipelineSource::Load(_) => Recognition::Preparing(Preparing::Loading),
@@ -1053,9 +1045,9 @@ where
                     ResultEvent::Preparing(step) => {
                         recognition = Recognition::Preparing(step);
                     }
-                    ResultEvent::Ready { segmenter, elapsed } => {
+                    ResultEvent::Ready { elapsed } => {
                         log::info!("speech model ready after {:.1}s", elapsed.as_secs_f64());
-                        configure(&mut session, config, segmenter);
+                        configure(&mut session, config);
                         recognition = Recognition::Ready;
                     }
                     ResultEvent::ConfigInvalid(reason) => {
@@ -1591,7 +1583,6 @@ fn load<R: Recognizer, S: Segmenter>(
         match loaded {
             Ok(pipeline) => {
                 let ready = ResultEvent::Ready {
-                    segmenter: pipeline.segmenter.is_some(),
                     elapsed: started.elapsed(),
                 };
                 return result_tx.send(ready).is_ok().then(|| Worker::new(pipeline));
@@ -1646,8 +1637,9 @@ fn decode_recording<R: Recognizer, S: Segmenter>(
             break;
         }
         // A full window, as a live tick past `preview.max_seconds` has: one
-        // with nothing settled in it -- no VAD model, or speech the detector
-        // never breaks -- is committed whole, which keeps this to a window.
+        // with nothing settled in it -- speech the detector never breaks, or
+        // pauses too short to settle it -- is committed whole, which keeps
+        // this to a window.
         let Some(tail) = worker.tick(&held, start, utterance, TickKind::Commits, &mut commit)?
         else {
             break;
@@ -1899,7 +1891,7 @@ mod tests {
         crate::shell::recorder::dump_capture(&path, &[0.5; 10_000], 16_000).unwrap();
         let mut worker = Worker::new(Pipeline {
             recognizer: Count,
-            segmenter: Some(Blocks(1_000)),
+            segmenter: Blocks(1_000),
         });
         let mut commits = Vec::new();
         decode_recording(
@@ -1930,7 +1922,7 @@ mod tests {
         crate::shell::recorder::dump_capture(&path, &[0.5; 10_000], 16_000).unwrap();
         let mut worker = Worker::new(Pipeline {
             recognizer: Count,
-            segmenter: Some(Blocks(1_000)),
+            segmenter: Blocks(1_000),
         });
         let mut commits = Vec::new();
         decode_recording(
@@ -1959,11 +1951,9 @@ mod tests {
         assert!(beyond.is_err(), "a recording shorter than its offset");
     }
 
-    /// Every request is preceded by the clock at its own stamp, and a drain
-    /// ends with the clock at the current time, once.
-    /// With nothing ever settling -- no VAD model, or speech the detector
-    /// never breaks -- a recording is still read and decoded a window at a
-    /// time, never whole, and every sample is still decoded once.
+    /// With nothing ever settling -- speech the detector never breaks -- a
+    /// recording is still read and decoded a window at a time, never whole,
+    /// and every sample is still decoded once.
     #[test]
     fn a_recording_with_nothing_settled_is_held_a_window_at_a_time() {
         let directory = tempfile::tempdir().unwrap();
@@ -1971,7 +1961,7 @@ mod tests {
         crate::shell::recorder::dump_capture(&path, &[0.5; 10_000], 16_000).unwrap();
         let mut worker = Worker::new(Pipeline {
             recognizer: Count,
-            segmenter: None::<Blocks>,
+            segmenter: Blocks(usize::MAX),
         });
         let mut commits = Vec::new();
         decode_recording(
@@ -2052,6 +2042,8 @@ mod tests {
         );
     }
 
+    /// Every request is preceded by the clock at its own stamp, and a drain
+    /// ends with the clock at the current time, once.
     #[test]
     fn requests_are_clocked_at_their_stamps() {
         let (sender, receiver) = mpsc::channel();

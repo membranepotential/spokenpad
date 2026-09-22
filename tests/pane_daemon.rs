@@ -607,7 +607,7 @@ impl Daemon {
     /// A daemon whose editor attaches as a UI and then raises while sourcing
     /// its configuration, which is what a broken `init.lua` looks like.
     fn broken_init(display: &str) -> Self {
-        Self::with(Some(display.to_owned()), None, |config| {
+        Self::with(Some(display.to_owned()), Chunks(usize::MAX), |config| {
             config.nvim.init = None;
             config.nvim.editor = [
                 "nvim",
@@ -624,7 +624,7 @@ impl Daemon {
     }
 
     fn start(display: Option<String>) -> Self {
-        Self::with(display, None, |_| {})
+        Self::with(display, Chunks(usize::MAX), |_| {})
     }
 
     /// A daemon that commits while the capture runs: a second of speech is a
@@ -633,9 +633,8 @@ impl Daemon {
     /// Its editor is slow to exit: a job that ignores `SIGTERM` makes Neovim
     /// wait two seconds for it after it closed its channels.
     fn with_chunks(display: &str) -> Self {
-        Self::with(Some(display.to_owned()), Some(Chunks(16_000)), |config| {
+        Self::with(Some(display.to_owned()), Chunks(16_000), |config| {
             config.recording.enabled = true;
-            config.preview.enabled = true;
             config.preview.interval_ms = 200;
             config.nvim.editor = [
                 "nvim",
@@ -647,11 +646,7 @@ impl Daemon {
         })
     }
 
-    fn with(
-        display: Option<String>,
-        segmenter: Option<Chunks>,
-        adjust: impl FnOnce(&mut Config),
-    ) -> Self {
+    fn with(display: Option<String>, segmenter: Chunks, adjust: impl FnOnce(&mut Config)) -> Self {
         let directory = tempfile::tempdir().expect("a temporary directory");
         let root = directory.path();
         let mut config = Config::default();
@@ -673,7 +668,6 @@ impl Daemon {
         )));
         config.recording.dir = root.join("audio");
         config.recording.enabled = false;
-        config.preview.enabled = false;
         adjust(&mut config);
         config.validate().expect("the test configuration is valid");
 
@@ -954,8 +948,9 @@ impl Recognizer for Fixed {
 
 /// Fixed chunks of this many samples, every one but the last settled, and
 /// none where nothing was said: what a voice activity detector reports for a
-/// steady tone, without loading one. Without it the whole capture is decoded
-/// when the key comes up, which is the simplest path through the pipeline.
+/// steady tone, without loading one. `Chunks(usize::MAX)` is one window that
+/// never settles, so the whole capture is decoded when the key comes up,
+/// which is the simplest path through the pipeline.
 struct Chunks(usize);
 
 impl Segmenter for Chunks {

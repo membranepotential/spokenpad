@@ -2441,3 +2441,27 @@ configured `recording.dir` to 0700 at every press, even one the user shares
   listed by others.
 - Not done here: the dictation directory is created by `shell/nvim` and
   `shell/pane`, which should create it with `dirs::create_private` too.
+
+## One model family, VAD and preview always on (2026-09-22)
+
+The user removed three features before the first public release.
+
+- `asr.family` and `asr.language`: Whisper and SenseVoice. Both scored
+  worse than Parakeet on the five reference clips ([asr.md](asr.md)), neither
+  takes hotwords, and Whisper needed a code path of its own to cut windows
+  longer than its 30 seconds. `Asr` now holds a `Decoding` instead of a
+  `Model` per family; any NeMo transducer still loads from `asr.model_dir`.
+- `vad.enabled`: without the detector nothing settles, so nothing commits
+  before the release, the capture is held in memory whole, and silence is
+  decoded, which is where Parakeet invents "Thank you.". `Pipeline` now
+  holds a segmenter rather than an `Option` of one, and a detector that does
+  not load leaves the speech model unavailable, as a recognizer that does
+  not load does: the window says so, captures are kept, and the next press
+  tries again.
+- `preview.enabled`: the tick that previews is the tick that commits, so
+  turning it off had the same costs as turning the detector off.
+
+A configuration that still sets one of these keys is refused with what
+became of it (`config::GONE`), never with serde's bare "unknown field".
+`examples/eval.rs --whole` and `examples/corpus.rs --path whole` keep their
+whole-capture decode by calling the recognizer directly.

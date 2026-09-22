@@ -13,8 +13,8 @@ on i3, sway, Openbox, KWin Wayland and X11; on sway the daemon adds a
 any terminal, the choice for Wayland without Xwayland. Managed mode (a
 terminal on i3 or sway) was removed on 2026-09-22; its config keys are
 refused with a message that says so.
-Rust only, CPU only (sherpa-onnx linked statically: Parakeet TDT by default, Whisper
-or SenseVoice via `asr.family`; Silero VAD).
+Rust only, CPU only (sherpa-onnx linked statically: Parakeet TDT, or another NeMo
+transducer in `asr.model_dir`; Silero VAD, always on).
 
 Read first: `STATUS.md` (live dashboard, keep it true, ≤ 60 lines),
 `docs/constraints.md` (hard rules), `docs/architecture.md`, `docs/rust.md`.
@@ -31,7 +31,7 @@ Design history is `docs/decisions.md`; add an entry when you change behaviour.
 - The only network access anywhere in the program is the pinned default
   model download (`spokenpad fetch-models`, or automatically on first launch;
   `core/models.rs`, `shell/models.rs`): fixed URLs, verified against a pinned
-  size and sha256. A user-configured `model_dir`/`asr.family` is never
+  size and sha256. A user-configured `model_dir` or `vad.model` is never
   downloaded.
 - No window spokenpad opens may take focus. Attach mode opens no window;
   pane mode sets `_NET_WM_USER_TIME = 0` (once, never
@@ -77,8 +77,9 @@ those belongs in `src/shell/`.
 - Imperative shell: `shell/daemon.rs` (`run` = lock/socket/signals/devices and the model loader, `serve` =
   the generic loop), `shell/audio.rs` (`InputBackend` seam; PortAudio impl),
   `shell/recorder.rs` (recovery WAV), `shell/control.rs` (control socket
-  server and the CLI's client), `shell/inference.rs` (sherpa/Silero, model
-  families), `shell/models.rs` (downloads and verifies the default models),
+  server and the CLI's client), `shell/inference.rs` (sherpa's transducer
+  and Silero), `shell/dirs.rs` (private directories), `shell/models.rs`
+  (downloads and verifies the default models),
   `shell/nvim/mod.rs` (editor lifecycle, both modes, `spokenpad editor`),
   `shell/nvim/passage.rs` (text dictated with no editor open), `shell/wm.rs`
   (sway's IPC socket for the pane's rule, bounded helper processes),

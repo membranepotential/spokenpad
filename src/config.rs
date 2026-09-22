@@ -9,8 +9,7 @@ use std::{
 };
 
 /// Both models are 16kHz: Silero's window is 512 samples at that rate and
-/// every supported ASR family's features assume it. Nothing resamples in
-/// between.
+/// Parakeet's features assume it. Nothing resamples in between.
 pub const REQUIRED_SAMPLE_RATE: u32 = 16_000;
 /// Upper bound for `audio.postroll_ms`: every release blocks the event loop
 /// this long at most, and a key pressed meanwhile ends it early.
@@ -108,18 +107,8 @@ pub fn models_dir() -> PathBuf {
         .join("spokenpad/models")
 }
 
-/// The ASR model, one variant per model family sherpa-onnx loads offline.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Model {
-    /// A NeMo transducer such as Parakeet TDT, the default. The only family
-    /// with hotwords.
-    Parakeet { decoding: Decoding },
-    /// OpenAI Whisper. `None` detects the language.
-    Whisper { language: Option<String> },
-    /// SenseVoice. `None` detects the language.
-    SenseVoice { language: Option<String> },
-}
-
+/// The speech model: a NeMo transducer such as Parakeet TDT, the default,
+/// which sherpa-onnx loads offline.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(try_from = "RawAsr")]
 pub struct Asr {
@@ -127,40 +116,28 @@ pub struct Asr {
     /// directory.
     pub model_dir: PathBuf,
     pub num_threads: u16,
-    pub model: Model,
+    pub decoding: Decoding,
 }
 impl Default for Asr {
     fn default() -> Self {
         Self {
             model_dir: models_dir().join("parakeet-tdt-0.6b-v3-int8"),
             num_threads: 6,
-            model: Model::Parakeet {
-                decoding: Decoding::GreedySearch,
-            },
+            decoding: Decoding::GreedySearch,
         }
     }
 }
 
-/// `[asr]` as written: one flat table, whose valid keys depend on `family`.
+/// `[asr]` as written: one flat table, whose hotword keys depend on
+/// `decoding`.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawAsr {
-    #[serde(default)]
-    family: Family,
     model_dir: Option<PathBuf>,
     num_threads: Option<u16>,
     decoding: Option<SearchMethod>,
     hotwords_score: Option<f32>,
     vocabulary: Option<Vec<String>>,
-    language: Option<String>,
-}
-#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-enum Family {
-    #[default]
-    Parakeet,
-    Whisper,
-    SenseVoice,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -173,100 +150,56 @@ impl TryFrom<RawAsr> for Asr {
     type Error = anyhow::Error;
     fn try_from(raw: RawAsr) -> Result<Self> {
         let default = Self::default();
-        let family = raw.family;
-        let name = match family {
-            Family::Parakeet => "parakeet",
-            Family::Whisper => "whisper",
-            Family::SenseVoice => "sense_voice",
-        };
-        if family != Family::Parakeet {
-            ensure!(
-                raw.vocabulary.is_none() && raw.hotwords_score.is_none(),
-                "asr.vocabulary and asr.hotwords_score need family = \"parakeet\": \
-                 sherpa-onnx applies hotwords only in a transducer's modified_beam_search"
-            );
-            ensure!(
-                raw.decoding.is_none(),
-                "asr.decoding applies only to family = \"parakeet\""
-            );
-        }
-        ensure!(
-            raw.language.is_none() || family != Family::Parakeet,
-            "asr.language does not apply to family = \"{name}\""
+        // Greedy unless hotwords are asked for: sherpa-onnx's beam search on
+        // Parakeet TDT returns "" or "Yeah." for clear speech about one time
+        // in five (k2-fsa/sherpa-onnx#3267).
+        let method = raw.decoding.unwrap_or(
+            if raw.vocabulary.as_ref().is_some_and(|v| !v.is_empty())
+                || raw.hotwords_score.is_some()
+            {
+                SearchMethod::ModifiedBeamSearch
+            } else {
+                SearchMethod::GreedySearch
+            },
         );
-        if let Some(language) = &raw.language {
-            ensure!(
-                !language.is_empty()
-                    && language
-                        .bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'),
-                "asr.language must be a language code such as \"en\"; leave it out to detect"
-            );
-        }
-        let model = match family {
-            Family::Parakeet => Model::Parakeet {
-                // Greedy unless hotwords are asked for: sherpa-onnx's beam
-                // search on Parakeet TDT returns "" or "Yeah." for clear
-                // speech about one time in five (k2-fsa/sherpa-onnx#3267).
-                decoding: match raw.decoding.unwrap_or(
-                    if raw.vocabulary.as_ref().is_some_and(|v| !v.is_empty())
-                        || raw.hotwords_score.is_some()
-                    {
-                        SearchMethod::ModifiedBeamSearch
-                    } else {
-                        SearchMethod::GreedySearch
-                    },
-                ) {
-                    SearchMethod::GreedySearch => {
-                        ensure!(
-                            raw.vocabulary.is_none_or(|v| v.is_empty()),
-                            "asr.vocabulary requires decoding = \"modified_beam_search\""
-                        );
-                        ensure!(
-                            raw.hotwords_score.is_none(),
-                            "asr.hotwords_score requires decoding = \"modified_beam_search\": \
-                             greedy_search applies no hotwords"
-                        );
-                        Decoding::GreedySearch
-                    }
-                    SearchMethod::ModifiedBeamSearch => {
-                        let vocabulary = raw.vocabulary.unwrap_or_default();
-                        let hotwords_score = raw.hotwords_score.unwrap_or(1.5);
-                        ensure!(
-                            hotwords_score.is_finite(),
-                            "asr.hotwords_score must be finite"
-                        );
-                        for word in &vocabulary {
-                            ensure!(
-                                !word.trim().is_empty() && !word.contains(['\n', '\r', '\0']),
-                                "invalid vocabulary phrase"
-                            );
-                        }
-                        Decoding::ModifiedBeamSearch {
-                            vocabulary,
-                            hotwords_score,
-                        }
-                    }
-                },
-            },
-            Family::Whisper => Model::Whisper {
-                language: raw.language,
-            },
-            Family::SenseVoice => Model::SenseVoice {
-                language: raw.language,
-            },
-        };
-        let model_dir = match raw.model_dir {
-            Some(dir) => dir,
-            None if family == Family::Parakeet => default.model_dir,
-            None => bail!("asr.model_dir is required for family = \"{name}\""),
+        let decoding = match method {
+            SearchMethod::GreedySearch => {
+                ensure!(
+                    raw.vocabulary.is_none_or(|v| v.is_empty()),
+                    "asr.vocabulary requires decoding = \"modified_beam_search\""
+                );
+                ensure!(
+                    raw.hotwords_score.is_none(),
+                    "asr.hotwords_score requires decoding = \"modified_beam_search\": \
+                     greedy_search applies no hotwords"
+                );
+                Decoding::GreedySearch
+            }
+            SearchMethod::ModifiedBeamSearch => {
+                let vocabulary = raw.vocabulary.unwrap_or_default();
+                let hotwords_score = raw.hotwords_score.unwrap_or(1.5);
+                ensure!(
+                    hotwords_score.is_finite(),
+                    "asr.hotwords_score must be finite"
+                );
+                for word in &vocabulary {
+                    ensure!(
+                        !word.trim().is_empty() && !word.contains(['\n', '\r', '\0']),
+                        "invalid vocabulary phrase"
+                    );
+                }
+                Decoding::ModifiedBeamSearch {
+                    vocabulary,
+                    hotwords_score,
+                }
+            }
         };
         let num_threads = raw.num_threads.unwrap_or(default.num_threads);
         ensure!(num_threads > 0, "asr.num_threads must be positive");
         Ok(Self {
-            model_dir,
+            model_dir: raw.model_dir.unwrap_or(default.model_dir),
             num_threads,
-            model,
+            decoding,
         })
     }
 }
@@ -274,7 +207,6 @@ impl TryFrom<RawAsr> for Asr {
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Vad {
-    pub enabled: bool,
     /// Resolved like `asr.model_dir`.
     pub model: PathBuf,
     pub threshold: f64,
@@ -288,7 +220,6 @@ pub struct Vad {
 impl Default for Vad {
     fn default() -> Self {
         Self {
-            enabled: true,
             model: models_dir().join("silero_vad.onnx"),
             threshold: 0.5,
             min_silence_seconds: 0.35,
@@ -545,14 +476,12 @@ impl Default for Nvim {
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Preview {
-    pub enabled: bool,
     pub interval_ms: u64,
     pub max_seconds: f64,
 }
 impl Default for Preview {
     fn default() -> Self {
         Self {
-            enabled: true,
             interval_ms: 1100,
             max_seconds: 30.,
         }
@@ -792,16 +721,13 @@ impl Config {
             self.preview.interval_ms >= 200 && self.preview.interval_ms <= 3_600_000,
             "preview.interval_ms must be in [200,3600000]"
         );
-        // The silence timeout measures the time since the recognizer last
-        // produced text, and only a tick produces any: the earliest a capture
-        // can report speech is one tick after the press. A timeout shorter
-        // than two ticks would end a capture the user is talking into, having
-        // given it no chance to say so, so the two keys are validated against
-        // each other rather than only against their own ranges.
-        if self.preview.enabled
-            && self.vad.enabled
-            && let Some(timeout) = self.capture.silence_timeout()
-        {
+        // The silence timeout measures the time since a tick last reported
+        // speech: the earliest a capture can report any is one tick after the
+        // press. A timeout shorter than two ticks would end a capture the
+        // user is talking into, having given it no chance to say so, so the
+        // two keys are validated against each other rather than only against
+        // their own ranges.
+        if let Some(timeout) = self.capture.silence_timeout() {
             let tick = Duration::from_millis(self.preview.interval_ms);
             ensure!(
                 timeout >= tick * 2,
@@ -850,9 +776,54 @@ impl Config {
     }
 }
 
-/// The keys only managed mode read. It was removed on 2026-09-22: the pane
-/// does what it did with no rule in the window manager's configuration.
-const MANAGED_ONLY: [&str; 3] = ["terminal", "window_instance", "window_fraction"];
+/// What became of a key spokenpad no longer reads.
+enum Gone {
+    /// Removed; the text follows "was removed" and says why and what to do
+    /// instead.
+    Removed(&'static str),
+}
+
+/// Every key spokenpad no longer reads, by section. A configuration that
+/// still sets one is refused with what became of it, rather than with
+/// serde's bare "unknown field".
+const GONE: &[(&str, &str, Gone)] = &[
+    (
+        "asr",
+        "family",
+        Gone::Removed(
+            ": spokenpad runs Parakeet TDT only. Delete the line, and asr.model_dir too if it points at another family's model",
+        ),
+    ),
+    (
+        "asr",
+        "language",
+        Gone::Removed(
+            " with the other model families: Parakeet TDT recognises the language by itself. Delete the line",
+        ),
+    ),
+    (
+        "vad",
+        "enabled",
+        Gone::Removed(
+            ": the voice activity detector is always on. Without it nothing settles, so nothing is committed before the release and nothing previews, and silence is decoded, which is where the recogniser invents words. Delete the line",
+        ),
+    ),
+    (
+        "preview",
+        "enabled",
+        Gone::Removed(
+            ": the preview is always on; the same ticks commit settled text as you speak. Delete the line",
+        ),
+    ),
+    ("nvim", "terminal", Gone::Removed(MANAGED_ONLY)),
+    ("nvim", "window_instance", Gone::Removed(MANAGED_ONLY)),
+    ("nvim", "window_fraction", Gone::Removed(MANAGED_ONLY)),
+];
+
+/// Why the keys only managed mode read are gone. It was removed on
+/// 2026-09-22: the pane does what it did with no rule in the window
+/// manager's configuration.
+const MANAGED_ONLY: &str = " with managed mode, which the pane replaces: it sizes and places its own window and needs no rule in your window manager. Delete the line";
 
 /// What a configuration still sets that spokenpad no longer has, and what
 /// replaced it, so that the user reads that rather than serde's "unknown
@@ -863,16 +834,21 @@ fn removed(table: &toml::Table) -> Option<String> {
             "[hotkey] was removed: spokenpad no longer reads the keyboard. Delete the [hotkey] table and bind keys in your window manager to `spokenpad start`, `spokenpad stop`, `spokenpad toggle` and `spokenpad cancel` (see \"Bind your keys\" in the README)".to_owned(),
         );
     }
-    let nvim = table.get("nvim").and_then(toml::Value::as_table)?;
-    if nvim.get("mode").and_then(toml::Value::as_str) == Some("managed") {
+    let section = |name: &str| table.get(name).and_then(toml::Value::as_table);
+    if section("nvim")
+        .and_then(|nvim| nvim.get("mode"))
+        .and_then(toml::Value::as_str)
+        == Some("managed")
+    {
         return Some(
             "nvim.mode = \"managed\" was removed: the pane replaces it, a window spokenpad draws itself that needs no rule in your window manager. Delete the line to use the pane (the default), or set nvim.mode = \"attach\" and run `spokenpad editor` in a terminal of your own".to_owned(),
         );
     }
-    MANAGED_ONLY.iter().find(|key| nvim.contains_key(**key)).map(|key| {
-        format!(
-            "nvim.{key} was removed with managed mode, which the pane replaces: it sizes and places its own window and needs no rule in your window manager. Delete the line"
-        )
+    GONE.iter().find_map(|(name, key, gone)| {
+        section(name)?.get(*key)?;
+        Some(match gone {
+            Gone::Removed(instead) => format!("{name}.{key} was removed{instead}"),
+        })
     })
 }
 
@@ -984,15 +960,6 @@ mod tests {
             timeout("[capture]\nsilence_timeout_s=1\n[preview]\ninterval_ms=500"),
             Some(Duration::from_secs(1))
         );
-        // A tick that can never land is only a contradiction while the tick
-        // exists: with the progressive decode off, the silence rule is off
-        // too and the pair says nothing about each other.
-        for off in [
-            "[capture]\nsilence_timeout_s=300\n[preview]\ninterval_ms=600000\nenabled=false",
-            "[capture]\nsilence_timeout_s=300\n[preview]\ninterval_ms=600000\n[vad]\nenabled=false",
-        ] {
-            assert_eq!(timeout(off), Some(Duration::from_secs(300)), "{off}");
-        }
     }
     #[test]
     fn reject_invalid_boundaries() {
@@ -1037,12 +1004,6 @@ mod tests {
             "[asr]\nvocabulary=['']",
             "[asr]\nhotwords_score=nan",
             "[asr]\nnum_threads=0",
-            "[asr]\nlanguage='en'",
-            "[asr]\nfamily='moonshine'\nmodel_dir='m'",
-            "[asr]\nfamily='whisper'",
-            "[asr]\nfamily='whisper'\nmodel_dir='w'\ndecoding='greedy_search'",
-            "[asr]\nfamily='sense_voice'\nmodel_dir='s'\nhotwords_score=1.5",
-            "[asr]\nfamily='whisper'\nmodel_dir='w'\nlanguage='e n'",
             "[text]\nfillers=['']",
         ] {
             assert!(Config::parse(bad, None).is_err(), "accepted {bad}");
@@ -1087,87 +1048,44 @@ mod tests {
         );
     }
     #[test]
-    fn a_family_takes_only_its_own_keys() {
-        let c = Config::parse(
-            "[asr]\nfamily='whisper'\nmodel_dir='w'\nlanguage='de'\nnum_threads=2",
-            Some(Path::new("/tmp/conf")),
-        )
-        .unwrap();
-        assert_eq!(c.asr.model_dir, Path::new("/tmp/conf/w"));
-        assert_eq!(c.asr.num_threads, 2);
+    fn beam_search_is_taken_only_for_hotwords() {
+        let decoding = |toml: &str| Config::parse(toml, None).unwrap().asr.decoding;
+        assert_eq!(decoding(""), Decoding::GreedySearch);
+        assert_eq!(decoding("[asr]\nvocabulary=[]"), Decoding::GreedySearch);
         assert_eq!(
-            c.asr.model,
-            Model::Whisper {
-                language: Some("de".into())
-            }
+            decoding("[asr]\ndecoding='greedy_search'"),
+            Decoding::GreedySearch
         );
-        let c = Config::parse("[asr]\nfamily='sense_voice'\nmodel_dir='s'", None).unwrap();
-        assert_eq!(c.asr.model, Model::SenseVoice { language: None });
-        // Greedy by default: beam search is taken only for hotwords.
         assert_eq!(
-            Config::parse("", None).unwrap().asr.model,
-            Model::Parakeet {
-                decoding: Decoding::GreedySearch
+            decoding("[asr]\nhotwords_score=2.0"),
+            Decoding::ModifiedBeamSearch {
+                vocabulary: vec![],
+                hotwords_score: 2.0
             }
         );
         assert_eq!(
-            Config::parse("[asr]\nvocabulary=[]", None)
-                .unwrap()
-                .asr
-                .model,
-            Model::Parakeet {
-                decoding: Decoding::GreedySearch
+            decoding("[asr]\nvocabulary=['mkdir']"),
+            Decoding::ModifiedBeamSearch {
+                vocabulary: vec!["mkdir".into()],
+                hotwords_score: 1.5
             }
         );
-        assert_eq!(
-            Config::parse("[asr]\nhotwords_score=2.0", None)
-                .unwrap()
-                .asr
-                .model,
-            Model::Parakeet {
-                decoding: Decoding::ModifiedBeamSearch {
-                    vocabulary: vec![],
-                    hotwords_score: 2.0
-                }
-            }
-        );
-        let c = Config::parse("[asr]\ndecoding='greedy_search'", None).unwrap();
-        assert_eq!(
-            c.asr.model,
-            Model::Parakeet {
-                decoding: Decoding::GreedySearch
-            }
-        );
-        assert_eq!(
-            Config::parse("[asr]\nvocabulary=['mkdir']", None)
-                .unwrap()
-                .asr
-                .model,
-            Model::Parakeet {
-                decoding: Decoding::ModifiedBeamSearch {
-                    vocabulary: vec!["mkdir".into()],
-                    hotwords_score: 1.5
-                }
-            }
-        );
+    }
 
-        let error = format!(
-            "{:#}",
-            Config::parse(
-                "[asr]\nfamily='whisper'\nmodel_dir='w'\nvocabulary=['mkdir']",
-                None
-            )
-            .unwrap_err()
-        );
-        assert!(
-            error.contains("asr.vocabulary") && error.contains("family = \"parakeet\""),
-            "{error}"
-        );
-        let error = format!(
-            "{:#}",
-            Config::parse("[asr]\nfamily='whisper'", None).unwrap_err()
-        );
-        assert!(error.contains("asr.model_dir is required"), "{error}");
+    /// A key spokenpad no longer reads is refused with what became of it,
+    /// never with serde's bare "unknown field".
+    #[test]
+    fn a_removed_key_says_what_became_of_it() {
+        for (toml, says) in [
+            ("[asr]\nfamily='whisper'", "asr.family was removed"),
+            ("[asr]\nfamily='parakeet'", "Parakeet TDT only"),
+            ("[asr]\nlanguage='de'", "asr.language was removed"),
+            ("[vad]\nenabled=false", "vad.enabled was removed"),
+            ("[preview]\nenabled=true", "preview.enabled was removed"),
+        ] {
+            let error = format!("{:#}", Config::parse(toml, None).unwrap_err());
+            assert!(error.contains(says), "{toml}: {error}");
+        }
     }
     #[test]
     fn explicit_model_paths_use_config_directory() {
@@ -1210,9 +1128,8 @@ mod tests {
         );
         // A key only the pane reads is harmless in attach mode, so switching
         // modes needs no other edit. That is deliberate: unlike `[asr]`,
-        // where a hotword under a family that cannot use it would silently
-        // do nothing the user expects, a leftover `font_size` changes nothing
-        // at all.
+        // where a hotword under greedy search would silently do nothing the
+        // user expects, a leftover `font_size` changes nothing at all.
         let attach = Config::parse("[nvim]\nmode = 'attach'\nfont_size = 22.0", None).unwrap();
         assert_eq!(attach.nvim.mode, Mode::Attach);
     }

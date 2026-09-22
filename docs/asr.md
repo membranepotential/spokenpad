@@ -5,53 +5,48 @@ justified in [constraints.md](constraints.md#bias-vocabulary-at-decode-time-neve
 the implementation is in [`shell/inference.rs`](../src/shell/inference.rs),
 the `[asr]` settings in [`config.rs`](../src/config.rs).
 
-## Model families
+## The model
 
-spokenpad runs offline models through
+spokenpad runs a NeMo transducer — Parakeet TDT by default — offline through
 [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) 1.13.8, CPU only
-(see [constraints.md](constraints.md#cpu-only)). `asr.family` selects how the
-files are loaded; the functional core sees only the `Recognizer` trait.
+(see [constraints.md](constraints.md#cpu-only)). The functional core sees only
+the `Recognizer` trait.
 
-| `family` | sherpa-onnx config | files in `model_dir` | hotwords | language |
-|---|---|---|---|---|
-| `parakeet` (default) | NeMo transducer | `encoder`, `decoder`, `joiner`, `tokens` | yes | fixed by the model |
-| `whisper` | Whisper | `encoder`, `decoder`, `tokens` | no | `asr.language`, or detected |
-| `sense_voice` | SenseVoice, with inverse text normalisation | `model`, `tokens` | no | `asr.language`, or detected |
+`asr.model_dir` holds four files, each found by its role: `encoder`,
+`decoder` and `joiner`, where `<role>.int8.onnx` is preferred over
+`<role>.onnx`, and `tokens.txt`. A missing file makes `check` and
+`transcribe` exit with code 2 and name the directory; the daemon says so in
+the dictation window and tries again at the next press. The model reads
+16 kHz mono, the only rate `audio.sample_rate` accepts.
 
-Each file is found by its role: `<role>.int8.onnx` is preferred over
-`<role>.onnx`, and a `<prefix>-` is allowed before the role, as in Whisper's
-`tiny.en-encoder.int8.onnx`; `tokens` is `tokens.txt` or
-`<prefix>-tokens.txt`. A missing file, or two files for one role, makes
-`check` and `transcribe` exit with code 2 and name the directory; the daemon
-says so in the dictation window and tries again at the next press.
-
-Every family reads 16 kHz mono, the only rate `audio.sample_rate` accepts.
-
-Keys that do not apply to the chosen family are rejected when the config is
-read, not ignored: `vocabulary`, `hotwords_score` and `decoding` belong to
-`parakeet`, `language` to `whisper` and `sense_voice`, and every family but
-`parakeet` needs an explicit `model_dir`.
+Until 2026-09-22 `asr.family` also offered Whisper and SenseVoice, with
+`asr.language`. Both were removed: Parakeet was better than either on every
+measurement below, and each family was a code path of its own (Whisper's
+30-second window was cut into pieces). A configuration that still sets
+either key is refused with a message that says so
+([decisions.md](decisions.md#one-model-family-vad-and-preview-always-on-2026-09-22)).
 
 ### Verified models
 
 Measured on one example machine (Intel i7-9850H, 6 threads) over the five
 local eval clips, with the VAD on and an empty vocabulary. WER is the
 aggregate word error rate against hand-checked references, ignoring case and
-punctuation.
+punctuation. The Whisper and SenseVoice rows are kept as the record of why
+they were removed.
 
 | model | size | WER | wall time, 100 s of audio |
 |---|---|---|---|
 | `sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8` (default) | 670 MB | 18.7% | ~20 s |
 | `sherpa-onnx-nemo-parakeet-unified-en-0.6b-int8-non-streaming` | 633 MB | 8.2% | ~20 s |
-| `sherpa-onnx-whisper-tiny.en` | 100 MB (int8) | 23.0% | ~9 s |
-| `sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2025-09-09`, `language = "en"` | 240 MB | 29.4% | ~10 s |
+| `sherpa-onnx-whisper-tiny.en` (removed) | 100 MB (int8) | 23.0% | ~9 s |
+| `sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2025-09-09`, `language = "en"` (removed) | 240 MB | 29.4% | ~10 s |
 
 Parakeet's row is greedy decoding against the corrected `shell-commands`
 reference (2026-09-21); the Whisper and SenseVoice rows were measured the same
 day before that correction, against a reference with one sentence the clip
 does not contain, so they read slightly high.
 
-`parakeet-unified-en-0.6b` is the same `parakeet` family with another
+`parakeet-unified-en-0.6b` is another NeMo transducer in another
 `model_dir`, and it is the one model measured here whose beam search and
 hotwords work (next section). **Read its WER with the next paragraph, not on
 its own.** It is English only, and it does not fail gracefully on another
@@ -63,41 +58,25 @@ if you dictate English and nothing else. Measurements:
 
 Wall time is five `spokenpad transcribe` runs, each loading the model, on a
 machine busy with parallel builds; it compares the models, not the decode
-speed below. Whisper tiny.en punctuates but misses technical words (`uda
-rules` for `udev rules`). SenseVoice writes English in capitals.
+speed below. Whisper tiny.en punctuated but missed technical words (`uda
+rules` for `udev rules`). SenseVoice wrote English in capitals.
 
 Moonshine is not offered. Measured on sherpa-onnx 1.13.6, it failed on every
 Moonshine v2 window longer than about ten seconds (an onnxruntime broadcast
 error, then an empty result), and VAD windows are often longer. Not re-measured
 on 1.13.8.
 
-### Whisper's 30-second window
+### Using another transducer
 
-Whisper reads at most 30 s per decode, and sherpa-onnx drops the rest with
-only a log line. A VAD window has no length limit: pauses shorter than
-`2 × vad.edge_pad_seconds` stay inside one window. So for Whisper the adapter
-cuts a window longer than 28 s into equal consecutive pieces, decodes each
-with its second of trailing silence, and joins the texts. Every sample is
-still decoded once; a cut can split a word.
-
-### Using another model
-
-1. Download a sherpa-onnx release of a supported family, for example
-   `sherpa-onnx-whisper-base.en.tar.bz2` from the
+1. Download a sherpa-onnx release of a NeMo transducer, for example
+   `sherpa-onnx-nemo-parakeet-unified-en-0.6b-int8-non-streaming` from the
    [asr-models release](https://github.com/k2-fsa/sherpa-onnx/releases/tag/asr-models).
 2. Unpack it, for example into `~/.local/share/spokenpad/models/`.
-3. In `~/.config/spokenpad/config.toml`, set `[asr] family` and `model_dir`,
-   and remove `decoding`, `hotwords_score` and `vocabulary` if the family is
-   not `parakeet`.
+3. In `~/.config/spokenpad/config.toml`, set `[asr] model_dir` to it.
 4. Run `spokenpad check`. It prints `Configuration valid; CPU recognizer
    ready` when the files load.
 5. Run `spokenpad transcribe some.wav` on a 16 kHz recording to judge the
    quality, then restart the service.
-
-A family sherpa-onnx supports but spokenpad does not list (Paraformer,
-Zipformer CTC, Canary, …) needs a new `Model` variant in `config.rs` and one
-match arm in `shell/inference.rs`.
-
 ## The default: Parakeet TDT 0.6B v3, int8
 
 Run as a NeMo transducer (`model_type = "nemo_transducer"`). The files
@@ -171,7 +150,7 @@ against the output text afterward. This is what makes decode-time biasing
 possible instead of the fuzzy string replacement rejected in
 [constraints.md](constraints.md#bias-vocabulary-at-decode-time-never-fuzzy-replacement).
 sherpa-onnx applies hotwords only in a transducer's beam search, which is why
-`vocabulary` exists only for `family = "parakeet"`.
+`vocabulary` needs `decoding = "modified_beam_search"`.
 
 Hotwords require BPE-level scoring, which means the decoder needs a
 `bpe_vocab` file mapping subword pieces to scores.

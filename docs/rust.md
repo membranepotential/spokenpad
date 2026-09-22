@@ -140,12 +140,12 @@ directory; leaving the key out keeps the default under
 `spokenpad fetch-models` fills, and which `check` and `transcribe` fill on
 their own before loading a still-default Parakeet or Silero model, and the
 daemon in the background while it already records (never for a configured
-`model_dir` or another `asr.family`, whose absence stays the plain "missing
-model" error). `[asr]` is parsed into a typed
-`Model` per `asr.family`, and a key the family cannot use is rejected.
+`model_dir`, whose absence stays the plain "missing model" error). `[asr]`
+is parsed into a typed `Decoding`, and a hotword key greedy search cannot
+use is rejected. A key spokenpad no longer reads (`config::GONE`) is refused
+with what became of it, never as a bare unknown field.
 `audio.sample_rate` must be **16000** — the Silero window is 512 samples at
-that rate and every supported model family reads it, and nothing resamples in
-between. `vad.chunk_seconds` must be positive, `preview.max_seconds` at most
+that rate and Parakeet reads it, and nothing resamples in between. `vad.chunk_seconds` must be positive, `preview.max_seconds` at most
 3600 (default 30), `capture.silence_timeout_s` either 0 (off) or in [1,3600]
 (default 300), and `nvim.colorscheme` must match `[A-Za-z0-9_.-]+`, since it
 becomes Lua code. Recovery rejects a WAV whose rate differs from the configured

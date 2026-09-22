@@ -5,7 +5,7 @@ use spokenpad::{
     core::{control::Request, decode::Pipeline, text::Processor},
     shell::{
         control::Socket,
-        inference::{Transcriber, load_segmenter, model_config},
+        inference::{SpeechSegmenter, Transcriber, model_config},
         models::{FetchEvent, ensure_defaults, fetch_models},
         pane,
     },
@@ -191,14 +191,14 @@ fn run(args: Args) -> Result<u8> {
             }
             samples.drain(..((from * f64::from(rate)) as usize).min(samples.len()));
             ensure_default_models(&config);
-            if let Err(e) = model_config(&config.asr) {
+            if let Err(e) = models_present(&config) {
                 log::error!("{e:#}");
                 return Ok(2);
             }
             let transcriber = Transcriber::new(&config.asr, rate)?;
             let mut pipeline = Pipeline {
                 recognizer: transcriber,
-                segmenter: load_segmenter(&config.vad, rate),
+                segmenter: SpeechSegmenter::new(&config.vad, rate)?,
             };
             log::info!(
                 "decoding {:.1}s from {}",
@@ -214,25 +214,14 @@ fn run(args: Args) -> Result<u8> {
         }
         Some(Action::Check) => {
             ensure_default_models(&config);
-            if let Err(e) = model_config(&config.asr) {
+            if let Err(e) = models_present(&config) {
                 log::error!("{e:#}");
                 return Ok(2);
             }
             let mut model = Transcriber::new(&config.asr, config.audio.sample_rate)?;
             model.warm_up()?;
-            let segmenter = load_segmenter(&config.vad, config.audio.sample_rate);
-            ensure!(
-                !config.vad.enabled || segmenter.is_some(),
-                "VAD is enabled but could not load"
-            );
-            println!(
-                "Configuration valid; CPU recognizer ready; VAD {}.",
-                if segmenter.is_some() {
-                    "ready"
-                } else {
-                    "disabled"
-                }
-            );
+            SpeechSegmenter::new(&config.vad, config.audio.sample_rate)?;
+            println!("Configuration valid; CPU recognizer ready; VAD ready.");
             println!(
                 "A running daemon applies [nvim] changes to the next dictation window it opens; \
                  every other section takes effect after `systemctl --user restart spokenpad`."
@@ -287,7 +276,7 @@ fn run(args: Args) -> Result<u8> {
 }
 /// Downloads whichever default model files this configuration would load
 /// but does not have yet (see `shell::models::ensure_defaults`). A
-/// user-configured `model_dir` or another `asr.family` is never touched, so
+/// user-configured `model_dir` is never touched, so
 /// its absence stays the plain "missing ASR model" error `model_config`
 /// raises next.
 ///
@@ -301,6 +290,17 @@ fn ensure_default_models(config: &Config) {
     }) {
         log::error!("could not download default models: {e:#}");
     }
+}
+/// Whether the files of both models are where the configuration says. A
+/// missing one is exit code 2, whichever model it belongs to.
+fn models_present(config: &Config) -> Result<()> {
+    model_config(&config.asr)?;
+    ensure!(
+        config.vad.model.is_file(),
+        "missing VAD model {} (run `spokenpad fetch-models`)",
+        config.vad.model.display()
+    );
+    Ok(())
 }
 /// Progress for `spokenpad fetch-models`: one line per file, plus an
 /// in-place percentage while it downloads.

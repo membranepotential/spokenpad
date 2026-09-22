@@ -52,7 +52,7 @@ Decoding runs on the CPU only; a GPU is never used
 set it to your number of physical cores. On the example machine (Intel
 i7-9850H, 6 cores) the default Parakeet model decodes at 9–17× real time,
 see [asr.md](asr.md#speed-on-a-cpu). Measured peak memory of one
-`spokenpad transcribe`: 1.2 GB with Parakeet, 0.36 GB with Whisper tiny.en.
+`spokenpad transcribe`: 1.2 GB with Parakeet.
 
 ## Audio
 

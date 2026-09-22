@@ -78,9 +78,7 @@ of the slice, on the detector's window grid, and commits empty text. Nothing is
 decoded there — the VAD heard no speech — but the audio behind it is finished
 with, which is what keeps a silent latch from growing.
 
-No tick is issued at all when the pipeline has no segmenter: with nothing ever
-settling, the preview would be a re-decode of the whole growing capture. While
-the uncommitted tail exceeds `preview.max_seconds` (30 s) the tick still runs
+While the uncommitted tail exceeds `preview.max_seconds` (30 s) the tick still runs
 and still commits every settled chunk; only the cosmetic decode of the open
 tail is skipped, so the tail settles and previews resume by themselves. The
 winbar says which. Such a tick reads the first `preview.max_seconds` of the
@@ -141,8 +139,8 @@ and pauses peaks at 26.0 s of retained audio
 measurements of those schedules, not the bound.
 
 `MAX_UTTERANCE_SECONDS` (3600) is a ceiling on that retained window, not on
-the length of a capture. With a VAD model loaded nothing comes near it; without
-one nothing settles, so it is what bounds a forgotten capture's memory.
+the length of a capture. While the tick commits nothing comes near it; it is
+reached only where ticks are too rare to keep up.
 Reaching it is final for that capture: accepting audio again after a hole would
 splice two moments that were never spoken together. So reaching it now *ends*
 the capture — `AudioCapture` reports it, `Session::cap` turns it into
@@ -179,9 +177,8 @@ it was.
   binding and refresh `last_press` — so ending either would only let the next
   repeat start the capture after it.
 
-  The rule is off where nothing can produce text before the release: no VAD
-  model, `vad.enabled = false`, `preview.enabled = false`. Only a tick
-  produces text, so `Config::validate` also requires the timeout to be at
+  The rule is off for a capture made before the speech model was ready: no
+  tick runs then. Only a tick reports speech, so `Config::validate` also requires the timeout to be at
   least two `preview.interval_ms`: the earliest a capture can report speech
   is one tick after the press, and a shorter timeout would end a capture that
   was never given the chance.

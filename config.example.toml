@@ -71,9 +71,8 @@ postroll_ms = 250
 # key left under a book is therefore bounded the same way whichever binding
 # it is on.
 #
-# It is off regardless of this setting wherever nothing can report speech: no
-# VAD model, vad.enabled = false, preview.enabled = false. There is no
-# progressive decode in those cases, so there is no silence to measure.
+# It is off for a capture made before the speech model is ready: nothing
+# decodes it while it runs, so there is no silence to measure.
 silence_timeout_s = 300
 
 # Two limits have no setting at all, because they are not preferences:
@@ -116,10 +115,8 @@ silence_timeout_s = 300
 # against 116 MiB before). That incident cannot repeat with a VAD model loaded.
 #
 # The ceiling is still there for the cases where nothing is committed while
-# you speak, and so nothing can be dropped: no VAD model, vad.enabled = false,
-# preview.enabled = false (which turns the tick off, not only the visible
-# preview -- see [preview] below), or a preview.interval_ms long enough that
-# few ticks fire. It is 3600 seconds of *held* audio
+# you speak, and so nothing can be dropped: a preview.interval_ms long enough
+# that few ticks fire. It is 3600 seconds of *held* audio
 # (MAX_UTTERANCE_SECONDS in audio.rs), a compile-time constant rather than a
 # setting: it is a bound on how much of this machine's RAM one capture may
 # occupy (~230 MB/hour at 16 kHz), not a policy. Reaching it ends the capture:
@@ -152,30 +149,18 @@ enabled = true
 max_total_bytes = 5368709120
 
 [asr]
-# The model family, as sherpa-onnx loads it:
-#   "parakeet"     a NeMo transducer such as Parakeet TDT (the default, and
-#                  the only family with `vocabulary`)
-#   "whisper"      OpenAI Whisper (sherpa-onnx-whisper-* releases)
-#   "sense_voice"  SenseVoice (sherpa-onnx-sense-voice-* releases)
-# Every family reads 16 kHz audio. See docs/asr.md for how to add a model.
-family = "parakeet"
-
-# The directory holding the model's files. spokenpad finds each file by its
-# role (encoder.int8.onnx before encoder.onnx, tiny.en-encoder.onnx too).
-# Required for every family but "parakeet", whose default is where
-# `spokenpad fetch-models` puts it (and where the daemon, in the background,
-# and check/transcribe put it themselves the first time they find it
-# missing), under
-# $XDG_DATA_HOME (~/.local/share if unset). A relative path resolves against
-# this file's directory; ~ and $VARS expand.
+# The directory holding the model: a NeMo transducer such as Parakeet TDT,
+# the default. spokenpad finds each file by its role (encoder.int8.onnx
+# before encoder.onnx, tokens.txt). The default is where `spokenpad
+# fetch-models` puts it (and where the daemon, in the background, and
+# check/transcribe put it themselves the first time they find it missing),
+# under $XDG_DATA_HOME (~/.local/share if unset). A relative path resolves
+# against this file's directory; ~ and $VARS expand. See docs/asr.md.
 model_dir = "~/.local/share/spokenpad/models/parakeet-tdt-0.6b-v3-int8"
 
 # CPU threads for decoding.
 num_threads = 6
 
-# The next three keys apply to "parakeet" only; remove them for another
-# family, which rejects them.
-#
 # "greedy_search" or "modified_beam_search". Left out, it is greedy_search,
 # unless `vocabulary` below is set: hotwords exist only in beam search.
 # Beam search on Parakeet TDT returns nothing, or an invented "Yeah.", for
@@ -196,10 +181,6 @@ num_threads = 6
 # modified_beam_search, with the failure rate described above.
 # vocabulary = ["kubectl", "spokenpad", "nginx"]
 
-# "whisper" and "sense_voice" only: the spoken language as a code such as
-# "en" or "de". Left out, the model detects it.
-# language = "en"
-
 [vad]
 # Voice activity detection. The capture is split at silence and each speech
 # segment decoded in turn, in one pass -- no region is ever decoded twice.
@@ -208,13 +189,11 @@ num_threads = 6
 # an EMPTY STRING when speech is a small fraction of the window it is given:
 # the same 0.53s of speech decodes to "D home." with no padding, "Did the
 # home?" with 2s of silence each side, and "" with 5s. In use that is pressing
-# the key, saying two words, and getting nothing back. Turning this off
-# restores the old whole-buffer behaviour, that bug included.
+# the key, saying two words, and getting nothing back.
 #
 # A chunk this finds speech in that still decodes to an empty string is
 # decoded once more without the second of trailing silence the recogniser
-# normally appends; some short utterances only come back that way. Without
-# the detector nothing is known to be speech, so nothing is retried.
+# normally appends; some short utterances only come back that way.
 #
 # It does NOT make decoding faster -- measured 12.3-12.6x real-time whole-buffer
 # against 11.0-11.7x segmented. What it changes is WHEN text appears: the first
@@ -234,9 +213,8 @@ num_threads = 6
 # It also decides what NOT to decode: a capture this finds no speech in is not
 # handed to the recogniser at all. Silence does not decode to an empty string,
 # it decodes to invented words -- an empty half-second press came back "Thank
-# you." and the words landed in the file. With this off, every capture is
-# decoded whole, silence included.
-enabled = true
+# you." and the words landed in the file. The detector is always on; until
+# 2026-09-22 `enabled = false` turned it off.
 
 # Silero VAD weights, ~0.6 MB, fetched by `spokenpad fetch-models` (and by
 # the daemon, check and transcribe themselves, at this default path). Resolved
@@ -491,22 +469,15 @@ copy_to_clipboard = false
 #
 # The preview is cosmetic only: virtual text in nvim, replaced every tick,
 # never written to the file. What reaches the buffer is each chunk decoded
-# exactly once, when it settles or at key release. Turning this off means
-# nothing commits until the key is released, and the whole capture is decoded
-# then -- and, because committing is also what lets the daemon drop the audio
-# it has transcribed, that capture is held in memory whole, up to the ceiling
-# in [recording] above (~230 MB/hour).
-enabled = true
+# exactly once, when it settles or at key release. The tick is always on.
 
 # Minimum time between ticks. Must be >= 200. The real gap is
 # max(interval - last_decode, last_decode), so the worker stays idle at least
 # half the time however long the passage gets.
 interval_ms = 1100
 
-# Backstop on how much uncommitted audio a preview may decode. Without a VAD
-# model no preview is issued at all -- the whole growing capture would have to
-# be re-decoded, which this project refuses -- so with a VAD model the tick
-# only ever decodes the open tail, at most one chunk, and this is reached only
-# if a chunk somehow never settles. Past this many seconds previews pause, the
+# Backstop on how much uncommitted audio a preview may decode. The tick only
+# ever decodes the open tail, at most one chunk, and this is reached only if a
+# chunk does not settle. Past this many seconds previews pause, the
 # winbar says so, and they resume by themselves once the tail is short again.
 max_seconds = 30.0

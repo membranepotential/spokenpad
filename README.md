@@ -25,9 +25,9 @@ applications.
   the mouse pointer, one that never takes the focus (X11, and Wayland
   through Xwayland; verified on i3, sway, Openbox and KWin); anywhere else,
   you can open the editor yourself in any terminal.
-- **Choice of model.** Parakeet TDT 0.6B v3 by default, or Whisper and
-  SenseVoice models from sherpa-onnx. Parakeet can be biased towards your own
-  vocabulary (project names, commands).
+- **Parakeet TDT 0.6B v3**, downloaded on first use, or another NeMo
+  transducer from sherpa-onnx. It can be biased towards your own vocabulary
+  (project names, commands).
 
 ## Requirements
 
@@ -401,15 +401,13 @@ caught up. The log always has the full sentence and paths.
   winbar.
 - **A capture with no speech in it is not transcribed.** A recogniser given
   silence invents words ("Thank you."), so when the voice activity detector
-  (VAD) hears nothing, nothing is appended. Without a VAD model the whole
-  capture is decoded.
+  (VAD) hears nothing, nothing is appended. The detector is always on.
 - **Speech the VAD heard is not dropped by the recogniser.** Parakeet sometimes
   returns nothing for a short sentence; such a chunk is decoded once more
   without its trailing silence.
 - **Previews pause on a long unsettled tail** (`preview.max_seconds`, 30 s)
   and resume by themselves; text keeps landing while they are paused, 30 s at
-  a time even when you speak so slowly that no sentence ever ends. Without
-  a VAD model there is no preview, and the capture is decoded at release.
+  a time even when you speak so slowly that no sentence ever ends.
 - **A long recording costs no more memory than a short one.** Audio that has
   been transcribed is dropped as you speak; what is held is the sentence you
   are still in. The recovery WAV keeps the whole recording.
@@ -432,17 +430,14 @@ caught up. The log always has the full sentence and paths.
   decoded, and the winbar names the recovery WAV — which is finished and
   closed there, like any other capture's, not carried on past the limit. Text
   that lands while you speak is what makes the audio droppable, so the limit
-  is reachable only where nothing lands: with no VAD model, with
-  `vad.enabled = false`, with `preview.enabled = false` (which turns the whole
-  progressive tick off, not just the visible preview), or with a
-  `preview.interval_ms` long enough that few ticks fire.
-- **The silence timeout is off where nothing can report speech**: no VAD
-  model, `vad.enabled = false`, `preview.enabled = false`. There is no
-  progressive decode in those cases, so there is nothing to measure, and the
-  two limits above are what end a forgotten capture. A `preview.interval_ms`
-  long enough to starve the timeout is not silently ignored: the daemon
-  refuses to start on a configuration whose timeout is under two ticks, and
-  says which two keys disagree.
+  is reachable only where nothing lands: with a `preview.interval_ms` long
+  enough that few ticks fire.
+- **Before the speech model is ready there is no silence timeout**: nothing
+  decodes while you speak, so there is nothing to measure, and the two limits
+  above are what end a forgotten capture. A `preview.interval_ms` long enough
+  to starve the timeout is not silently ignored: the daemon refuses a
+  configuration whose timeout is under two ticks, and says which two keys
+  disagree.
 
 ## A window that opens by itself
 
@@ -506,7 +501,6 @@ cannot pass silently. Keys are not configured here; see
 | key | default | what it does |
 |---|---|---|
 | `capture.silence_timeout_s` | `300` | seconds without speech after which a latched capture ends by itself; `0` turns it off, and the four-hour limit still applies. Must be at least twice `preview.interval_ms` |
-| `asr.family` | `"parakeet"` | model family: `parakeet`, `whisper` or `sense_voice` ([docs/asr.md](docs/asr.md)) |
 | `asr.vocabulary` | `[]` | words to bias Parakeet towards, such as `["kubectl", "nginx"]`; switches to beam search, which sometimes drops a sentence ([docs/asr.md](docs/asr.md)) |
 | `nvim.mode` | `"pane"` | `pane`: the daemon opens a window it draws itself; `attach`: you run `spokenpad editor` |
 | `nvim.font_family`, `nvim.font_size` | `"monospace"`, `11.25` | pane mode only: the font it draws with, sized in points exactly as Alacritty's `font.size` (scaled by the X resource `Xft.dpi`), so the same numbers give the same cells — provided `Xft.dpi` is set (`xrdb` or `~/.Xresources`): the pane does not read an XSETTINGS daemon's `Xft/DPI` or RandR's physical screen size, which Alacritty falls back to, and uses 96 dpi instead |

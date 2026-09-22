@@ -17,9 +17,12 @@ use clap::Parser;
 use serde::Deserialize;
 use spokenpad::{
     config::Config,
-    core::{decode::Pipeline, text::Processor},
+    core::{
+        decode::{Pipeline, Recognizer, TrailingSilence},
+        text::Processor,
+    },
     shell::{
-        inference::{Transcriber, load_segmenter},
+        inference::{SpeechSegmenter, Transcriber},
         recorder::read_capture,
     },
 };
@@ -205,14 +208,9 @@ fn main() -> Result<()> {
     eprintln!("loading model and warming up ...");
     let mut recognizer = Transcriber::new(&config.asr, config.audio.sample_rate)?;
     recognizer.warm_up()?;
-    let segmenter = if args.whole {
-        None
-    } else {
-        load_segmenter(&config.vad, config.audio.sample_rate)
-    };
     let mut pipeline = Pipeline {
         recognizer,
-        segmenter,
+        segmenter: SpeechSegmenter::new(&config.vad, config.audio.sample_rate)?,
     };
     let processor = Processor::new(&config.text)?;
 
@@ -242,7 +240,14 @@ fn main() -> Result<()> {
         }
 
         let started = Instant::now();
-        let raw = pipeline.decode(&samples, || false, |_, _| {})?;
+        // `--whole`: one decode of the whole clip, no detector in front of it.
+        let raw = if args.whole {
+            pipeline
+                .recognizer
+                .transcribe(&samples, TrailingSilence::Padded)?
+        } else {
+            pipeline.decode(&samples, || false, |_, _| {})?
+        };
         let decode_seconds = started.elapsed().as_secs_f64();
         let hypothesis = processor.process(&raw);
 

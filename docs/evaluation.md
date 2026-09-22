@@ -158,9 +158,9 @@ time, and four counts WER cannot express.
 | `yeah` | Commits that are nothing but "Yeah." — what beam search invents for clear speech ([k2-fsa/sherpa-onnx#3267](https://github.com/k2-fsa/sherpa-onnx/issues/3267)). |
 | `dup` | Chunk seams where the next committed chunk began with the words the previous one ended with: two decode windows that overlapped, written into the file twice. |
 
-`e1` and `e2` are structurally zero on the `whole` path: with no segmenter
-nothing claims a window holds speech, so `Pipeline::transcribe_speech` never
-retries. Read them only on the `live` path.
+`e1` and `e2` are structurally zero on the `whole` path: it calls the
+recognizer once per capture, with no detector in front of it, so nothing
+claims a window holds speech and nothing is retried. Read them only on the `live` path.
 
 The aggregate is corpus-level (all edits over all reference words), and the
 per-file distribution is printed beside it, because one capture that loses
@@ -176,7 +176,7 @@ tick every `preview.interval_ms` over the audio since the committed offset,
 bounded by `preview.max_seconds` as one tick's work, every settled chunk
 committed once, then the release decoding only the audio still held — the
 daemon drops the rest (`AudioCapture::discard_before`). `--path whole` decodes
-each capture in one pass with no segmenter. Both run by default.
+each capture in one pass with no detector. Both run by default.
 
 The live replay's clock is the capture's own, not the wall clock. The daemon
 ticks on wall time, so a loaded machine ticks over a longer stretch of audio and
