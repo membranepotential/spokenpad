@@ -273,10 +273,11 @@ speech on real captures; see
 are a regression proxy, not a general accuracy guarantee — see
 [evaluation.md](evaluation.md).
 
-`cargo test --locked --all-targets` passes **169 library, 1 binary, 5 CLI and
-18 end-to-end tests**, with the one real-model e2e test ignored by default,
-plus 5 unit tests in `examples/eval.rs`. Strict all-target clippy and rustfmt
-checks apply.
+`cargo test --locked --all-targets` runs the library's unit tests, the CLI
+tests, the end-to-end tests and the pane tests, with the tests that load the
+real models or measure RSS ignored by default, plus the unit tests of the
+examples; on 2026-09-22 that was 309 library, 12 CLI and 36 end-to-end
+tests. Strict all-target clippy and rustfmt checks apply.
 `cargo run --example pane` opens the pane on a given display, and can
 write a screenshot of it.
 
