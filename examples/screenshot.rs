@@ -320,7 +320,9 @@ fn main() -> Result<()> {
         .context("the screen's pixels")?;
     let pixels: Vec<u32> = image
         .data
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|pixel| u32::from_le_bytes([pixel[0], pixel[1], pixel[2], 0]))
         .collect();
     write_png(&args.out, &pixels, args.width, args.height)?;
