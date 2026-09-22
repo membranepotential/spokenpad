@@ -415,9 +415,11 @@ pane_dimensions = { columns = 72, lines = 20 }
 # at the pointer. "tiled" makes it an ordinary window: i3 and sway tile it
 # beside the window you are typing in, at the size of its tile; Openbox, KWin
 # and other stacking window managers have no tiles and show it at the pointer
-# as they would a floating one. Neither takes the focus by itself (verified
-# on i3, sway, Openbox and KWin); your click still focuses it. Applies to the
-# next window after you save.
+# as they would a floating one. A tiled pane gives up the window type that
+# keeps some window managers from focusing it, so it is allowed only where it
+# is proven never to take the focus: i3, sway, Openbox and KWin. Anywhere
+# else the pane opens floating, and a notification says why. Your click
+# still focuses it. Applies to the next window after you save.
 pane_layout = "floating"
 
 # Pane mode only: the font the window draws with, as a fontconfig family name

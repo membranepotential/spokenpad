@@ -7,7 +7,7 @@
 //! | property | what it does |
 //! |---|---|
 //! | `_NET_WM_USER_TIME = 0` | "do not focus this window when it is mapped" (EWMH). On i3 this is the whole guarantee, and it holds even for the first window on an empty workspace. |
-//! | `_NET_WM_WINDOW_TYPE_UTILITY` | floats the window on tiling window managers, and blocks focus on the ones that ignore user time (bspwm, Hyprland's Xwayland). With `nvim.pane_layout = "tiled"` it is `_NET_WM_WINDOW_TYPE_NORMAL` instead, which tiling window managers tile; the user time, the sway rule and KWin's refusal of a user time of 0 hold it unfocused there, as `tests/pane_focus_wms.rs` proves per window manager. |
+//! | `_NET_WM_WINDOW_TYPE_UTILITY` | floats the window on tiling window managers, and blocks focus on the ones that ignore user time (bspwm, Hyprland's Xwayland). With `nvim.pane_layout = "tiled"` it is `_NET_WM_WINDOW_TYPE_NORMAL` instead, which tiling window managers tile; that is allowed only under [`TILED_PROVEN`], where the user time and the sway rule hold it unfocused, as `tests/pane_focus_wms.rs` proves per window manager. |
 //! | `_NET_WM_STATE_ABOVE` | stacks the window above the one the user is typing in. KWin stacks a window it refused focus *below* the active one otherwise. It gives no focus anywhere measured. |
 //! | `WM_HINTS input = True` | the ICCCM "passive input" model: the window manager may give the window the focus *later*, when the user clicks it, so they can type into it. |
 //! | `WM_CLASS = spokenpad-pane` | a name no rule written for the managed-mode terminal can match, and the name the `no_focus` rule matches that spokenpad adds to sway before the map (`shell::wm::Wm::refuse_focus`): sway reads none of the properties above. |
@@ -135,6 +135,31 @@ pub fn xft_dpi(connection: &impl Connection) -> XftDpi {
 /// The name the X11 window manager of every wlroots compositor — sway among
 /// them — gives itself on its EWMH check window (`wlroots/xwayland/xwm.c`).
 pub const WLROOTS_WM: &str = "wlroots wm";
+
+/// The window managers a tiled pane (`_NET_WM_WINDOW_TYPE_NORMAL`) is proven
+/// never to focus by itself, by the names they give on their check window:
+/// `docs/experiments/2026-09-22-tiled-pane-focus.md`. [`WLROOTS_WM`] stands
+/// for sway only because the daemon refuses any other wlroots compositor
+/// before it gets this far. Elsewhere the window type is the floating
+/// pane's `_UTILITY`, which is what refuses focus on window managers that
+/// ignore the user time (bspwm, Hyprland's Xwayland).
+pub const TILED_PROVEN: [&str; 4] = ["i3", WLROOTS_WM, "Openbox", "KWin"];
+
+/// The layout the pane opens with under `manager`: the one asked for, except
+/// tiled where it is not proven, which falls back to floating.
+pub fn layout_under(asked: PaneLayout, manager: &Manager) -> PaneLayout {
+    match asked {
+        PaneLayout::Tiled
+            if !manager
+                .name
+                .as_deref()
+                .is_some_and(|name| TILED_PROVEN.contains(&name)) =>
+        {
+            PaneLayout::Floating
+        }
+        asked => asked,
+    }
+}
 
 /// The window manager running an X display, as the display itself tells it.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -578,6 +603,32 @@ fn clamp(rect: Rect) -> (i16, i16, u16, u16) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_tiled_pane_falls_back_to_floating_where_it_is_not_proven() {
+        let under = |name: Option<&str>| Manager {
+            name: name.map(str::to_owned),
+            pid: None,
+        };
+        for proven in ["i3", "wlroots wm", "Openbox", "KWin"] {
+            assert_eq!(
+                layout_under(PaneLayout::Tiled, &under(Some(proven))),
+                PaneLayout::Tiled,
+                "{proven}"
+            );
+        }
+        for unproven in [Some("bspwm"), Some("Hyprland"), Some("awesome"), None] {
+            assert_eq!(
+                layout_under(PaneLayout::Tiled, &under(unproven)),
+                PaneLayout::Floating,
+                "{unproven:?}"
+            );
+            assert_eq!(
+                layout_under(PaneLayout::Floating, &under(unproven)),
+                PaneLayout::Floating
+            );
+        }
+    }
 
     #[test]
     fn a_rectangle_is_clamped_into_what_x11_can_express() {

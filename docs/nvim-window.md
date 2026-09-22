@@ -355,12 +355,16 @@ windows at the pointer. `"tiled"` makes it an ordinary window
 (`_NET_WM_WINDOW_TYPE_NORMAL` instead of `_UTILITY`): i3 and sway tile it
 beside the window you are typing in, at the size of its tile, and the pane
 follows the tile's size. Openbox and KWin have no tiles; there it is an
-ordinary window at the pointer, kept above like the floating one. Everything
-that keeps the pane from taking the focus is the same in both layouts, and a
-tiled pane never took the focus on i3, sway, Openbox or KWin (Wayland and
-X11), so no window manager refuses it
-([experiment](experiments/2026-09-22-tiled-pane-focus.md)). On sway an empty
-workspace refuses both layouts alike.
+ordinary window at the pointer, kept above like the floating one.
+
+A tiled pane gives up `_UTILITY`, which is what refuses focus on window
+managers that ignore the user time (bspwm, Hyprland's Xwayland). So tiled is
+allowed only where it is proven never to take the focus — i3, sway, Openbox
+and KWin (Wayland and X11), recognised by the name on the display's EWMH
+check window ([experiment](experiments/2026-09-22-tiled-pane-focus.md)).
+Under any other window manager, or none, the pane opens floating; the log
+says why every time, and one desktop notification per daemon session. On
+sway an empty workspace refuses both layouts alike.
 
 ### Where it opens
 

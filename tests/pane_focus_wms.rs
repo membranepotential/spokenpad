@@ -222,6 +222,53 @@ fn the_pane_never_takes_focus_on_i3() {
 // (`_NET_WM_WINDOW_TYPE_NORMAL`): tiled on i3 and sway, an ordinary window
 // at the pointer on Openbox and KWin. It must never take the focus either.
 
+/// Where the tiled pane is not proven unfocused — here a display with no
+/// window manager at all, which names none — `pane_layout = "tiled"` opens
+/// the floating pane: the window type that refuses focus on window managers
+/// that ignore the user time stays `_UTILITY`.
+#[test]
+fn a_tiled_pane_opens_floating_where_it_is_not_proven() {
+    if !harness::tools_or_skip(&["Xvfb", "nvim", "fc-match"]) {
+        return;
+    }
+    let server = XServer::start();
+    server.set_resources("Xft.dpi:\t96\n");
+    assert_eq!(x11::manager(&server.connection, 0).name, None);
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let mut session = NvimSession::new(pane_config(
+        directory.path(),
+        &server.display,
+        None,
+        None,
+        PaneLayout::Tiled,
+    ));
+    session
+        .ensure()
+        .expect("open the pane")
+        .expect("the pane attached");
+    let pane = wait_for(PATIENCE, "the pane window", || {
+        find_by_instance(&server, INSTANCE)
+    });
+    let types = server
+        .connection
+        .get_property(
+            false,
+            pane,
+            server.atom("_NET_WM_WINDOW_TYPE"),
+            AtomEnum::ATOM,
+            0,
+            4,
+        )
+        .expect("ask for the window type")
+        .reply()
+        .expect("the window type")
+        .value32()
+        .expect("32-bit atoms")
+        .collect::<Vec<_>>();
+    assert_eq!(types, [server.atom("_NET_WM_WINDOW_TYPE_UTILITY")]);
+    session.close();
+}
+
 #[test]
 fn the_tiled_pane_never_takes_focus_on_i3() {
     if !harness::tools_or_skip(&["Xvfb", "i3", "nvim", "fc-match"]) {
@@ -980,8 +1027,7 @@ fn control(desktop: &mut dyn Desktop, report: &mut Report) -> bool {
         // Sampled like the pane, so the control is held to the same measure:
         // a focus that lasted one sample counts.
         let sampler = FocusSampler::start(&desktop.server().display, desktop.view());
-        window.map().expect("map the control");
-        desktop.wait_until_managed(window.id());
+        desktop.map_until_managed(window.id());
         sleep(SETTLE);
         let samples = sampler.finish();
         samples.assert_measured(label);
@@ -1029,8 +1075,7 @@ fn ablate(
     sleep(REWRITE_PAUSE);
     change(desktop.server(), window.id());
     desktop.server().sync();
-    window.map().expect("map the ablation window");
-    desktop.wait_until_managed(window.id());
+    desktop.map_until_managed(window.id());
     sleep(SETTLE);
     let frames = with_frames(desktop.server(), window.id());
     let placed = placement(desktop, window.id(), holder);

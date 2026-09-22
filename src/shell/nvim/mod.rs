@@ -175,6 +175,9 @@ pub struct NvimSession {
     /// one does: the desktop notification for text that went to the file
     /// says this rather than only that no editor is open.
     refused: Option<String>,
+    /// Whether the user has been told, this session, that a tiled pane
+    /// opens floating under their window manager: once, not every window.
+    told_tiled_floats: bool,
 }
 
 impl NvimSession {
@@ -187,6 +190,7 @@ impl NvimSession {
             append_sequence: 0,
             pane: None,
             refused: None,
+            told_tiled_floats: false,
         }
     }
 
@@ -283,6 +287,35 @@ impl NvimSession {
             ),
         };
         if let Err(error) = wm::run(&["notify-send", "--app-name=spokenpad", title, &body]) {
+            log::debug!("desktop notification unavailable: {error:#}");
+        }
+    }
+
+    /// Says, in the log every time and in one desktop notification a
+    /// session, that `pane_layout = "tiled"` opens floating here: a tiled
+    /// pane gives up the window type that refuses focus on window managers
+    /// that ignore the user time, and is proven unfocused only on
+    /// [`x11::TILED_PROVEN`].
+    fn tell_tiled_floats(&mut self, manager: &x11::Manager) {
+        let name = manager
+            .name
+            .as_deref()
+            .unwrap_or("an unnamed window manager");
+        let reason = format!(
+            "nvim.pane_layout = \"tiled\" is proven never to take the focus only on i3, sway, \
+             Openbox and KWin; this display runs {name}, so the pane opens floating"
+        );
+        log::warn!("{reason}");
+        if self.told_tiled_floats || !self.config.notify {
+            return;
+        }
+        self.told_tiled_floats = true;
+        if let Err(error) = wm::run(&[
+            "notify-send",
+            "--app-name=spokenpad",
+            "spokenpad: the pane opens floating here",
+            &reason,
+        ]) {
             log::debug!("desktop notification unavailable: {error:#}");
         }
     }
@@ -757,6 +790,10 @@ impl NvimSession {
         let deadline = Instant::now() + Duration::from_secs_f64(self.config.startup_timeout_s);
         let (target, display, manager) = pane_target(&self.config)?;
         refuse_pane_focus_on_sway(&self.config, &manager)?;
+        let layout = x11::layout_under(self.config.pane_layout, &manager);
+        if layout != self.config.pane_layout {
+            self.tell_tiled_floats(&manager);
+        }
         let mut fresh = NewFileGuard::claim(&self.config)?;
         let (command, marker) = pane_launch(&self.config, fresh.path())?;
         let value = marker.value().to_owned();
@@ -773,7 +810,7 @@ impl NvimSession {
                     family: self.config.font_family.clone(),
                     size: self.config.font_size,
                     dimensions: self.config.pane_dimensions,
-                    layout: self.config.pane_layout,
+                    layout,
                     attach_timeout: deadline.saturating_duration_since(Instant::now()),
                     target: Some(target),
                     title: "spokenpad dictation".to_owned(),

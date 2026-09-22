@@ -57,8 +57,13 @@ follows a resize as it always has, and Neovim is told the new grid.
   any stage. The user time holds it on i3, Openbox and KWin even with a
   normal window type (as the ablations in the earlier experiments showed for
   single maps), and the runtime rule holds it on sway.
-- So the tiled layout is refused nowhere. On sway the empty-workspace
-  refusal applies to both layouts alike.
+- So tiled is allowed on exactly these five, recognised by the name on the
+  display's check window. Anywhere else it falls back to floating: a tiled
+  pane gives up `_UTILITY`, which is what refuses focus on window managers
+  that ignore the user time, and those are the ones not measured here
+  (`a_tiled_pane_opens_floating_where_it_is_not_proven` checks the fallback
+  on a display with no window manager). On sway the empty-workspace refusal
+  applies to both layouts alike.
 - Openbox and KWin do not tile: there "tiled" is an ordinary window at the
   pointer, kept above like the floating pane. That is documented, not
   refused, since it never takes the focus.

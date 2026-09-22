@@ -1383,12 +1383,16 @@ window manager, or be refused where that cannot be proven.
   the window type is `_NET_WM_WINDOW_TYPE_NORMAL`, which i3 and sway tile.
   The user time, `_NET_WM_STATE_ABOVE`, `WM_HINTS input = True` and the
   sway rule are the same in both layouts.
-- **Proven, so refused nowhere.** The full focus story, run tiled on i3,
+- **Allowed only where proven.** The full focus story, run tiled on i3,
   sway, Openbox, KWin Wayland and KWin X11, never saw the pane focused; the
   user's click focused it everywhere
-  ([experiment](experiments/2026-09-22-tiled-pane-focus.md)). A tiling
-  window manager not run here (bspwm, Hyprland, awesome) is unverified, as
-  for the floating pane.
+  ([experiment](experiments/2026-09-22-tiled-pane-focus.md)). Tiled gives
+  up `_UTILITY`, which refuses focus on window managers that ignore the user
+  time (bspwm, Hyprland's Xwayland), so under any window manager not on that
+  list (`x11::TILED_PROVEN`, by the name on the display's check window) the
+  pane opens floating, with a log line every time and one notification a
+  session. (The first version of this entry allowed tiled everywhere; a
+  review caught that it contradicted the user's condition.)
 - **Stacking window managers have no tiles.** On Openbox and KWin "tiled"
   is an ordinary window at the pointer, kept above. Documented rather than
   refused, since it never takes the focus.
