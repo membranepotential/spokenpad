@@ -231,7 +231,7 @@ impl Segmenter for Chunker {
             Chunker::Fixed(size) => *size,
             Chunker::Speech(config) => {
                 let mut spans: Vec<Range<usize>> = vec![];
-                for (i, window) in samples.chunks_exact(VAD_WINDOW).enumerate() {
+                for (i, window) in samples.as_chunks::<VAD_WINDOW>().0.iter().enumerate() {
                     if !window.iter().any(|s| s.abs() > LOUD) {
                         continue;
                     }
