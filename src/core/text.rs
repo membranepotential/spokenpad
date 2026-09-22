@@ -49,17 +49,21 @@ impl Processor {
                 ))?)
             })
         }
+        // A key matches as a word of its own: nothing that belongs to a word
+        // on either side of it. The half boundaries say exactly that, also
+        // for a key that begins or ends with punctuation ("e.g.", "c++"),
+        // which `\b` would require to touch a word.
         Ok(Self {
             config: config.clone(),
             fillers: pattern(
                 config.fillers.iter().map(|s| regex::escape(s)),
-                r"(?i)\s*\b",
-                r"\b,?\s*",
+                r"(?i)\s*\b{start-half}",
+                r"\b{end-half},?\s*",
             )?,
             replacements: pattern(
                 config.replacements.keys().map(|s| regex::escape(s)),
-                r"\b",
-                r"\b",
+                r"\b{start-half}",
+                r"\b{end-half}",
             )?,
             cleanup: Cleanup::new()?,
         })
@@ -102,6 +106,31 @@ mod tests {
             Processor::new(&c.text).unwrap().process("foo bar foo"),
             "X Y"
         );
+    }
+    /// A key that begins or ends with punctuation matches where it stands
+    /// as a word of its own, and never inside another word.
+    #[test]
+    fn keys_edged_with_punctuation_match_as_words() {
+        let c = crate::config::Config::parse(
+            "[text]\nfillers=['hm…']\n[text.replacements]\n'e.g.'='for example'\n'c++'='C++'\n'#todo'='TODO'",
+            None,
+        )
+        .unwrap();
+        let p = Processor::new(&c.text).unwrap();
+        for (input, output) in [
+            ("see e.g. this", "see for example this"),
+            ("see e.g.", "see for example"),
+            ("e.g., that", "for example, that"),
+            ("write c++ and c++", "write C++ and C++"),
+            ("a #todo here", "a TODO here"),
+            ("hm… right", "right"),
+            // Glued to a word, a key is part of that word.
+            ("e.g.x", "e.g.x"),
+            ("abc++", "abc++"),
+            ("x#todo", "x#todo"),
+        ] {
+            assert_eq!(p.process(input), output, "{input:?}");
+        }
     }
     #[test]
     fn fillers_and_literal_replacements() {

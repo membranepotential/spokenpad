@@ -293,8 +293,9 @@ strip_fillers = true
 # another word ("um" won't touch "umbrella").
 fillers = ["uh", "um", "erm", "hmm"]
 
-# Exact, whole-word, case-sensitive substitutions applied after decoding.
-# Deliberately NOT fuzzy: the tool this project replaced used edit-distance
+# Exact, whole-word, case-sensitive substitutions applied after decoding. A
+# key may begin or end with punctuation ("e.g.", "c++"); like any key, it
+# matches only where no letter or digit touches it. Deliberately NOT fuzzy: the tool this project replaced used edit-distance
 # matching and turned "set" into "sed" and "reset" into "rust". Prefer
 # asr.vocabulary above for fixing misheard technical terms -- biasing what
 # the decoder hears beats rewriting what it already got wrong.
