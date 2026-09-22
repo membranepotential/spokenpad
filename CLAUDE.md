@@ -38,9 +38,10 @@ Design history is `docs/decisions.md`; add an entry when you change behaviour.
   again), `_NET_WM_WINDOW_TYPE_UTILITY`, `_NET_WM_STATE_ABOVE` and
   `WM_HINTS input = True` before the first map, and announces no
   `WM_TAKE_FOCUS`. When the display names its window manager `wlroots wm`
-  (sway), the pane first adds `no_focus [instance="^spokenpad-pane$"
-  class="^spokenpad-pane$"]` over sway's IPC and refuses to open if sway
-  cannot be reached or the focused workspace is empty. The user's own click
+  and its process is sway, the pane first adds `no_focus [instance="^spokenpad-pane$"
+  class="^spokenpad-pane$"]` over the IPC socket that process listens on,
+  and refuses to open otherwise: no process named, another wlroots
+  compositor, no socket of that sway, or an empty focused workspace. The user's own click
   may focus a window; nothing else may. The code contains no focus call.
 - Committed speech is decoded exactly once; the release decodes only the tail.
   The one exception: a VAD chunk that decodes to "" is decoded once more

@@ -315,14 +315,16 @@ the rule holds depends on `nvim.mode`:
     before the map.** sway reads none of the properties above and focuses
     every window it maps unless such a rule matches. Whether sway runs the
     display is read from the display (its window manager names itself
-    `wlroots wm`), never from the environment. The daemon adds the rule over
+    `wlroots wm`, and the process the X server names for it is `sway`),
+    never from the environment. The daemon adds the rule over
     sway's IPC socket before each pane (`no_focus
     [instance="^spokenpad-pane$" class="^spokenpad-pane$"]`), finding the
     socket by the process that runs the display or through `$SWAYSOCK`,
+    either only if that process is the one listening on it,
     opens the pane only if sway answers that it took the rule, and never
-    writes the user's sway configuration. When no socket answers as sway —
-    or another wlroots compositor runs the display — the pane refuses to
-    open. sway focuses the first window on a workspace whatever the rules
+    writes the user's sway configuration. It fails closed: when the display
+    names no process, when that process is another wlroots compositor, or
+    when no socket of this sway answers, the pane refuses to open. sway focuses the first window on a workspace whatever the rules
     say, so on an empty focused workspace the pane refuses to open too, and
     the text goes to the pending passage.
   - **A short gap is accepted.** The empty-workspace check runs over IPC just

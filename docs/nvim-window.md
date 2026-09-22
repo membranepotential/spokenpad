@@ -146,11 +146,13 @@ which window manager runs it: the name on the root's
 `_NET_SUPPORTING_WM_CHECK` window, which is `wlroots wm` under sway's
 Xwayland (and `i3`, `Openbox`, `KWin` elsewhere). The environment does not
 decide this, since a `$SWAYSOCK` that was never imported, or is left from
-another session, would decide it wrongly. On `wlroots wm` the daemon looks
-for sway's IPC socket where that sway puts it — `sway-ipc.<uid>.<pid>.sock`
-in `$XDG_RUNTIME_DIR`, `<pid>` being the process the X server names as the
-owner of that check window (the X-Resource extension) — and then at
-`$SWAYSOCK`, and sends the first one that answers as sway
+another session, would decide it wrongly. On `wlroots wm` the X server
+names the process that owns that check window (the X-Resource extension),
+and it must be `sway` (`/proc/<pid>/comm`). The daemon then looks for sway's
+IPC socket where that sway puts it — `sway-ipc.<uid>.<pid>.sock` in
+`$XDG_RUNTIME_DIR` — and then at `$SWAYSOCK`, and counts a socket only if the
+process listening on it (`SO_PEERCRED`) is that same sway. To the first one
+that does, it sends
 
 ```
 no_focus [instance="^spokenpad-pane$" class="^spokenpad-pane$"]
@@ -163,10 +165,14 @@ again. Nothing is written to your sway configuration. The pane does not open,
 and the text goes to the pending passage with a notification that says why,
 when:
 
-- no socket answers as sway — neither `$SWAYSOCK` nor the one in the runtime
-  directory; another wlroots compositor (labwc, river, Wayfire) looks the
-  same from the display, has no sway socket, and is refused for the same
-  reason, since its focus behaviour is not verified;
+- the display does not name its window manager's process, so nothing can
+  tell whether it is sway;
+- the process is not sway — another wlroots compositor (labwc, river,
+  Wayfire) looks the same from the display, and spokenpad has no rule it can
+  add there and has not verified how it focuses windows; the notification
+  names the compositor and says to use `nvim.mode = "attach"`;
+- no socket of this sway is found — `$SWAYSOCK` unset, dead, or another
+  sway's, and nothing in the runtime directory;
 - the focused workspace is empty, since sway focuses the first window on a
   workspace whatever the rules say.
 

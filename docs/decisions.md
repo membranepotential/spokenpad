@@ -1415,3 +1415,21 @@ and X11), floating and tiled.
 - Tests that run the binary remove `DISPLAY`, `WAYLAND_DISPLAY` and
   `SWAYSOCK` from its environment, so the default mode cannot reach the
   user's display.
+
+## The sway check fails closed (2026-09-22)
+
+A second review found two ways the sway check could still guess.
+
+- **`$SWAYSOCK` was not tied to the display.** A socket of another sway, or
+  one left over and reused, answered as sway and took the rule for a display
+  it does not run. A socket now counts only if the process listening on it
+  (`SO_PEERCRED`) is the process the X server names for the display's window
+  manager. A display that names no process is refused, not guessed at. A
+  test starts a second sway and passes its live socket as `$SWAYSOCK`: the
+  pane refuses.
+- **Other wlroots compositors got sway's advice.** labwc, Wayfire or river
+  also call their X window manager `wlroots wm`. The daemon now reads the
+  display's process name (`/proc/<pid>/comm`): anything but `sway` is refused
+  with its own reason — this compositor is not sway, spokenpad cannot keep
+  the pane unfocused there, use `nvim.mode = "attach"`. Not run: none of
+  those compositors is installed here.

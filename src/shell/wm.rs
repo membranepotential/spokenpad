@@ -63,6 +63,21 @@ impl Wm {
         Ok(Self { socket, kind })
     }
 
+    /// The window manager answering on `socket`, if and only if the process
+    /// listening there is `pid`: the kernel's peer credentials of the
+    /// connection name the listener, so a socket of another instance — a
+    /// second sway, or one left over from an earlier session and reused —
+    /// is refused rather than trusted.
+    pub fn of_process(socket: PathBuf, pid: u32) -> Result<Self> {
+        let listener = peer_pid(&socket)?;
+        ensure!(
+            listener == pid,
+            "{} belongs to process {listener}, not to {pid}",
+            socket.display()
+        );
+        Self::at(socket)
+    }
+
     pub fn kind(&self) -> WmKind {
         self.kind
     }
@@ -191,6 +206,41 @@ fn request(socket: &Path, message: Message, payload: &str) -> Result<String> {
     let mut body = vec![0_u8; length];
     read_exact_by(&mut stream, &mut body, &remaining)?;
     String::from_utf8(body).context("IPC reply is not UTF-8")
+}
+
+/// The process listening on `socket`, from the connection's peer
+/// credentials (`SO_PEERCRED`, which the kernel fills in at `listen`).
+fn peer_pid(socket: &Path) -> Result<u32> {
+    let deadline = Instant::now() + TIMEOUT;
+    let remaining = || {
+        deadline
+            .checked_duration_since(Instant::now())
+            .filter(|left| !left.is_zero())
+            .context("window manager did not answer in time")
+    };
+    let stream = connect_by(socket, &remaining)
+        .with_context(|| format!("connect to window manager at {}", socket.display()))?;
+    let mut credentials = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: `credentials` is a live `ucred` of `length` bytes, which is
+    // what SO_PEERCRED writes, and `stream` is open for the whole call.
+    let read = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&raw mut credentials).cast::<libc::c_void>(),
+            &raw mut length,
+        )
+    };
+    if read != 0 {
+        return Err(std::io::Error::last_os_error()).context("read the socket's peer credentials");
+    }
+    u32::try_from(credentials.pid).context("the socket's peer has no process id")
 }
 
 /// `UnixStream::connect` under the deadline.
@@ -701,6 +751,25 @@ mod tests {
         let error = Wm::at(socket).err().expect("no reply").to_string();
         assert!(error.contains("did not answer in time"), "{error}");
         assert!(started.elapsed() < Duration::from_secs(4));
+    }
+
+    /// A socket counts only for the process that listens on it: the fake
+    /// window manager listens in this test's process.
+    #[test]
+    fn a_socket_counts_only_for_the_process_listening_on_it() {
+        let fake = FakeWm::start(vec![(
+            Message::GetVersion,
+            json!({"variant": "sway", "major": 1}).to_string(),
+        )]);
+        let wm = Wm::of_process(fake.socket.clone(), std::process::id()).unwrap();
+        assert_eq!(wm.kind(), WmKind::Sway);
+        let error = format!(
+            "{:#}",
+            Wm::of_process(fake.socket.clone(), std::process::id() + 1)
+                .err()
+                .expect("another process's socket")
+        );
+        assert!(error.contains("belongs to process"), "{error}");
     }
 
     /// A window manager that has stopped accepting fills its accept queue;

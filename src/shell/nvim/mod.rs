@@ -1567,15 +1567,18 @@ fn pane_target(config: &Nvim) -> Result<(place::Target, String, x11::Manager)> {
 /// the first window on a workspace.
 ///
 /// sway is recognised by the display, not by the environment: its Xwayland
-/// window manager calls itself [`x11::WLROOTS_WM`]. A `$SWAYSOCK` that was
+/// window manager calls itself [`x11::WLROOTS_WM`], the X server names the
+/// process that runs it, and that process must be `sway`. A `$SWAYSOCK` that was
 /// never imported, or is left over from another session, must not be what
 /// decides whether a window takes the focus. sway's socket is looked for
 /// where the sway running the display puts it — `sway-ipc.<uid>.<pid>.sock`
 /// in the runtime directory, `<pid>` being the process the display names as
-/// its window manager — and then at `$SWAYSOCK`. The pane opens only when
-/// one of them answers as sway and takes the rule. Another wlroots
-/// compositor looks the same from the display and has no sway socket, so it
-/// is refused as well: its focus behaviour is not verified.
+/// its window manager — and then at `$SWAYSOCK`; either counts only if the
+/// process listening on it is that sway. The pane opens only when one of
+/// them answers and takes the rule. Another wlroots compositor (labwc,
+/// Wayfire, river) looks the same from the display and is refused, saying it
+/// is not sway: its focus behaviour is not verified. A display that does not
+/// name its window manager's process is refused too.
 fn refuse_pane_focus_on_sway(config: &Nvim, manager: &x11::Manager) -> Result<()> {
     use crate::core::wm::{Property, WmKind};
     use std::os::unix::fs::MetadataExt as _;
@@ -1583,20 +1586,36 @@ fn refuse_pane_focus_on_sway(config: &Nvim, manager: &x11::Manager) -> Result<()
     if manager.name.as_deref() != Some(x11::WLROOTS_WM) {
         return Ok(());
     }
-    // sway names its socket by its own uid, which owns the runtime
-    // directory; reading the owner needs no `getuid`.
-    let discovered = manager
-        .pid
-        .zip(config.runtime_dir.as_ref())
-        .and_then(|(pid, dir)| {
-            let uid = std::fs::metadata(dir).ok()?.uid();
-            Some(dir.join(format!("sway-ipc.{uid}.{pid}.sock")))
-        });
+    // Everything below fails closed: a window that might take the focus is
+    // not opened.
+    let pid = manager.pid.context(
+        "the pane cannot open: the X display is run by a wlroots compositor, and the X \
+         server does not say which process, so spokenpad cannot tell whether it is sway \
+         and cannot keep the pane unfocused. Set nvim.mode = \"attach\"",
+    )?;
+    let program = std::fs::read_to_string(format!("/proc/{pid}/comm"))
+        .map(|name| name.trim().to_owned())
+        .with_context(|| format!("read which program process {pid}, running the display, is"))?;
+    ensure!(
+        program == "sway",
+        "the pane cannot open: the X display is run by {program}, a wlroots compositor that \
+         is not sway. It focuses new windows in ways spokenpad has not verified, and has no \
+         rule spokenpad can add, so spokenpad cannot keep the pane unfocused there. Set \
+         nvim.mode = \"attach\""
+    );
+    // sway names its socket by its own pid and uid, which owns the runtime
+    // directory; reading the owner needs no `getuid`. `$SWAYSOCK` counts only
+    // when the process listening on it is this sway.
+    let discovered = config.runtime_dir.as_ref().and_then(|dir| {
+        let uid = std::fs::metadata(dir).ok()?.uid();
+        Some(dir.join(format!("sway-ipc.{uid}.{pid}.sock")))
+    });
     let sway = discovered
         .iter()
         .chain(config.sway_socket.iter())
         .find_map(|socket| {
-            Wm::at(socket.clone())
+            Wm::of_process(socket.clone(), pid)
+                .inspect_err(|error| log::debug!("not this display's sway: {error:#}"))
                 .ok()
                 .filter(|wm| wm.kind() == WmKind::Sway)
         });
@@ -1604,15 +1623,15 @@ fn refuse_pane_focus_on_sway(config: &Nvim, manager: &x11::Manager) -> Result<()
         let socket = match &config.sway_socket {
             None => "$SWAYSOCK is not set".to_owned(),
             Some(socket) => format!(
-                "$SWAYSOCK names {}, where no sway answers (left from an earlier session?)",
+                "$SWAYSOCK names {}, which is not the socket of this sway (process {pid}): \
+                 left from an earlier session, or another sway's",
                 socket.display()
             ),
         };
         bail!(
-            "the pane cannot open: the X display is run by sway or another wlroots \
-             compositor, which focuses every new window unless spokenpad tells it not to over \
-             sway's IPC socket, and no sway socket answers for this display ({socket}). \
-             Import SWAYSOCK into the user manager (`exec systemctl --user \
+            "the pane cannot open: sway runs the X display and focuses every new window unless \
+             spokenpad tells it not to over sway's IPC socket, and this sway's socket was not \
+             found ({socket}). Import SWAYSOCK into the user manager (`exec systemctl --user \
              import-environment SWAYSOCK` in the sway config), or set nvim.mode = \"attach\""
         );
     };

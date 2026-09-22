@@ -156,22 +156,26 @@ fn the_pane_finds_sway_without_swaysock() {
     session.close();
 }
 
-/// With sway running the display and no socket that answers as sway —
-/// `$SWAYSOCK` unset or left over from another session, and no runtime
-/// directory to look in — the pane cannot add its rule, so it must not open:
-/// no window, no focus, and a reason that names `SWAYSOCK`.
+/// With sway running the display and no socket of *that* sway — `$SWAYSOCK`
+/// unset, left over from another session, or a live socket of another sway,
+/// and no runtime directory to look in — the pane cannot add its rule, so it
+/// must not open: no window, no focus, and a reason that names `SWAYSOCK`.
 #[test]
 fn the_pane_refuses_a_sway_it_cannot_reach() {
     if !harness::tools_or_skip(&["sway", "Xwayland", "nvim", "fc-match"]) {
         return;
     }
     let mut sway = Sway::start();
+    // A second sway, whose socket answers as sway but belongs to another
+    // process than the one running the pane's display.
+    let other = Sway::start();
     focus_holder(&mut sway);
     let directory = tempfile::tempdir().expect("a temporary directory");
     let dead = directory.path().join("sway-ipc.dead.sock");
     for (socket, expected) in [
         (None, "$SWAYSOCK is not set"),
-        (Some(dead.clone()), "where no sway answers"),
+        (Some(dead.clone()), "is not the socket of this sway"),
+        (other.sway_socket(), "is not the socket of this sway"),
     ] {
         let mut session = NvimSession::new(pane_config(
             directory.path(),
