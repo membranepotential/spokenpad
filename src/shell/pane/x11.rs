@@ -10,7 +10,7 @@
 //! | `_NET_WM_WINDOW_TYPE_UTILITY` | floats the window on tiling window managers, and blocks focus on the ones that ignore user time (bspwm, Hyprland's Xwayland). With `nvim.pane_layout = "tiled"` it is `_NET_WM_WINDOW_TYPE_NORMAL` instead, which tiling window managers tile; that is allowed only under [`TILED_PROVEN`], where the user time and the sway rule hold it unfocused, as `tests/pane_focus_wms.rs` proves per window manager. |
 //! | `_NET_WM_STATE_ABOVE` | stacks the window above the one the user is typing in. KWin stacks a window it refused focus *below* the active one otherwise. It gives no focus anywhere measured. |
 //! | `WM_HINTS input = True` | the ICCCM "passive input" model: the window manager may give the window the focus *later*, when the user clicks it, so they can type into it. |
-//! | `WM_CLASS = spokenpad-pane` | a name no rule written for the managed-mode terminal can match, and the name the `no_focus` rule matches that spokenpad adds to sway before the map (`shell::wm::Wm::refuse_focus`): sway reads none of the properties above. |
+//! | `WM_CLASS = spokenpad-pane` | the name the `no_focus` rule matches that spokenpad adds to sway before the map (`shell::wm::Wm::refuse_focus`): sway reads none of the properties above. |
 //!
 //! **`_NET_WM_USER_TIME` is written once, as 0, and never again.** The EWMH
 //! contract is that a toolkit updates it to the timestamp of the last user
@@ -46,9 +46,8 @@ use x11rb::{
     xcb_ffi::XCBConnection,
 };
 
-/// `WM_CLASS`. Deliberately not `spokenpad`: a `no_focus` rule a user wrote
-/// for the managed-mode terminal must not match this window, because this
-/// window needs no rule at all.
+/// `WM_CLASS`: what the pane's own `no_focus` rule on sway matches, anchored,
+/// and what a user's window rule would have to name.
 pub const INSTANCE: &str = "spokenpad-pane";
 /// `WM_CLASS` class name; see [`INSTANCE`].
 pub const CLASS: &str = "spokenpad-pane";

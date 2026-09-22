@@ -9,9 +9,10 @@ Neovim over msgpack-RPC.
 with `nvim --embed` in it, floating or tiled (`nvim.pane_layout`), sized in
 cells (`nvim.pane_dimensions`), needing no rule in the user's config (X11 and Xwayland; verified headless
 on i3, sway, Openbox, KWin Wayland and X11; on sway the daemon adds a
-`no_focus` rule over IPC); `"managed"`: the daemon opens a floating terminal
-on i3 or sway; `"attach"`: the user runs `spokenpad editor` in any terminal,
-the choice for Wayland without Xwayland.
+`no_focus` rule over IPC); `"attach"`: the user runs `spokenpad editor` in
+any terminal, the choice for Wayland without Xwayland. Managed mode (a
+terminal on i3 or sway) was removed on 2026-09-22; its config keys are
+refused with a message that says so.
 Rust only, CPU only (sherpa-onnx linked statically: Parakeet TDT by default, Whisper
 or SenseVoice via `asr.family`; Silero VAD).
 
@@ -33,8 +34,7 @@ Design history is `docs/decisions.md`; add an entry when you change behaviour.
   size and sha256. A user-configured `model_dir`/`asr.family` is never
   downloaded.
 - No window spokenpad opens may take focus. Attach mode opens no window;
-  managed mode proves the i3/sway `no_focus` rule over IPC before it spawns a
-  graphical editor; pane mode sets `_NET_WM_USER_TIME = 0` (once, never
+  pane mode sets `_NET_WM_USER_TIME = 0` (once, never
   again), `_NET_WM_WINDOW_TYPE_UTILITY`, `_NET_WM_STATE_ABOVE` and
   `WM_HINTS input = True` before the first map, and announces no
   `WM_TAKE_FOCUS`. When the display names its window manager `wlroots wm`
@@ -63,7 +63,7 @@ those belongs in `src/shell/`.
   notices), `core/decode.rs` (progressive commits over
   `Recognizer`/`Segmenter` traits), `core/segments.rs` (`merge_spans`: VAD
   spans to padded, settled windows), `core/wm.rs` (i3/sway IPC protocol,
-  `no_focus` proof, the pane's runtime sway rule), `core/terminal.rs` (the terminal table), `core/models.rs` (the pinned
+  the pane's runtime sway rule), `core/models.rs` (the pinned
   default model manifest), `core/grid.rs` (nvim's `ext_linegrid` redraw
   events and the screen they fold into), `core/keys.rs` (keysym and modifiers
   to nvim key notation), `core/font.rs` (the pane's point size and
@@ -77,7 +77,8 @@ those belongs in `src/shell/`.
   families), `shell/models.rs` (downloads and verifies the default models),
   `shell/nvim/mod.rs` (editor lifecycle, both modes, `spokenpad editor`),
   `shell/nvim/passage.rs` (text dictated with no editor open), `shell/wm.rs`
-  (i3/sway IPC socket), `shell/logging.rs`.
+  (sway's IPC socket for the pane's rule, bounded helper processes),
+  `shell/logging.rs`.
 - The pane (`shell/pane/`, the dictation window spokenpad draws itself,
   reached through `nvim.mode = "pane"`): `mod.rs` (the loop, the renderer,
   `requirements` for `spokenpad check`), `host.rs` (its thread, and the three
@@ -97,8 +98,7 @@ those belongs in `src/shell/`.
 - `examples/eval.rs` (WER on the five committed clips),
   `examples/corpus.rs` (the whole local corpus through either decode path,
   with the counts WER hides: empty chunks, lost endings, chunk seams that
-  wrote a word twice), `examples/verify_window.rs` (manual i3/sway window
-  smoke check), `examples/verify_native.rs` (JSON dump of segments and
+  wrote a word twice), `examples/verify_native.rs` (JSON dump of segments and
   progressive commits), `examples/pane.rs` (opens the pane on a given
   display, and can write a screenshot).
 - `tests/harness/mod.rs` is the headless desktop the pane tests share (its own
@@ -122,8 +122,7 @@ those belongs in `src/shell/`.
   tarball; `.SRCINFO` from `makepkg --printsrcinfo`), `packaging/systemd/`
   (`spokenpad.socket`, enabled by the package; `spokenpad.service`, started
   only by it; `dev.conf.example`, the drop-in that runs `~/.local/bin`),
-  `packaging/i3` and `packaging/sway` (window rules and example key
-  bindings). `.github/workflows/ci.yml` runs fmt, clippy and every test in an
+  `packaging/i3` and `packaging/sway` (example key bindings). `.github/workflows/ci.yml` runs fmt, clippy and every test in an
   Arch container, with every tool the tests drive installed and no
   `SPOKENPAD_ALLOW_MISSING_*` set.
 
@@ -164,7 +163,7 @@ the daemon lock.
   never a half-done state. Pushing still needs the user's word. Deploying a
   verified build (`cargo install --locked --path . --root ~/.local`, then
   `systemctl --user restart spokenpad`, with the dev drop-in in place) is
-  always allowed; in managed mode it closes the user's
+  always allowed; in pane mode it closes the user's
   dictation window, so say that you did it.
 - Experiments: every experiment (a benchmark, a corpus replay, a model or
   parameter comparison, a spike) gets its own file

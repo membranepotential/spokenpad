@@ -4,8 +4,7 @@
 `pick_output`/`placement` in [`core/geometry.rs`](../src/core/geometry.rs).
 
 spokenpad needs Linux, a microphone PortAudio can open, and an x86-64 or
-aarch64 CPU. Any desktop works, X11 or Wayland; only managed mode needs i3 or
-sway. Figures below come from one example machine and are labelled as such.
+aarch64 CPU. Any desktop works, X11 or Wayland. Figures below come from one example machine and are labelled as such.
 
 ## Keys
 
@@ -33,16 +32,14 @@ spokenpad never touches an input device
 
 ## Displays
 
-Attach mode places no window. The two that do — managed and pane — both open
-on whichever output holds the mouse pointer, and both fall back to a corner
-where the pointer cannot be read: sway gives a client no way to ask, and
+Attach mode places no window. The pane opens on whichever output holds the
+mouse pointer, and falls back to a corner where the pointer cannot be read:
 Xwayland answers with where the pointer last was over an X window
-([nvim-window.md](nvim-window.md#placement)).
+([nvim-window.md](nvim-window.md#where-it-opens)).
 [`core/geometry.rs`](../src/core/geometry.rs) picks the output as a pure
-function over output rectangles, so any number and arrangement works. Where
-those rectangles come from differs: managed mode reads them from the window
-manager over IPC, pane mode from RandR, falling back to the root window's
-size on a server with no RandR.
+function over output rectangles, so any number and arrangement works. The
+rectangles come from RandR, falling back to the root window's size on a
+server with no RandR.
 
 Pane mode also needs a display it can rasterise into: a 24- or 32-bit visual
 with the usual channel masks, which is every X server anyone runs. It refuses
@@ -76,10 +73,7 @@ idle, where it is only logged.
 ## Window manager
 
 Attach mode needs nothing from the window manager: the user
-opens the editor in any terminal. Managed mode needs i3 or sway, where the
-dictation window must float and must never take focus; the window manager
-enforces both through the rules in `packaging/i3/` or `packaging/sway/`
-([nvim-window.md](nvim-window.md)).
+opens the editor in any terminal.
 
 Pane mode needs no rule in your configuration: the window it draws carries
 the properties that make a window manager float it, keep it on top and refuse

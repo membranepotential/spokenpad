@@ -372,7 +372,7 @@ fn the_pane_draws_what_neovim_draws() {
     // Dictated text is on disk already: the Lua side writes after every
     // append. What is not on disk is what the user typed since, and in this
     // mode closing the window ends the editor — so the pane has to write
-    // first. Managed mode never faces this: its editor outlives the daemon.
+    // first. Attach mode never faces this: its editor outlives the daemon.
     const BY_HAND: &str = "noch von Hand getippt";
     let insert = find_key(&server, u32::from(b'o')).expect("the layout has an `o`");
     press_key(&mut server, insert);

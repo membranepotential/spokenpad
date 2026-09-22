@@ -1,5 +1,5 @@
 //! TOML is validated once, before starting threads or loading native code.
-use crate::core::{font::Points, geometry::Dimensions, terminal::Terminal};
+use crate::core::{font::Points, geometry::Dimensions};
 use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 use std::{
@@ -370,9 +370,6 @@ pub enum Mode {
     /// The user does, with `spokenpad editor`, in any terminal on any desktop.
     /// The daemon never opens a window, so it can never take focus.
     Attach,
-    /// The daemon does, in `terminal`, on the first key-down, after proving
-    /// the running i3 or sway refuses that window focus.
-    Managed,
     /// The daemon does, in a window it draws itself, on the first key-down;
     /// the default. Needs no rule in the user's configuration and no
     /// terminal: the window carries the properties that make a window
@@ -450,20 +447,13 @@ impl<'de> Deserialize<'de> for FontFamily {
 #[serde(default, deny_unknown_fields)]
 pub struct Nvim {
     pub mode: Mode,
-    /// The terminal a spawned editor runs in (managed mode); see [`Terminal`].
-    pub terminal: Terminal,
     pub editor: Vec<String>,
     pub init: Option<PathBuf>,
     pub colorscheme: Option<String>,
     pub transparent: bool,
-    pub window_instance: String,
     pub socket_path: PathBuf,
     pub dictation_dir: PathBuf,
     pub file_template: String,
-    /// Managed mode: the terminal window's size, as a fraction of each axis
-    /// of the monitor it opens on. The daemon cannot know the terminal's
-    /// cell size, so it sizes that window in pixels.
-    pub window_fraction: f64,
     /// Pane mode: the pane's size in cells, as Alacritty's
     /// `window.dimensions`, cut down to what fits on the monitor.
     pub pane_dimensions: Dimensions,
@@ -515,12 +505,10 @@ impl Default for Nvim {
     fn default() -> Self {
         Self {
             mode: Mode::Pane,
-            terminal: Terminal::Alacritty,
             editor: vec!["nvim".into()],
             init: None,
             colorscheme: None,
             transparent: true,
-            window_instance: "spokenpad".into(),
             socket_path: env::var_os("XDG_RUNTIME_DIR")
                 .filter(|s| !s.is_empty())
                 .map(PathBuf::from)
@@ -528,7 +516,6 @@ impl Default for Nvim {
                 .join("spokenpad-nvim.sock"),
             dictation_dir: state_dir().join("dictation"),
             file_template: "dictation-%Y-%m-%d-%H%M%S.md".into(),
-            window_fraction: 0.33,
             pane_dimensions: Dimensions::DEFAULT,
             pane_layout: PaneLayout::Floating,
             font_family: FontFamily::default(),
@@ -680,13 +667,10 @@ impl Config {
     pub fn parse(input: &str, base: Option<&Path>) -> Result<Self> {
         // Removed rather than unknown: say what replaced it. Input that is
         // not TOML at all is reported by the typed parse below.
-        if input
-            .parse::<toml::Table>()
-            .is_ok_and(|table| table.contains_key("hotkey"))
+        if let Ok(table) = input.parse::<toml::Table>()
+            && let Some(removed) = removed(&table)
         {
-            bail!(
-                "[hotkey] was removed: spokenpad no longer reads the keyboard. Delete the [hotkey] table and bind keys in your window manager to `spokenpad start`, `spokenpad stop`, `spokenpad toggle` and `spokenpad cancel` (see \"Bind your keys\" in the README)"
-            );
+            bail!("{removed}");
         }
         let mut c: Self = toml::from_str(input).context("invalid configuration")?;
         // A relative model path is relative to the config file. The defaults
@@ -764,35 +748,14 @@ impl Config {
             self.recording.max_total_bytes > 0,
             "recording.max_total_bytes must be positive"
         );
-        // A terminal takes the editor as trailing arguments; a first word
-        // starting with `-` would be read as one of the terminal's options.
+        // The editor's argv starts with the program; a first word starting
+        // with `-` would be an option with no program to take it.
         ensure!(
             self.nvim
                 .editor
                 .first()
                 .is_some_and(|program| !program.is_empty() && !program.starts_with('-')),
             "nvim.editor must name an executable"
-        );
-        // Interpolated into window-manager criteria, and the last element of
-        // ghostty's GTK application id, which may not start with a digit.
-        ensure!(
-            self.nvim
-                .window_instance
-                .bytes()
-                .next()
-                .is_some_and(|b| b.is_ascii_alphabetic())
-                && self
-                    .nvim
-                    .window_instance
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'),
-            "nvim.window_instance must match [A-Za-z][A-Za-z0-9_-]*"
-        );
-        ensure!(
-            self.nvim.window_fraction.is_finite()
-                && self.nvim.window_fraction > 0.
-                && self.nvim.window_fraction <= 1.,
-            "nvim.window_fraction must be in (0,1]"
         );
         ensure!(
             self.nvim.startup_timeout_s.is_finite()
@@ -875,6 +838,32 @@ impl Config {
         }
         Ok(())
     }
+}
+
+/// The keys only managed mode read. It was removed on 2026-09-22: the pane
+/// does what it did with no rule in the window manager's configuration.
+const MANAGED_ONLY: [&str; 3] = ["terminal", "window_instance", "window_fraction"];
+
+/// What a configuration still sets that spokenpad no longer has, and what
+/// replaced it, so that the user reads that rather than serde's "unknown
+/// field".
+fn removed(table: &toml::Table) -> Option<String> {
+    if table.contains_key("hotkey") {
+        return Some(
+            "[hotkey] was removed: spokenpad no longer reads the keyboard. Delete the [hotkey] table and bind keys in your window manager to `spokenpad start`, `spokenpad stop`, `spokenpad toggle` and `spokenpad cancel` (see \"Bind your keys\" in the README)".to_owned(),
+        );
+    }
+    let nvim = table.get("nvim").and_then(toml::Value::as_table)?;
+    if nvim.get("mode").and_then(toml::Value::as_str) == Some("managed") {
+        return Some(
+            "nvim.mode = \"managed\" was removed: the pane replaces it, a window spokenpad draws itself that needs no rule in your window manager. Delete the line to use the pane (the default), or set nvim.mode = \"attach\" and run `spokenpad editor` in a terminal of your own".to_owned(),
+        );
+    }
+    MANAGED_ONLY.iter().find(|key| nvim.contains_key(**key)).map(|key| {
+        format!(
+            "nvim.{key} was removed with managed mode, which the pane replaces: it sizes and places its own window and needs no rule in your window manager. Delete the line"
+        )
+    })
 }
 
 pub fn expand_path(path: &Path) -> Result<PathBuf> {
@@ -1012,7 +1001,6 @@ mod tests {
             "[preview]\ninterval_ms=199",
             "[preview]\nmax_seconds=nan",
             "[vad]\nthreshold=nan",
-            "[nvim]\nwindow_fraction=inf",
             "[nvim]\npane_dimensions = { columns = 0, lines = 20 }",
             "[nvim]\npane_dimensions = { columns = 72 }",
             "[nvim]\npane_dimensions = { columns = 72, lines = 20, rows = 3 }",
@@ -1020,13 +1008,8 @@ mod tests {
             "[nvim]\nfile_template='%Q'",
             "[nvim]\neditor=[]",
             "[nvim]\neditor=['--headless']",
-            "[nvim]\nwindow_instance='x\" ]'",
-            "[nvim]\nwindow_instance='1st'",
-            "[nvim]\nwindow_instance=''",
-            "[nvim]\nterminal='xterm'",
             "[nvim]\nmode='spawn'",
             "[nvim]\nmode=true",
-            "[nvim]\nterminal=['alacritty', '-e']",
             "[recording]\nmax_total_bytes=0",
             "[capture]\nsilence_timeout_s=0.5",
             // Shorter than two preview ticks: it would end a capture the
@@ -1198,9 +1181,6 @@ mod tests {
     #[test]
     fn the_editor_mode_is_explicit_and_pane_by_default() {
         assert_eq!(Config::default().nvim.mode, Mode::Pane);
-        let managed = Config::parse("[nvim]\nmode = 'managed'\nterminal = 'foot'", None).unwrap();
-        assert_eq!(managed.nvim.mode, Mode::Managed);
-        assert_eq!(managed.nvim.terminal, Terminal::Foot);
         let pane = Config::parse("[nvim]\nmode = 'pane'\nfont_size = 13.5", None).unwrap();
         assert_eq!(pane.nvim.mode, Mode::Pane);
         assert_eq!(pane.nvim.font_size.get(), 13.5);
@@ -1218,18 +1198,50 @@ mod tests {
             sized.nvim.pane_dimensions,
             Dimensions::new(100, 30).unwrap()
         );
-        // A key another mode reads is harmless here, and the other way round,
-        // so switching modes needs no other edit. That is deliberate: unlike
-        // `[asr]`, where a hotword under a family that cannot use it would
-        // silently do nothing the user expects, a leftover `terminal` or
-        // `font_size` changes nothing at all.
-        let attach = Config::parse(
-            "[nvim]\nmode = 'attach'\nterminal = 'kitty'\nfont_size = 22.0",
-            None,
-        )
-        .unwrap();
+        // A key only the pane reads is harmless in attach mode, so switching
+        // modes needs no other edit. That is deliberate: unlike `[asr]`,
+        // where a hotword under a family that cannot use it would silently
+        // do nothing the user expects, a leftover `font_size` changes nothing
+        // at all.
+        let attach = Config::parse("[nvim]\nmode = 'attach'\nfont_size = 22.0", None).unwrap();
         assert_eq!(attach.nvim.mode, Mode::Attach);
-        assert_eq!(attach.nvim.terminal, Terminal::Kitty);
+    }
+
+    /// Managed mode is gone, and so are the keys only it read. A config that
+    /// still has one is refused with the key's name and what replaced it,
+    /// never with serde's bare "unknown field".
+    #[test]
+    fn managed_mode_and_its_keys_say_the_pane_replaced_them() {
+        let error = format!(
+            "{:#}",
+            Config::parse("[nvim]\nmode = 'managed'", None).unwrap_err()
+        );
+        assert!(
+            error.contains("nvim.mode = \"managed\" was removed") && error.contains("pane"),
+            "{error}"
+        );
+        for (key, line) in [
+            ("terminal", "terminal = 'alacritty'"),
+            ("window_instance", "window_instance = 'spokenpad'"),
+            ("window_fraction", "window_fraction = 0.33"),
+        ] {
+            let error = format!(
+                "{:#}",
+                Config::parse(&format!("[nvim]\nmode = 'pane'\n{line}"), None).unwrap_err()
+            );
+            assert!(
+                error.contains(&format!("nvim.{key} was removed with managed mode"))
+                    && error.contains("pane"),
+                "{error}"
+            );
+        }
+        // The same word outside `[nvim]` is not one of managed mode's keys:
+        // it stays an ordinary unknown field.
+        let error = format!(
+            "{:#}",
+            Config::parse("terminal = 'alacritty'", None).unwrap_err()
+        );
+        assert!(!error.contains("managed"), "{error}");
     }
 
     #[test]

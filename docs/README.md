@@ -17,9 +17,9 @@ and verification. Historical measurements are labelled where retained.
 3. **[progressive-commit.md](progressive-commit.md)** — the decode design:
    settled chunks land while the user is still speaking, and releasing the
    key only decodes the open tail.
-4. **[nvim-window.md](nvim-window.md)** — the dictation editor: attach and
-   managed mode, how a managed window is opened, placed and refused focus,
-   and what runs inside nvim.
+4. **[nvim-window.md](nvim-window.md)** — the dictation editor: pane and
+   attach mode, how the pane is opened, placed and refused focus, and what
+   runs inside nvim.
 5. **[asr.md](asr.md)** — the model families, the measured decode speed, and
    the `bpe.vocab` reconstruction that makes hotword biasing possible.
 6. **[evaluation.md](evaluation.md)** — the regression harness

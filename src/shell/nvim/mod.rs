@@ -11,10 +11,10 @@
 //! committed text so that a failure to land it is visible rather than silent.
 //! With no editor to append to, `passage` writes the text to the file itself.
 //!
-//! Three modes differ only in who starts that editor: nobody (`attach`), a
-//! terminal (`managed`), or a window spokenpad draws itself (`pane`, in
-//! [`shell::pane`](crate::shell::pane)). Everything after it answers on its
-//! socket is the same code, which is why the wait for that socket is shared.
+//! Two modes differ only in who starts that editor: the user, with
+//! `spokenpad editor` (`attach`), or the daemon, in a window it draws itself
+//! (`pane`, in [`shell::pane`](crate::shell::pane)). Everything after it
+//! answers on its socket is the same code.
 mod passage;
 pub(crate) mod rpc;
 
@@ -22,13 +22,7 @@ pub use passage::DetachedWrite;
 
 use crate::{
     config::{self, Mode, Nvim},
-    core::{
-        geometry::{Rect, fraction_of, pick_output, placement},
-        session::NoticeText,
-        state::IndicatorPhase,
-        terminal::Terminal,
-        wm::Criterion,
-    },
+    core::{session::NoticeText, state::IndicatorPhase, wm::Criterion},
     shell::{
         pane::{host::PaneHost, place, x11},
         wm::{self, Wm},
@@ -46,7 +40,7 @@ use std::{
         process::CommandExt,
     },
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::Command,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -86,7 +80,6 @@ const INDICATOR_TIMEOUT: Duration = Duration::from_millis(250);
 const CONNECT_POLL: Duration = Duration::from_millis(25);
 /// Ownership probes retried when the peer closes the connection unanswered.
 const PROBE_ATTEMPTS: usize = 3;
-const MAP_TIMEOUT: Duration = Duration::from_secs(3);
 /// How long a call on an attached editor is waited for while Neovim holds it
 /// behind a half-typed command, before it is given up on as if the editor
 /// had stopped answering.
@@ -190,7 +183,6 @@ struct Connected {
 pub struct NvimSession {
     config: Nvim,
     connection: Option<Connected>,
-    process: Option<Child>,
     session_nonce: Option<String>,
     append_sequence: u64,
     /// The thread that owns the window in `mode = "pane"`, started the first
@@ -214,7 +206,6 @@ impl NvimSession {
         Self {
             config,
             connection: None,
-            process: None,
             session_nonce: None,
             append_sequence: 0,
             pane: None,
@@ -270,8 +261,8 @@ impl NvimSession {
         self.connection.as_ref().map(|open| open.path.as_path())
     }
 
-    /// Returns the pinned dictation path, reattaching as needed and, in
-    /// managed mode, spawning. `None` in attach mode means no editor is open:
+    /// Returns the pinned dictation path, reattaching as needed and, in pane
+    /// mode, opening a pane. `None` in attach mode means no editor is open:
     /// the user has not run `spokenpad editor`, and text goes to the pending
     /// passage through [`append_detached`](Self::append_detached) instead.
     pub fn ensure(&mut self) -> Result<Option<PathBuf>> {
@@ -283,7 +274,6 @@ impl NvimSession {
 
         let attached = self.attach_existing()?
             || match self.config.mode {
-                Mode::Managed => self.spawn_and_attach(),
                 Mode::Pane => self.open_pane_and_attach(),
                 Mode::Attach => Ok(false),
             }
@@ -554,7 +544,7 @@ impl NvimSession {
             );
         }
         self.drop_connection();
-        // A terminal editor outlives the daemon on purpose: the user may
+        // An editor the user opened outlives the daemon on purpose: they may
         // still be reading what they dictated. A pane cannot — its window and
         // its editor are threads and children of this process — so it is
         // closed here, which writes every modified buffer on the way out.
@@ -719,86 +709,9 @@ impl NvimSession {
             .then(|| (pinned.buffer, PathBuf::from(&pinned.name))))
     }
 
-    fn spawn_and_attach(&mut self) -> Result<bool> {
-        let terminal = self.config.terminal;
-        // Only a graphical terminal has a window, and only a window manager
-        // can refuse it focus and say where it should go. Everything about
-        // the window is settled here, before the dictation file exists.
-        let window = if terminal.is_graphical() {
-            let wm =
-                Wm::connect().context("a graphical dictation window needs a running i3 or sway")?;
-            let criteria = terminal.focus_criteria(&self.config.window_instance, wm.kind())?;
-            wm.prove_no_focus(&criteria)
-                .with_context(|| format!("a {terminal} window could take focus"))?;
-            let rect = window_placement(&wm, self.config.window_fraction);
-            Some((wm, criteria, rect))
-        } else {
-            None
-        };
-        let window_rect = window.as_ref().and_then(|(_, _, rect)| *rect);
-
-        let mut fresh = NewFileGuard::claim(&self.config)?;
-        let marker = OwnershipMarker::write(&self.config.socket_path)?;
-        let init = resolve_init(&self.config)?;
-        let argv = spawn_argv(
-            &self.config,
-            fresh.path(),
-            marker.value(),
-            window_rect,
-            init.as_deref(),
-        )?;
-        let (program, arguments) = argv.split_first().context("empty nvim command")?;
-        let mut command = Command::new(program);
-        command
-            .args(arguments)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        #[cfg(test)]
-        if !terminal.is_graphical() {
-            let log = self
-                .config
-                .socket_path
-                .parent()
-                .unwrap_or_else(|| Path::new("."))
-                .join("nvim.log");
-            command.env("NVIM_LOG_FILE", log);
-        }
-        // SAFETY: this closure calls only the async-signal-safe `setsid` between
-        // fork and exec, and does not capture or allocate.
-        unsafe {
-            command.pre_exec(|| {
-                if libc::setsid() == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-        let child = command
-            .spawn()
-            .with_context(|| format!("start {program}"))?;
-        let mut editor = SpawnedEditorGuard::new(child);
-        self.reap_replaced_process();
-
-        let deadline = Instant::now() + Duration::from_secs_f64(self.config.startup_timeout_s);
-        if let Some((wm, criteria, Some(rect))) = &window {
-            place_when_mapped(&mut editor, wm, criteria, *rect, deadline);
-        }
-        let attached =
-            self.await_editor(&mut fresh, marker.value(), deadline, || editor.exited())?;
-        if attached {
-            self.process = editor.release();
-            marker.keep();
-        }
-        Ok(attached)
-    }
-
-    /// Wait for an editor this session just started to answer on its socket,
-    /// and adopt it. `gone` says whether it has already exited, which is the
-    /// one failure worth giving up on early.
-    ///
-    /// Shared by both spawning modes: a terminal and a pane differ in how the
-    /// editor is started and in nothing that happens after.
+    /// Wait for the editor inside a pane this session just opened to answer
+    /// on its socket, and adopt it. `gone` says whether it has already
+    /// exited, which is the one failure worth giving up on early.
     fn await_editor(
         &mut self,
         fresh: &mut NewFileGuard,
@@ -854,7 +767,7 @@ impl NvimSession {
     /// is given a rule over IPC instead ([`refuse_pane_focus_on_sway`]).
     /// What it does need is an X display, and saying so plainly
     /// is the whole error path — with none, the text goes to the pending
-    /// passage exactly as it does when a terminal is missing.
+    /// passage.
     fn open_pane_and_attach(&mut self) -> Result<bool> {
         let opened = self.try_open_pane();
         if !matches!(opened, Ok(true)) {
@@ -996,58 +909,6 @@ impl NvimSession {
             path: target.to_owned(),
         }))
     }
-
-    fn reap_replaced_process(&mut self) {
-        if let Some(mut process) = self.process.take()
-            && process.try_wait().ok().flatten().is_none()
-        {
-            std::thread::spawn(move || {
-                let _ = process.wait();
-            });
-        }
-    }
-}
-
-impl Drop for NvimSession {
-    fn drop(&mut self) {
-        self.reap_replaced_process();
-    }
-}
-
-/// Waits for the window to appear, then floats, sizes and places it. Best
-/// effort: a window that never shows up within the deadline, or a refused
-/// command, leaves it wherever the window manager put it.
-fn place_when_mapped(
-    editor: &mut SpawnedEditorGuard,
-    wm: &Wm,
-    criteria: &[Criterion],
-    rect: Rect,
-    startup_deadline: Instant,
-) {
-    let deadline = (Instant::now() + MAP_TIMEOUT).min(startup_deadline);
-    while Instant::now() < deadline {
-        if editor.exited() {
-            return;
-        }
-        if let Ok(Some(criterion)) = wm.find(criteria) {
-            if let Err(error) = wm.place(criterion, rect) {
-                log::warn!("could not place the dictation window: {error:#}");
-            }
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-}
-
-/// Where a new window goes: the pointer's output, or the focused one.
-fn window_placement(wm: &Wm, fraction: f64) -> Option<Rect> {
-    let outputs = wm
-        .outputs()
-        .inspect_err(|error| log::warn!("could not read the outputs: {error:#}"))
-        .ok()?;
-    let pointer = wm.pointer();
-    let output = pick_output(&outputs, pointer)?;
-    Some(placement(output, pointer, fraction_of(output, fraction)))
 }
 
 /// The outcome of one attempt to adopt a freshly spawned editor.
@@ -1187,27 +1048,6 @@ fn parse_copy_outcome(value: &Value) -> Result<CopyOutcome> {
     }
 }
 
-/// The argv for a fresh editor inside its terminal. Pure: the caller
-/// materializes `init` and resolves the window rect, so what is left is a
-/// total function of the configuration and can be read — and tested — as one.
-fn spawn_argv(
-    config: &Nvim,
-    target: &Path,
-    marker: &str,
-    rect: Option<Rect>,
-    init: Option<&Path>,
-) -> Result<Vec<String>> {
-    let mut argv = config
-        .terminal
-        .argv(&config.window_instance, rect.map(|rect| (rect.x, rect.y)));
-    let program = argv.len() + config.editor.len();
-    argv.extend(editor_argv(config, target, marker, init)?);
-    if config.terminal == Terminal::Headless {
-        argv.insert(program, "--headless".to_owned());
-    }
-    Ok(argv)
-}
-
 /// The editor's own argv: the configured command, the init and colourscheme,
 /// the ownership marker, the socket, the readiness flag and the file.
 pub(crate) fn editor_argv(
@@ -1327,44 +1167,6 @@ fn deadline(timeout: Duration) -> Instant {
 
 fn capped(deadline: Instant, timeout: Duration) -> Instant {
     (Instant::now() + timeout).min(deadline)
-}
-
-/// Kills a spawned editor, and its process group, unless startup succeeded.
-///
-/// The guard owns the `Child`: a bare `waitpid` behind `Child`'s back would
-/// race the wait `Child` performs itself and could reap a recycled pid.
-struct SpawnedEditorGuard(Option<Child>);
-
-impl SpawnedEditorGuard {
-    fn new(child: Child) -> Self {
-        Self(Some(child))
-    }
-
-    fn exited(&mut self) -> bool {
-        self.0
-            .as_mut()
-            .is_some_and(|child| child.try_wait().ok().flatten().is_some())
-    }
-
-    /// Hands the editor over to a caller that intends to keep it running.
-    fn release(&mut self) -> Option<Child> {
-        self.0.take()
-    }
-}
-
-impl Drop for SpawnedEditorGuard {
-    fn drop(&mut self) {
-        let Some(mut child) = self.0.take() else {
-            return;
-        };
-        let group = i32::try_from(child.id()).unwrap_or(i32::MAX);
-        // SAFETY: spawned editors call setsid, so the child's pid is also its
-        // process-group id, and a negative pid signals that group alone. The
-        // child has not been reaped yet, so its pid cannot have been recycled.
-        let _ = unsafe { libc::kill(-group, libc::SIGKILL) };
-        let _ = child.kill();
-        let _ = child.wait();
-    }
 }
 
 /// Removes a freshly created dictation file unless a session pins it.

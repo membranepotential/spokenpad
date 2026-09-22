@@ -105,8 +105,8 @@ the root because both sides read it. Nothing under `core/` may import
   `nvim.mode`s, and `shell/nvim/rpc.rs` the msgpack transport, where every
   call carries an absolute deadline. `shell/nvim/passage.rs` writes commits
   to the pending dictation file while no editor is open. `shell/wm.rs` speaks
-  the i3/sway IPC protocol for a managed spawn, one request per connection
-  under a deadline. No module synthesizes input or calls a focus API.
+  the i3/sway IPC protocol to add the pane's `no_focus` rule on sway, one
+  request per connection under a deadline. No module synthesizes input or calls a focus API.
 
 The dictation preview uses the theme's comment foreground with an italic
 distinction, without an extra virtual blank line. It remains virtual text,
@@ -191,15 +191,11 @@ per-user lock above rejects a second daemon. The package build sets
 checked source list instead of downloading them, and an absolute
 `CARGO_TARGET_DIR`, which that build script takes as given.
 
-In attach mode (the default) the daemon opens no window: the user starts the
-editor with `spokenpad editor`, which writes an ownership marker beside the
-socket and then execs nvim. In managed mode the daemon spawns the editor in a
-terminal from the typed table in `core/terminal.rs` (alacritty, kitty, foot,
-wezterm, ghostty, or `headless`); any other terminal is refused, since its
-window cannot be named before it exists. Before a graphical spawn it reads
-the running i3 or sway configuration over IPC, following sway's `include`
-lines on disk, and refuses unless a `no_focus` rule names the window.
-Reattaching requires evidence that the editor belongs to spokenpad; an
+In pane mode (the default) the daemon opens a window it draws itself, with
+`nvim --embed` inside it ([nvim-window.md](nvim-window.md)). In attach mode
+the daemon opens no window: the user starts the editor with
+`spokenpad editor`, which writes an ownership marker beside the socket and
+then execs nvim. Reattaching requires evidence that the editor belongs to spokenpad; an
 arbitrary nvim socket is refused. Fresh editors must also finish the startup
 handlers registered before our final one-shot `VimEnter` callback. Both
 ownership and readiness require the generated session nonce; an early RPC
@@ -274,10 +270,8 @@ are a regression proxy, not a general accuracy guarantee — see
 18 end-to-end tests**, with the one real-model e2e test ignored by default,
 plus 5 unit tests in `examples/eval.rs`. Strict all-target clippy and rustfmt
 checks apply.
-The optional `cargo run --example verify_window` smoke harness opens a real
-managed editor on i3 or sway, saves multiline Unicode exactly, confirms that
-focus is unchanged after opening and appending, and closes its temporary
-editor. Run this manual check only when no other dictation editor is open.
+`cargo run --example pane` opens the pane on a given display, and can
+write a screenshot of it.
 
 The Rust daemon has been the live service since 2026-09-09. Startup completed
 on the actual microphone without a callback-timeout warning, with no service

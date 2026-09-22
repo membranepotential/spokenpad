@@ -16,6 +16,5 @@ pub mod models;
 pub mod segments;
 pub mod session;
 pub mod state;
-pub mod terminal;
 pub mod text;
 pub mod wm;

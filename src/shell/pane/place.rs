@@ -1,16 +1,11 @@
 //! Where the pane opens, and how big.
 //!
-//! The same rule managed mode uses, and the same pure functions decide it:
-//! [`geometry::pick_output`] chooses the monitor, and the pane then puts its
-//! `nvim.pane_dimensions`, cut down to what fits on that monitor, at the
-//! pointer with [`geometry::placement`], clamped fully on-screen. What is
-//! here is only the asking: the monitors from RandR, and the pointer from
-//! the X server itself.
-//!
-//! Managed mode asks the window manager over its IPC socket, because it has
-//! to talk to i3 or sway anyway to prove the `no_focus` rule. The pane needs
-//! no rule and no window manager, so it asks X directly — which also means it
-//! works under a window manager spokenpad has never heard of.
+//! Pure functions decide it: [`geometry::pick_output`] chooses the monitor,
+//! and the pane then puts its `nvim.pane_dimensions`, cut down to what fits
+//! on that monitor, at the pointer with [`geometry::placement`], clamped
+//! fully on-screen. What is here is only the asking: the monitors from
+//! RandR, and the pointer from the X server itself — never a window manager,
+//! so it works under one spokenpad has never heard of.
 //!
 //! **Under Xwayland the pointer is not usable.** `QueryPointer` answers with
 //! the last position the pointer had over an X window, so on a Wayland
@@ -65,7 +60,6 @@ fn outputs(connection: &XCBConnection, screen: usize) -> Result<Vec<geometry::Ou
             height: geometry.height.into(),
         },
         primary: true,
-        focused: false,
     }])
 }
 
@@ -92,10 +86,9 @@ fn monitors(
                     width: monitor.width.into(),
                     height: monitor.height.into(),
                 },
-                primary: monitor.primary,
                 // X has no notion of which monitor holds the keyboard focus;
                 // `pick_output` falls back to the primary, then to the first.
-                focused: false,
+                primary: monitor.primary,
             })
             .collect(),
     )

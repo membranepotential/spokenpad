@@ -6,7 +6,7 @@
 //! `tests/pane_render.rs` covers the grid:
 //!
 //! - with no `DISPLAY` the daemon says so and the transcript goes to the
-//!   pending passage, which is what happens when a terminal is missing too;
+//!   pending passage;
 //! - an editor that dies on startup is noticed at once rather than waited
 //!   out, and its text goes to the pending passage too;
 //! - a pane that opens after its caller has given up is closed by the thread

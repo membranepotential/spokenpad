@@ -14,15 +14,7 @@ pkgbase = spokenpad
 	depends = libxcb
 	depends = libxkbcommon-x11
 	depends = fontconfig
-	optdepends = libnotify: a desktop notification when text is dictated with no editor open
-	optdepends = i3-wm: nvim.mode = "managed", the floating dictation terminal
-	optdepends = sway: nvim.mode = "managed", the floating dictation terminal
-	optdepends = xdotool: nvim.mode = "managed" on i3, to open the window at the pointer
-	optdepends = alacritty: the terminal for nvim.mode = "managed" (the default)
-	optdepends = kitty: a terminal for nvim.mode = "managed"
-	optdepends = foot: a terminal for nvim.mode = "managed"
-	optdepends = wezterm: a terminal for nvim.mode = "managed"
-	optdepends = ghostty: a terminal for nvim.mode = "managed"
+	optdepends = libnotify: desktop notifications, such as for text dictated with no editor open
 	optdepends = xclip: nvim.copy_to_clipboard on X11
 	optdepends = xsel: nvim.copy_to_clipboard on X11
 	optdepends = wl-clipboard: nvim.copy_to_clipboard on Wayland

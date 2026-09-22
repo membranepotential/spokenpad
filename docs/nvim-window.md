@@ -12,30 +12,34 @@ The transcript goes to a dedicated neovim, over its msgpack-RPC socket.
 Nothing is pasted anywhere, and no window that was not opened for this
 purpose is ever written to.
 
-## Three modes: who opens the editor
+## Two modes: who opens the editor
 
 `nvim.mode` says who opens that neovim. It is explicit configuration, not
 detection.
 
 | `nvim.mode` | who opens it | where it works | focus |
 |---|---|---|---|
-| `attach` | you, with `spokenpad editor` | any terminal, any desktop: X11 or Wayland, any window manager | the daemon opens no window, so it cannot take focus |
-| `managed` | the daemon, on the first key-down, in `nvim.terminal` | i3 or sway | proven: the running window manager's `no_focus` rule, before the window exists |
 | `pane` (default) | the daemon, on the first key-down, in a window it draws itself | X11, and Wayland through Xwayland | the window's own properties; on sway, a `no_focus` rule the daemon adds over IPC |
+| `attach` | you, with `spokenpad editor` | any terminal, any desktop: X11 or Wayland, any window manager | the daemon opens no window, so it cannot take focus |
 
 `pane` is the default since its focus guarantee was proven on i3, sway,
 Openbox and KWin (Wayland and X11): a window that appears by itself beside
-what you are reading, with nothing to install in your window manager.
-`attach` works everywhere else — any terminal, any desktop, also Wayland
-without Xwayland, where there is no X display for a pane; a pane that cannot
-open says so in its notification, and names `attach`. `managed` is the
-original behaviour, generalised from alacritty on i3 to five terminals on i3
-and sway; it is worth its setup for a window that appears by itself, beside
-what you are reading. `pane` is that same window without the setup and
-without the terminal: spokenpad owns it, so the rule, the terminal table and
-the empty-workspace gap all go away — except on sway, where spokenpad adds
-the rule itself and the gap stays — and so does the window's independence
-from the daemon.
+what you are reading, with nothing to install in your window manager. What
+it gives up is the window's independence from the daemon: spokenpad owns it,
+so a daemon restart closes it. `attach` works everywhere else — any
+terminal, any desktop, also Wayland without Xwayland, where there is no X
+display for a pane; a pane that cannot open says so in its notification, and
+names `attach`.
+
+Until 2026-09-22 there was a third mode, `managed`: the daemon opened the
+user's terminal on i3 or sway, and only after proving a `no_focus` rule for it
+in the running window manager's configuration. The pane is that same window
+without the rule and without the terminal, proven on more window managers, so
+managed mode was removed
+([decisions.md](decisions.md#managed-mode-is-removed-the-pane-replaces-it-2026-09-22)).
+A configuration that still sets `mode = "managed"`, or one of the keys only it
+read (`terminal`, `window_instance`, `window_fraction`), is refused with a
+message that names the key and says the pane replaced it.
 
 Everything below the mode is shared: one file per editor, the winbar
 indicator and notices, the live preview, the opt-in clipboard copy after a
@@ -55,7 +59,7 @@ nvim [-u <init>] --cmd "let g:spokenpad_owner = '<marker>'" \
 ```
 
 with the same `nvim.editor`, `nvim.init`, `nvim.colorscheme` and ownership
-marker a managed spawn uses. The daemon finds it on the next key-down: the
+marker a pane's editor gets. The daemon finds it on the next key-down: the
 marker file beside the socket proves spokenpad started it, and it is adopted
 on the file it was started on. From then on it is the dictation window,
 exactly as if the daemon had opened it. `spokenpad editor` refuses to start a
@@ -74,7 +78,7 @@ lost:
   a test runs both on the same inputs.
 - **The next editor shows it.** The file is the *pending passage*, recorded
   in `<socket>.pending`. Every later dictation with no editor continues it,
-  and the next editor — `spokenpad editor`, or a managed spawn — opens on it
+  and the next editor — `spokenpad editor`, or a pane — opens on it
   rather than on a new file. `spokenpad editor` *takes* the passage: it
   removes the pointer before the editor reads the file, under a lock
   (`<socket>.pending.lock`) that every direct write also holds, so nothing
@@ -97,9 +101,9 @@ lost:
 The pointer lives beside the socket, in `$XDG_RUNTIME_DIR` by default, so a
 reboot forgets it; the file stays in `nvim.dictation_dir`.
 
-The same path catches a managed-mode editor that could not be opened (a
-missing `no_focus` rule, a terminal that is not installed): the text goes to
-the pending passage instead of only to the log.
+The same path catches a pane that could not be opened (no X display, a
+library missing, sway unreachable): the text goes to the pending passage
+instead of only to the log.
 
 ## Pane mode: the window spokenpad draws
 
@@ -113,8 +117,8 @@ with its stdin and stdout as the channel, and attaches to it as a UI with
 then describes its display as redraw events instead of drawing to a terminal,
 and spokenpad turns them into pixels. The editor is otherwise the same one
 every mode gets — same argv, same init, same ownership marker, same
-`--listen` socket — so the daemon appends to it exactly as it does to a
-terminal editor. **Committed text does not travel over the drawing channel**:
+`--listen` socket — so the daemon appends to it exactly as it does to an
+editor you opened with `spokenpad editor`. **Committed text does not travel over the drawing channel**:
 the pane draws, and never writes to the buffer.
 
 ### Why it needs no rule
@@ -128,7 +132,7 @@ is when a window manager reads them:
 | `_NET_WM_WINDOW_TYPE_UTILITY` | floats it on tiling window managers, and is what refuses focus on those that ignore user time (bspwm, Hyprland's Xwayland). |
 | `_NET_WM_STATE_ABOVE` | keeps it above the window you are typing in. KWin, on Wayland and on X11, stacks a window it refused focus *below* the active one otherwise. |
 | `WM_HINTS input = True` | the ICCCM "passive input" model, so the window manager may give it focus *later*, when you click it — which is how you click in and type. |
-| `WM_CLASS = spokenpad-pane` | a name no rule written for the managed-mode terminal can match, and the name the one rule spokenpad adds itself, on sway, matches (below). |
+| `WM_CLASS = spokenpad-pane` | the name the one rule spokenpad adds itself, on sway, matches (below). |
 
 `_NET_WM_USER_TIME` is written **once, as zero, and never again**. The EWMH
 contract is that a toolkit updates it to the timestamp of the last user
@@ -296,25 +300,22 @@ Two hundred ideographs the family does not cover take one frame and one
 There is no input method: dead keys and Compose work, because they are
 xkbcommon's and spokenpad reads the layout the X server has loaded, but IBus
 and Fcitx are not clients of this window. For German and English dictation
-that is not a gap; for CJK input it is, and `attach` or `managed` is the
-answer there.
+that is not a gap; for CJK input it is, and `attach` is the answer there.
 
 ### What happens when
 
 - **No `DISPLAY`, or a library missing.** The daemon says which, and the text
-  goes to the pending passage, exactly as it does when a terminal is not
-  installed. It does not fail. `$DISPLAY` is read once, when the
+  goes to the pending passage. It does not fail. `$DISPLAY` is read once, when the
   configuration is loaded, and passed from there to both the window and the
   editor inside it — so the two always agree about which server they are on,
   which is what the editor's clipboard provider needs.
 - **You close the window.** The editor inside it is asked to write every
   modified buffer and quit, its socket goes, and the next dictation opens a
-  new window on a new file. Same as closing a managed terminal.
+  new window on a new file.
 - **You `:q` in it.** The same, from the other end.
 - **The daemon restarts.** The window goes with it — it is a thread of that
-  process and the editor is its child. This is the one real difference from
-  managed mode, where your terminal outlives the daemon and is reattached to.
-  Nothing is lost: dictated text is written to the file after every utterance,
+  process and the editor is its child. An editor you opened in attach mode
+  outlives the daemon and is reattached to; a pane cannot. Nothing is lost: dictated text is written to the file after every utterance,
   and the pane writes every modified buffer before it quits, so a restart
   costs the window and not the transcript. The next dictation opens a new one.
   [What closing a pane guarantees](#what-closing-a-pane-guarantees) says what
@@ -328,7 +329,8 @@ answer there.
 Dictated text is already on disk before the window closes: the Lua side
 writes the file after every append. Only what you typed into the pane
 yourself is still just in the buffer, and pane mode is the one mode where
-closing the window ends the editor — a managed terminal outlives the daemon.
+closing the window ends the editor — an editor opened in attach mode outlives
+the daemon.
 
 So the pane writes every modified buffer first, and the whole teardown has a
 budget, because `shell::daemon::SHUTDOWN_GRACE` (3 s) is what the daemon
@@ -410,12 +412,16 @@ cramped, and this is the small margin that was asked for.
 
 The default is 656x368 pixels at the default 11.25 pt and 96 dpi, about a
 third of a 1920x1080 screen each way, what the pane was before it was sized
-in cells; at 192 dpi it is the same third of a 3840x2160 screen. The monitor
-and corner follow the same rule managed mode uses, and the same pure
-functions in `core/geometry.rs` decide them. The monitors come from RandR
-and the pointer from the X server itself, rather than from a window manager's
-IPC socket, so this works under a window manager spokenpad has never heard
-of.
+in cells; at 192 dpi it is the same third of a 3840x2160 screen. Pure
+functions in `core/geometry.rs` decide the monitor and the corner:
+`pick_output` takes the monitor under the pointer, else the primary, else the
+first, and `placement` clamps the window fully onto it, so a pointer near an
+edge tucks the window flush against it. The monitors come from RandR and the
+pointer from the X server itself, rather than from a window manager's IPC
+socket, so this works under a window manager spokenpad has never heard of.
+The pane is placed **once**, when it opens, and never again: a window that
+jumped back under the pointer on every keypress would fight anyone who had
+put it somewhere they wanted it.
 
 Under Xwayland the pointer is **not** asked for: `QueryPointer` there answers
 with wherever the pointer last was over an X window, which is not where it is,
@@ -427,141 +433,21 @@ it appears in about the right place, and corrected once afterwards — a window
 manager that draws a frame places the frame rather than the window inside it,
 which on i3 is four pixels across and eighteen down.
 
-## Managed mode: what gets spawned
-
-```
-alacritty --class spokenpad \
-  -o window.position.x=<x> -o window.position.y=<y> \
-  -e nvim -u <bundled dictation_init.lua> --listen <socket> <dated file>
-```
-
-`nvim.terminal` names the terminal, from a table spokenpad knows rather than
-as an argv it would have to trust. Each row is taken from that terminal's own
-documentation, and says how its window is named for the window manager,
-whether it can be told where to open, and how it takes the command:
-
-| `nvim.terminal` | window name (`I` = `nvim.window_instance`) | initial position | source |
-|---|---|---|---|
-| `alacritty` | `--class I`: X11 class and instance, Wayland `app_id` | `-o window.position.x/y`, X11 only | `alacritty --help`, `alacritty(1)` |
-| `kitty` | `--class I --name I`: X11 class/instance, Wayland `app_id` | `--position XxY`, X11 only, non-negative | `kitty --help` |
-| `foot` | `--app-id=I`; Wayland only | none | `foot(1)` |
-| `wezterm` | `start --always-new-process --class I`: both halves of `WM_CLASS`, Wayland `app_id` | `--position screen:X,Y`, X11 only, non-negative | wezterm.org/cli/start, wezterm's X11 `WM_CLASS` code |
-| `ghostty` | `--class=spokenpad.I` (Wayland `app_id`; GTK needs a dotted id), `--x11-instance-name=I` | none (GTK cannot) | ghostty `Config.zig` |
-| `headless` | no window: `nvim --headless` | — | — |
-
-`wezterm` gets `--always-new-process`, and `ghostty` `--gtk-single-instance=false`:
-without them the window may open inside an already running instance, and the
-process spokenpad started would exit at once. A terminal outside the table
-is refused, because its window name — and so the `no_focus` rule — cannot be
-known before the window exists.
-
-The **instance** is `spokenpad` by default. It is the name every
-window-manager rule keys on, and it is restricted to `[A-Za-z][A-Za-z0-9_-]*`
-because it is interpolated into criteria strings — a config value must not be
-able to become window-manager syntax.
-
-The daemon runs as a systemd user service, started by its socket
-(`spokenpad.socket`) on the first press, so the terminal it spawns sees the
-user manager's environment, not your session's. Import what the terminal and
-the IPC socket need from your window manager's startup — `DISPLAY` (and
-`XAUTHORITY`) on i3; `SWAYSOCK`, `WAYLAND_DISPLAY` and `DISPLAY` on sway —
-before the first press:
-
-```
-exec systemctl --user import-environment DISPLAY XAUTHORITY
-```
-
-A daemon already running keeps the environment it started with; after
-changing the import, `systemctl --user restart spokenpad`.
-
-The window is opened lazily, on the **first key-down**, not at daemon start:
-until you dictate there is no reason for a terminal to be sitting on your
-desktop. It is opened on the editor thread while the utterance is still being
-spoken, so the wait is paid in parallel with the recording rather than added
-to it, and the append that follows simply queues behind it.
-
 ## Focus, and why there is no focus code
 
 The window must never take focus — it appears while you are reading something
-else, and you keep reading.
+else, and you keep reading. The pane's own properties do that everywhere but
+sway, and on sway a rule spokenpad adds over sway's IPC
+([above](#why-it-needs-no-rule)). Either way spokenpad contains **no focus
+call at all**: not `xdotool windowfocus`, and not a "remember the focused
+window and restore it afterwards" dance either, since restoring focus is
+itself a focus change and would race anything the user did in between.
 
-Who enforces that differs by mode. In `managed` it is the window manager's
-job, through a rule the user installs and spokenpad proves. In `pane` it is
-the window's own properties, which every window manager but sway reads
-without being told anything, and on sway a rule spokenpad adds over sway's
-IPC ([above](#why-it-needs-no-rule)). What both have in common, and
-what the rest of this section is about, is that spokenpad contains **no focus
-call at all**: not `xdotool windowfocus`, and not a "remember the focused window and
-restore it afterwards" dance either, since restoring focus is itself a focus
-change and would race anything the user did in between.
-
-Two lines in a rules file do it properly. On i3,
-[`packaging/i3/spokenpad.conf`](../packaging/i3/spokenpad.conf):
-
-```
-for_window [instance="spokenpad"] floating enable
-no_focus   [instance="spokenpad"]
-```
-
-and on sway, [`packaging/sway/spokenpad.conf`](../packaging/sway/spokenpad.conf),
-the same for `app_id` *and* `instance`: every supported terminal except foot
-picks Wayland or Xwayland by itself, and a rule for the other would not
-apply.
-
-spokenpad refuses to **spawn** a graphical editor unless it can prove those
-rules are in the *loaded* configuration for this exact name. It asks the
-running window manager over its IPC socket (`$SWAYSOCK`, `$I3SOCK`, or
-`i3 --get-socketpath`; `GET_VERSION` says which one answered). i3 returns its
-configuration with every included file, as loaded. sway returns the main file
-only, and spokenpad reads nothing from disk, since a file on disk may never
-have been loaded: on sway the rules must be in the main config file itself
-(`~/.config/sway/config`), not in a file it includes. A rule counts only if its criteria are exactly this one
-property with a literal value.
-
-The rules are not enough on an empty workspace: i3 and sway both give the
-first window on a workspace focus, whatever `no_focus` says. So spokenpad also
-reads the tree and does not spawn while the focused workspace holds no
-window; the text then goes to the pending passage. The tree is read just
-before the spawn, so switching to an empty workspace in the ~200 ms before
-the window maps is the one remaining gap.
-
-The proof is taken at spawn only: reattaching to an editor that is already on
-screen trusts the rule that was proven when it was opened, because the window
-is already mapped and unfocused and a later reload cannot un-steal focus that
-was never stolen.
-
-Verified live on i3 on 2026-09-07: the focused window was unchanged across an
-open, and i3 reported the new window as `focused: false`. sway is implemented
-against `sway-ipc(7)`, `sway(5)` and sway's source, and tested against a fake
-IPC server; it has not been run live.
-
-## Placement
-
-Size and position are spokenpad's, not the window manager's, so the rule file stays to the two
-things only a window manager can do.
-
-Both window modes follow the same rule with the same code; where they differ
-is only who is asked. Managed mode asks the window manager over its IPC
-socket, because it has to talk to i3 or sway anyway to prove the rule; pane
-mode asks X directly ([above](#where-it-opens)).
-
-The managed terminal is **a third of the screen on each axis**
-(`nvim.window_fraction`, 0.33; the daemon cannot know the terminal's cell
-size, so this one is in pixels), the pane `nvim.pane_dimensions` cells, both
-with the **top-left corner at the mouse pointer**, on whichever monitor
-the pointer is on (on i3, read with `xdotool` in managed mode and with
-`QueryPointer` in pane mode; sway gives a client no way to ask, and Xwayland
-answers with a stale position, so on Wayland the window opens in a corner of
-the chosen output) — it opens beside what you are reading rather than in a
-fixed corner you have to look away to find. `geometry::pick_output` chooses the
-output and `geometry::placement` clamps the rect fully on-screen — both pure
-functions over output rectangles — so a pointer near an edge tucks the window
-flush against it, and a pointer in the bottom-right corner (or one that cannot
-be read at all) puts it in the bottom-right corner.
-
-Placement happens **once, on spawn**, and never again: a window that jumped back
-under the pointer on every keypress would fight anyone who had put it somewhere
-they wanted it. Reattaching to a running editor moves nothing.
+The pane is also opened lazily, on the **first key-down**, not at daemon
+start: until you dictate there is no reason for a window to be sitting on
+your desktop. It is opened on the editor thread while the utterance is still
+being spoken, so the wait is paid in parallel with the recording rather than
+added to it, and the append that follows simply queues behind it.
 
 ## Latched recording
 
@@ -796,43 +682,25 @@ the chrome off in its first frame.
 
 ## Startup cost
 
-**244 ms** from key-down to a window that is placed, chrome-free and
-answering RPC; **92 ms** to reattach to one that is already open. Both are off
-the latency path — the window is opened on every key-down, on the editor
-thread, while the user is still speaking.
+About **300 ms** from key-up to the transcript in the file with a pane opened
+on the way (`tests/pane_daemon.rs` prints it), and off the latency path
+either way: the window is opened on the key-down, on the editor thread, while
+the user is still speaking.
 
-Neither number is about nvim. Measured time-to-RPC-ready is 0.26 s under a
-full LazyVim config and 0.28 s under the bundled one, so the editor was never
-the cost. Three other things were, and all three are fixed:
+The editor's own start is the larger part, and a configuration can make it
+much larger: a first-ever open took 13.5 s while a plugin manager did
+one-time work, so `nvim.startup_timeout_s` stays a generous 20 s. Readiness
+is a raw msgpack-RPC round trip on the socket, under one absolute deadline,
+so an editor that is still starting cannot block the editor thread with no
+way out, and a pane whose editor exited is noticed at once rather than
+waited out.
 
-- **The readiness probe spawned a whole nvim per poll.** `nvim --server
-  <socket> --remote-expr 1` every 100 ms, at ~200 ms a spawn. It is now a raw
-  msgpack-RPC round trip on the socket: one connection, one request, and the
-  reply arrives when nvim's event loop reaches it. It still has a hard
-  timeout, which is why the Rust client enforces one absolute deadline; an
-  editor that is still starting must not
-  block the editor thread with no way out, hanging the daemon's shutdown.
-  `nvim.startup_timeout_s` stays a generous 20 s: a first-ever open took
-  13.5 s while a plugin manager did one-time work.
-- **The first X query of the process cost ~1.9 s**, where every later one
-  costs ~50 ms. That landed on the first dictation of a session — the one
-  occasion with nothing on screen to hide it. The layout is queried once per
-  spawn, before the editor starts, so a slow editor start costs one query,
-  not one per attempt. Since 2026-09-21 the outputs, the configuration and
-  the tree come from the window manager's own IPC socket (`shell/wm.rs`), one
-  request per connection under a two-second deadline, instead of `xrandr` and
-  `i3-msg` subprocesses; only the pointer still costs one `xdotool` call, on
-  i3. On the headless path no query is made at all.
-- **The window was placed after nvim answered.** It is now told where to open
-  (`window.position.x`/`y`, which i3 honours for a floating window: verified,
-  the window maps at exactly the requested point, floating and unfocused), so
-  its first frame is already in the right place instead of appearing wherever
-  the window manager chose — often the middle of the other monitor — and then
-  flying across the screen. Only the size is still corrected afterwards,
-  because alacritty measures its window in character cells and guessing the
-  font metrics to avoid one small resize would be worse than the resize. That
-  correction is issued as soon as i3 reports the window (~0.18 s), which is
-  well before nvim has drawn anything.
+Until 2026-09-22 the managed terminal measured **244 ms** from key-down to a
+window placed and answering RPC, and **92 ms** to reattach to one already
+open; the three fixes that got it there (a raw RPC probe instead of an
+`nvim --remote-expr` spawn per poll, the window manager's IPC socket instead
+of `xrandr` and `i3-msg`, and the terminal told where to open) are in
+[decisions.md](decisions.md).
 
 `init` is passed straight to `nvim -u`, so nvim's own special value works
 there too — for a window with no configuration at all:
@@ -844,10 +712,11 @@ init = "NONE"
 
 ## Reconnection
 
-A live socket is reattached to rather than respawned, so restarting the daemon
-does not litter the desktop with terminals. Quitting nvim simply means the
-next dictation opens a fresh one — in managed mode; in attach mode it goes to
-a new pending passage until you run `spokenpad editor` again.
+A live socket is reattached to rather than opened again, so an editor you
+opened in attach mode survives a daemon restart and is written into again.
+Quitting nvim simply means the next dictation opens a fresh pane — in pane
+mode; in attach mode it goes to a new pending passage until you run
+`spokenpad editor` again.
 
 Liveness is checked on every key-down, and a plain `connect` is not enough: a
 socket answers exactly as before the user `:bdelete`s the dictation buffer,
@@ -878,7 +747,7 @@ is held:
 - **the pane says so** in its last row ("waiting for the editor: finish or
   <Esc> the pending command", shorter in a narrow window), drawn by the pane
   itself because Neovim is the one not running; `showcmd` keeps the right
-  end. A terminal editor gets the log only;
+  end. An editor you opened in attach mode gets the log only;
 - **the wait ends after 2 minutes** (`HELD_AT_MOST`). A person mid-command
   finishes within seconds; what outlasts that is a hit-enter prompt or a
   plugin's `input()` in an editor nobody is looking at, which would hold the
@@ -922,7 +791,9 @@ behind, the text was not in the buffer). It is in both places only if the
 editor ran the request after all: one whose reply alone was lost on a live
 connection, or an editor that was not reading at all (stopped, swapped out)
 when the connection closed. Measured: continued after `SIGSTOP`, Neovim reads
-the request and the close together and runs the request first. A second copy
+the request and the close together and usually runs the request first; on a
+loaded machine it was also seen to drop it (`src/shell/nvim/tests.rs` accepts
+either, never twice). A second copy
 the user can delete is the price of never losing the text.
 
 When the daemon exits it **detaches without closing nvim**: the user may still

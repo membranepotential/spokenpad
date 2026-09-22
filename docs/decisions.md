@@ -1751,3 +1751,43 @@ user's there was deleted.
 - The test closes 23 panes, each with a pending sequence, 12 of them next
   to an ESC or a `^L` already in the file; the previous version failed on
   the first of those.
+
+## Managed mode is removed; the pane replaces it (2026-09-22)
+
+The user decided that `nvim.mode = "managed"` goes, with every key only it
+read. `nvim.mode` keeps two values: `pane` (the default) and `attach`, which
+Wayland without Xwayland still needs.
+
+- Why: the pane is the same window at the pointer, never focused, without
+  what managed mode cost. It needs no `no_focus` rule in the user's window
+  manager configuration and no terminal from a table, and it is proven
+  headless on i3, sway, Openbox and KWin (Wayland and X11), where managed
+  mode ran on i3 and sway only. Keeping managed mode kept a second window
+  path, the `no_focus` proof over IPC, the terminal table and their tests
+  alive to duplicate what the pane does.
+- Given up: a window that outlives the daemon. A pane closes with a daemon
+  restart; it writes every buffer first, so no text is lost, and attach mode
+  remains for an editor that must outlive the daemon.
+- Removed: `core/terminal.rs`, the `no_focus` proof of the user's
+  configuration and the placement commands (`shell/wm.rs`, `core/wm.rs`;
+  the pane's own runtime rule on sway stays), `examples/verify_window.rs`,
+  the keys `terminal`, `window_instance` and `window_fraction`, the window
+  rules in `packaging/i3/` and `packaging/sway/` (their example key bindings
+  stay), and the terminal and window-manager optional dependencies of the
+  package. `nvim.editor` and `nvim.startup_timeout_s` stay: the pane reads
+  both.
+- Compatibility: unknown keys were already an error. A config that still
+  sets `mode = "managed"` or one of the removed keys is refused with a
+  message that names the key and says the pane replaced it, the way a
+  leftover `[hotkey]` table is. The daemon then runs on the defaults, the
+  pane among them, and the pane says "config not reloaded" until the file is
+  fixed.
+- Tests: the editor tests and `tests/e2e.rs` spawned a headless managed
+  editor as their stand-in window. They now open the editor the way
+  `spokenpad editor` does, in attach mode; the pane's own path for waiting on
+  a fresh editor is tested by starting one the way a pane does, without the
+  window. On the way, the frozen-editor case of the stopping-daemon test
+  failed about one run in twelve on a loaded machine, at the base commit
+  too: continued after `SIGSTOP`, Neovim sometimes drops a request whose
+  connection closed rather than running it. It now accepts either outcome,
+  and still never a second copy.

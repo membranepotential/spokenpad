@@ -40,8 +40,8 @@ applications.
   an X display (Wayland works through Xwayland), `fontconfig` for `fc-match`,
   and `libxcb`, `libxkbcommon` and `libxkbcommon-x11`. These are opened when a
   pane opens rather than linked, so the daemon starts and dictates without
-  them — the text then goes to a file — and the other two modes never need
-  them; `spokenpad check` reports whether this machine has them.
+  them — the text then goes to a file — and attach mode never needs them;
+  `spokenpad check` reports whether this machine has them.
 
 ## Install
 
@@ -344,39 +344,29 @@ caught up. The log always has the full sentence and paths.
 ## A window that opens by itself
 
 By default the daemon opens the dictation window itself, on the first
-key-down: a window it draws, at the mouse pointer (`mode = "pane"`).
-`mode = "managed"` opens your terminal there instead. `mode = "attach"` has you
-open the editor yourself (`spokenpad editor`, in any terminal), and the daemon
-writes into it; it works on any desktop, Wayland without Xwayland included.
-No window may take focus, and none does.
+key-down: a window it draws, at the mouse pointer (`mode = "pane"`). It needs
+no rule in your window manager's config: the window carries the properties
+that make a window manager refuse it focus, and on sway the daemon adds a
+`no_focus` rule over sway's IPC before each window. It works on X11, and on
+Wayland through Xwayland; verified headless on i3, sway, Openbox and KWin
+(Wayland and X11) — **new, try it before you rely on it**. It does not survive
+a daemon restart: the window belongs to the daemon, which writes everything
+in it to its file before it goes. On sway it will not open on an empty
+workspace, since sway focuses the first window on one whatever the rules say.
 
-| | `mode = "managed"` | `mode = "pane"` |
-|---|---|---|
-| what opens | your terminal, running nvim | a window spokenpad draws itself |
-| where it works | i3 or sway | X11, and Wayland through Xwayland |
-| setup | a `no_focus` rule in your window manager config | none in your config |
-| how focus is refused | that rule, proven over IPC before the window exists | the window's own properties; on sway, a `no_focus` rule the daemon adds over sway's IPC before each window |
-| empty workspace | will not open: i3 and sway focus the first window on one | opens, unfocused; on sway it will not open, for the same reason |
-| survives a daemon restart | yes, it is your terminal | no, the window belongs to the daemon |
-| verified on | i3, live | i3, sway, Openbox, KWin (Wayland and X11), headless — **new, try it before you rely on it** |
+`mode = "attach"` has you open the editor yourself (`spokenpad editor`, in any
+terminal), and the daemon writes into it; it works on any desktop, Wayland
+without Xwayland included. No window may take focus, and none does.
 
-**Managed:**
+`mode = "managed"`, which opened your terminal on i3 or sway and needed a
+`no_focus` rule in your config, was removed on 2026-09-22: the pane does the
+same with no rule. A config that still sets it, or `terminal`,
+`window_instance` or `window_fraction`, is refused with a message that says
+so; delete those lines. The window rules the package used to ship in
+`/usr/share/spokenpad/i3` and `sway` are gone too, and so is any need for
+them.
 
-1. Set the mode and your terminal in `~/.config/spokenpad/config.toml`:
-   ```toml
-   [nvim]
-   mode = "managed"
-   terminal = "kitty"   # alacritty (default), kitty, foot, wezterm or ghostty
-   ```
-2. Add the rules to your window manager config:
-   [`packaging/i3/spokenpad.conf`](packaging/i3/spokenpad.conf) (include it)
-   or [`packaging/sway/spokenpad.conf`](packaging/sway/spokenpad.conf) (paste
-   it into the main config; sway reports only that file). Each file's header
-   says how. Then reload the window manager.
-3. Import the session environment into systemd (install step 4) and restart
-   the service.
-
-**Pane:**
+**Setting up the pane:**
 
 1. Nothing to set: it is the default. What you may want to change:
    ```toml
@@ -399,7 +389,7 @@ With no display, or with a library missing, dictation still works: the text
 goes to a dictation file and the next editor opens on it. Nothing is lost and
 the daemon does not fail.
 
-Details, the terminal table and placement: [docs/nvim-window.md](docs/nvim-window.md).
+Details and placement: [docs/nvim-window.md](docs/nvim-window.md).
 
 ## Configuration
 
@@ -414,8 +404,7 @@ cannot pass silently. Keys are not configured here; see
 | `capture.silence_timeout_s` | `300` | seconds without speech after which a latched capture ends by itself; `0` turns it off, and the four-hour limit still applies. Must be at least twice `preview.interval_ms` |
 | `asr.family` | `"parakeet"` | model family: `parakeet`, `whisper` or `sense_voice` ([docs/asr.md](docs/asr.md)) |
 | `asr.vocabulary` | `[]` | words to bias Parakeet towards, such as `["kubectl", "nginx"]`; switches to beam search, which sometimes drops a sentence ([docs/asr.md](docs/asr.md)) |
-| `nvim.mode` | `"pane"` | `pane`: the daemon opens a window it draws itself; `managed`: the daemon opens a terminal on i3 or sway; `attach`: you run `spokenpad editor` |
-| `nvim.terminal` | `"alacritty"` | managed mode only: the terminal for that window |
+| `nvim.mode` | `"pane"` | `pane`: the daemon opens a window it draws itself; `attach`: you run `spokenpad editor` |
 | `nvim.font_family`, `nvim.font_size` | `"monospace"`, `11.25` | pane mode only: the font it draws with, sized in points exactly as Alacritty's `font.size` (scaled by the X resource `Xft.dpi`), so the same numbers give the same cells — provided `Xft.dpi` is set (`xrdb` or `~/.Xresources`): the pane does not read an XSETTINGS daemon's `Xft/DPI` or RandR's physical screen size, which Alacritty falls back to, and uses 96 dpi instead |
 | `nvim.pane_layout` | `"floating"` | pane mode only: `"tiled"` has i3 and sway tile it beside your window instead; allowed only where proven unfocused (i3, sway, Openbox, KWin), floating elsewhere |
 | `nvim.pane_dimensions` | `{ columns = 72, lines = 20 }` | pane mode only: its size in cells, as Alacritty's `window.dimensions`, cut to what fits on the monitor; about a third of a 1080p screen at the default font. The window adds a fixed margin of 4 pixels at 96 dpi on every side |

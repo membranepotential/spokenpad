@@ -21,8 +21,7 @@ imperative shell, and `config.rs` sits at the root because both sides read it.
 | `core/geometry.rs` | Which output the pointer is on, and the clamped window rect | none |
 | `core/font.rs` | The pane's font size in points, `Xft.dpi`, and the cell a face makes: Alacritty's and FreeType's arithmetic, rounding included | none |
 | `core/text.rs` | Filler stripping, exact replacements, whitespace repair | none |
-| `core/wm.rs` | i3/sway IPC framing; parsing outputs, tree, config and `no_focus` rules; the pane's runtime `no_focus` command for sway | none |
-| `core/terminal.rs` | The known terminals: how each names its window, where it opens, its argv | none |
+| `core/wm.rs` | i3/sway IPC framing; the tree's focused workspace; the pane's runtime `no_focus` command for sway | none |
 | `core/session.rs` | Utterance lifecycle, preview cadence, and the one user-visible notice | internal channels |
 | `core/decode.rs` | Committed sample offset, settled commits, release tails, preview isolation | worker messages |
 | `core/segments.rs` | VAD merge/pad/settlement: spans in, decode windows out | none |
@@ -32,7 +31,7 @@ imperative shell, and `config.rs` sits at the root because both sides read it.
 | `shell/recorder.rs` | Persist every capture independently of decode, prune the directory, and keep the list of recordings not transcribed yet for the next start (`waiting.tsv`) | filesystem |
 | `core/grid.rs` | Neovim's `ext_linegrid` redraw events, typed, and the screen they fold into; which rows each one changed | none |
 | `core/keys.rs` | A keysym, its modifiers and the text a layout produced, as the notation `nvim_input` reads | none |
-| `shell/nvim/mod.rs` | Editor lifecycle in all three modes (attach, managed spawn, pane), ownership proof, transactional appends, indicator, `spokenpad editor` | Unix socket, window manager |
+| `shell/nvim/mod.rs` | Editor lifecycle in both modes (pane, attach), ownership proof, transactional appends, indicator, `spokenpad editor` | Unix socket |
 | `shell/pane/mod.rs` | The pane: its loop, the renderer, and what `spokenpad check` looks for | X11 |
 | `shell/pane/host.rs` | The pane's thread: the two things the daemon tells it, whether a pane is open, and restarting after a panic | internal channels |
 | `shell/pane/x11.rs` | The window, the properties that keep a window manager from focusing it, `PutImage`, and `Xft.dpi` from x11rb's resource database, as winit reads it | X11, `~/.Xresources` |
@@ -43,7 +42,7 @@ imperative shell, and `config.rs` sits at the root because both sides read it.
 | `shell/pane/xkb.rs` | libxcb and libxkbcommon, opened with `dlopen` when a pane opens | shared libraries |
 | `shell/nvim/passage.rs` | With no editor open: append to the pending dictation file, and the pointer the next editor opens | filesystem |
 | `shell/nvim/rpc.rs` | msgpack-RPC transport with absolute deadlines; pure codec | Unix socket |
-| `shell/wm.rs` | i3/sway IPC requests under a deadline, once per spawn, and the pane's `no_focus` rule sent to sway before each pane; `xdotool` for the pointer on i3 | IPC socket, one subprocess |
+| `shell/wm.rs` | The pane's `no_focus` rule sent to sway over its IPC socket before each pane, one request per connection under a deadline; short-lived helpers such as `notify-send`, bounded in time and output | IPC socket, subprocesses |
 | `shell/logging.rs` | Private 0600 diagnostic log, rotated at 1 MB | filesystem |
 | `shell/daemon.rs` | `run` (the shell) and `serve` (the event loop) | all of the above |
 
@@ -74,11 +73,9 @@ unit-tested without a device, a thread, or a process. Nothing there may import
 - `core/font.rs` — points and `Xft.dpi` to pixels, and a face's tables to a
   cell, the way Alacritty and FreeType compute them.
 - `core/wm.rs` — the i3 IPC protocol, which sway shares, as values: frames,
-  replies, `no_focus` proof, `include` resolution, placement commands.
-- `core/terminal.rs` — the terminal table: window names, focus criteria per
-  window manager, argv.
+  replies, the focused workspace, the pane's `no_focus` command.
 - one pure half still lives inside a shell module: in `shell/nvim`, the RPC
-  codec, the spawn argv, ownership parsing, and `passage::append_paragraph`.
+  codec, the editor argv, ownership parsing, and `passage::append_paragraph`.
 
 The shell owns everything that can fail for reasons outside the program:
 `shell::daemon::run` and `shell::daemon::serve`, the audio backends,
@@ -258,9 +255,8 @@ than discarded along with the editor.
 The daemon tells that thread two things, open and stop, and is never told a
 window closed. It does not need to be: the editor dies with the window, its
 socket goes with it, and the next key-down finds a dead socket and asks for a
-new pane — which is exactly what happens when a user closes a managed
-terminal. Committed text never travels over the drawing channel; it goes over
-the editor's own socket, as in every other mode.
+new pane. Committed text never travels over the drawing channel; it goes over
+the editor's own socket, as in attach mode.
 
 Capture callbacks do bounded work — one allocation, one lock, no I/O — and hand
 immutable chunks to the recording and decode consumers. One inference worker

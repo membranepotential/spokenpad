@@ -318,10 +318,6 @@ trailing_space = false
 #              window, so it can never take focus. With no editor open,
 #              dictation goes straight into the dictation file, and the next
 #              `spokenpad editor` opens on it.
-#   "managed"  the daemon does, in `terminal` below, on the first key-down.
-#              Needs i3 or sway, and refuses to open a window until the running
-#              window manager's config proves a no_focus rule for it
-#              (packaging/i3/ or packaging/sway/).
 #   "pane"     (the default) the daemon does, in a window it draws itself, on the first
 #              key-down. No terminal, and no rule to install in your config:
 #              the window carries the properties that make a window manager
@@ -339,18 +335,16 @@ trailing_space = false
 #              (Wayland without Xwayland) it cannot open, the text goes to
 #              the dictation file, and the notification says to use
 #              "attach".
+#
+# "managed", the daemon opening a floating terminal on i3 or sway, was removed
+# on 2026-09-22: the pane does the same without a rule in your config. A
+# config that still sets it, or `terminal`, `window_instance` or
+# `window_fraction`, is refused with a message that says so.
 mode = "pane"
 
-# Managed mode only: the terminal the window opens in -- "alacritty",
-# "kitty", "foot" (Wayland only), "wezterm" or "ghostty". spokenpad knows how
-# each one names its window, which is what the no_focus rule keys on, so it
-# can prove that rule before the window exists; any other terminal is
-# refused. "headless" runs nvim with no window at all (attach a UI with
-# `nvim --remote-ui --server <socket_path>`).
-terminal = "alacritty"
-
 # The editor. The init, colourscheme, `--listen <socket>` and the dictation
-# file are appended to this, so anything here comes first.
+# file are appended to this, so anything here comes first. Pane mode puts
+# `--embed` right after it.
 editor = ["nvim"]
 
 # nvim config for the dictation editor, in every mode.
@@ -387,30 +381,16 @@ editor = ["nvim"]
 # colourscheme's own background instead.
 transparent = true
 
-# Managed mode only: the window's name -- its X11 instance on i3, and its
-# Wayland app_id under sway (ghostty's app_id is "spokenpad.<this>", since GTK
-# needs a dot). The rules in packaging/i3/ and packaging/sway/ match
-# "spokenpad". Restricted to [A-Za-z][A-Za-z0-9_-]* because it is
-# interpolated into window-manager criteria.
-window_instance = "spokenpad"
-
-# Managed mode only: size of the terminal window, as a fraction of each
-# screen axis (spokenpad cannot know your terminal's cell size, so this one is
-# in pixels; the pane uses pane_dimensions below). It opens with its top-left corner at the mouse pointer, clamped fully
-# on screen, so it lands beside whatever you are reading. Under Wayland the
-# pointer cannot be read -- sway tells a client nothing, and Xwayland answers
-# with where the pointer last was over an X window -- so there it opens in a
-# corner of the chosen output instead.
-window_fraction = 0.33
-
 # Pane mode only: the pane's size in character cells, as Alacritty's
 # `window.dimensions`. A grid larger than the monitor under the pointer is cut
 # to as many whole cells as fit. The window adds a fixed margin of 4 pixels at
 # 96 dpi on every side (8 at 192 dpi), in the editor's background colour, as
 # Alacritty's `window.padding = { x = 4, y = 4 }` would. 72x20 at the default
 # font is 656x368 pixels at 96 dpi, about a third of a 1920x1080 screen each
-# way. Its top-left corner goes to the pointer, as for the managed window
-# above.
+# way. Its top-left corner goes to the pointer, clamped fully on screen, so
+# it lands beside whatever you are reading. Under Wayland the pointer cannot
+# be read -- Xwayland answers with where it last was over an X window -- so
+# there it opens in a corner of the monitor instead.
 pane_dimensions = { columns = 72, lines = 20 }
 
 # Pane mode only: "floating" (the default) opens the pane above your windows
@@ -473,9 +453,9 @@ font_size = 11.25
 dictation_dir = "~/.local/state/spokenpad/dictation"
 file_template = "dictation-%Y-%m-%d-%H%M%S.md"
 
-# Managed mode only: how long to wait for a freshly spawned nvim to be ready:
-# listening on the socket, its ownership nonce set, AND your own startup
-# handlers finished. Generous on purpose -- a first-ever open took 13.5s while
+# Pane mode only: how long to wait for the pane and the nvim inside it to be
+# ready: the window open, nvim listening on the socket, its ownership nonce
+# set, AND your own startup handlers finished. Generous on purpose -- a first-ever open took 13.5s while
 # a plugin manager did one-time work, and killing a healthy editor mid-startup
 # is the worse failure.
 startup_timeout_s = 20.0

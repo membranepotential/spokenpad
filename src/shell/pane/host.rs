@@ -10,9 +10,8 @@
 //! is waiting ([`PaneHost::show_held`]). It is never told that
 //! a window closed, because it does not need to be — the editor inside the
 //! pane dies with it, its socket goes with it, and the next key-down finds a
-//! dead socket and asks for a new pane. That is exactly what managed mode
-//! does when the user closes the terminal, and it is why the passage ends the
-//! same way in both. What the daemon *can* ask is whether one is open at all
+//! dead socket and asks for a new pane, which is why closing the window ends
+//! the passage. What the daemon *can* ask is whether one is open at all
 //! ([`PaneHost::alive`]), which is how a wait for a dead editor ends early
 //! instead of running out its clock.
 //!

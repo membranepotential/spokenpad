@@ -272,9 +272,10 @@ clipboard slowly enough to race the restore, a terminal that swallows
 `ctrl+v`.
 
 **Rule:** the transcript only ever goes to an editor opened for the purpose,
-over that editor's own socket. In managed mode the daemon spawns that neovim
-itself; in attach mode the user opens it with `spokenpad editor`, which runs
-nvim on the dictation socket and marks it as spokenpad's. No other window is
+over that editor's own socket. In pane mode the daemon starts that neovim
+itself, inside a window it draws; in attach mode the user opens it with
+`spokenpad editor`, which runs nvim on the dictation socket and marks it as
+spokenpad's. No other window is
 ever written to, and nothing is pasted anywhere. With no such editor open,
 the transcript goes to a dictation file on disk — never to a window — and the
 next editor opens on that file (see
@@ -330,10 +331,9 @@ the rule holds depends on `nvim.mode`:
   - **A short gap is accepted.** The empty-workspace check runs over IPC just
     before the window is created, and the map follows once the editor inside
     has started, a fraction of a second later. A user who switches to an
-    empty workspace in that moment gets a focused window. Managed mode has
-    the same gap between its check and its spawn. Closing it would need the
-    window manager to decide at map time, which only a rule in its own
-    configuration does.
+    empty workspace in that moment gets a focused window. Closing it would
+    need the window manager to decide at map time, which only a rule in its
+    own configuration does.
   - **There is no focus call**, as everywhere else in this project.
 
   The proof runs headless, with the pane opened the way the daemon opens it
@@ -351,29 +351,16 @@ the rule holds depends on `nvim.mode`:
 - **Attach mode opens no window at all.** The user opens the editor in a
   terminal of their choosing, and the daemon only ever talks to its socket,
   so the rule holds by construction, on any desktop.
-- **Managed mode opens exactly one: the dictation window**, and only after
-  proving that the running window manager refuses it focus. The terminal is
-  one of a known table ([`core/terminal.rs`](../src/core/terminal.rs)) that
-  names its window before it exists — the X11 instance on i3, the Wayland
-  `app_id` and the instance under sway — and the daemon reads the loaded
-  configuration over the window manager's IPC socket and refuses to spawn
-  unless it finds a `no_focus` rule for exactly that name
-  ([`shell/wm.rs`](../src/shell/wm.rs)), and unless the focused workspace
-  already holds a window, since both window managers focus the first window
-  on a workspace despite `no_focus`. A terminal outside the table is
-  refused, since its window cannot be named in advance.
-
 There is deliberately no focus call anywhere in
 [`shell/nvim/mod.rs`](../src/shell/nvim/mod.rs),
 [`shell/wm.rs`](../src/shell/wm.rs) or [`shell/pane/`](../src/shell/pane/) —
 not even a "restore the previous focus" one, which would be a focus change of
-its own; the only window-manager commands sent float, size and move the
-managed-mode window by criteria, and add the pane's `no_focus` rule on sway. See
-[nvim-window.md](nvim-window.md). (The Qt status overlay that preceded it was
+its own; the only window-manager command sent adds the pane's `no_focus` rule
+on sway. See [nvim-window.md](nvim-window.md). (The Qt status overlay that preceded it was
 non-focusable by construction; it is deleted, see
 [decisions.md](decisions.md#pyside6-over-gtk4).)
 
-Verified live on 2026-09-07: opening the dictation window left the focused
-window unchanged, and i3 reported the new window as `focused: false`. sway is
-implemented from its documentation and source and tested against a fake IPC
-server, not yet live.
+Until 2026-09-22 a third mode, managed, opened the user's terminal on i3 or
+sway and refused to until the running window manager's configuration proved
+a `no_focus` rule for it. The pane replaced it; see
+[decisions.md](decisions.md#managed-mode-is-removed-the-pane-replaces-it-2026-09-22).

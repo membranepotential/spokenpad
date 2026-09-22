@@ -22,13 +22,10 @@ impl Rect {
 pub struct Output {
     pub rect: Rect,
     pub primary: bool,
-    /// The output holding keyboard focus, where the window manager reports one
-    /// (sway does; i3 does not).
-    pub focused: bool,
 }
 /// The output the window opens on: the one under the pointer, or — with no
-/// pointer to go by, or one outside every output — the focused output, then
-/// the primary, then the first listed.
+/// pointer to go by, or one outside every output — the primary, then the
+/// first listed.
 pub fn pick_output(outputs: &[Output], pointer: Option<(i32, i32)>) -> Option<Rect> {
     let under_pointer = pointer.and_then(|(x, y)| {
         let anchor = Rect {
@@ -45,7 +42,6 @@ pub fn pick_output(outputs: &[Output], pointer: Option<(i32, i32)>) -> Option<Re
     });
     under_pointer
         .map(|(_, output)| output)
-        .or_else(|| outputs.iter().find(|o| o.focused))
         .or_else(|| outputs.iter().find(|o| o.primary))
         .or_else(|| outputs.first())
         .map(|output| output.rect)
@@ -92,12 +88,6 @@ impl Dimensions {
     }
 }
 
-/// `fraction` of `output` on each axis, in pixels, at least one.
-pub fn fraction_of(output: Rect, fraction: f64) -> (u32, u32) {
-    let scale = |extent: u32| ((f64::from(extent) * fraction) as u32).max(1);
-    (scale(output.width), scale(output.height))
-}
-
 /// A window of `width` x `height` pixels on `output`, with its top-left
 /// corner at `anchor` (the pointer) or, with none, in the bottom-right
 /// corner; clamped so the whole window is on the output.
@@ -126,7 +116,7 @@ mod tests {
             height: 1080,
         };
         assert_eq!(
-            placement(r, Some((-1, 1079)), fraction_of(r, 0.5)),
+            placement(r, Some((-1, 1079)), (960, 540)),
             Rect {
                 x: -960,
                 y: 540,
@@ -139,7 +129,6 @@ mod tests {
                 &[Output {
                     rect: r,
                     primary: true,
-                    focused: false,
                 }],
                 Some((9999, 9999))
             ),
@@ -186,7 +175,6 @@ mod tests {
                 height: 1080,
             },
             primary,
-            focused: false,
         }
     }
 
@@ -211,10 +199,6 @@ mod tests {
             Some(0)
         );
         assert_eq!(pick_output(&outputs, None).map(|rect| rect.x), Some(0));
-        // A focused output (sway reports one) wins over the primary.
-        let mut focused = outputs.clone();
-        focused[2].focused = true;
-        assert_eq!(pick_output(&focused, None).map(|rect| rect.x), Some(1920));
         // With no primary declared, the first monitor is the fallback.
         let unmarked = [screen(-1920, false), screen(0, false)];
         assert_eq!(
@@ -226,7 +210,7 @@ mod tests {
     #[test]
     fn mirrored_monitors_tie_break_on_the_earlier_one() {
         // Two outputs covering the same corner intersect the pointer equally.
-        // The tie-break is the order the window manager listed them, so the choice is
+        // The tie-break is the order RandR listed them, so the choice is
         // stable across queries rather than whichever compared last.
         let mirrored = |width: u32, primary: bool| Output {
             rect: Rect {
@@ -236,7 +220,6 @@ mod tests {
                 height: 1080,
             },
             primary,
-            focused: false,
         };
         assert_eq!(
             pick_output(&[mirrored(1920, false), mirrored(1280, true)], pointer(10))

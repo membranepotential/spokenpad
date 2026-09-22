@@ -21,7 +21,7 @@
 //!
 //! **Committed text does not come through here.** The embedded Neovim also
 //! listens on its own socket, and the daemon appends over that socket exactly
-//! as it does for a terminal editor. The pane draws; it never writes to the
+//! as it does for an editor the user opened. The pane draws; it never writes to the
 //! buffer, and it holds no clipboard code — the editor's own provider does
 //! that, as in every other mode.
 //!
@@ -949,9 +949,9 @@ impl Canvas {
 ///
 /// Dictated text is already on disk: the Lua side writes the file after every
 /// append. What is not on disk is anything the user typed into the pane since
-/// then, and closing the window must not be the thing that loses it. Managed
-/// mode never has this problem, because its editor outlives the daemon; a
-/// pane's editor does not, so it writes first.
+/// then, and closing the window must not be the thing that loses it. An
+/// editor the user opened in attach mode outlives the daemon; a pane's editor
+/// does not, so it writes first.
 const WRITE_EVERYTHING: &str = r#"
 local unwritten = {}
 for _, buffer in ipairs(vim.api.nvim_list_bufs()) do

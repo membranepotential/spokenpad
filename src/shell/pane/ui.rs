@@ -59,7 +59,7 @@ impl Editor {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
-        // Its own session, as a spawned terminal editor gets. A daemon run in
+        // Its own session. A daemon run in
         // the foreground shares its process group with whatever started it,
         // and a Ctrl-C there would otherwise reach nvim first — before the
         // pane has had the chance to write what is in the buffer.
