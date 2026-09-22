@@ -1445,11 +1445,8 @@ fn apply_capture_event(event: CaptureEvent, session: &mut Session, now: Instant)
             }
             Command::Nothing
         }
-        CaptureEvent::StreamUnavailable {
-            reason,
-            during_capture,
-        } => {
-            log::error!("microphone recovery failed: {reason}");
+        // The capture logged why, once for the whole streak of failures.
+        CaptureEvent::StreamUnavailable { during_capture } => {
             if during_capture {
                 session.notify(Notice::MicrophoneUnavailable);
             }

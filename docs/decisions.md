@@ -1447,3 +1447,27 @@ every new window, a file that still does not load raises "config not
 reloaded" with the reason, and the pane that opens is where that notice is
 seen. Falling back to attach would put the notice in no window at all until
 the user opens one. The README's configuration section says so.
+
+## A missing microphone is looked for less and less often (2026-09-22)
+
+A microphone that stays missing (unplugged, no sound server) cost the event
+loop a PortAudio initialisation, and up to 500 ms of waiting for a first
+callback, every two seconds for as long as the daemon ran, and wrote
+"microphone recovery failed" to the log each time. Now the watchdog waits
+2 s after the first failed attempt and doubles the wait after each further
+one, up to 60 s (`reopen_backoff` in `shell/audio.rs`).
+
+- **A press does not wait for the back-off.** It tries the microphone at
+  once, as before; a failed press counts as one more attempt of the streak.
+- **Logged once per streak.** The first failure is an error, with the reason;
+  the attempts after it are at debug level; the recovery is one info line
+  ("microphone available again after N failed attempts"). The event loop no
+  longer logs `StreamUnavailable` itself; it only raises the notice when a
+  capture is running.
+- **The stall is bounded, not gone.** An attempt still runs on the event
+  loop's thread. At the cap it costs at most one such stall a minute while
+  idle; a press arriving during it is answered by the control thread at
+  once and stamped when it arrived, and only waits to be acted on.
+- Rejected: opening the stream on a thread of its own. The stream and
+  PortAudio's handle belong to the loop that captures from them, and the
+  cap already makes the cost rare.

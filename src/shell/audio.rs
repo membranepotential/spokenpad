@@ -38,8 +38,15 @@ const STALE_STREAM: Duration = Duration::from_secs(1);
 const FINAL_CALLBACK_WAIT: Duration = Duration::from_millis(100);
 /// How often a stop re-checks delivery, liveness and its interrupt.
 const STOP_POLL_INTERVAL: Duration = Duration::from_millis(2);
-/// A device that will not reopen must not be retried on every poll.
+/// How long the watchdog waits after the first failed open before it tries
+/// again; each further failure in a row doubles the wait, up to
+/// [`MAX_REOPEN_BACKOFF`]. An attempt costs a PortAudio initialisation and up
+/// to [`FIRST_CALLBACK_TIMEOUT`] on the event loop's thread, so a microphone
+/// that stays missing must not be looked for every two seconds for good.
 const REOPEN_BACKOFF: Duration = Duration::from_secs(2);
+/// The longest wait between two attempts of the watchdog. A press does not
+/// wait for it: it tries the microphone at once.
+const MAX_REOPEN_BACKOFF: Duration = Duration::from_secs(60);
 /// Chunk vector capacity reserved up front, in seconds of audio.
 const RESERVE_SECONDS: usize = 60;
 /// Smallest device buffer the reserve above assumes. Before the first
@@ -92,6 +99,34 @@ pub trait InputBackend {
     fn open(&mut self, config: &Audio, core: Arc<CallbackCore>) -> Result<Self::Stream>;
 }
 
+/// Failed attempts to open the microphone in a row, since it last worked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Failing {
+    /// 1 at the first failure.
+    attempts: u32,
+    /// When the watchdog may try again.
+    retry_at: Instant,
+}
+
+impl Failing {
+    /// The streak after one more failure, at `now`.
+    fn after(previous: Option<Self>, now: Instant) -> Self {
+        let attempts = previous.map_or(1, |failing| failing.attempts.saturating_add(1));
+        Self {
+            attempts,
+            retry_at: now + reopen_backoff(attempts),
+        }
+    }
+}
+
+/// The watchdog's wait after `attempts` failures in a row.
+fn reopen_backoff(attempts: u32) -> Duration {
+    let doublings = attempts.saturating_sub(1).min(u32::BITS - 1);
+    REOPEN_BACKOFF
+        .saturating_mul(1 << doublings)
+        .min(MAX_REOPEN_BACKOFF)
+}
+
 /// Non-fatal conditions the device reported to the capture callback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StreamFlags(u64);
@@ -142,11 +177,9 @@ impl fmt::Display for StreamFlags {
 pub enum CaptureEvent {
     /// The stream stopped delivering audio and a replacement is running.
     StreamRestarted { gap: Duration, during_capture: bool },
-    /// The stream stopped delivering audio and could not be reopened.
-    StreamUnavailable {
-        reason: String,
-        during_capture: bool,
-    },
+    /// The stream stopped delivering audio and could not be reopened. Why is
+    /// logged by the capture, once per streak of failures.
+    StreamUnavailable { during_capture: bool },
     /// The in-memory ceiling was reached; later audio exists only on disk.
     MemoryCapReached { recovery: RecordingStatus },
     /// The device reported overflow/underflow to the callback.
@@ -354,7 +387,8 @@ pub struct AudioCapture<B: InputBackend = PortAudioBackend> {
     stream: Option<B::Stream>,
     core: Arc<CallbackCore>,
     cap: CapNotice,
-    next_reopen: Option<Instant>,
+    /// `Some` while the microphone cannot be opened; the watchdog backs off.
+    failing: Option<Failing>,
 }
 
 impl AudioCapture<PortAudioBackend> {
@@ -400,23 +434,21 @@ impl<B: InputBackend> AudioCapture<B> {
             stream: None,
             core,
             cap: CapNotice::None,
-            next_reopen: None,
+            failing: None,
         };
-        if preroll_frames > 0
-            && let Err(error) = capture.open_stream()
-        {
-            capture.next_reopen = Some(Instant::now() + REOPEN_BACKOFF);
-            log::error!("microphone unavailable; retrying: {error:#}");
+        if preroll_frames > 0 {
+            // A failure is logged, and retried, by `reopen` and the watchdog.
+            let _ = capture.reopen("start-up");
         }
         capture
     }
 
     pub fn start_capture(&mut self) -> Result<()> {
         self.cap = CapNotice::None;
-        self.next_reopen = None;
+        // A press tries the microphone at once, whatever the watchdog's
+        // back-off says: the user is waiting on this one.
         if self.config.preroll_frames() == 0 {
-            self.close_stream(Teardown::Abort);
-            self.open_stream()?;
+            self.reopen("key press")?;
         } else if !self.stream_is_live() {
             self.reopen("input stream looks dead at the key press")?;
         }
@@ -652,34 +684,29 @@ impl<B: InputBackend> AudioCapture<B> {
 
         if self.stream_expected() && !self.stream_is_live() {
             let now = Instant::now();
-            if self.next_reopen.is_none_or(|at| now >= at) {
+            if self.failing.is_none_or(|failing| now >= failing.retry_at) {
                 let gap = self.core.since_last_callback();
-                if capturing {
-                    log::error!(
+                // A microphone that has not come back since it was lost was
+                // reported by the first attempt of the streak.
+                match (self.failing, capturing) {
+                    (Some(_), _) => {}
+                    (None, true) => log::error!(
                         "input stream stopped delivering audio {:.1}s ago mid-capture; reopening; audio spoken during the gap is lost",
                         gap.as_secs_f64()
-                    );
-                } else {
-                    log::warn!(
+                    ),
+                    (None, false) => log::warn!(
                         "idle input stream stopped delivering audio {:.1}s ago; reopening so the pre-roll is ready",
                         gap.as_secs_f64()
-                    );
+                    ),
                 }
                 events.push(match self.reopen("watchdog").and_then(Opened::delivering) {
-                    Ok(()) => {
-                        self.next_reopen = None;
-                        CaptureEvent::StreamRestarted {
-                            gap,
-                            during_capture: capturing,
-                        }
-                    }
-                    Err(error) => {
-                        self.next_reopen = Some(now + REOPEN_BACKOFF);
-                        CaptureEvent::StreamUnavailable {
-                            reason: format!("{error:#}"),
-                            during_capture: capturing,
-                        }
-                    }
+                    Ok(()) => CaptureEvent::StreamRestarted {
+                        gap,
+                        during_capture: capturing,
+                    },
+                    Err(_) => CaptureEvent::StreamUnavailable {
+                        during_capture: capturing,
+                    },
                 });
             }
         }
@@ -726,15 +753,47 @@ impl<B: InputBackend> AudioCapture<B> {
             && self.core.since_last_callback() < STALE_STREAM
     }
 
-    /// Replaces a dead stream. The old handle is aborted rather than stopped:
-    /// a wedged device must not block the event loop while it drains.
+    /// Replaces the stream, dead or missing, and counts the failures in a
+    /// row: the first is logged as an error, the rest at debug level, and the
+    /// recovery once. The old handle is aborted rather than stopped: a wedged
+    /// device must not block the event loop while it drains.
     fn reopen(&mut self, reason: &str) -> Result<Opened> {
-        log::debug!("reopening the input stream ({reason})");
+        log::debug!("opening the input stream ({reason})");
         self.close_stream(Teardown::Abort);
         if let CaptureState::Idle { ring } = &mut *lock(&self.core.state) {
             ring.clear();
         }
-        self.open_stream()
+        let opened = self.open_stream();
+        let outcome = match &opened {
+            Ok(opened) => opened.delivering(),
+            Err(error) => Err(anyhow!("{error:#}")),
+        };
+        match outcome {
+            Ok(()) => {
+                if let Some(failing) = self.failing.take() {
+                    log::info!(
+                        "microphone available again after {} failed attempts",
+                        failing.attempts
+                    );
+                }
+            }
+            Err(error) => {
+                let failing = Failing::after(self.failing, Instant::now());
+                if failing.attempts == 1 {
+                    log::error!(
+                        "microphone unavailable: {error:#}; looked for again at each press, and in between after a wait that doubles up to {}s",
+                        MAX_REOPEN_BACKOFF.as_secs()
+                    );
+                } else {
+                    log::debug!(
+                        "microphone still unavailable after {} attempts: {error:#}",
+                        failing.attempts
+                    );
+                }
+                self.failing = Some(failing);
+            }
+        }
+        opened
     }
 
     fn open_stream(&mut self) -> Result<Opened> {
@@ -752,14 +811,9 @@ impl<B: InputBackend> AudioCapture<B> {
             }
             thread::sleep(Duration::from_millis(10));
         }
-        // The device is open but mute. The back-off is set here, for every
-        // caller, so that the stall above costs one attempt per back-off
-        // period rather than one on every poll of the event loop.
-        self.next_reopen = Some(Instant::now() + REOPEN_BACKOFF);
-        log::error!(
-            "input stream opened but delivered no audio within {}ms; the device may be suspended or held by another client",
-            FIRST_CALLBACK_TIMEOUT.as_millis()
-        );
+        // The device is open but mute. `reopen`, every caller's way in,
+        // reports it and backs off, so that the stall above costs one attempt
+        // per back-off period rather than one on every poll of the event loop.
         Ok(Opened::Silent)
     }
 
@@ -1534,6 +1588,72 @@ mod tests {
             opens + 1,
             "the device is not hammered once per poll"
         );
+    }
+
+    #[test]
+    fn the_wait_between_attempts_doubles_up_to_a_minute() {
+        let waits: Vec<u64> = (1..=8).map(|n| reopen_backoff(n).as_secs()).collect();
+        assert_eq!(waits, [2, 4, 8, 16, 32, 60, 60, 60]);
+        assert_eq!(reopen_backoff(u32::MAX), MAX_REOPEN_BACKOFF);
+    }
+
+    /// A microphone that stays missing is looked for less and less often,
+    /// and one that comes back ends the streak, so the next loss starts the
+    /// wait from two seconds again.
+    #[test]
+    fn a_microphone_that_stays_missing_is_looked_for_less_often() {
+        let (backend, mut capture) = capture(5);
+        backend.refuse.store(true, Ordering::Relaxed);
+        backend.kill();
+        let mut waits = Vec::new();
+        for _ in 0..3 {
+            // Due now: what the clock would reach after the wait.
+            if let Some(failing) = &mut capture.failing {
+                failing.retry_at = Instant::now();
+            }
+            let before = Instant::now();
+            assert!(matches!(
+                capture.poll().as_slice(),
+                [CaptureEvent::StreamUnavailable { .. }]
+            ));
+            let failing = capture.failing.expect("still failing");
+            waits.push((failing.attempts, failing.retry_at - before));
+        }
+        let attempts: Vec<u32> = waits.iter().map(|(n, _)| *n).collect();
+        assert_eq!(attempts, [1, 2, 3]);
+        for ((_, wait), expected) in waits.iter().zip([2, 4, 8]) {
+            let expected = Duration::from_secs(expected);
+            assert!(
+                *wait >= expected && *wait < expected + Duration::from_secs(1),
+                "{wait:?}, expected {expected:?}"
+            );
+        }
+
+        backend.refuse.store(false, Ordering::Relaxed);
+        capture.failing.as_mut().expect("failing").retry_at = Instant::now();
+        assert!(matches!(
+            capture.poll().as_slice(),
+            [CaptureEvent::StreamRestarted { .. }]
+        ));
+        assert_eq!(capture.failing, None, "the streak ends with the recovery");
+    }
+
+    /// The back-off is the watchdog's: a press tries the microphone at once.
+    #[test]
+    fn a_press_does_not_wait_for_the_back_off() {
+        let (backend, mut capture) = capture(5);
+        backend.refuse.store(true, Ordering::Relaxed);
+        backend.kill();
+        capture.poll();
+        let retry_at = capture.failing.expect("failing").retry_at;
+        assert!(retry_at > Instant::now() + Duration::from_secs(1));
+        let opens = backend.opens.load(Ordering::Relaxed);
+        assert!(capture.start_capture().is_err(), "still missing");
+        assert_eq!(backend.opens.load(Ordering::Relaxed), opens + 1);
+        assert_eq!(capture.failing.expect("failing").attempts, 2);
+        backend.refuse.store(false, Ordering::Relaxed);
+        capture.start_capture().expect("back at the next press");
+        assert_eq!(capture.failing, None);
     }
 
     #[test]
