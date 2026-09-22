@@ -731,8 +731,11 @@ local function transactional_append(text, continued)
   local from = last_text
   if continued and last_text > 0 then
     from = last_text - 1
-    local separator = addition[1] == "" and "" or " "
-    addition[1] = old_lines[last_text] .. separator .. addition[1]
+    -- No second space after one the last commit already ends in
+    -- (`text.trailing_space`).
+    local previous = old_lines[last_text]
+    local separator = (addition[1] == "" or previous:find("%s$")) and "" or " "
+    addition[1] = previous .. separator .. addition[1]
   elseif last_text > 0 then
     table.insert(addition, 1, "")
   end

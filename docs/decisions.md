@@ -2283,3 +2283,15 @@ the key right after `:q`, loses that dictation the same way.
   socket (it does so before it waits two seconds for its job), the order a
   user produces. Under the same CPU load, 6 of 6 runs of the whole file
   passed, against 1 failure in 5 before.
+
+## No double space where a sentence continues (2026-09-22)
+
+The 2026-09-22 audit (P3-020): with `text.trailing_space`, every commit ends
+in a space, and the join that continues a paragraph added another, so each
+seam of one utterance read "word  word". Both the editor's append
+(`spokenpad.lua`) and the pending passage (`passage::append_paragraph`),
+which must write the same file, now join with no space when the last line
+already ends in whitespace (Lua's `%s`). Test: the shared paragraph cases
+gained two seams; `paragraphs_follow_the_editors_rule` failed on them
+before, and `the_detached_paragraph_rule_matches_the_editors` holds the Lua
+to the same result.

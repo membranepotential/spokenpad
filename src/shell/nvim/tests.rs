@@ -501,6 +501,8 @@ fn the_detached_paragraph_rule_matches_the_editors() {
         ("a\nb\n", "c\nd\n", false),
         ("\n\n", "x", false),
         ("Grüße\n", "東京", true),
+        ("first \n", "more ", true),
+        ("first\t\n", "more", true),
     ] {
         fs::write(&path, existing).unwrap();
         lua(

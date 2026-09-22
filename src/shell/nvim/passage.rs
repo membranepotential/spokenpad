@@ -174,7 +174,8 @@ pub(super) fn pointer_path(socket: &Path) -> PathBuf {
 /// The same rule as `transactional_append`, over the lines nvim would read
 /// from `existing`: trailing blank lines are dropped, a new utterance opens
 /// a paragraph one blank line below the last text (none at the top of an
-/// empty file), and `continued` extends the last line with a space instead.
+/// empty file), and `continued` extends the last line with a space instead —
+/// with none when that line already ends in one.
 pub fn append_paragraph(existing: &str, text: &str, continued: bool) -> String {
     let body = existing.strip_suffix('\n').unwrap_or(existing);
     let mut lines: Vec<&str> = if existing.is_empty() {
@@ -183,10 +184,8 @@ pub fn append_paragraph(existing: &str, text: &str, continued: bool) -> String {
         body.split('\n').collect()
     };
     // Lua's `%s`: space, \t, \n, \v, \f, \r.
-    let blank = |line: &str| {
-        line.chars()
-            .all(|c| matches!(c, ' ' | '\t' | '\n' | '\x0b' | '\x0c' | '\r'))
-    };
+    let space = |c: char| matches!(c, ' ' | '\t' | '\n' | '\x0b' | '\x0c' | '\r');
+    let blank = |line: &str| line.chars().all(space);
     let last_text = lines
         .iter()
         .rposition(|line| !blank(line))
@@ -195,7 +194,13 @@ pub fn append_paragraph(existing: &str, text: &str, continued: bool) -> String {
     let mut addition: Vec<String> = text.split('\n').map(str::to_owned).collect();
     match lines.pop() {
         Some(previous) if continued => {
-            let separator = if addition[0].is_empty() { "" } else { " " };
+            // No second space after one the last commit already ends in
+            // (`text.trailing_space`), as in Lua's `%s$`.
+            let separator = if addition[0].is_empty() || previous.ends_with(space) {
+                ""
+            } else {
+                " "
+            };
             addition[0] = format!("{previous}{separator}{}", addition[0]);
         }
         Some(previous) => {
@@ -228,6 +233,9 @@ mod tests {
             ("a\nb\n", "c\nd\n", false, "a\nb\n\nc\nd\n\n"),
             ("\n\n", "x", false, "x\n"),
             ("Grüße\n", "東京", true, "Grüße 東京\n"),
+            // `text.trailing_space` ends every commit in a space already.
+            ("first \n", "more ", true, "first more \n"),
+            ("first\t\n", "more", true, "first\tmore\n"),
         ];
         for (existing, text, continued, expected) in cases {
             assert_eq!(
