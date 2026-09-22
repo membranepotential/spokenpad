@@ -81,15 +81,22 @@ those belongs in `src/shell/`.
   events), `transcriptions.rs` (recordings whose text is not all written,
   and `waiting.tsv`), `requests.rs` (control requests with their clock),
   `lock.rs` (the per-user daemon lock); `shell/audio.rs` (`InputBackend`
-  seam; PortAudio impl), `shell/recorder.rs` (recovery WAV),
-  `shell/sync.rs` (the capture path's mutex policy), `shell/control.rs`
-  (control socket server and the CLI's client), `shell/inference.rs`
-  (sherpa's transducer and Silero), `shell/dirs.rs` (private directories), `shell/models.rs`
-  (downloads and verifies the default models),
-  `shell/nvim/mod.rs` (editor lifecycle, both modes, `spokenpad editor`),
+  seam; PortAudio impl; the device list `spokenpad check` prints),
+  `shell/recorder.rs` (recovery WAV), `shell/sync.rs` (one policy for a
+  poisoned mutex: the capture path and the pane's shared state),
+  `shell/dirs.rs` (every directory spokenpad creates is 0700),
+  `shell/control.rs` (control socket server, each request under one
+  deadline; the CLI's client, which starts `spokenpad.socket` once when its
+  socket is missing and reports a failed press through `notify-send`),
+  `shell/inference.rs` (sherpa's transducer and Silero), `shell/models.rs`
+  (downloads and verifies the default models: HTTPS only, bounded, one
+  process at a time; the commands' progress reporters),
+  `shell/nvim/mod.rs` (editor lifecycle, both modes, `spokenpad editor`;
+  a listener of this user only, `SO_PEERCRED`; `with_manager_session`, the
+  display the user manager has now, for the socket-activated daemon),
   `shell/nvim/passage.rs` (text dictated with no editor open), `shell/wm.rs`
-  (sway's IPC socket for the pane's rule, bounded helper processes),
-  `shell/logging.rs`.
+  (sway's IPC socket for the pane's rule, a socket's peer credentials,
+  bounded helper processes), `shell/logging.rs`.
 - The pane (`shell/pane/`, the dictation window spokenpad draws itself,
   reached through `nvim.mode = "pane"`): `mod.rs` (the loop, the renderer,
   `requirements` for `spokenpad check`), `host.rs` (its thread, the three
@@ -139,14 +146,21 @@ those belongs in `src/shell/`.
   tarball; `.SRCINFO` from `makepkg --printsrcinfo`), `packaging/systemd/`
   (`spokenpad.socket`, enabled by the package; `spokenpad.service`, started
   only by it; `dev.conf.example`, the drop-in that runs `~/.local/bin`),
-  `packaging/i3` and `packaging/sway` (example key bindings). `.github/workflows/ci.yml` runs fmt, clippy and every test in an
-  Arch container, with every tool the tests drive installed and no
+  `packaging/aur/spokenpad.install` (the note after installing),
+  `packaging/i3` and `packaging/sway` (example key bindings),
+  `packaging/sherpa-archive.sh` (fetches the sherpa-onnx static libraries
+  and checks them against the sha256 pinned in the PKGBUILD).
+  `THIRD-PARTY.md` names the licences of what the binary links and
+  downloads. `.github/workflows/ci.yml` (actions pinned by commit) runs
+  fmt, clippy and every test in an Arch container, on the checked sherpa
+  archive, with every tool the tests drive installed and no
   `SPOKENPAD_ALLOW_MISSING_*` set.
 
 ## Commands
 
 ```sh
 cargo build --locked --release
+packaging/sherpa-archive.sh DIR && SHERPA_ONNX_ARCHIVE_DIR=DIR cargo build --locked --release   # on the checked archive, as CI and the package do
 cargo test --locked --all-targets              # no mic, user display, lock or service socket is touched
 cargo test --locked --test e2e -- --ignored    # real-model e2e; needs `spokenpad fetch-models` first
 cargo clippy --locked --all-targets -- -D warnings && cargo fmt --check
