@@ -11,11 +11,12 @@ never takes focus. Fully local, CPU-only. Next milestone: public release.
   cancels, hover focus + gap, screenshot); user config migrated. User must
   reload i3 (float rule gone). WirePlumber restarted (walkthrough rig had
   made it drop the card).
-- Audit fixes: lane 1 (17 commits, core/daemon/config) and lane 2 (19,
-  edges; rebased c8c8685, CI on ci/lane2) DONE — integration agent rebasing
-  lane 1 onto lane 2 + wiring (manager session, progress, create_private,
-  sync::lock, stale docs). Then: two reviews, CI on ci/integration, merge,
-  deploy, migrate the user's config (_seconds keys; drop removed keys).
+- Audit fixes integrated on branch worktree-agent-a9b96c4bbc0b525ee
+  (fb45b3c: lanes 1+2, wiring, both reviews' findings fixed; CI fixes:
+  CAP_SYS_NICE for sway/kwin, pane_render serialized). CI on ci/integration
+  running. Corpus agent: core guard for full Commits windows, corpus.rs =
+  daemon ticks, dev subset main vs branch, :restart leftover server.
+  Then: merge, deploy, migrate the user's config (_seconds keys).
 - User 09-23: licence A (declare eSpeak NG GPL-3.0+ from sherpa's TTS).
 
 ## Next
