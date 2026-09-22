@@ -40,6 +40,16 @@ impl Request {
         }
     }
 
+    /// Whether this request may begin a capture: only such a press is worth
+    /// starting a daemon for. A `stop` or a `cancel` finding none has
+    /// nothing to end.
+    pub fn may_begin(self) -> bool {
+        match self {
+            Self::Start | Self::Toggle => true,
+            Self::Stop | Self::Cancel => false,
+        }
+    }
+
     /// The request line a client sends.
     pub fn encode(self) -> String {
         format!("{}\n", self.as_str())

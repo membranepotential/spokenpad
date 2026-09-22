@@ -2632,3 +2632,20 @@ typo from a missing model. A missing model now exits 6, the first free code;
   usage error, and clap's own.
 - Test: `a_usage_error_is_exit_two` and
   `invalid_config_fails_before_devices_and_missing_model_is_exit_six`.
+
+## Only `start` and `toggle` start the socket they find missing (2026-09-23)
+
+The entry of 2026-09-22 above had every control command start
+`spokenpad.socket` when it found nothing listening. A `stop` or a `cancel`
+with no daemon has nothing to end, yet it started one; and a daemon that
+crashes at start was started again by every key-up as well as every press.
+
+- Chosen: only a request that may begin a capture (`Request::may_begin`:
+  `start`, `toggle`) starts the unit and notifies. `stop` and `cancel` that
+  find no daemon exit 1 and say so on stderr, as at any other path, without
+  a desktop notification.
+- Not fixed by this: a first press so quick that its `stop` reaches the
+  daemon systemd starts before its `start` still leaves a recording
+  running; with the socket active, both wait on it in the order they
+  connected.
+- Test: `only_start_and_toggle_start_the_socket`.

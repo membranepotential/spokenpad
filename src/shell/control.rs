@@ -475,11 +475,14 @@ impl std::error::Error for SendError {}
 ///
 /// A key binding runs this, and a window manager throws its stderr away, so
 /// a press that finds nobody listening does what it can before it fails:
-/// when `path` is where `spokenpad.socket` listens, it starts that unit once
-/// (`systemctl --user start spokenpad.socket`: the package enables it, but
-/// only for the next login) and tries again; failing that, it says why in a
-/// desktop notification as well. At any other path — a daemon started by
-/// hand, a test — it only fails.
+/// when `path` is where `spokenpad.socket` listens and the request may begin
+/// a capture (`start`, `toggle`), it starts that unit once (`systemctl
+/// --user start spokenpad.socket`: the package enables it, but only for the
+/// next login) and tries again; failing that, it says why in a desktop
+/// notification as well. A `stop` or a `cancel` that finds nobody has
+/// nothing to end, and fails without either, so a release cannot start a
+/// daemon a crash just ended. At any other path — a daemon started by hand,
+/// a test — it only fails.
 pub fn send(path: &Path, request: Request) -> Result<(), SendError> {
     let recovery = (path == units_socket()).then_some(Recovery {
         start_socket: || {
@@ -538,6 +541,9 @@ where
                 io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
             ) =>
         {
+            if !request.may_begin() {
+                return first;
+            }
             match start_socket() {
                 Ok(()) => send_once(path, request),
                 Err(error) => Err(SendError::Failed(error.context(format!(
@@ -833,6 +839,43 @@ mod tests {
             "{error}"
         );
         assert_eq!(notified, [error]);
+    }
+
+    /// Only a press that may begin a capture starts the socket it finds
+    /// missing. A `stop` or a `cancel` with no daemon has nothing to end: it
+    /// fails as it would at any other path, without a notification.
+    #[test]
+    fn only_start_and_toggle_start_the_socket() {
+        for request in Request::ALL {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("spokenpad.sock");
+            let mut started = false;
+            let mut notified = Vec::new();
+            let result = send_recovering(
+                &path,
+                request,
+                Some(Recovery {
+                    start_socket: || {
+                        started = true;
+                        Err(anyhow::anyhow!("Unit spokenpad.socket not found."))
+                    },
+                    notify: |error: &SendError| notified.push(error.to_string()),
+                }),
+            );
+            let begins = matches!(request, Request::Start | Request::Toggle);
+            assert_eq!(started, begins, "{request}");
+            assert_eq!(
+                notified.len(),
+                usize::from(begins),
+                "{request}: {notified:?}"
+            );
+            if !begins {
+                assert!(
+                    matches!(result, Err(SendError::NoDaemon { .. })),
+                    "{request}: {result:?}"
+                );
+            }
+        }
     }
 
     /// Only the path `spokenpad.socket` listens on is the unit's: a daemon
