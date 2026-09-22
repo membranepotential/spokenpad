@@ -340,6 +340,14 @@ fn closing_the_pane_cancels_the_capture_it_showed() {
     let recordings = daemon.wavs().len();
     assert!(type_text(&mut server, ":q"), "the layout types `:q`");
     assert!(press_keysym(&mut server, RETURN), "the layout has Return");
+    // The press comes once Neovim has acted on `:q` — it closes its socket
+    // before it waits two seconds for its job — so the order is the one a
+    // user produces: the quit first, then the key. Neovim may still report
+    // the quit after the press arrives; that must not make the quit look
+    // like the newer of the two and cancel the capture the press started.
+    wait_for(PATIENCE, "the editor to act on `:q`", || {
+        UnixStream::connect(&daemon.socket).is_err().then_some(())
+    });
     daemon.send(Request::Toggle);
     wait_for(PATIENCE, "the next capture to start", || {
         (daemon.wavs().len() > recordings).then_some(())

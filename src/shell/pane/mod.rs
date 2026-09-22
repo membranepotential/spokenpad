@@ -68,7 +68,12 @@ use x11rb::protocol::xproto::{ButtonPressEvent, KeyButMask, MotionNotifyEvent};
 /// Something the pane has to react to. One channel carries both sources, so
 /// the loop blocks in one place and uses no processor time while idle.
 pub enum Event {
-    Window(x11rb::protocol::Event),
+    /// An X event, and when it arrived: the watcher stamps it the moment it
+    /// reads it, before the loop, which may be busy drawing, gets to it.
+    Window {
+        event: x11rb::protocol::Event,
+        at: Instant,
+    },
     Editor(FromEditor),
 }
 
@@ -124,9 +129,10 @@ pub enum Status {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ending {
     /// The user closed it, at `at`: the window manager asked
-    /// (`WM_DELETE_WINDOW`), or Neovim said it was quitting because it was
-    /// told to (`:q`, `:q!`, `:wq`, `:qa`, `:cq`). The daemon cancels a
-    /// capture that was running.
+    /// (`WM_DELETE_WINDOW`, dated when it arrived), or Neovim said it was
+    /// quitting because it was told to (`:q`, `:q!`, `:wq`, `:qa`, `:cq`;
+    /// dated by the user's last key or click in the window, which is what
+    /// told it). The daemon cancels a capture that was running then.
     ByUser { at: Instant },
     /// Neovim went away without saying so — killed, crashed, a deadly
     /// signal, `:restart` — or the pane lost its sources of events. Nothing the user meant: the
@@ -211,6 +217,9 @@ pub struct Pane {
     /// ([`ANNOUNCE_LEAVING`]); its channel closes a moment later. Never
     /// cleared: `VimLeavePre` runs once the exit can no longer be cancelled.
     leaving: Option<Instant>,
+    /// When the user last typed or clicked into the window, as the X watcher
+    /// read it: what a quit Neovim announces is dated by.
+    last_input: Option<Instant>,
     /// Whether the last row says that the daemon is waiting for a call
     /// Neovim holds behind a half-typed command ([`HELD_NOTICES`]).
     held: bool,
@@ -326,6 +335,7 @@ impl Pane {
             dragging: None,
             editor_gone: false,
             leaving: None,
+            last_input: None,
             held: false,
         };
         let attach = pane.editor.attach(columns, rows)?;
@@ -524,7 +534,13 @@ impl Pane {
                 Ok(Status::Running)
             }
             Event::Editor(FromEditor::Leaving) => {
-                self.leaving.get_or_insert_with(Instant::now);
+                // The quit was typed or clicked into this window, so it is
+                // dated by that input, not by when Neovim got round to saying
+                // so: a slow `VimLeavePre` must not make a key pressed right
+                // after `:q<CR>` look like it came first, and cancel the
+                // capture it started.
+                let told = self.last_input.unwrap_or_else(Instant::now);
+                self.leaving.get_or_insert(told);
                 Ok(Status::Running)
             }
             Event::Editor(FromEditor::Gone) => {
@@ -534,22 +550,29 @@ impl Pane {
                     None => Ending::EditorDied,
                 }))
             }
-            Event::Window(event) => self.window_event(event),
+            Event::Window { event, at } => self.window_event(event, at),
         }
     }
 
-    fn window_event(&mut self, event: x11rb::protocol::Event) -> Result<Status> {
+    fn window_event(&mut self, event: x11rb::protocol::Event, at: Instant) -> Result<Status> {
         use x11rb::protocol::Event as X;
         match event {
             X::Expose(_) => self.damage_everything(),
             X::ConfigureNotify(event) => self.resize(event.width, event.height)?,
             X::KeyPress(event) => {
                 if let Some(keys) = self.keyboard.press(event.detail, event.state) {
+                    self.last_input = Some(at);
                     self.editor.input(&keys)?;
                 }
             }
-            X::ButtonPress(event) => self.button(&event, true)?,
-            X::ButtonRelease(event) => self.button(&event, false)?,
+            X::ButtonPress(event) => {
+                self.last_input = Some(at);
+                self.button(&event, true)?;
+            }
+            X::ButtonRelease(event) => {
+                self.last_input = Some(at);
+                self.button(&event, false)?;
+            }
             X::MotionNotify(event) => self.motion(&event)?,
             X::FocusIn(_) => {
                 self.focused = true;
@@ -567,7 +590,7 @@ impl Pane {
                 }
             }
             X::ClientMessage(event) if self.window.is_close_request(&event) => {
-                return Ok(Status::Finished(Ending::ByUser { at: Instant::now() }));
+                return Ok(Status::Finished(Ending::ByUser { at }));
             }
             _ => {}
         }
@@ -1516,7 +1539,8 @@ fn watch(
                 match connection.wait_for_event() {
                     Ok(_) if stopping.load(Ordering::Acquire) => return,
                     Ok(event) => {
-                        if events.send(Event::Window(event)).is_err() {
+                        let at = Instant::now();
+                        if events.send(Event::Window { event, at }).is_err() {
                             return;
                         }
                     }

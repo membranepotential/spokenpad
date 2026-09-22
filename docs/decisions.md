@@ -2260,3 +2260,26 @@ optional (C10).
 - `Cargo.toml` carries `repository`, `readme`, keywords and categories, and
   `publish = false`; `rust-version` stays 1.88, the newest minimum among
   the dependencies and what `as_chunks` and let chains need.
+
+## A quit in the pane is dated by the key that asked for it (2026-09-22)
+
+`tests/pane_daemon.rs`'s `closing_the_pane_cancels_the_capture_it_showed`
+failed about one run in five under CPU load, at "the fourth capture's text
+in a new pane". The daemon's log showed why: `:q<CR>` in the pane, then a
+press that started a new capture, then the pane's record of the user's
+close, dated when Neovim's `VimLeavePre` notice reached the pane thread —
+after the press — so the state machine took the close for the new capture
+and cancelled it. A user with a Neovim config that is slow to quit, pressing
+the key right after `:q`, loses that dictation the same way.
+
+- Chosen: the X watcher stamps every event when it reads it, and a quit
+  Neovim announces is dated by the last key or click the pane forwarded to
+  it, which is what told it to quit; a `WM_DELETE_WINDOW` is dated when it
+  arrived. Neither waits for the pane's own loop.
+- Rejected: X server timestamps. They are exact, but need a round trip at
+  open to map the server's clock onto the daemon's, for a gain of the few
+  milliseconds between the server sending a key and the watcher reading it.
+- Test: the closing test now presses the key once Neovim has closed its
+  socket (it does so before it waits two seconds for its job), the order a
+  user produces. Under the same CPU load, 6 of 6 runs of the whole file
+  passed, against 1 failure in 5 before.
