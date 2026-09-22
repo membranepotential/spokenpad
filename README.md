@@ -234,7 +234,7 @@ it. A narrow window gives up the level meter first, then the explanation, but
 never the phase label or the headline. When two things happen to the same
 capture, the more serious one is shown: memory limit reached > capture
 incomplete > microphone unavailable > capture not kept > recording lost >
-recording partly transcribed > no speech model > microphone gap > reached the time limit > stopped after
+recording shortened > recording partly transcribed > no speech model > microphone gap > reached the time limit > stopped after
 silence > config not reloaded > nearly silent > held too briefly >
 downloading the speech model > loading the speech model > transcribing
 recordings > preview paused. The speech model's
@@ -251,11 +251,13 @@ caught up. The log always has the full sentence and paths.
   have been live ("transcribing recordings"), just without a preview while
   you speak. Such a capture ends by itself after 60 minutes, the most a live
   one can hold, and no recording waiting to be transcribed is pruned. One
-  that is gone anyway is reported as "recording lost". If the daemon stops
-  before it has transcribed them all, the next start transcribes the rest,
-  from where each one's text reached. One that fails partway says
-  "recording partly transcribed", with the `spokenpad transcribe --from
-  SECONDS` that recovers the rest.
+  that is gone anyway is reported as "recording lost". Recordings not
+  transcribed yet are listed for the next start, which transcribes the rest
+  from where each one's text reached. One that fails partway says "recording
+  partly transcribed": the next start tries the rest again, or, if it failed
+  at the same point before, the notice gives the `spokenpad transcribe --from
+  SECONDS` that recovers it. One cut short since it was recorded says
+  "recording shortened".
 - **A model that cannot be had does not stop dictation.** Offline on the
   first run, a failed download, or a missing configured `asr.model_dir`: the
   winbar says "no speech model" and why, the recordings are kept, and the
@@ -410,7 +412,11 @@ window, or attaches to one you opened: `[nvim]` changes apply to that
 window. Every other section takes effect after
 `systemctl --user restart spokenpad`, which the log says when it sees one
 changed. A file that no longer loads leaves the settings in use, and the
-window says "config not reloaded" and why.
+window says "config not reloaded" and why. A file that does not load when
+the daemon starts gives it the defaults — the pane among them, whatever mode
+the file asked for — because the pane is where that notice is seen: it
+opens on the next press and says "config not reloaded" until the file is
+fixed.
 
 ## Recovering a dictation
 

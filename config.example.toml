@@ -313,7 +313,6 @@ trailing_space = false
 
 # Who opens that neovim.
 #
-#   "pane"     (the default) see below.
 #   "attach"   you do: run `spokenpad editor` in any terminal, on any desktop
 #              (X11 or Wayland, any window manager). The daemon never opens a
 #              window, so it can never take focus. With no editor open,
@@ -323,7 +322,7 @@ trailing_space = false
 #              Needs i3 or sway, and refuses to open a window until the running
 #              window manager's config proves a no_focus rule for it
 #              (packaging/i3/ or packaging/sway/).
-#   "pane"     the daemon does, in a window it draws itself, on the first
+#   "pane"     (the default) the daemon does, in a window it draws itself, on the first
 #              key-down. No terminal, and no rule to install in your config:
 #              the window carries the properties that make a window manager
 #              refuse it focus, and keep it on top. sway reads none of them,

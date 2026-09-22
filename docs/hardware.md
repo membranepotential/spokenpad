@@ -75,7 +75,7 @@ idle, where it is only logged.
 
 ## Window manager
 
-Attach mode (the default) needs nothing from the window manager: the user
+Attach mode needs nothing from the window manager: the user
 opens the editor in any terminal. Managed mode needs i3 or sway, where the
 dictation window must float and must never take focus; the window manager
 enforces both through the rules in `packaging/i3/` or `packaging/sway/`

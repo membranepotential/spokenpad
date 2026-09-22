@@ -1437,3 +1437,13 @@ A second review found two ways the sway check could still guess.
   with its own reason — this compositor is not sway, spokenpad cannot keep
   the pane unfocused there, use `nvim.mode = "attach"`. Not run: none of
   those compositors is installed here.
+
+## A config that does not load at startup gives the pane (2026-09-22)
+
+With the pane the default, a file that does not load when the daemon starts
+gives it `Config::default()` — the pane — even for a user whose file asked
+for attach or managed mode. Kept on purpose: the file is read again before
+every new window, a file that still does not load raises "config not
+reloaded" with the reason, and the pane that opens is where that notice is
+seen. Falling back to attach would put the notice in no window at all until
+the user opens one. The README's configuration section says so.
