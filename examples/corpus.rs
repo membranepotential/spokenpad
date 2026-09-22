@@ -143,8 +143,6 @@ struct Plan {
     padding: Option<usize>,
     /// Audio between preview ticks, in samples.
     tick: usize,
-    /// `preview.max_seconds` in samples: past this the daemon stops previewing.
-    max_tail: usize,
     previews: bool,
     rate: u32,
 }
@@ -442,10 +440,13 @@ fn engine(config: &Config, padding: Option<usize>) -> Result<Engine> {
     let mut recognizer = Transcriber::new(&config.asr, rate)?;
     // Warm up before the probe, so lazy native initialisation is not counted.
     recognizer.warm_up()?;
-    Ok(Worker::new(Pipeline {
-        recognizer: Probe::new(recognizer, padding),
-        segmenter: SpeechSegmenter::new(&config.vad, rate)?,
-    }))
+    Ok(Worker::new(
+        Pipeline {
+            recognizer: Probe::new(recognizer, padding),
+            segmenter: SpeechSegmenter::new(&config.vad, rate)?,
+        },
+        config.preview.window(rate),
+    ))
 }
 
 // -- the two paths ----------------------------------------------------------------
@@ -460,12 +461,14 @@ fn engine(config: &Config, padding: Option<usize>) -> Result<Engine> {
 /// different chunk boundaries. Ticking on audio time makes a replay reproducible
 /// and models the idle machine, where a decode runs ~14x faster than real time.
 ///
-/// `TickKind::Commits` is the daemon's own way to skip the cosmetic decode, and
-/// `Worker::tick` returns at the first unsettled chunk whichever kind it is
-/// given, so the kind cannot change one committed word. Without `--previews`
-/// every tick uses it, which costs the replay about a tenth of its decodes.
+/// The kind of each tick is the daemon's, from [`TickKind::for_tail`], except
+/// that without `--previews` a tick the daemon would preview is
+/// [`TickKind::Settled`]: it commits exactly what the preview tick commits,
+/// without the cosmetic decode, which saves the replay about nine decodes in
+/// ten.
 fn replay_live(worker: &mut Engine, samples: &[f32], plan: Plan) -> Result<Vec<String>> {
     let utterance = Utterance::new(1);
+    let window = worker.window();
     // `session.committed_hint`. Here it never lags: the replay is one thread,
     // so it is the worker's own offset.
     let mut hint = Frames::ZERO;
@@ -474,14 +477,10 @@ fn replay_live(worker: &mut Engine, samples: &[f32], plan: Plan) -> Result<Vec<S
     let mut available = plan.tick;
     while available < samples.len() {
         // Past preview.max_seconds of uncommitted audio the daemon stops the
-        // cosmetic decode but keeps ticking, so settled chunks still commit.
-        let kind = if plan.previews && available - hint.get() <= plan.max_tail {
-            TickKind::Preview
-        } else {
-            TickKind::Commits
-        };
+        // cosmetic decode but keeps ticking, a window at a time.
+        let kind = tick_kind(available - hint.get(), window, plan.previews);
         // `snapshot_capture(committed_hint)`, truncated to one tick's work.
-        let end = available.min(hint.get() + plan.max_tail);
+        let end = available.min(hint.get() + window);
         worker.tick(&samples[hint.get()..end], hint, &utterance, kind, |c| {
             landed.push((c.text, c.through))
         })?;
@@ -498,6 +497,15 @@ fn replay_live(worker: &mut Engine, samples: &[f32], plan: Plan) -> Result<Vec<S
         texts.push(c.text)
     })?;
     Ok(texts)
+}
+
+/// The kind of tick the daemon issues for a tail of `tail` samples, with a
+/// preview tick left undecoded unless `previews` asks for it.
+fn tick_kind(tail: usize, window: usize, previews: bool) -> TickKind {
+    match TickKind::for_tail(tail, window) {
+        TickKind::Preview if !previews => TickKind::Settled,
+        kind => kind,
+    }
 }
 
 /// One decode of the whole capture, with no detector in front of it.
@@ -1005,7 +1013,6 @@ fn main() -> Result<()> {
             .trailing_silence_ms
             .map(|ms| (ms * u64::from(rate) / 1000) as usize),
         tick,
-        max_tail: (config.preview.max_seconds * f64::from(rate)) as usize,
         previews: args.previews,
         rate,
     };
@@ -1230,59 +1237,20 @@ mod tests {
         assert_eq!((tally.empty_first, tally.empty_after_retry), (0, 0));
     }
 
-    /// Without `--previews` the replay ticks with `TickKind::Commits`, which
-    /// is only sound because the kind decides the cosmetic decode and nothing
-    /// else. If that ever stops holding, every number this harness has
-    /// produced without `--previews` is wrong, so assert it here.
+    /// The replay issues the daemon's kind of tick: a tail longer than the
+    /// window is read a window at a time, whatever `--previews` says, and a
+    /// shorter one is previewed or, without `--previews`, only settled.
+    /// Committing a window that settled nothing over a shorter tail would
+    /// cut speech the daemon never cuts, and every number this harness
+    /// produced would be of a decoder nobody runs.
     #[test]
-    fn the_tick_kind_changes_no_committed_word() {
-        use spokenpad::core::decode::{Segment, Segmenter, Split};
-        struct Chunks;
-        impl Segmenter for Chunks {
-            fn split(&mut self, samples: &[f32]) -> Result<Split> {
-                Ok(Split {
-                    segments: (0..samples.len())
-                        .step_by(4)
-                        .map(|i| Segment {
-                            window: i..(i + 4).min(samples.len()),
-                            speech_end: (i + 4).min(samples.len()),
-                            settled: i + 4 < samples.len(),
-                        })
-                        .collect(),
-                    ..Split::default()
-                })
-            }
+    fn the_replay_ticks_as_the_daemon_does() {
+        for previews in [false, true] {
+            assert_eq!(tick_kind(11, 10, previews), TickKind::Window);
         }
-        /// Text that depends only on the window, so two runs are comparable.
-        struct ByContent;
-        impl Recognizer for ByContent {
-            fn transcribe(&mut self, samples: &[f32], _: TrailingSilence) -> Result<String> {
-                Ok(format!("w{}", samples.iter().sum::<f32>()))
-            }
-        }
-        let run = |kind| {
-            let mut worker = Worker::new(Pipeline {
-                recognizer: Probe::new(ByContent, None),
-                segmenter: Chunks,
-            });
-            let samples: Vec<f32> = (0..10).map(|i| i as f32).collect();
-            let mut commits = vec![];
-            worker
-                .tick(&samples, Frames::ZERO, &Utterance::new(1), kind, |c| {
-                    commits.push((c.text, c.through.get()))
-                })
-                .unwrap();
-            (commits, worker.pipeline.recognizer.take().decodes)
-        };
-        let (previewed, previewed_decodes) = run(TickKind::Preview);
-        let (committed, committed_decodes) = run(TickKind::Commits);
-        assert_eq!(previewed, committed, "the same chunks, with the same text");
-        assert_eq!(committed.len(), 2, "two settled chunks of the three");
-        assert_eq!(
-            (previewed_decodes, committed_decodes),
-            (3, 2),
-            "the cosmetic decode of the open tail is the only difference"
-        );
+        assert_eq!(tick_kind(10, 10, true), TickKind::Preview);
+        assert_eq!(tick_kind(10, 10, false), TickKind::Settled);
+        assert_eq!(tick_kind(0, 10, false), TickKind::Settled);
     }
 
     fn row(ref_words: usize, hyp_words: usize, edits: usize, lost_tail: usize) -> Row {

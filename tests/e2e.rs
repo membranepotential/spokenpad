@@ -2339,15 +2339,18 @@ fn replay_into_capture(minutes: usize, dropping: bool) -> usize {
             max_total_bytes: 1,
         },
     );
-    let mut worker = Worker::new(Pipeline {
-        recognizer: Counting {
-            words: false,
-            delay: Duration::ZERO,
-            calls: Arc::new(Mutex::new(Vec::new())),
-            failing: Arc::new(AtomicBool::new(false)),
+    let mut worker = Worker::new(
+        Pipeline {
+            recognizer: Counting {
+                words: false,
+                delay: Duration::ZERO,
+                calls: Arc::new(Mutex::new(Vec::new())),
+                failing: Arc::new(AtomicBool::new(false)),
+            },
+            segmenter: Chunker::Speech(Vad::default()),
         },
-        segmenter: Chunker::Speech(Vad::default()),
-    });
+        30 * RATE as usize,
+    );
     let utterance = Utterance::new(1);
     capture.start_capture().expect("start the capture");
 
@@ -2445,7 +2448,7 @@ impl DirectMicrophone {
     }
 }
 
-/// How long the real Silero pass over an open tail takes. A `Commits` tick
+/// How long the real Silero pass over an open tail takes. A window tick
 /// runs even past `preview.max_seconds`, and `Pipeline::split` has no abandon
 /// check, so whatever this costs is what a release can queue behind.
 ///

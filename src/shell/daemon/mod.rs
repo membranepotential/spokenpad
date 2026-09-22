@@ -352,7 +352,9 @@ where
             })
             .collect(),
     );
-    let window = ((config.preview.max_seconds * f64::from(rate)) as usize).max(1);
+    // `preview.max_seconds` in samples: the engine's worker checks every
+    // window tick the loop sends against it.
+    let window = config.preview.window(rate);
 
     let (work_tx, work_rx) = mpsc::channel();
     let (result_tx, results) = mpsc::channel();
@@ -371,6 +373,7 @@ where
     let mut state = Loop {
         config,
         rate,
+        window,
         capture,
         requests: Requests::new(requests),
         session,
@@ -401,6 +404,8 @@ where
 struct Loop<'a, B: InputBackend> {
     config: &'a Config,
     rate: u32,
+    /// The engine's window, in samples: `preview.max_seconds`.
+    window: usize,
     capture: AudioCapture<B>,
     requests: Requests,
     session: Session,
@@ -719,7 +724,6 @@ impl<B: InputBackend> Loop<'_, B> {
         if !self.session.tick_due(now) {
             return Ok(());
         }
-        let max_seconds = self.config.preview.max_seconds;
         let tail = self
             .capture
             .captured_frames()
@@ -727,18 +731,17 @@ impl<B: InputBackend> Loop<'_, B> {
         // A tail too long to redraw cheaply stops the cosmetic decode only.
         // The tick still runs, still commits what has settled, and so still
         // lets the shell drop the audio behind it.
-        let kind = if Frames(tail).seconds(self.rate) > max_seconds {
+        let kind = TickKind::for_tail(tail, self.window);
+        if kind == TickKind::Window {
             if self.session.previewing() {
                 log::warn!(
                     "preview paused: uncommitted audio exceeds preview.max_seconds; still recording and committing"
                 );
             }
             self.session.defer_previews();
-            TickKind::Commits
         } else {
             self.session.resume_previews();
-            TickKind::Preview
-        };
+        }
         let utterance = self
             .session
             .current
@@ -752,10 +755,9 @@ impl<B: InputBackend> Loop<'_, B> {
         // of it (docs/experiments/2026-09-21-constant-ram-recording.md). The
         // rest of the tail is the next tick's business; a preview tick never
         // reaches this, because it only runs while the tail is under the same
-        // limit.
-        audio
-            .samples
-            .truncate(((max_seconds * f64::from(self.rate)) as usize).max(1));
+        // limit. The snapshot holds at least `tail` samples, so a window tick
+        // gets the full window the worker requires.
+        audio.samples.truncate(self.window);
         self.session.requested(now);
         log::debug!(
             "preview {} requested: {:.2}s audio starting at {}",

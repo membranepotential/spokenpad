@@ -286,31 +286,56 @@ struct Progress {
     id: Option<UtteranceId>,
     through: Frames,
 }
-/// What a tick is for.
+/// What a tick is for, and so which audio it reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TickKind {
-    /// The whole open tail: settled chunks commit, and the rest is decoded
-    /// for the preview.
+    /// The whole open tail, no longer than a window: settled chunks commit,
+    /// and the rest is decoded for the preview.
     Preview,
-    /// A window cut from an open tail longer than it, too long to redraw on
-    /// every tick. Settled chunks still commit, so the committed offset keeps
-    /// moving and the audio behind it can still be dropped; the rest is not
-    /// decoded. A window that begins at the committed offset and settles
+    /// A [`Preview`](Self::Preview) tick without the cosmetic decode: it
+    /// commits exactly what that tick commits and decodes nothing else. For
+    /// a replay, which throws the preview's text away (`examples/corpus.rs`).
+    Settled,
+    /// The first window of an open tail longer than it, too long to redraw
+    /// on every tick. Settled chunks still commit, so the committed offset
+    /// keeps moving and the audio behind it can still be dropped; the rest is
+    /// not decoded. A window that begins at the committed offset and settles
     /// nothing is committed through its last pause, or whole when it has
-    /// none, so the offset moves anyway.
-    Commits,
+    /// none, so the offset moves anyway. [`Worker::tick`] refuses one that
+    /// does not hold exactly the worker's window.
+    Window,
+}
+impl TickKind {
+    /// The kind of tick for an open tail of `tail` samples: a tail longer
+    /// than `window` is read a window at a time, any other is previewed
+    /// whole. The one rule the daemon and a replay both follow.
+    pub fn for_tail(tail: usize, window: usize) -> Self {
+        if tail > window {
+            Self::Window
+        } else {
+            Self::Preview
+        }
+    }
 }
 
 pub struct Worker<R, S> {
     pub pipeline: Pipeline<R, S>,
     progress: Progress,
+    /// `preview.max_seconds` in samples: the most audio one tick reads, and
+    /// exactly what a [`TickKind::Window`] tick holds.
+    window: usize,
 }
 impl<R: Recognizer, S: Segmenter> Worker<R, S> {
-    pub fn new(pipeline: Pipeline<R, S>) -> Self {
+    pub fn new(pipeline: Pipeline<R, S>, window: usize) -> Self {
         Self {
             pipeline,
             progress: Progress::default(),
+            window,
         }
+    }
+    /// The most audio one tick reads, in samples.
+    pub fn window(&self) -> usize {
+        self.window
     }
     /// Takes up `utterance` with its text committed through `through`
     /// already, by an earlier daemon: nothing before it is decoded again.
@@ -341,6 +366,15 @@ impl<R: Recognizer, S: Segmenter> Worker<R, S> {
         if !utterance.ticking() {
             return Ok(None);
         }
+        // Committing a window that settled nothing bounds a tail that
+        // outgrew a window. Over a shorter tail it would cut speech that is
+        // simply still being spoken.
+        ensure!(
+            kind != TickKind::Window || samples.len() == self.window,
+            "a window tick holds {} samples, not the window of {}",
+            samples.len(),
+            self.window
+        );
         self.begin(utterance);
         ensure!(
             start <= self.progress.through,
@@ -387,7 +421,7 @@ impl<R: Recognizer, S: Segmenter> Worker<R, S> {
                     .transcribe(&remainder[window], TrailingSilence::Padded)?;
                 return Ok(utterance.ticking().then(|| self.open_tail(text, heard)));
             }
-            (Some(_), TickKind::Commits) => {}
+            (Some(_), TickKind::Settled | TickKind::Window) => {}
             // Every window is decoded and only settled silence follows.
             // Finishing it commits no text and decodes nothing; it is what
             // keeps the open tail, and the audio the shell has to hold for
@@ -407,7 +441,7 @@ impl<R: Recognizer, S: Segmenter> Worker<R, S> {
                 }
             }
         }
-        if kind == TickKind::Commits && skip == 0 && self.progress.through == base {
+        if kind == TickKind::Window && skip == 0 && self.progress.through == base {
             self.commit_window(remainder, &split, utterance, &mut commit)?;
         }
         Ok(utterance
@@ -574,14 +608,17 @@ mod tests {
         }
     }
     fn worker() -> Worker<Fake, Quarters> {
-        Worker::new(Pipeline {
-            recognizer: Fake {
-                calls: vec![],
-                replies: vec![],
-                stop: None,
+        Worker::new(
+            Pipeline {
+                recognizer: Fake {
+                    calls: vec![],
+                    replies: vec![],
+                    stop: None,
+                },
+                segmenter: Quarters,
             },
-            segmenter: Quarters,
-        })
+            10,
+        )
     }
     #[test]
     fn progressive_release_never_redecodes_committed_speech() {
@@ -704,13 +741,16 @@ mod tests {
         }
     }
     fn deaf_worker(bare: &'static str) -> Worker<DeafWhenPadded, Quarters> {
-        Worker::new(Pipeline {
-            recognizer: DeafWhenPadded {
-                bare,
-                calls: vec![],
+        Worker::new(
+            Pipeline {
+                recognizer: DeafWhenPadded {
+                    bare,
+                    calls: vec![],
+                },
+                segmenter: Quarters,
             },
-            segmenter: Quarters,
-        })
+            10,
+        )
     }
     #[test]
     fn empty_speech_is_decoded_again_without_trailing_silence() {
@@ -783,14 +823,17 @@ mod tests {
                 Ok(Split::default())
             }
         }
-        let mut w = Worker::new(Pipeline {
-            recognizer: Fake {
-                calls: vec![],
-                replies: vec![],
-                stop: None,
+        let mut w = Worker::new(
+            Pipeline {
+                recognizer: Fake {
+                    calls: vec![],
+                    replies: vec![],
+                    stop: None,
+                },
+                segmenter: Silent,
             },
-            segmenter: Silent,
-        });
+            10,
+        );
         let u = Utterance::new(1);
         assert_eq!(
             w.tick(&[0.; 10], Frames::ZERO, &u, TickKind::Preview, |_| panic!(
@@ -830,14 +873,17 @@ mod tests {
                 })
             }
         }
-        let mut w = Worker::new(Pipeline {
-            recognizer: Fake {
-                calls: vec![],
-                replies: vec![],
-                stop: None,
+        let mut w = Worker::new(
+            Pipeline {
+                recognizer: Fake {
+                    calls: vec![],
+                    replies: vec![],
+                    stop: None,
+                },
+                segmenter: Quiet(4),
             },
-            segmenter: Quiet(4),
-        });
+            10,
+        );
         let u = Utterance::new(1);
         let mut commits = vec![];
         assert_eq!(
@@ -881,12 +927,12 @@ mod tests {
     /// the whole tick would stop the commits that shorten the tail, and the
     /// pause would never end.
     #[test]
-    fn a_commits_only_tick_still_commits_and_leaves_the_tail_undecoded() {
+    fn a_window_tick_still_commits_and_leaves_the_tail_undecoded() {
         let mut w = worker();
         let u = Utterance::new(1);
         let mut commits = vec![];
         assert_eq!(
-            w.tick(&[1.; 10], Frames::ZERO, &u, TickKind::Commits, |c| commits
+            w.tick(&[1.; 10], Frames::ZERO, &u, TickKind::Window, |c| commits
                 .push(c))
                 .unwrap(),
             Some(Preview {
@@ -923,19 +969,22 @@ mod tests {
     /// the window whole. Otherwise every later tick reads the same window, the
     /// committed offset never moves, and the tail grows until the release.
     #[test]
-    fn a_commits_tick_that_settles_nothing_commits_its_window_whole() {
-        let mut w = Worker::new(Pipeline {
-            recognizer: Fake {
-                calls: vec![],
-                replies: vec![],
-                stop: None,
+    fn a_window_tick_that_settles_nothing_commits_its_window_whole() {
+        let mut w = Worker::new(
+            Pipeline {
+                recognizer: Fake {
+                    calls: vec![],
+                    replies: vec![],
+                    stop: None,
+                },
+                segmenter: Unbroken,
             },
-            segmenter: Unbroken,
-        });
+            10,
+        );
         let u = Utterance::new(1);
         let mut commits = vec![];
         let tail = w
-            .tick(&[1.; 10], Frames::ZERO, &u, TickKind::Commits, |c| {
+            .tick(&[1.; 10], Frames::ZERO, &u, TickKind::Window, |c| {
                 commits.push(c)
             })
             .unwrap()
@@ -949,7 +998,7 @@ mod tests {
             vec![("text", Frames(10))]
         );
         // The next window begins where this one ended, and is decoded once.
-        w.tick(&[1.; 10], Frames(10), &u, TickKind::Commits, |c| {
+        w.tick(&[1.; 10], Frames(10), &u, TickKind::Window, |c| {
             commits.push(c)
         })
         .unwrap();
@@ -962,19 +1011,22 @@ mod tests {
     /// only what follows it.
     #[test]
     fn a_release_during_a_window_committed_whole_keeps_the_decoded_segment() {
-        let mut w = Worker::new(Pipeline {
-            recognizer: Fake {
-                calls: vec![],
-                replies: vec![],
-                stop: None,
+        let mut w = Worker::new(
+            Pipeline {
+                recognizer: Fake {
+                    calls: vec![],
+                    replies: vec![],
+                    stop: None,
+                },
+                segmenter: Unbroken,
             },
-            segmenter: Unbroken,
-        });
+            10,
+        );
         let u = Utterance::new(1);
         w.pipeline.recognizer.stop = Some(u.clone());
         let mut commits = vec![];
         assert_eq!(
-            w.tick(&[1.; 10], Frames::ZERO, &u, TickKind::Commits, |c| {
+            w.tick(&[1.; 10], Frames::ZERO, &u, TickKind::Window, |c| {
                 commits.push(c)
             })
             .unwrap(),
@@ -996,20 +1048,113 @@ mod tests {
     /// waits for the chunk to settle.
     #[test]
     fn a_preview_tick_that_settles_nothing_commits_nothing() {
-        let mut w = Worker::new(Pipeline {
-            recognizer: Fake {
-                calls: vec![],
-                replies: vec![],
-                stop: None,
+        let mut w = Worker::new(
+            Pipeline {
+                recognizer: Fake {
+                    calls: vec![],
+                    replies: vec![],
+                    stop: None,
+                },
+                segmenter: Unbroken,
             },
-            segmenter: Unbroken,
-        });
+            10,
+        );
         let u = Utterance::new(1);
         w.tick(&[1.; 10], Frames::ZERO, &u, TickKind::Preview, |_| {
             panic!("committed an open chunk")
         })
         .unwrap();
         assert_eq!(w.progress.through, Frames::ZERO);
+    }
+
+    /// A tail that outgrew a window is read a window at a time; a tail of
+    /// exactly a window is still previewed whole.
+    #[test]
+    fn only_a_tail_longer_than_a_window_is_read_a_window_at_a_time() {
+        assert_eq!(TickKind::for_tail(0, 10), TickKind::Preview);
+        assert_eq!(TickKind::for_tail(10, 10), TickKind::Preview);
+        assert_eq!(TickKind::for_tail(11, 10), TickKind::Window);
+    }
+
+    /// Committing a window that settled nothing is only for a window cut
+    /// from a longer tail. A shorter slice is speech still being spoken, and
+    /// a window tick over it is refused before anything is decoded.
+    #[test]
+    fn a_window_tick_that_is_not_the_workers_window_is_refused() {
+        let unbroken = || {
+            Worker::new(
+                Pipeline {
+                    recognizer: Fake {
+                        calls: vec![],
+                        replies: vec![],
+                        stop: None,
+                    },
+                    segmenter: Unbroken,
+                },
+                10,
+            )
+        };
+        for len in [6, 11] {
+            let mut w = unbroken();
+            let refused = w.tick(
+                &vec![1.; len],
+                Frames::ZERO,
+                &Utterance::new(1),
+                TickKind::Window,
+                |_| panic!("committed from a slice of {len}"),
+            );
+            assert!(refused.is_err(), "a window tick over {len} samples ran");
+            assert!(w.pipeline.recognizer.calls.is_empty());
+            assert_eq!(w.progress.through, Frames::ZERO);
+        }
+    }
+
+    /// Leaving out the cosmetic decode changes no committed word: the same
+    /// chunks with the same text, and an open chunk that fills the whole
+    /// window is still left open. A replay that skips the preview measures
+    /// exactly what the daemon commits.
+    #[test]
+    fn a_settled_tick_commits_what_a_preview_tick_commits() {
+        let run = |kind| {
+            let mut w = worker();
+            let samples: Vec<f32> = (0..10).map(|i| i as f32).collect();
+            let mut commits = vec![];
+            w.tick(&samples, Frames::ZERO, &Utterance::new(1), kind, |c| {
+                commits.push((c.text, c.through))
+            })
+            .unwrap();
+            (commits, w.pipeline.recognizer.calls.len())
+        };
+        let (previewed, previewed_decodes) = run(TickKind::Preview);
+        let (settled, settled_decodes) = run(TickKind::Settled);
+        assert_eq!(previewed, settled, "the same chunks, with the same text");
+        assert_eq!(settled.len(), 2, "two settled chunks of the three");
+        assert_eq!(
+            (previewed_decodes, settled_decodes),
+            (3, 2),
+            "the cosmetic decode of the open tail is the only difference"
+        );
+
+        let mut w = Worker::new(
+            Pipeline {
+                recognizer: Fake {
+                    calls: vec![],
+                    replies: vec![],
+                    stop: None,
+                },
+                segmenter: Unbroken,
+            },
+            10,
+        );
+        w.tick(
+            &[1.; 10],
+            Frames::ZERO,
+            &Utterance::new(1),
+            TickKind::Settled,
+            |_| panic!("committed an open chunk"),
+        )
+        .unwrap();
+        assert!(w.pipeline.recognizer.calls.is_empty(), "nothing decoded");
     }
 
     /// Each segment of a final decode commits at its own speech end, so a
@@ -1033,10 +1178,13 @@ mod tests {
             .unwrap();
         assert_eq!(commits, vec![Frames(104), Frames(108), Frames(110)]);
 
-        let mut w = Worker::new(Pipeline {
-            recognizer: FailsSecond(0),
-            segmenter: Quarters,
-        });
+        let mut w = Worker::new(
+            Pipeline {
+                recognizer: FailsSecond(0),
+                segmenter: Quarters,
+            },
+            10,
+        );
         let mut commits = vec![];
         let failed = w.finish(&[1.; 10], Frames::ZERO, &Utterance::new(2), |c| {
             commits.push(c.through)
@@ -1342,16 +1490,19 @@ mod long_capture {
         let releasing = Rc::new(Cell::new(false));
         let windows = Rc::new(Cell::new(vec![]));
         let calls = Rc::new(Cell::new(vec![]));
-        let mut worker = Worker::new(Pipeline {
-            recognizer: Counter(Rc::clone(&calls)),
-            segmenter: Detector {
-                config: Vad::default(),
-                base: Rc::clone(&base),
-                releasing: Rc::clone(&releasing),
-                windows: Rc::clone(&windows),
-                before: mode == Bookkeeping::Before,
+        let mut worker = Worker::new(
+            Pipeline {
+                recognizer: Counter(Rc::clone(&calls)),
+                segmenter: Detector {
+                    config: Vad::default(),
+                    base: Rc::clone(&base),
+                    releasing: Rc::clone(&releasing),
+                    windows: Rc::clone(&windows),
+                    before: mode == Bookkeeping::Before,
+                },
             },
-        });
+            PREVIEW_MAX,
+        );
         let mut held = Held {
             buffers: VecDeque::new(),
             start: 0,
@@ -1370,12 +1521,11 @@ mod long_capture {
                 continue;
             }
             next_tick += step;
-            let kind = if held.end - through > PREVIEW_MAX {
-                TickKind::Commits
-            } else {
-                TickKind::Preview
-            };
-            let (from, samples) = held.snapshot(through);
+            // As the daemon's loop: the kind from the tail, and one tick's
+            // work cut to a window.
+            let kind = TickKind::for_tail(held.end - through, PREVIEW_MAX);
+            let (from, mut samples) = held.snapshot(through);
+            samples.truncate(PREVIEW_MAX);
             base.set(through);
             worker
                 .tick(&samples, Frames(from), &utterance, kind, |c| {
@@ -1509,16 +1659,19 @@ mod long_capture {
         let windows = Rc::new(Cell::new(vec![]));
         let calls = Rc::new(Cell::new(vec![]));
         let config = Vad::default();
-        let mut worker = Worker::new(Pipeline {
-            recognizer: Counter(Rc::clone(&calls)),
-            segmenter: Detector {
-                config: config.clone(),
-                base: Rc::clone(&base),
-                releasing: Rc::new(Cell::new(false)),
-                windows: Rc::clone(&windows),
-                before: false,
+        let mut worker = Worker::new(
+            Pipeline {
+                recognizer: Counter(Rc::clone(&calls)),
+                segmenter: Detector {
+                    config: config.clone(),
+                    base: Rc::clone(&base),
+                    releasing: Rc::new(Cell::new(false)),
+                    windows: Rc::clone(&windows),
+                    before: false,
+                },
             },
-        });
+            PREVIEW_MAX,
+        );
         let utterance = Utterance::new(1);
         let mut through = 0_usize;
         let mut peak = 0;
@@ -1589,10 +1742,13 @@ mod long_capture {
         let samples = audio(&spans, 0..13 * second);
         let loud = samples.iter().filter(|s| s.abs() > 0.1).count();
         let calls = Rc::new(Cell::new(vec![]));
-        let mut worker = Worker::new(Pipeline {
-            recognizer: Counter(Rc::clone(&calls)),
-            segmenter: MinSpeech(Vad::default()),
-        });
+        let mut worker = Worker::new(
+            Pipeline {
+                recognizer: Counter(Rc::clone(&calls)),
+                segmenter: MinSpeech(Vad::default()),
+            },
+            window,
+        );
         let utterance = Utterance::new(1);
         let mut commits = vec![];
         worker
@@ -1600,7 +1756,7 @@ mod long_capture {
                 &samples[..window],
                 Frames::ZERO,
                 &utterance,
-                TickKind::Commits,
+                TickKind::Window,
                 |c| commits.push(c),
             )
             .expect("tick");

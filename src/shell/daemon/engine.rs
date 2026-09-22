@@ -68,8 +68,8 @@ pub(super) struct Tail {
 }
 
 /// The inference thread: builds the pipeline if it was not handed one ready,
-/// then decodes what the event loop sends it. `window` is the most audio one
-/// step of a recording's transcription reads, as a preview tick does.
+/// then decodes what the event loop sends it. `window` is the worker's: the
+/// most audio one tick reads, live or from a recording.
 pub(super) fn engine_thread<R: Recognizer, S: Segmenter>(
     pipeline: PipelineSource<R, S>,
     window: usize,
@@ -78,8 +78,8 @@ pub(super) fn engine_thread<R: Recognizer, S: Segmenter>(
     result_tx: &Sender<ResultEvent>,
 ) {
     let mut worker = match pipeline {
-        PipelineSource::Ready(pipeline) => Worker::new(pipeline),
-        PipelineSource::Load(loader) => match load(loader, work_rx, result_tx) {
+        PipelineSource::Ready(pipeline) => Worker::new(pipeline, window),
+        PipelineSource::Load(loader) => match load(loader, window, work_rx, result_tx) {
             Some(worker) => worker,
             None => return,
         },
@@ -123,11 +123,10 @@ pub(super) fn engine_thread<R: Recognizer, S: Segmenter>(
                 from,
             } => {
                 let started = Instant::now();
-                let result =
-                    decode_recording(&mut worker, &path, &utterance, from, window, rate, |c| {
-                        let _ = result_tx.send(ResultEvent::Commit(c));
-                    })
-                    .with_context(|| format!("transcribe {}", path.display()));
+                let result = decode_recording(&mut worker, &path, &utterance, from, rate, |c| {
+                    let _ = result_tx.send(ResultEvent::Commit(c));
+                })
+                .with_context(|| format!("transcribe {}", path.display()));
                 result_tx.send(ResultEvent::Finished {
                     id: utterance.id,
                     result,
@@ -148,6 +147,7 @@ pub(super) fn engine_thread<R: Recognizer, S: Segmenter>(
 /// [`Work::Load`] after a failure. `None` when told to stop first.
 fn load<R: Recognizer, S: Segmenter>(
     mut loader: Loader<R, S>,
+    window: usize,
     work_rx: &Receiver<Work>,
     result_tx: &Sender<ResultEvent>,
 ) -> Option<Worker<R, S>> {
@@ -161,7 +161,10 @@ fn load<R: Recognizer, S: Segmenter>(
                 let ready = ResultEvent::Ready {
                     elapsed: started.elapsed(),
                 };
-                return result_tx.send(ready).is_ok().then(|| Worker::new(pipeline));
+                return result_tx
+                    .send(ready)
+                    .is_ok()
+                    .then(|| Worker::new(pipeline, window));
             }
             Err(e) => result_tx
                 .send(ResultEvent::Unavailable(format!("{e:#}")))
@@ -183,15 +186,14 @@ fn load<R: Recognizer, S: Segmenter>(
 
 /// Transcribes a recording made before the model was ready, the way a live
 /// capture of it would have been: settled chunks committed a window at a
-/// time, then the tail decoded as the release decodes it. Only a window and
-/// the open tail are ever in memory. Everything before `from` is committed
+/// time, then the tail decoded as the release decodes it. Only the worker's
+/// window and the open tail are ever in memory. Everything before `from` is committed
 /// already, and not read.
 fn decode_recording<R: Recognizer, S: Segmenter>(
     worker: &mut Worker<R, S>,
     path: &Path,
     utterance: &Arc<Utterance>,
     from: Frames,
-    window: usize,
     rate: u32,
     mut commit: impl FnMut(Commit),
 ) -> Result<(String, usize)> {
@@ -205,6 +207,7 @@ fn decode_recording<R: Recognizer, S: Segmenter>(
         .into());
     }
     worker.resume(utterance, from);
+    let window = worker.window();
     let mut held = Vec::with_capacity(window);
     let mut start = from;
     loop {
@@ -216,7 +219,7 @@ fn decode_recording<R: Recognizer, S: Segmenter>(
         // with nothing settled in it -- speech the detector never breaks, or
         // pauses too short to settle it -- is committed through its last
         // pause, or whole, which keeps this to a window.
-        let Some(tail) = worker.tick(&held, start, utterance, TickKind::Commits, &mut commit)?
+        let Some(tail) = worker.tick(&held, start, utterance, TickKind::Window, &mut commit)?
         else {
             break;
         };
@@ -270,17 +273,19 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("capture.wav");
         crate::shell::recorder::dump_capture(&path, &[0.5; 10_000], 16_000).unwrap();
-        let mut worker = Worker::new(Pipeline {
-            recognizer: Count,
-            segmenter: Blocks(1_000),
-        });
+        let mut worker = Worker::new(
+            Pipeline {
+                recognizer: Count,
+                segmenter: Blocks(1_000),
+            },
+            3_000,
+        );
         let mut commits = Vec::new();
         decode_recording(
             &mut worker,
             &path,
             &Utterance::new(1),
             Frames::ZERO,
-            3_000,
             16_000,
             |c| commits.push((c.text.parse::<usize>().unwrap(), c.through)),
         )
@@ -301,17 +306,19 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("capture.wav");
         crate::shell::recorder::dump_capture(&path, &[0.5; 10_000], 16_000).unwrap();
-        let mut worker = Worker::new(Pipeline {
-            recognizer: Count,
-            segmenter: Blocks(1_000),
-        });
+        let mut worker = Worker::new(
+            Pipeline {
+                recognizer: Count,
+                segmenter: Blocks(1_000),
+            },
+            3_000,
+        );
         let mut commits = Vec::new();
         decode_recording(
             &mut worker,
             &path,
             &Utterance::new(1),
             Frames(4_000),
-            3_000,
             16_000,
             |c| commits.push((c.text.parse::<usize>().unwrap(), c.through)),
         )
@@ -325,7 +332,6 @@ mod tests {
             &path,
             &Utterance::new(2),
             Frames(20_000),
-            3_000,
             16_000,
             |_| panic!("nothing to commit"),
         );
@@ -340,17 +346,19 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("capture.wav");
         crate::shell::recorder::dump_capture(&path, &[0.5; 10_000], 16_000).unwrap();
-        let mut worker = Worker::new(Pipeline {
-            recognizer: Count,
-            segmenter: Blocks(usize::MAX),
-        });
+        let mut worker = Worker::new(
+            Pipeline {
+                recognizer: Count,
+                segmenter: Blocks(usize::MAX),
+            },
+            3_000,
+        );
         let mut commits = Vec::new();
         decode_recording(
             &mut worker,
             &path,
             &Utterance::new(1),
             Frames::ZERO,
-            3_000,
             16_000,
             |c| commits.push(c.text.parse::<usize>().unwrap()),
         )

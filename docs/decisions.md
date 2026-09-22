@@ -2372,7 +2372,7 @@ every tick read the same first window of it, nothing in it settled, and
 nothing committed. A tick that only commits decodes no preview, so no text
 came back, and the silence timeout ended the capture mid-sentence.
 
-- Chosen: a `TickKind::Commits` window that begins at the committed offset
+- Chosen: a `TickKind::Window` (then `Commits`) window that begins at the committed offset
   and settles nothing is committed whole, as the transcription of a
   recording made before the model was ready already did (`decode_recording`
   now goes through the same tick). A release stops it between segments.
@@ -2603,7 +2603,7 @@ up to 30 s of audio.
   slice ended, and one it cut at its longest span with no gap. With the
   pause come the windows that decode everything before it, merged by the
   same policy and padded by at most `vad.pad_seconds`, never into the speech
-  that follows. A `TickKind::Commits` window that settles nothing is
+  that follows. A `TickKind::Window` window that settles nothing is
   committed through that pause; the rest stays for the next tick. Only a
   window with no pause is still committed through its end.
 - Chosen: a release during that commit keeps the segment whose decode it
@@ -2690,3 +2690,28 @@ while it starts.
   behind carries no marker either, since it waits for a UI before `--cmd`,
   and would then be refused as unrelated rather than stopped. Not probed
   with a real `:restart`.
+
+## A window tick holds a full window, checked in the core (2026-09-23)
+
+The review of 2026-09-23 found that `examples/corpus.rs` without
+`--previews` ticked every tail with the kind the daemon uses only for a
+tail longer than `preview.max_seconds`. On a short tail that settled
+nothing, the replay committed the tail through its last pause, which the
+daemon never does, so its numbers were not the daemon's. The worker itself
+did not check that such a tick held a full window; only the daemon's loop
+made sure.
+
+- Chosen: the worker knows its window (`Worker::new(pipeline, window)`,
+  `config.preview.window(rate)`), and `Worker::tick` refuses a
+  `TickKind::Window` tick that does not hold exactly that many samples,
+  before it decodes anything. `TickKind::for_tail` is the one rule for the
+  kind, which the daemon's loop and the replay both call.
+- Chosen: a third kind, `TickKind::Settled`: a preview tick without the
+  cosmetic decode. The replay uses it without `--previews`; it commits what
+  a preview tick commits (`a_settled_tick_commits_what_a_preview_tick_commits`).
+- Rejected: letting the worker derive the kind from the audio it is given.
+  The loop truncates a snapshot to the window before it crosses the thread,
+  so a truncated long tail and a tail of exactly a window look the same.
+- Tests: `a_window_tick_that_is_not_the_workers_window_is_refused`,
+  `only_a_tail_longer_than_a_window_is_read_a_window_at_a_time`,
+  `the_replay_ticks_as_the_daemon_does`.

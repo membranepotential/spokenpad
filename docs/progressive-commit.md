@@ -82,7 +82,7 @@ While the uncommitted tail exceeds `preview.max_seconds` (30 s) the tick still r
 and still commits every settled chunk; only the cosmetic decode of the open
 tail is skipped, so the tail settles and previews resume by themselves. The
 winbar says which. Such a tick reads the first `preview.max_seconds` of the
-tail only (`TickKind::Commits`). When no chunk settles inside that window —
+tail only (`TickKind::Window`; the worker refuses one that holds less). When no chunk settles inside that window —
 slow dictation whose pauses are too short to settle a chunk and whose speech
 is too little to fill one — the window is committed through its last pause:
 the end of the last speech the detector heard with silence after it, either

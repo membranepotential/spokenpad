@@ -184,13 +184,16 @@ lands on different chunk boundaries; ticking on audio time makes a replay
 reproducible and models an idle machine, where a decode runs ~14x faster than
 real time.
 
-The preview decode is skipped unless `--previews` is given: the replay ticks
-with `TickKind::Commits`, which is the daemon's own way of keeping the commits
-coming while the cosmetic decode is off. `Worker::tick` returns at the first
-unsettled chunk whichever kind it is given, so the kind cannot change one
-committed word — an assertion `examples/corpus.rs` carries as a test — while
-the replay does about a tenth of the decodes. With `--previews` the wall time
-is the daemon's real workload; without it, only the decodes that produce text.
+Each tick is of the kind the daemon would issue (`TickKind::for_tail`): a
+tail longer than `preview.max_seconds` is read a window at a time
+(`TickKind::Window`), and a window in which nothing settles is committed
+through its last pause; a shorter tail is previewed. The preview decode is
+skipped unless `--previews` is given: the replay then ticks a shorter tail
+with `TickKind::Settled`, which commits exactly what a preview tick commits
+and decodes nothing else (`a_settled_tick_commits_what_a_preview_tick_commits`
+in `core/decode.rs`), so the replay does about a tenth of the decodes. With
+`--previews` the wall time is the daemon's real workload; without it, only
+the decodes that produce text.
 
 ### Where the corpus comes from
 
