@@ -7,27 +7,28 @@ Hold a key (or latch with shift), speak, and text appears in an nvim that
 never takes focus. Fully local, CPU-only. Next milestone: public release.
 
 ## Now (2026-09-22: polish for the public release)
-- p3-focus — pane never takes focus on sway/Xwayland, openbox, kwin
-  (headless, own sessions); gates pane as default — agent running.
+- pane-wm — _NET_WM_STATE_ABOVE, sway runtime no_focus rule over IPC
+  (else refuse -> attach), kwin-x11 headless test, click-may-focus rule
+  wording — agent running.
 - packaging — socket activation, accept before model load, record while
   models download, config reload per window, PKGBUILD + CI — agent running.
 
 ## Next
 1. User: P4 live check of pane mode on i3 (typing elsewhere, click + type
    `Grüße @ € { }`, tokyonight, close window and dictate again).
-2. After p3-focus passes: default mode = pane. User decides: push (62 commits unpushed); make the repo public.
+2. User decides: push; make the repo public.
 3. Lost chunk: the end-of-slice close is both the one lost chunk and the
    whole 0.35-point gain. Open: a guard that keeps the gain (see
    experiments/2026-09-22-empty-chunk-flips.md).
-3b. After packaging + p3-focus merge: pane size as columns x lines (like
+3b. After packaging merges (pane-wm agent): pane size as columns x lines (like
    Alacritty window.dimensions, clamped to the screen) and floating/tiled
-   option; tiled must never take focus on any WM (test per WM).
-4. Small: trailing-pad overlap cost unmeasured; beam + vocabulary untested.
-5. Before public: fresh-user walkthrough, audit + security review, README
+   option (tiled never takes focus, per WM); then default mode = pane.
+4. Before public: fresh-user walkthrough, audit + security review, README
    screenshot. History scan done: clean (user checked the old Handy file).
 
 ## Done
-- 09-22: pane font in points x Xft.dpi = Alacritty cells (19x41 here),
+- 09-22: pane focus proven on i3, Openbox, KWin Wayland; sway steals it
+  (pinned by a test). Pane font in points x Xft.dpi = Alacritty cells (19x41 here),
   deployed 11:54, user font set to SauceCodePro 12; dev subset `--subset dev` (28 captures, ~2 min run, holds every
   failure main shows; beam loss caught); `spoken` flag: 15 mixed captures,
   their references cost ~1 WER point; flip count done.
