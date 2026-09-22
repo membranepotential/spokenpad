@@ -8,7 +8,7 @@
 use crate::{
     config::{Audio, Recording},
     core::{frames::Frames, session::RecordingStatus},
-    shell::recorder::CaptureRecorder,
+    shell::recorder::{CaptureRecorder, Unfinished},
 };
 use anyhow::{Context, Result, anyhow, bail};
 use portaudio as pa;
@@ -674,6 +674,16 @@ impl<B: InputBackend> AudioCapture<B> {
 
     pub fn release_recording(&self, path: &std::path::Path) {
         self.core.recorder.release(path);
+    }
+
+    /// See [`CaptureRecorder::take_unfinished`].
+    pub fn take_unfinished(&self) -> Vec<Unfinished> {
+        self.core.recorder.take_unfinished()
+    }
+
+    /// See [`CaptureRecorder::save_unfinished`].
+    pub fn save_unfinished(&self, unfinished: &[Unfinished]) -> Result<()> {
+        self.core.recorder.save_unfinished(unfinished)
     }
 
     /// Repairs the stream if it died and reports every device condition

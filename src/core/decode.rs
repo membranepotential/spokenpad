@@ -252,6 +252,14 @@ impl<R: Recognizer, S: Segmenter> Worker<R, S> {
             progress: Progress::default(),
         }
     }
+    /// Takes up `utterance` with its text committed through `through`
+    /// already, by an earlier daemon: nothing before it is decoded again.
+    pub fn resume(&mut self, utterance: &Utterance, through: Frames) {
+        self.progress = Progress {
+            id: Some(utterance.id),
+            through,
+        };
+    }
     fn begin(&mut self, utterance: &Utterance) {
         if self.progress.id != Some(utterance.id) {
             self.progress = Progress {

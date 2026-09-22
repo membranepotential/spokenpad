@@ -452,6 +452,12 @@ impl Session {
     pub fn is_current(&self, id: UtteranceId) -> bool {
         self.current.as_ref().is_some_and(|u| u.id == id)
     }
+    /// An utterance id no capture of this session has or will have, for a
+    /// recording a previous daemon left untranscribed.
+    pub fn reserve_id(&mut self) -> UtteranceId {
+        self.next_id += 1;
+        UtteranceId(self.next_id)
+    }
     /// Records that text has landed. Cancelling stops *decoding*; it never
     /// unwrites text the recognizer already produced, so there is no reject
     /// path here — only the live capture's hints move.

@@ -27,7 +27,7 @@ use crate::{
         inference::{SpeechSegmenter, Transcriber, load_segmenter},
         models::{Repair, ensure_defaults, repair_defaults},
         nvim::{AppendFailure, CopyOutcome, IndicatorState, NvimSession},
-        recorder::CaptureReader,
+        recorder::{CaptureReader, Unfinished},
     },
 };
 use anyhow::{Context, Result, ensure};
@@ -86,9 +86,9 @@ pub enum PipelineSource<R, S> {
     Load(Loader<R, S>),
 }
 
-/// A capture made before the speech model was ready: its recovery WAV, the
-/// utterance it was, and how far into the WAV its transcription has
-/// committed text.
+/// A capture made before the speech model was ready, or left untranscribed
+/// by the last daemon: its recovery WAV, the utterance it is, and how far
+/// into the WAV its transcription has committed text.
 struct Waiting {
     path: PathBuf,
     id: UtteranceId,
@@ -201,10 +201,12 @@ enum Work {
         kind: TickKind,
     },
     Finish(Tail),
-    /// Transcribe a recording made before the model was ready.
+    /// Transcribe a recording made before the model was ready, or left by
+    /// the last daemon, from `from` on: its text before that is written.
     Recording {
         path: PathBuf,
         utterance: Arc<Utterance>,
+        from: Frames,
     },
     /// Try the loader again: the last attempt failed.
     Load,
@@ -730,8 +732,24 @@ where
         PipelineSource::Load(_) => Recognition::Preparing(Preparing::Loading),
     };
     // Captures made before the model was ready, not yet sent to it; and those
-    // sent to it and not transcribed yet.
-    let mut waiting: VecDeque<Waiting> = VecDeque::new();
+    // sent to it and not transcribed yet. The first are those the last daemon
+    // left, from where their text reached.
+    let mut waiting: VecDeque<Waiting> = capture
+        .take_unfinished()
+        .into_iter()
+        .map(|Unfinished { path, through }| {
+            log::info!(
+                "{} was left untranscribed by the last run; it is transcribed from {:.2}s once the speech model is ready",
+                path.display(),
+                through.seconds(rate)
+            );
+            Waiting {
+                path,
+                id: session.reserve_id(),
+                through,
+            }
+        })
+        .collect();
     let mut transcribing: Vec<Waiting> = Vec::new();
     // Whether the capture that is recording, or was last, decodes as it goes.
     // One made before the model was ready does not: it is on disk only.
@@ -1046,6 +1064,7 @@ where
                         Work::Recording {
                             path: recording.path.clone(),
                             utterance: Utterance::new(recording.id.0),
+                            from: recording.through,
                         },
                     )?;
                     transcribing.push(recording);
@@ -1118,23 +1137,44 @@ where
             | ResultEvent::ConfigInvalid(_) => {}
         }
     }
-    for Waiting { path, through, .. } in waiting.into_iter().chain(transcribing) {
-        if through == Frames::ZERO {
-            log::warn!(
-                "{} was recorded before the speech model was ready and is not transcribed; recover it with `spokenpad transcribe {}`",
-                path.display(),
-                path.display()
-            );
-        } else {
-            // What was committed is in the dictation file already; the
-            // rest is recovered from where it stopped, or it is written
-            // twice.
-            let seconds = through.seconds(rate);
-            log::warn!(
-                "{} was transcribed through {seconds:.2}s only; recover the rest with `spokenpad transcribe --from {seconds:.2} {}`",
-                path.display(),
-                path.display()
-            );
+    // The next start transcribes the rest; only if it cannot know about them
+    // does the user have to.
+    let unfinished: Vec<Unfinished> = waiting
+        .into_iter()
+        .chain(transcribing)
+        .map(|Waiting { path, through, .. }| Unfinished { path, through })
+        .collect();
+    match capture.save_unfinished(&unfinished) {
+        Ok(()) => {
+            for Unfinished { path, through } in &unfinished {
+                log::warn!(
+                    "{} is not transcribed past {:.2}s; the next start transcribes the rest",
+                    path.display(),
+                    through.seconds(rate)
+                );
+            }
+        }
+        Err(e) => {
+            log::error!("the next start cannot transcribe what this one did not: {e:#}");
+            for Unfinished { path, through } in &unfinished {
+                if *through == Frames::ZERO {
+                    log::warn!(
+                        "{} is not transcribed; recover it with `spokenpad transcribe {}`",
+                        path.display(),
+                        path.display()
+                    );
+                } else {
+                    // What was committed is in the dictation file already;
+                    // the rest is recovered from where it stopped, or it is
+                    // written twice.
+                    let seconds = through.seconds(rate);
+                    log::warn!(
+                        "{} was transcribed through {seconds:.2}s only; recover the rest with `spokenpad transcribe --from {seconds:.2} {}`",
+                        path.display(),
+                        path.display()
+                    );
+                }
+            }
         }
     }
     // Sent last: everything the editor still has to write is already queued
@@ -1222,12 +1262,17 @@ fn engine_thread<R: Recognizer, S: Segmenter>(
                     elapsed: started.elapsed(),
                 })
             }
-            Work::Recording { path, utterance } => {
+            Work::Recording {
+                path,
+                utterance,
+                from,
+            } => {
                 let started = Instant::now();
-                let result = decode_recording(&mut worker, &path, &utterance, window, rate, |c| {
-                    let _ = result_tx.send(ResultEvent::Commit(c));
-                })
-                .with_context(|| format!("transcribe {}", path.display()));
+                let result =
+                    decode_recording(&mut worker, &path, &utterance, from, window, rate, |c| {
+                        let _ = result_tx.send(ResultEvent::Commit(c));
+                    })
+                    .with_context(|| format!("transcribe {}", path.display()));
                 result_tx.send(ResultEvent::Finished {
                     id: utterance.id,
                     result,
@@ -1285,18 +1330,29 @@ fn load<R: Recognizer, S: Segmenter>(
 /// Transcribes a recording made before the model was ready, the way a live
 /// capture of it would have been: settled chunks committed a window at a
 /// time, then the tail decoded as the release decodes it. Only a window and
-/// the open tail are ever in memory.
+/// the open tail are ever in memory. Everything before `from` is committed
+/// already, and not read.
 fn decode_recording<R: Recognizer, S: Segmenter>(
     worker: &mut Worker<R, S>,
     path: &Path,
     utterance: &Arc<Utterance>,
+    from: Frames,
     window: usize,
     rate: u32,
     mut commit: impl FnMut(Commit),
 ) -> Result<(String, usize)> {
     let mut reader = CaptureReader::open(path, rate)?;
+    let skipped = reader.skip(from.get())?;
+    ensure!(
+        skipped == from.get(),
+        "{} ends at {:.2}s, before the {:.2}s its text already reaches",
+        path.display(),
+        Frames(skipped).seconds(rate),
+        from.seconds(rate)
+    );
+    worker.resume(utterance, from);
     let mut held = Vec::with_capacity(window);
-    let mut start = Frames::ZERO;
+    let mut start = from;
     loop {
         let wanted = window.saturating_sub(held.len());
         if reader.read(&mut held, wanted)? < wanted {
@@ -1553,11 +1609,55 @@ mod tests {
             segmenter: Some(Blocks(1_000)),
         });
         let mut commits = Vec::new();
-        decode_recording(&mut worker, &path, &Utterance::new(1), 3_000, 16_000, |c| {
-            commits.push(c.text.parse::<usize>().unwrap())
-        })
+        decode_recording(
+            &mut worker,
+            &path,
+            &Utterance::new(1),
+            Frames::ZERO,
+            3_000,
+            16_000,
+            |c| commits.push(c.text.parse::<usize>().unwrap()),
+        )
         .unwrap();
         assert_eq!(commits, vec![1_000; 10], "one commit per block, each once");
+    }
+
+    /// A recording whose text reaches partway already is transcribed from
+    /// there: the rest once, nothing before it again.
+    #[test]
+    fn a_recording_is_transcribed_from_where_its_text_reaches() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("capture.wav");
+        crate::shell::recorder::dump_capture(&path, &[0.5; 10_000], 16_000).unwrap();
+        let mut worker = Worker::new(Pipeline {
+            recognizer: Count,
+            segmenter: Some(Blocks(1_000)),
+        });
+        let mut commits = Vec::new();
+        decode_recording(
+            &mut worker,
+            &path,
+            &Utterance::new(1),
+            Frames(4_000),
+            3_000,
+            16_000,
+            |c| commits.push((c.text.parse::<usize>().unwrap(), c.through)),
+        )
+        .unwrap();
+        assert_eq!(commits.iter().map(|c| c.0).sum::<usize>(), 6_000);
+        assert_eq!(commits.first().map(|c| c.1), Some(Frames(5_000)));
+        assert_eq!(commits.last().map(|c| c.1), Some(Frames(10_000)));
+
+        let beyond = decode_recording(
+            &mut worker,
+            &path,
+            &Utterance::new(2),
+            Frames(20_000),
+            3_000,
+            16_000,
+            |_| panic!("nothing to commit"),
+        );
+        assert!(beyond.is_err(), "a recording shorter than its offset");
     }
 
     /// Every request is preceded by the clock at its own stamp, and a drain
@@ -1575,9 +1675,15 @@ mod tests {
             segmenter: None::<Blocks>,
         });
         let mut commits = Vec::new();
-        decode_recording(&mut worker, &path, &Utterance::new(1), 3_000, 16_000, |c| {
-            commits.push(c.text.parse::<usize>().unwrap())
-        })
+        decode_recording(
+            &mut worker,
+            &path,
+            &Utterance::new(1),
+            Frames::ZERO,
+            3_000,
+            16_000,
+            |c| commits.push(c.text.parse::<usize>().unwrap()),
+        )
         .unwrap();
         assert!(
             commits.iter().all(|&decoded| decoded <= 3_000),

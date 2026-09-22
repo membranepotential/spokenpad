@@ -6,7 +6,7 @@
 
 use crate::{
     config::{MAX_POSTROLL_MS, MAX_PREROLL_MS, Recording},
-    core::{session::RecordingStatus, state::MAX_CAPTURE},
+    core::{frames::Frames, session::RecordingStatus, state::MAX_CAPTURE},
 };
 use anyhow::{Context, Result, bail, ensure};
 use chrono::Local;
@@ -14,7 +14,7 @@ use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
 use std::{
     collections::HashSet,
     fs::{self, DirBuilder, File, OpenOptions},
-    io::{BufReader, BufWriter},
+    io::{BufReader, BufWriter, Write},
     os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     sync::{
@@ -30,6 +30,11 @@ const DIR_MODE: u32 = 0o700;
 const FILE_MODE: u32 = 0o600;
 const CAPTURE_PREFIX: &str = "capture-";
 const CAPTURE_SUFFIX: &str = ".wav";
+/// The recordings a stopping daemon had not finished transcribing, in the
+/// recording directory: one line each, the frames its text already reaches,
+/// a tab, and the file's name. Written at the stop, taken (read and removed)
+/// at the next start, which transcribes the rest.
+const WAITING_LIST: &str = "waiting.tsv";
 const MAX_SAME_SECOND: usize = 100;
 const FULL_SCALE: f32 = 32_767.0;
 const WRITER_JOIN: Duration = Duration::from_secs(3);
@@ -103,6 +108,14 @@ struct Lifecycle {
     last: Option<Arc<RecordingState>>,
 }
 
+/// A recording the daemon had not finished transcribing when it stopped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unfinished {
+    pub path: PathBuf,
+    /// How far into it the text already written reaches.
+    pub through: Frames,
+}
+
 /// One asynchronous WAV writer per capture.
 pub struct CaptureRecorder {
     config: Recording,
@@ -113,27 +126,77 @@ pub struct CaptureRecorder {
     /// made before the speech model was ready exists only here, so pruning
     /// passes over these as over the ones still being written.
     kept: Arc<Mutex<HashSet<PathBuf>>>,
+    /// What the last daemon left unfinished, until the event loop takes it.
+    unfinished: Mutex<Vec<Unfinished>>,
     writer_join: Duration,
 }
 
 impl CaptureRecorder {
+    /// Takes the recordings the last daemon left unfinished, and keeps them
+    /// from the pruning here and later, until each is released.
     pub fn new(config: Recording, sample_rate: u32) -> Self {
+        let unfinished = if config.enabled {
+            take_waiting_list(&config.dir)
+        } else {
+            Vec::new()
+        };
+        let kept = unfinished.iter().map(|u| u.path.clone()).collect();
         let recorder = Self {
             config,
             sample_rate,
             lifecycle: Mutex::new(Lifecycle::default()),
             open_paths: Arc::new(Mutex::new(HashSet::new())),
-            kept: Arc::new(Mutex::new(HashSet::new())),
+            kept: Arc::new(Mutex::new(kept)),
+            unfinished: Mutex::new(unfinished),
             writer_join: WRITER_JOIN,
         };
         if recorder.config.enabled {
             prune_recordings(
                 &recorder.config.dir,
                 recorder.config.max_total_bytes,
-                |_| false,
+                |path| lock(&recorder.kept).contains(path),
             );
         }
         recorder
+    }
+
+    /// The recordings the last daemon did not finish transcribing, once:
+    /// they are kept until released, and transcribing them is the caller's.
+    pub fn take_unfinished(&self) -> Vec<Unfinished> {
+        std::mem::take(&mut *lock(&self.unfinished))
+    }
+
+    /// Writes the recordings this daemon did not finish transcribing where
+    /// the next start takes them from. Nothing is written for none.
+    pub fn save_unfinished(&self, unfinished: &[Unfinished]) -> Result<()> {
+        if unfinished.is_empty() {
+            return Ok(());
+        }
+        let path = self.config.dir.join(WAITING_LIST);
+        let staging = self.config.dir.join(format!("{WAITING_LIST}.new"));
+        let mut text = String::new();
+        for Unfinished { path, through } in unfinished {
+            let name = path
+                .strip_prefix(&self.config.dir)
+                .ok()
+                .and_then(Path::to_str)
+                .filter(|name| is_capture_name(name))
+                .with_context(|| format!("{} is not a recording of ours", path.display()))?;
+            text.push_str(&format!("{}\t{name}\n", through.get()));
+        }
+        (|| -> std::io::Result<()> {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(FILE_MODE)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(&staging)?;
+            file.write_all(text.as_bytes())?;
+            file.sync_all()?;
+            fs::rename(&staging, &path)
+        })()
+        .with_context(|| format!("write {}", path.display()))
     }
 
     /// Keeps `path` from being pruned until [`release`](Self::release).
@@ -505,6 +568,17 @@ impl CaptureReader {
         }
         Ok(into.len() - before)
     }
+
+    /// Passes over up to `count` samples without keeping them, and says how
+    /// many it passed: fewer than `count` only at the end of the file.
+    pub fn skip(&mut self, count: usize) -> Result<usize> {
+        let mut skipped = 0;
+        for sample in self.samples.by_ref().take(count) {
+            sample.with_context(|| format!("{}: unreadable PCM samples", self.path.display()))?;
+            skipped += 1;
+        }
+        Ok(skipped)
+    }
 }
 
 fn from_pcm16_sample(value: i16) -> f32 {
@@ -645,6 +719,59 @@ fn secure_recordings(directory: &Path) {
             );
         }
     }
+}
+
+/// Whether `name` is one this recorder gives its WAVs: a plain file name.
+fn is_capture_name(name: &str) -> bool {
+    name.starts_with(CAPTURE_PREFIX) && name.ends_with(CAPTURE_SUFFIX) && !name.contains('/')
+}
+
+/// Reads and removes the waiting list in `directory`. Every recording on it
+/// is transcribed from where its text reached, so the list is used once: a
+/// list that cannot be removed is not used at all, since a later start would
+/// write the same text again. Lines that do not name a recording that is
+/// there are skipped.
+fn take_waiting_list(directory: &Path) -> Vec<Unfinished> {
+    let path = directory.join(WAITING_LIST);
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(error) => {
+            log::error!(
+                "could not read {}: {error}; the recordings on it are not transcribed",
+                path.display()
+            );
+            return Vec::new();
+        }
+    };
+    if let Err(error) = fs::remove_file(&path) {
+        log::error!(
+            "could not remove {}: {error}; the recordings on it are not transcribed, recover them with `spokenpad transcribe --from SECONDS`:\n{text}",
+            path.display()
+        );
+        return Vec::new();
+    }
+    text.lines()
+        .filter_map(|line| {
+            let parsed = line.split_once('\t').and_then(|(through, name)| {
+                let through = Frames(through.parse().ok()?);
+                let recording = directory.join(name);
+                let present = fs::symlink_metadata(&recording)
+                    .is_ok_and(|metadata| metadata.file_type().is_file());
+                (is_capture_name(name) && present).then_some(Unfinished {
+                    path: recording,
+                    through,
+                })
+            });
+            if parsed.is_none() {
+                log::error!(
+                    "{}: skipped {line:?}, which names no recording here",
+                    path.display()
+                );
+            }
+            parsed
+        })
+        .collect()
 }
 
 fn narrow_directory(directory: &Path) {
@@ -834,6 +961,96 @@ mod tests {
         assert_eq!(sliced, whole);
         let error = CaptureReader::open(&path, 8_000).err().unwrap();
         assert!(error.to_string().contains("16000Hz"), "{error}");
+        let mut reader = CaptureReader::open(&path, 16_000).unwrap();
+        assert_eq!(reader.skip(7).unwrap(), 7);
+        let mut rest = Vec::new();
+        assert_eq!(reader.read(&mut rest, 4).unwrap(), 3);
+        assert_eq!(rest, whole[7..]);
+        assert_eq!(reader.skip(4).unwrap(), 0, "the end");
+    }
+
+    /// What a stopping daemon had not transcribed is handed to the next
+    /// start, once, with how far its text reached, and pruning passes over it
+    /// until it is released however far over budget the directory is.
+    #[test]
+    fn unfinished_recordings_reach_the_next_start_once_and_are_kept() {
+        let temporary = tempdir().unwrap();
+        let directory = temporary.path().join("audio");
+        let recording = Recording {
+            enabled: true,
+            dir: directory.clone(),
+            max_total_bytes: 1,
+        };
+        let first = CaptureRecorder::new(recording.clone(), 16_000);
+        let record = |recorder: &CaptureRecorder| {
+            recorder.start();
+            recorder.write(&[0.5; 64]);
+            recorder.stop();
+            let RecordingStatus::Recorded(path) = recorder.status() else {
+                panic!("not recorded")
+            };
+            recorder.keep(&path);
+            path
+        };
+        let (older, newer) = (record(&first), record(&first));
+        let unfinished = [
+            Unfinished {
+                path: older.clone(),
+                through: Frames::ZERO,
+            },
+            Unfinished {
+                path: newer.clone(),
+                through: Frames(32),
+            },
+        ];
+        first.save_unfinished(&unfinished).unwrap();
+        drop(first);
+        let list = directory.join(WAITING_LIST);
+        let mode = fs::metadata(&list).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, FILE_MODE, "the list names the user's recordings");
+
+        let second = CaptureRecorder::new(recording.clone(), 16_000);
+        assert!(older.exists() && newer.exists(), "pruned at the start");
+        assert_eq!(second.take_unfinished(), unfinished);
+        assert!(second.take_unfinished().is_empty(), "taken once");
+        assert!(!list.exists(), "a third start gets nothing");
+        second.start();
+        second.write(&[0.5; 64]);
+        second.stop();
+        assert!(older.exists(), "pruned while it waits");
+        second.release(&older);
+        second.start();
+        second.stop();
+        assert!(!older.exists(), "released, it is pruned like any other");
+        drop(second);
+        assert!(
+            CaptureRecorder::new(recording, 16_000)
+                .take_unfinished()
+                .is_empty()
+        );
+    }
+
+    /// A list line that names no recording of ours is skipped: the list is
+    /// read from disk, and nothing outside the directory is ever opened.
+    #[test]
+    fn a_waiting_list_naming_anything_else_is_skipped() {
+        let temporary = tempdir().unwrap();
+        let directory = temporary.path().join("audio");
+        fs::create_dir(&directory).unwrap();
+        let present = directory.join("capture-2026-09-22-120000.wav");
+        dump_capture(&present, &[0.5; 16], 16_000).unwrap();
+        fs::write(
+            directory.join(WAITING_LIST),
+            "16\tcapture-2026-09-22-120000.wav\n0\tcapture-gone.wav\n0\t../capture-x.wav\nnonsense\n5\tnotes.txt\n",
+        )
+        .unwrap();
+        assert_eq!(
+            take_waiting_list(&directory),
+            [Unfinished {
+                path: present,
+                through: Frames(16),
+            }]
+        );
     }
 
     #[test]

@@ -353,7 +353,21 @@ impl Default for Settings {
 
 impl Harness {
     fn start(settings: Settings) -> Self {
-        let directory = tempfile::tempdir().expect("tempdir");
+        Self::start_in(tempfile::tempdir().expect("tempdir"), settings)
+    }
+
+    /// Stops this daemon and starts another on the same directory: the same
+    /// recordings, dictation files and editor socket, as a restart of the
+    /// service would.
+    fn restart(mut self, settings: Settings) -> Self {
+        self.stop();
+        let directory =
+            std::mem::replace(&mut self.directory, tempfile::tempdir().expect("tempdir"));
+        drop(self);
+        Self::start_in(directory, settings)
+    }
+
+    fn start_in(directory: TempDir, settings: Settings) -> Self {
         let root = directory.path();
         let mut config = Config::default();
         config.audio.preroll_ms = settings.preroll_ms;
@@ -1632,6 +1646,81 @@ fn a_capture_made_before_the_model_is_ready_is_transcribed_once_it_is() {
         counted(&h.text()) == loud + RATE as usize
     });
     h.finish();
+}
+
+/// Recordings still waiting when the daemon stops are transcribed at the
+/// next start, without a press: one it had partly transcribed from where its
+/// text reached, so every sample of both is decoded exactly once across the
+/// two runs.
+#[test]
+fn recordings_left_at_a_stop_are_transcribed_at_the_next_start() {
+    let settings = |loading, delay| Settings {
+        mode: Mode::Attach,
+        loading,
+        delay,
+        vad: Some(brisk_vad()),
+        words: false,
+        max_seconds: 1.0,
+        ..Settings::default()
+    };
+    // Each decode takes longer than the shutdown waits for the engine, so the
+    // stop comes in the middle of the first recording.
+    let mut h = Harness::start(settings(true, Duration::from_secs(5)));
+    h.press(true);
+    h.say(&tone(1.5));
+    h.say(&vec![0.0; RATE as usize * 2]);
+    h.say(&tone(1.5));
+    h.press_only(true);
+    h.release_for_good();
+    h.press(false);
+    h.say(&tone(0.5));
+    h.release_for_good();
+    let loud: usize = fs::read_dir(&h.recordings)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|e| e == "wav"))
+        .map(|path| loud_samples(&read_capture(&path).unwrap().0))
+        .sum();
+    assert_eq!(
+        loud,
+        7 * RATE as usize / 2,
+        "both recordings hold all speech"
+    );
+
+    h.load(Ok(()));
+    wait_until("the first window's text is written", || dictated(&h) > 0);
+    let before = dictated(&h);
+    h.stop();
+    let list = h.recordings.join("waiting.tsv");
+    let saved = fs::read_to_string(&list).expect("the stop saved what waits");
+    let through: Vec<usize> = saved
+        .lines()
+        .map(|line| line.split('\t').next().unwrap().parse().unwrap())
+        .collect();
+    assert!(
+        matches!(through[..], [partly, 0] if partly > 0),
+        "the first partly transcribed, the second not at all: {saved}"
+    );
+    assert_eq!(dictated(&h), before, "{saved}");
+
+    let h = h.restart(settings(false, Duration::ZERO));
+    wait_until("the rest of both is transcribed", || dictated(&h) == loud);
+    assert!(!list.exists(), "the list is taken, and used once");
+    thread::sleep(Duration::from_millis(300));
+    assert_eq!(dictated(&h), loud, "nothing is written twice");
+    h.finish();
+}
+
+/// What every dictation file of `h` counts, summed.
+fn dictated(h: &Harness) -> usize {
+    fs::read_dir(&h.dictation)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| counted(&fs::read_to_string(entry.path()).unwrap_or_default()))
+                .sum()
+        })
+        .unwrap_or(0)
 }
 
 /// A recording that is gone by the time the model is ready is not counted as

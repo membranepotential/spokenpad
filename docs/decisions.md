@@ -1506,3 +1506,37 @@ into the same limit.
   which the keys stop working.
 - A socket that is not the one the key bindings use still exits `1`, and is
   meant to hit the limit: it is a broken unit, not something a user did.
+
+## Recordings left at a stop are transcribed at the next start (2026-09-22)
+
+A daemon that stopped with recordings still waiting to be transcribed named
+them in the log for `spokenpad transcribe --from`. But the next start pruned
+the recording directory with nothing kept, so the file the log pointed to
+could be gone by the time the user read it.
+
+- **Now the stop writes the list, and the next start transcribes it.** The
+  recordings still waiting or being transcribed go to `waiting.tsv` in the
+  recording directory, one line each: the frames the text already written
+  reaches, and the file name. The next `CaptureRecorder::new` takes the list
+  (reads, then removes it) and keeps those recordings from pruning until
+  each is transcribed, and the event loop queues them as if they had just
+  been released. Once the model is ready each is transcribed from where its
+  text reached (`Worker::resume`), without a press; the window counts them
+  like any recording made before the model was ready.
+- **Exactly once.** The offset is the last commit the stopping daemon
+  handed to its editor, so the text before it is not written again. The list
+  is used once: removed by the start that takes it, and not used at all when
+  it cannot be removed. A daemon that crashes after taking it does not
+  transcribe those recordings a second time, and no longer protects them
+  from pruning either.
+- **The log still names the recordings** at the stop, each with how far it
+  got and that the next start does the rest. If the list cannot be written,
+  the stop falls back to the old lines for `spokenpad transcribe --from`.
+- A line that does not name a recording in the directory (a plain file name
+  `capture-*.wav` that is there) is skipped and logged: the list is read
+  from disk, and nothing outside the recording directory is opened.
+- Rejected: never pruning WAVs newer than the last stop. It keeps the file,
+  but leaves the transcription to the user and the offset to a log line.
+- Rejected: writing the list at every commit, so that a crash keeps it too.
+  That is a file write on the event loop per commit, for a case the
+  recovery WAVs already cover by hand.
