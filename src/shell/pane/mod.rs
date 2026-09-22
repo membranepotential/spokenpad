@@ -2,8 +2,10 @@
 //! Neovim behind it.
 //!
 //! The window never takes keyboard focus when it appears ([`x11`] explains the
-//! properties that make that true), floats on tiling window managers, and
-//! needs no window-manager rule. The user can click into it and type.
+//! properties that make that true), floats on tiling window managers or tiles
+//! there (`nvim.pane_layout`), and needs no rule in the user's configuration;
+//! on sway the daemon adds one over IPC before it opens. The user can click
+//! into it and type.
 //!
 //! How the pieces fit:
 //!
