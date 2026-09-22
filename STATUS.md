@@ -7,17 +7,17 @@ Hold a key (or latch with shift), speak, and text appears in an nvim that
 never takes focus. Fully local, CPU-only. Next milestone: public release.
 
 ## Now
-- simplify — managed mode removed, autosave, close cancels, layout log:
-  done on branch worktree-agent-a6071f6a0e01869a4 — in review — merge,
-  deploy, migrate the user's config (i3.d/spokenpad.conf symlink held the
-  float rule that floated the tiled pane).
-- hover-focus (implementer, on that branch) — pane opens >= 20 px from the
-  pointer, hover may focus it (user 09-22) — running.
-- first CI run on push of 1b21933 — queued.
-- audit (8 lenses, security + bugs on Opus; report in scratchpad
-  reviews/2026-09-22-2100, not the repo), fresh-user walkthrough (headless,
-  private HOME, null mic), README screenshot — running. User 09-22: push
-  allowed, release waits for the user's go.
+- simplify branch (worktree-agent-a6071f6a0e01869a4): managed mode removed,
+  autosave, close cancels, layout log + 2 review-fix commits; 2nd review
+  found a regression (hit-enter prompt blocks the pane opening) — implementer
+  fixing — then merge, deploy, migrate the user's config.
+- Waiting to merge after it: hover (ad36661, 967aa75: pane opens >= 20 px
+  beside the pointer, hover may focus), screenshot (8bec3a5), walkthrough
+  doc (46569a9). CI green up to tests on 66076b9.
+- Audit done: REPORT.md in scratchpad reviews/2026-09-22-2100 (2 P1, 19 P2,
+  26 P3). User 09-22: fix everything incl. the big splits; remove other ASR
+  families, vad.enabled, preview.enabled (beam search + vocabulary stay);
+  durations in _seconds; never log transcript text. Plus walkthrough fixes.
 
 ## Next
 0. After the merges: delete examples/verify_native.rs and decode_probe.rs
