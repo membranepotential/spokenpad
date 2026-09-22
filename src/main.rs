@@ -6,7 +6,7 @@ use spokenpad::{
     shell::{
         control::Socket,
         inference::{SpeechSegmenter, Transcriber, model_config},
-        models::{FetchEvent, ensure_defaults, fetch_models},
+        models::{self, ensure_defaults, fetch_models},
         pane,
     },
 };
@@ -298,7 +298,7 @@ fn fetch(dir: Option<PathBuf>) -> Result<Exit> {
     let files: Vec<_> = spokenpad::core::models::DEFAULT_MODEL_FILES
         .iter()
         .collect();
-    fetch_models(&dest, &files, report_fetch_event_stderr)?;
+    fetch_models(&dest, &files, models::report_on_stderr)?;
     Ok(Exit::Success)
 }
 
@@ -444,9 +444,7 @@ fn write_transcript(text: &str, out: Option<&Path>) -> Result<()> {
 /// to report clearly with its own exit code, rather than adding a second
 /// error path for the same underlying problem.
 fn ensure_default_models(config: &Config) {
-    if let Err(e) = ensure_defaults(&config.asr, &config.vad, |done, total| {
-        log::debug!("downloaded {done} of {total} bytes");
-    }) {
+    if let Err(e) = ensure_defaults(&config.asr, &config.vad, models::terminal_progress()) {
         log::error!("could not download default models: {e:#}");
     }
 }
@@ -461,28 +459,6 @@ fn models_present(config: &Config) -> Result<()> {
         config.vad.model.display()
     );
     Ok(())
-}
-
-/// Progress for `spokenpad fetch-models`: one line per file, plus an
-/// in-place percentage while it downloads.
-fn report_fetch_event_stderr(event: FetchEvent<'_>) {
-    let mut err = std::io::stderr();
-    match event {
-        FetchEvent::Present(f) => eprintln!("  {}: present", f.relative_path),
-        FetchEvent::Downloading(f) => {
-            eprint!("  {}: downloading ({} bytes)", f.relative_path, f.size);
-            let _ = err.flush();
-        }
-        FetchEvent::Progress { file, downloaded } => {
-            eprint!(
-                "\r  {}: downloading {:3}%",
-                file.relative_path,
-                downloaded.saturating_mul(100) / file.size.max(1)
-            );
-            let _ = err.flush();
-        }
-        FetchEvent::Verified(f) => eprintln!("\r  {}: done              ", f.relative_path),
-    }
 }
 
 fn main() -> ExitCode {
