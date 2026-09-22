@@ -24,7 +24,7 @@ never takes focus. Fully local, CPU-only. Next milestone: public release.
    option; tiled must never take focus on any WM (test per WM).
 4. Small: trailing-pad overlap cost unmeasured; beam + vocabulary untested.
 5. Before public: fresh-user walkthrough, audit + security review, README
-   screenshot; history scan clean except a Handy transcripts.json (user checks).
+   screenshot. History scan done: clean (user checked the old Handy file).
 
 ## Done
 - 09-22: pane font in points x Xft.dpi = Alacritty cells (19x41 here),
