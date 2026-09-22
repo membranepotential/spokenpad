@@ -115,7 +115,15 @@ No terminal. The daemon creates an X11 window, starts that nvim as a child
 with its stdin and stdout as the channel, and attaches to it as a UI with
 `nvim_ui_attach(columns, rows, { ext_linegrid = true, rgb = true })`. Neovim
 then describes its display as redraw events instead of drawing to a terminal,
-and spokenpad turns them into pixels. The editor is otherwise the same one
+and spokenpad turns them into pixels. The attach is the only call the pane
+waits for before the window is mapped. Neovim sources your configuration
+after the attach, and a message there (an `echoerr`, a deprecation notice)
+raises a hit-enter prompt that holds every later call until you press Enter —
+in the window, which has to be showing for you to see it. So the pane's own
+setup in Neovim ([the quit notice](#what-happens-when)) is sent without
+waiting and runs once the prompt is answered; the daemon's calls over the
+`--listen` socket wait for it within `nvim.startup_timeout_s`, as for any
+editor it starts. The editor is otherwise the same one
 every mode gets — same argv, same init, same ownership marker, same
 `--listen` socket — so the daemon appends to it exactly as it does to an
 editor you opened with `spokenpad editor`. **Committed text does not travel over the drawing channel**:

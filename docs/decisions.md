@@ -1941,3 +1941,27 @@ Review of the save-on-every-change entry above found two faults.
   `BufLeave` write); `:q` with `InsertLeave` ignored too still writes and
   quits; a dedicated editor leaves `'autowriteall'` off. The debounce itself
   has no timing test: one would race the machine's load.
+
+## A startup prompt no longer keeps the pane from opening (2026-09-22)
+
+A second review of the quit notice above found a regression. The pane
+waited for the notice's registration (`nvim_get_chan_info`, then
+`nvim_exec_lua`) before the window was mapped. With `--embed`, Neovim sources
+the user's configuration after `nvim_ui_attach`, and a message there (an
+`echoerr`, a deprecation notice) raises a hit-enter prompt that holds every
+later call. Measured on 0.12.5: the attach was answered at once, the mode
+read `blocking`, and the next request stayed unanswered until `<CR>` was
+input, then was answered. So the window never appeared, nobody could answer
+the prompt, every open failed after `nvim.startup_timeout_s`, and every key
+press repeated it.
+
+- Chosen: the registration is sent and not waited for; its answer is
+  handled whenever it arrives, and a failure is logged. The script finds the
+  pane's channel itself (the one `stdio` RPC channel `--embed` made), so
+  nothing has to be asked first. The attach stays the only call the pane
+  waits for, as before the quit notice. A registration that never runs
+  leaves a `:q` read as a crash, the safe direction.
+- Test: `tests/pane_render.rs` opens a pane whose init runs `echoerr`: the
+  window is mapped while Neovim reports `blocking`, the notice is registered
+  once `<CR>` answers the prompt, and `:q` is then the user's close. With the
+  registration awaited, the pane does not open.

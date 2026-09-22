@@ -44,7 +44,7 @@ use spokenpad::{
         daemon::SHUTDOWN_GRACE,
         nvim::pane_launch,
         nvim::{IndicatorState, NvimSession, Want},
-        pane::{Options, Pane, Status, place::Target},
+        pane::{Ending, Options, Pane, Status, place::Target},
     },
 };
 use std::{
@@ -779,7 +779,90 @@ fn closing_mid_command_writes_no_trace_of_the_cancelling_escape() {
     }
 }
 
+/// The user's configuration prints an error at startup, which Neovim, having
+/// sourced it after the pane attached, holds every call behind: a hit-enter
+/// prompt. The pane still opens and maps its window, so the user sees the
+/// prompt and can answer it; the quit notice it asked for on opening is
+/// registered once they have, and `:q` is then the user's close.
+#[test]
+fn a_prompt_at_startup_does_not_keep_the_pane_from_opening() {
+    if !harness::tools_or_skip(&["Xvfb", "i3", "nvim", "fc-match"]) {
+        return;
+    }
+    let server = XServer::start();
+    let i3 = I3::start(&server);
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let init = directory.path().join("init.vim");
+    std::fs::write(&init, "echoerr 'spokenpad test: a startup error'\n").expect("write the init");
+    let config = Nvim {
+        init: Some(init),
+        ..dictation_config(directory.path())
+    };
+    let file = config.dictation_dir.join("dictation-2026-09-22-000000.md");
+    std::fs::write(&file, "").expect("create the dictation file");
+
+    let mut pane = pane_on(&server, &config, &file);
+    i3.wait_until_managed(pane.window().id());
+    // `nvim_get_mode` is one of the calls Neovim answers during the prompt.
+    let mode = call(&mut pane, "nvim_get_mode", Vec::new(), PATIENCE);
+    let blocking = mode.as_map().is_some_and(|fields| {
+        fields
+            .iter()
+            .any(|(key, value)| key.as_str() == Some("blocking") && value.as_bool() == Some(true))
+    });
+    assert!(
+        blocking,
+        "the init raised no prompt, so this proves nothing: {mode}"
+    );
+
+    call(&mut pane, "nvim_input", vec![Value::from("<CR>")], PATIENCE);
+    assert_eq!(
+        quit_notices(&mut pane),
+        1,
+        "the quit notice was not registered once the prompt was answered"
+    );
+    call(
+        &mut pane,
+        "nvim_input",
+        vec![Value::from(":q<CR>")],
+        PATIENCE,
+    );
+    let ending = wait_for(PATIENCE, "the pane to finish", || finished(&mut pane));
+    assert!(
+        matches!(ending, Ending::ByUser { .. }),
+        "`:q` after the prompt was not the user's close: {ending:?}"
+    );
+}
+
 // ------------------------------------------------------------------ helpers
+
+/// How many quit notices (the pane's `VimLeavePre`
+/// autocommand) the pane's Neovim has. Neovim runs calls in order, so this
+/// one sees the registration the pane sent on opening.
+fn quit_notices(pane: &mut Pane) -> u64 {
+    call(
+        pane,
+        "nvim_exec_lua",
+        vec![
+            Value::from(
+                "local ok, found = pcall(vim.api.nvim_get_autocmds, { group = 'SpokenpadPane' })\n\
+                 return ok and #found or 0",
+            ),
+            Value::Array(Vec::new()),
+        ],
+        PATIENCE,
+    )
+    .as_u64()
+    .expect("a count of autocommands")
+}
+
+/// The pane's ending, if the next step finished it.
+fn finished(pane: &mut Pane) -> Option<Ending> {
+    match pane.step(Duration::from_millis(50)) {
+        Ok(Status::Finished(ending)) => Some(ending),
+        _ => None,
+    }
+}
 
 /// The editor configuration these panes run with: a socket and a dictation
 /// directory under `root`, and the bundled dictation init read from the

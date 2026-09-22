@@ -133,14 +133,23 @@ pub enum Ending {
 }
 
 /// Registered in the embedded Neovim once it is attached: on a quit it was
-/// told to do, it says so on the pane's own channel, before any channel
-/// closes. `VimLeavePre` runs for `:q`, `:wq`, `:qa` and `:cq` with
-/// `v:dying` at 0; a deadly signal sets `v:dying`, and a kill or a crash runs
-/// nothing at all. So the notice is independent of how long the process then
-/// takes to exit — Neovim waits up to two seconds for its jobs, an LSP among
-/// them — and a crash can never produce it.
+/// told to do, it says so on the pane's own channel — its stdio, the one
+/// `--embed` made — before any channel closes. `VimLeavePre` runs for `:q`,
+/// `:wq`, `:qa`, `:q!` and `:cq` with `v:dying` at 0; a deadly signal sets
+/// `v:dying`, and a kill or a crash runs nothing at all. So the notice is
+/// independent of how long the process then takes to exit — Neovim waits up
+/// to two seconds for its jobs, an LSP among them — and a crash can never
+/// produce it.
 const ANNOUNCE_LEAVING: &str = r#"
-local channel = ...
+local channel
+for _, chan in ipairs(vim.api.nvim_list_chans()) do
+  if chan.stream == "stdio" and chan.mode == "rpc" then
+    channel = chan.id
+  end
+end
+if not channel then
+  return
+end
 vim.api.nvim_create_autocmd("VimLeavePre", {
   group = vim.api.nvim_create_augroup("SpokenpadPane", { clear = true }),
   callback = function()
@@ -292,31 +301,17 @@ impl Pane {
         let attach = pane.editor.attach(columns, rows)?;
         pane.await_response(attach, options.attach_timeout)
             .context("attach to the embedded nvim as a UI")?;
-        // Our own channel's id, as Neovim numbers it, for it to notify on.
-        let asked = pane
-            .editor
-            .request("nvim_get_chan_info", vec![Value::from(0)])?;
-        let info = pane
-            .await_response(asked, options.attach_timeout)
-            .context("ask the embedded nvim for the pane's channel")?;
-        let channel = info
-            .as_map()
-            .and_then(|fields| {
-                fields
-                    .iter()
-                    .find(|(key, _)| key.as_str() == Some("id"))
-                    .and_then(|(_, id)| id.as_i64())
-            })
-            .context("the embedded nvim did not say which channel the pane is")?;
-        let announce = pane.editor.request(
+        // Sent, not waited for: Neovim sources the user's configuration after
+        // the attach, and a startup message there raises a hit-enter prompt
+        // that holds every call until the user answers it — in the window
+        // that has to be mapped first. The answer arrives whenever Neovim
+        // gets to it; `handle` logs it if it failed. For the same reason the
+        // script finds the pane's channel itself rather than being told the
+        // id `nvim_get_chan_info` would have to answer first.
+        pane.editor.request(
             "nvim_exec_lua",
-            vec![
-                Value::from(ANNOUNCE_LEAVING),
-                Value::Array(vec![Value::from(channel)]),
-            ],
+            vec![Value::from(ANNOUNCE_LEAVING), Value::Array(Vec::new())],
         )?;
-        pane.await_response(announce, options.attach_timeout)
-            .context("have the embedded nvim announce a quit")?;
         pane.watcher = Some(watch(&pane.window, sender, Arc::clone(&pane.stopping))?);
         Ok(pane)
     }
