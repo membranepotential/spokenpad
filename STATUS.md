@@ -1,38 +1,36 @@
 # spokenpad — local push-to-talk dictation for Linux
 
-_reconciled: 2026-09-22 @ 1869902 (handoff, session paused by the user)_
+_reconciled: 2026-09-22 @ fd36708 (merged worktrees removed; beam-fix/ kept)_
 
 ## Goal
 Hold a key (or latch with shift), speak, and text appears in an nvim that
 never takes focus. Fully local, CPU-only. Next milestone: public release.
 
-## Now (handoff: every agent branch is merged; nothing is running)
-- own-window — P0-P2 merged and deployed; the user's config is on
-  `mode = "pane"` since 09-22 00:22 (backup: config.toml.bak-2026-09-22).
-- Dataset frozen in eval-samples/local/ (git-ignored, 144 MB: audio/, gladia/,
-  probes/, runs/, references.json, README.md); tracked eval-samples/README.md
-  links it. Full reproduction run from the copy not done (sha256 verified).
-- beam-fix merged (1443aac): public repro, two patch variants; builds in
-  ~/.cache/spokenpad-dev/beam-fix/.
+## Now (2026-09-22: polish for the public release)
+- pane-hidpi — pane font in points scaled by Xft.dpi, same cell size as
+  Alacritty; tests at 192 dpi + Alacritty comparison — agent running.
+- packaging — design done (socket activation, PKGBUILD like jumanji, no
+  install script); implementation starts after pane-hidpi merges.
 
 ## Next
-1. Clean up: remove the merged worktrees under .claude/worktrees/ and their
-   branches; ~/.cache/spokenpad-dev is ~4 GB (keep beam-fix/ if wanted).
-2. User: P4 live check of `nvim.mode = "pane"` on i3 (steps: set the mode,
+1. User: P4 live check of `nvim.mode = "pane"` on i3 (steps: set the mode,
    `spokenpad check`, restart; dictate while typing elsewhere; click, type
    `Grüße @ € { }`; colours/font with tokyonight; close window, dictate again).
-3. User decides: P3 other WMs (pacman: sway xorg-xwayland openbox bspwm
-   awesome xfwm4) or skip; push (56+ commits unpushed); make the repo public.
-4. Lost chunk isolated (1 of 333): the end-of-slice close + silence advance
-   split off a 1.6 s window with 0.6 s of speech that decodes to "" (that
-   capture still scores better: 4.8% vs 7.0%). Open: count empty/non-empty
-   flips over the corpus; see experiments/…-lead-padding-clamp-corpus.md.
-5. Small: pane font log prints the path twice, `FontFamily("…")` Debug text
-   in `spokenpad check`; trailing-pad overlap (4 seams / 6 words) cost
+2. P3 focus checks (sway/Xwayland, openbox, kwin; user installs sway
+   openbox) gate pane as default. User decides: push (62 commits unpushed); make the repo public.
+3. Lost chunk: the end-of-slice close is both the one lost chunk and the
+   whole 0.35-point gain (flip run: revert = old text on all 181). Open: a
+   guard that keeps the gain; see experiments/2026-09-22-empty-chunk-flips.md.
+4. Small: trailing-pad overlap (4 seams / 6 words) cost
    unmeasured; beam + a real vocabulary never measured.
+5. Before public: fresh-user walkthrough, audit + security review, README
+   screenshot; history scan clean except a Handy transcripts.json (user checks).
 
-## Done (2026-09-21, all on main, deployed as d5d7418 at 23:51)
-- Constant RAM while recording (1.7 vs 116 MiB per 30 min), lead padding
+## Done
+- 09-22: dev subset `--subset dev` (28 captures, ~2 min run, holds every
+  failure main shows; beam loss caught); `spoken` flag: 15 mixed captures,
+  their references cost ~1 WER point; flip count done.
+- 09-21 (deployed as d5d7418): constant RAM while recording (1.7 vs 116 MiB per 30 min), lead padding
   stops at committed speech, a tick sees at most preview.max_seconds.
 - Own window `nvim.mode = "pane"`: own X11 window + embedded nvim, no focus,
   X libs loaded at run time; two review rounds fixed; headless on i3 only.
@@ -45,14 +43,18 @@ never takes focus. Fully local, CPU-only. Next milestone: public release.
   English, beam + hotwords work) is no default; Qwen3-ASR too slow; GPU not
   worth it on the GTX 1650. Beam bug cause found (blank skips frames for
   free); one-line patch documented, not shipped.
-- Earlier on 09-21: greedy default, control socket CLI, model download,
-  portability (Rust only, static binary, asr families), README rewrite.
 
 ## Known issues / open questions
 - Dying input stream: seen once, root cause unknown; the watchdog recovers it.
 
 ## Decided
 - Hard constraints: docs/constraints.md. No input device is read. No paste.
+- 09-22 (user): Arch PKGBUILD, no install script; daemon starts by socket
+  activation only (spokenpad.socket shipped enabled); models stay out of the
+  package: `spokenpad fetch-models` is the one explicit setup step, no
+  automatic download; default mode becomes pane after P3 focus checks on
+  sway/Xwayland + another X11 WM; the dev subset prefers the least private
+  captures; dictation content never enters the public repo.
 - 09-21 (user): post-roll stays; no "no speech" notice; no LLM cleanup; no
   upstream sherpa PR for now; every experiment goes to docs/experiments/;
   recordings may go to Gladia only, transcripts stay in eval-samples/local/.
