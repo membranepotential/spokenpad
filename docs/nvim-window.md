@@ -428,8 +428,10 @@ write.
 
 If Neovim refuses to write a buffer — a file that turned read-only, a
 directory that went away, a full disk — the text comes back with the failure
-and spokenpad writes it to `<the file>.unsaved` next to it, with the same
-`0600` permissions the dictation files have. A buffer that never had a file
+and spokenpad writes it to `<the file>.unsaved` next to it, or, when that
+exists already, to the first free `<the file>.unsaved-1`, `-2` and on, so
+an earlier rescue is never overwritten. Each is created new, `0600` like the
+dictation files, and never through a symlink. A buffer that never had a file
 goes to `unsaved-<timestamp>.md` in the state directory. Either way the log
 says where, at error level. The only case that loses anything is an editor
 that stops answering entirely: then there is no way to ask it what is in the
