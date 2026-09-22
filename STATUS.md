@@ -7,22 +7,16 @@ Hold a key (or latch with shift), speak, and text appears in an nvim that
 never takes focus. Fully local, CPU-only. Next milestone: public release.
 
 ## Now
-- main dee23dc deployed 22:30 (managed mode removed, autosave, close
-  cancels, hover focus + 20 px gap, screenshot, examples cleanup, Gladia
-  script untracked); user config migrated (backup .bak-2026-09-22-managed).
-  WirePlumber restarted 22:30: it had dropped the sound card at 21:52 during
-  the walkthrough's PipeWire rig. User must reload i3 (float rule gone).
-- Audit fixes (REPORT.md in scratchpad reviews/2026-09-22-2100; user 09-22:
-  fix all incl. big splits; remove other ASR families, vad.enabled,
-  preview.enabled; durations in _seconds; never log transcript text; plus
-  walkthrough fixes, xclip dependency, CLI starts the socket) — two lanes
-  running: core/daemon/config (A-C done, D running); edges DONE (19
-  commits, 427cda6; CI on ci/lane2). User 09-23: licence option A (declare
-  eSpeak NG GPL-3.0+ from sherpa's prebuilt TTS; no rebuild).
-  After merge (me): wire shell/models terminal_progress into main.rs;
-  nvim/** + pane/** create_dir_all -> shell::dirs::create_private;
-  daemon run(): Inherited socket -> nvim::with_manager_session on reload;
-  stale: architecture.md silence_timeout_s, shell/models.rs:66 asr.family.
+- main a1d4b0e+STATUS deployed 22:30 (managed mode removed, autosave, close
+  cancels, hover focus + gap, screenshot); user config migrated. User must
+  reload i3 (float rule gone). WirePlumber restarted (walkthrough rig had
+  made it drop the card).
+- Audit fixes: lane 1 (17 commits, core/daemon/config) and lane 2 (19,
+  edges; rebased c8c8685, CI on ci/lane2) DONE — integration agent rebasing
+  lane 1 onto lane 2 + wiring (manager session, progress, create_private,
+  sync::lock, stale docs). Then: two reviews, CI on ci/integration, merge,
+  deploy, migrate the user's config (_seconds keys; drop removed keys).
+- User 09-23: licence A (declare eSpeak NG GPL-3.0+ from sherpa's TTS).
 
 ## Next
 1. User live check after i3 reload: pane_layout = "tiled"; hover focuses the
