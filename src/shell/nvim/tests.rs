@@ -1021,11 +1021,12 @@ fn chrome_globals_are_set_only_in_an_editor_spokenpad_opened() {
 Spokenpad.dedicated = false
 vim.o.laststatus = 2
 vim.o.showtabline = 2
+vim.o.autowriteall = false
 Spokenpad.setup(Spokenpad.buf, false)
 local adopted = { vim.o.laststatus, vim.o.showtabline,
-  vim.api.nvim_get_option_value("wrap", { win = 0 }) }
+  vim.api.nvim_get_option_value("wrap", { win = 0 }), vim.o.autowriteall }
 Spokenpad.setup(Spokenpad.buf, true)
-return { adopted, vim.o.laststatus, vim.o.showtabline }
+return { adopted, vim.o.laststatus, vim.o.showtabline, vim.o.autowriteall }
 "#,
     );
     let adopted = adopted.as_array().unwrap();
@@ -1037,8 +1038,126 @@ return { adopted, vim.o.laststatus, vim.o.showtabline }
         Some(true),
         "adopting skipped the window-local prose settings"
     );
+    assert_eq!(user[3].as_bool(), Some(false), "adopting set autowriteall");
     assert_eq!(adopted[1].as_i64(), Some(0), "dedicated kept a statusline");
     assert_eq!(adopted[2].as_i64(), Some(0), "dedicated kept a tabline");
+    assert_eq!(
+        adopted[3].as_bool(),
+        Some(true),
+        "a dedicated editor's :q would refuse an unsaved buffer"
+    );
+}
+
+/// Waits until `path` holds `expected`, and says what it held if it never
+/// does.
+#[track_caller]
+fn wait_for_file(path: &Path, expected: &str) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let held = fs::read_to_string(path).unwrap();
+        if held == expected {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{} holds {held:?}, not {expected:?}",
+            path.display()
+        );
+        std::thread::sleep(CONNECT_POLL);
+    }
+}
+
+/// The dictation file is a scratch pad: whatever the user types into it is
+/// on disk at once, in Insert mode keystroke by keystroke, with no `:w`. The
+/// write is spokenpad's own, so a format-on-save in the user's configuration
+/// never runs on a transcript, and no other buffer is ever written by it.
+#[test]
+fn typing_into_the_dictation_buffer_saves_it_at_once() {
+    if !nvim_or_skip() {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let mut config = headless(directory.path());
+    // A format-on-save, as a user's configuration may have one.
+    config.editor.extend([
+        "--cmd".to_owned(),
+        "autocmd BufWritePre * let g:formatted = get(g:, 'formatted', 0) + 1".to_owned(),
+    ]);
+    let (mut session, path, _editor) = dictating(&config);
+    session.append("dictated", false).unwrap();
+
+    // Still in Insert mode: every keystroke is written.
+    type_into(&session, "Go typed");
+    wait_for_file(&path, "dictated\n typed\n");
+    // A change in Normal mode.
+    type_into(&session, "<Esc>ggdd");
+    wait_for_file(&path, " typed\n");
+    let state = lua(
+        &mut session,
+        "return { vim.bo[Spokenpad.buf].modified, vim.g.formatted or 0 }",
+    );
+    let state = state.as_array().unwrap();
+    assert_eq!(
+        state[0].as_bool(),
+        Some(false),
+        "the buffer is still unsaved"
+    );
+    assert_eq!(
+        state[1].as_i64(),
+        Some(0),
+        "the user's format-on-save ran on the transcript"
+    );
+
+    // Another file open in the same editor is the user's to save.
+    let other = directory.path().join("other.txt");
+    fs::write(&other, "untouched\n").unwrap();
+    type_into(&session, &format!(":split {}<CR>ggdd", other.display()));
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(fs::read_to_string(&other).unwrap(), "untouched\n");
+    assert_eq!(fs::read_to_string(&path).unwrap(), " typed\n");
+}
+
+/// `:q` on a dictation buffer the user has just edited writes it and quits,
+/// also when the change has not been saved on its own yet -- a typist faster
+/// than the change events, simulated by ignoring them -- and with
+/// spokenpad's own write rather than one that runs the user's autocommands.
+#[test]
+fn quitting_an_edited_dictation_buffer_writes_it_and_quits() {
+    if !nvim_or_skip() {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let mut config = headless(directory.path());
+    let formatted = directory.path().join("formatted");
+    config.editor.extend([
+        "--cmd".to_owned(),
+        format!(
+            "autocmd BufWritePre * call writefile(['ran'], '{}')",
+            formatted.display()
+        ),
+    ]);
+    let (mut session, path, mut editor) = dictating(&config);
+    session.append("dictated", false).unwrap();
+    lua(
+        &mut session,
+        "vim.o.eventignore = 'TextChanged,TextChangedI,TextChangedP'",
+    );
+
+    type_into(&session, "A and edited<Esc>:q<CR>");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let status = loop {
+        if let Some(status) = editor.0.try_wait().unwrap() {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "`:q` did not quit the editor");
+        std::thread::sleep(CONNECT_POLL);
+    };
+    assert!(status.success(), "the editor quit with {status}");
+    assert_eq!(fs::read_to_string(&path).unwrap(), "dictated and edited\n");
+    assert!(
+        !formatted.exists(),
+        "the write on `:q` ran the user's format-on-save"
+    );
 }
 
 #[test]

@@ -218,7 +218,9 @@ dictation file as its own paragraph and saved after every utterance.
   its `+` register, ready to paste wherever you want. This needs a Neovim
   clipboard provider (`wl-copy`, `xclip` or `xsel`).
 - **Files:** one Markdown file per editor, in
-  `~/.local/state/spokenpad/dictation/`.
+  `~/.local/state/spokenpad/dictation/`. It is a scratch pad you never save:
+  every change you make in it is written at once, and `:q` always writes and
+  quits.
 
 ### While you dictate
 
@@ -266,6 +268,9 @@ caught up. The log always has the full sentence and paths.
   default models are ever downloaded; for a model you configured, fix the
   path and press again.
 
+- **What you type is saved as you type it.** Every change in the dictation
+  file is written at once, keystroke by keystroke in Insert mode, with no
+  `:w` and without your format-on-save; `:q` writes and quits.
 - **You can type into the window while you dictate.** In Insert mode your
   cursor stays where you are typing: dictated text lands at the end of the
   text, and what you type stays in one piece beside it. In Normal mode, a

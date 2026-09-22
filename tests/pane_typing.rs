@@ -21,6 +21,8 @@
 //! - **Stopping while a call is held.** Setting the session's `quitting`
 //!   flag ends the wait at once, the append is reported as not confirmed,
 //!   and it is never written twice.
+//! - **Typing is saved as it happens.** What the user typed is in the file
+//!   before anything closes the window, with no `:w`.
 //! - **Closing the window mid-command.** Everything typed by hand is written,
 //!   although the write, too, waits behind a pending command.
 //!
@@ -237,6 +239,18 @@ fn typing_into_the_pane_during_a_latched_dictation() {
     press(&mut server, u32::from(b'o'));
     assert!(type_text(&mut server, BY_HAND));
     press(&mut server, ESCAPE);
+    // On disk as it is typed, with no `:w`, before anything closes the window.
+    wait_for(
+        PATIENCE,
+        "what was typed to reach the file by itself",
+        || {
+            run(&mut pane, Duration::from_millis(50));
+            std::fs::read_to_string(&file)
+                .ok()
+                .filter(|text| text.contains(BY_HAND))
+                .map(drop)
+        },
+    );
     let register = find_key(&server, u32::from(b'"')).expect("the layout has `\"`");
     press_key(&mut server, register);
     run(&mut pane, Duration::from_millis(500));

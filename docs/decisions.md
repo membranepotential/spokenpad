@@ -1791,3 +1791,31 @@ Wayland without Xwayland still needs.
   too: continued after `SIGSTOP`, Neovim sometimes drops a request whose
   connection closed rather than running it. It now accepts either outcome,
   and still never a second copy.
+
+## The dictation file is saved on every change, and `:q` always writes (2026-09-22)
+
+The user: the dictation file is a scratch pad, `:q` should always write and
+quit, and every edit should be saved at once. `:q` on a buffer the user had
+typed into failed with E37; only the pane's own close wrote first.
+
+- Chosen: `spokenpad.lua`, which every editor loads over RPC in both modes,
+  writes the dictation buffer on `TextChanged`, `TextChangedI` and
+  `TextChangedP`. In Insert mode that is every keystroke. A file this small
+  writes in a millisecond or two, and saving on `InsertLeave` instead would
+  lose a paragraph typed into an editor that then died, which the pane's
+  close cannot rescue.
+- Chosen: the write is an append's write plus `lockmarks`: `silent lockmarks
+  noautocmd write`, only of the pinned buffer, only when it is modified (an
+  append has already written its own, so its later `TextChanged` writes
+  nothing). No autocommand of the user's runs, so a format-on-save cannot
+  reflow a transcript. A failed write stays silent and leaves the buffer
+  modified: a message could raise a prompt, which would hold every call the
+  daemon sends.
+- Chosen: `QuitPre` writes the dictation buffer the same way. `:help
+  'autowriteall'` (0.12.5) covers `:quit`, `:qall`, `:exit` and `:xit`, and
+  it is set too, in editors spokenpad opened, for any other file opened
+  there; but it writes with autocommands. A test that ignores the change
+  events and quits proves the difference: without `QuitPre`, `:q` still
+  wrote and quit, and the user's `BufWritePre` ran on the transcript.
+- Rejected: `'autowriteall'` in an editor spokenpad only adopted, where the
+  globals are the user's, as with the chrome.

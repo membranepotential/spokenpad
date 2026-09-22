@@ -370,9 +370,21 @@ fn the_pane_draws_what_neovim_draws() {
 
     // ------------------- closing the window must not lose what was typed
     // Dictated text is on disk already: the Lua side writes after every
-    // append. What is not on disk is what the user typed since, and in this
+    // append, and after every change the user makes. What can still be only
+    // in the buffer is a change whose own write did not happen, and in this
     // mode closing the window ends the editor — so the pane has to write
     // first. Attach mode never faces this: its editor outlives the daemon.
+    // Ignoring the change events stands for that write not happening.
+    call(
+        &mut pane,
+        "nvim_set_option_value",
+        vec![
+            Value::from("eventignore"),
+            Value::from("TextChanged,TextChangedI,TextChangedP"),
+            Value::Map(Vec::new()),
+        ],
+        PATIENCE,
+    );
     const BY_HAND: &str = "noch von Hand getippt";
     let insert = find_key(&server, u32::from(b'o')).expect("the layout has an `o`");
     press_key(&mut server, insert);
@@ -384,7 +396,7 @@ fn the_pane_draws_what_neovim_draws() {
         buffer_text(&mut pane).contains(BY_HAND).then_some(())
     });
 
-    // Not written yet: Neovim only writes when spokenpad appends.
+    // Not written yet: its change events were ignored.
     let on_disk = std::fs::read_to_string(&file).expect("read the dictation file");
     assert!(
         !on_disk.contains(BY_HAND),

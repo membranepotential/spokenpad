@@ -90,7 +90,8 @@ those belongs in `src/shell/`.
   `core/geometry.rs`), `xkb.rs` (libxcb and libxkbcommon opened with `dlopen`
   when a pane opens, so the binary starts without them in the other modes).
 - Editor UI: `src/lua/spokenpad.lua` (winbar, preview extmark, transactional
-  `append_once`) and `src/lua/dictation_init.lua` (bundled init).
+  `append_once`, the dictation buffer saved on every change and before `:q`)
+  and `src/lua/dictation_init.lua` (bundled init).
 - Tests: unit tests in-module; `src/shell/nvim/tests.rs` (real
   `nvim --headless`); `tests/cli.rs`; `tests/e2e.rs` drives
   `shell::daemon::serve` with a synthetic microphone, a scripted request

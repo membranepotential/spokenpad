@@ -551,6 +551,29 @@ local function apply_chrome()
   end
 end
 
+--- Write what the user changed in the dictation buffer, the way an append is
+--- written: `noautocmd`, so a format-on-save in the user's config cannot
+--- reflow a transcript, and `lockmarks`, so the write leaves the `'[` and `']`
+--- marks where the user's last change put them. Only the pinned buffer, and
+--- only when it has unsaved changes: an append has already written its own.
+--- A write that fails leaves the buffer modified and says nothing -- a
+--- message here could raise a prompt, which would hold every call the daemon
+--- sends -- and the next change, the next append or closing the pane tries
+--- again.
+local function save(buf)
+  if buf ~= M.buf
+    or not vim.api.nvim_buf_is_loaded(buf)
+    or not vim.bo[buf].modified
+    or vim.bo[buf].buftype ~= ""
+    or vim.api.nvim_buf_get_name(buf) == ""
+  then
+    return
+  end
+  pcall(vim.api.nvim_buf_call, buf, function()
+    vim.cmd("silent lockmarks noautocmd write")
+  end)
+end
+
 --- Bind to the dictation buffer. Idempotent: called on every (re)connection.
 ---
 --- `dedicated` says whether this editor was opened by spokenpad for dictation
@@ -588,6 +611,34 @@ function M.setup(buf, dedicated)
       render()
     end,
   })
+  -- The dictation file is a scratch pad the user never has to save: every
+  -- change is written at once, in Insert mode keystroke by keystroke, so an
+  -- editor that dies loses nothing typed into it. A write of a file this
+  -- small costs a millisecond or two.
+  vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI", "TextChangedP" }, {
+    group = group,
+    buffer = buf,
+    callback = function(args)
+      save(args.buf)
+    end,
+  })
+  -- TextChanged waits for typeahead, so `dd:q` typed in one go reaches the
+  -- `:quit` with the buffer still modified. QuitPre runs before `:quit`,
+  -- `:wq` and `:qall` look at what is unsaved, from whichever buffer they
+  -- are typed in.
+  vim.api.nvim_create_autocmd("QuitPre", {
+    group = group,
+    callback = function()
+      if M.buf then
+        save(M.buf)
+      end
+    end,
+  })
+  -- And `:q` writes whatever else the user opened in this editor, rather
+  -- than refusing with E37. Global, so only where the editor is spokenpad's.
+  if M.dedicated then
+    vim.o.autowriteall = true
+  end
   render()
   -- The preview belongs to the capture, not to the buffer it was last drawn
   -- in: a daemon that re-pins mid-recording pushes the same indicator state

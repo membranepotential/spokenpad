@@ -312,7 +312,9 @@ that is not a gap; for CJK input it is, and `attach` is the answer there.
 - **You close the window.** The editor inside it is asked to write every
   modified buffer and quit, its socket goes, and the next dictation opens a
   new window on a new file.
-- **You `:q` in it.** The same, from the other end.
+- **You `:q` in it.** The same, from the other end. `:q` always writes and
+  quits: the dictation file is saved on every change, and before `:quit`,
+  `:wq` or `:qall` looks at what is unsaved ([The file](#the-file)).
 - **The daemon restarts.** The window goes with it — it is a thread of that
   process and the editor is its child. An editor you opened in attach mode
   outlives the daemon and is reattached to; a pane cannot. Nothing is lost: dictated text is written to the file after every utterance,
@@ -327,10 +329,11 @@ that is not a gap; for CJK input it is, and `attach` is the answer there.
 ### What closing a pane guarantees
 
 Dictated text is already on disk before the window closes: the Lua side
-writes the file after every append. Only what you typed into the pane
-yourself is still just in the buffer, and pane mode is the one mode where
-closing the window ends the editor — an editor opened in attach mode outlives
-the daemon.
+writes the file after every append, and after every change you make in it
+([The file](#the-file)). What can still be only in the buffer is a change
+whose write failed, or another file you opened in the same editor, and pane
+mode is the one mode where closing the window ends the editor — an editor
+opened in attach mode outlives the daemon.
 
 So the pane writes every modified buffer first, and the whole teardown has a
 budget, because `shell::daemon::SHUTDOWN_GRACE` (3 s) is what the daemon
@@ -474,6 +477,29 @@ One markdown file per **editor** under `nvim.dictation_dir`, named by
 `nvim.file_template` (`dictation-%Y-%m-%d-%H%M%S.md`), written after **every**
 utterance with `noautocmd write` — or, with no editor open, by the daemon
 itself into the pending passage (see [attach mode](#dictating-with-no-editor-open)).
+
+The file is a scratch pad you never save by hand. **Every change you make in
+it is written at once**, in every mode: `spokenpad.lua` writes the dictation
+buffer on `TextChanged`, `TextChangedI` and `TextChangedP`, so in Insert mode
+that is every keystroke. On a file this small a write costs a millisecond or
+two, and saving only on leaving Insert mode would lose a paragraph typed
+into an editor that then died. The write is the same one an append makes,
+`silent lockmarks noautocmd write`: no autocommand of yours runs, so a
+format-on-save cannot reflow a transcript, and the `'[` and `']` marks stay
+where your change put them. It writes only the dictation buffer, only when
+it has unsaved changes (an append has written its own), and a write that
+fails says nothing — a message could raise a prompt, which would hold every
+call the daemon sends — and leaves the buffer modified for the next change,
+the next append or the pane's close to try again.
+
+**`:q` always writes and quits.** A `QuitPre` autocommand writes the
+dictation buffer the same way before `:quit`, `:wq` or `:qall` looks at what
+is unsaved, which covers a change typed so fast that its change event has
+not run yet. In an editor spokenpad opened — a pane, or `spokenpad editor` —
+`'autowriteall'` is set as well (it applies to `:quit`, `:qall`, `:exit` and
+`:xit`, `:help 'autowriteall'`), so another file you opened there is written
+on `:q` too, with your autocommands, as Neovim writes it. An editor
+spokenpad only adopted keeps its own `'autowriteall'`.
 
 A window is a passage. Closing it ends the passage, and the next dictation
 opens a new window on a new file rather than appending under everything said
