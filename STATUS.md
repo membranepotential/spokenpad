@@ -7,13 +7,15 @@ Hold a key (or latch with shift), speak, and text appears in an nvim that
 never takes focus. Fully local, CPU-only. Next milestone: public release.
 
 ## Now
-- simplify (worktree, implementer) — remove managed mode (+ terminal,
-  window_* keys), autosave so `:q` always writes, closing the window
-  mid-capture cancels it, log the pane layout — running — review, merge,
-  deploy, then migrate the user's config.
-- hover-focus (worktree, investigation) — why the pane does not take focus
-  on hover under i3 focus_follows_mouse yes (user's setting), and whether
-  hover focus can be allowed without focus on map — running — report.
+- simplify — managed mode removed, autosave, close cancels, layout log:
+  done on branch worktree-agent-a6071f6a0e01869a4 — in review — merge,
+  deploy, migrate the user's config (i3.d/spokenpad.conf symlink held the
+  float rule that floated the tiled pane).
+- hover-focus (implementer, on that branch) — pane opens >= 20 px from the
+  pointer, hover may focus it (user 09-22) — running.
+- first CI run on push of 1b21933 — queued.
+- audit + security review, fresh-user walkthrough, README screenshot —
+  starting (user 09-22: push allowed, release waits for the user's go).
 
 ## Next
 1. User live check: typing elsewhere ok, `Grüße @ € {}` ok; still to try:
