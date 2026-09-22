@@ -7,12 +7,13 @@ Hold a key (or latch with shift), speak, and text appears in an nvim that
 never takes focus. Fully local, CPU-only. Next milestone: public release.
 
 ## Now
-- Nothing running. main bea94c3 deployed 14:31 (socket-activated, ~/.local).
+- main bea94c3 deployed 14:31 (socket-activated, ~/.local).
+- pane-livecheck — user live check: pane "stuck" while typing in it during
+  a latch (append took 2085 ms), winbar gap, add ~4 px padding — running.
 
 ## Next
-1. User: live check on i3 — pane size (nvim.pane_dimensions, default 72x20),
-   on top, typing elsewhere keeps focus, click + type `Grüße @ € { }`,
-   config edit applies at the next window, pane_layout = "tiled".
+1. User live check: typing elsewhere ok, `Grüße @ € {}` ok; still to try:
+   pane_dimensions edit at the next window, pane_layout = "tiled".
 2. Before public: fresh-user walkthrough (clean account: README only),
    codebase audit + security review, README screenshot of the pane.
 3. User decides: push (then the first real CI run), make the repo public,
