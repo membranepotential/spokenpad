@@ -7,10 +7,9 @@ Hold a key (or latch with shift), speak, and text appears in an nvim that
 never takes focus. Fully local, CPU-only. Next milestone: public release.
 
 ## Now
-- main 62d38e9 deployed 15:37: pane keeps dictating while the user types a
-  half command (waits while nvim is blocking), winbar gap fixed, 4 px margin.
-- pane-livecheck — follow-ups: cap the patient wait, <C-v> + teardown <Esc>
-  stray char — running.
+- Nothing running. main a13f7bb deployed 16:21: pane keeps dictating while
+  the user types a half command (patient wait, capped at 120 s; unconfirmed
+  text also goes to the pending passage), winbar gap fixed, 4 px margin.
 
 ## Next
 1. User live check: typing elsewhere ok, `Grüße @ € {}` ok; still to try:
