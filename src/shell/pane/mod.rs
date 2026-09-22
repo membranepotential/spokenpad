@@ -51,7 +51,7 @@ use rmpv::Value;
 use std::{
     io::Write,
     os::unix::fs::OpenOptionsExt,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Command,
     sync::{
         Arc,
@@ -1331,28 +1331,47 @@ fn rescue(entry: &Value) {
 /// Write rescued text next to the file it came from, or into the state
 /// directory when the buffer had no file.
 fn keep_beside(name: &str, text: &str) -> Result<PathBuf> {
-    let path = match name.is_empty() {
-        false => PathBuf::from(format!("{name}.unsaved")),
+    let (stem, extension) = match name.is_empty() {
+        false => (PathBuf::from(format!("{name}.unsaved")), ""),
         true => {
             let directory = crate::config::state_dir();
             std::fs::create_dir_all(&directory)?;
-            directory.join(format!(
-                "unsaved-{}.md",
-                chrono::Local::now().format("%Y-%m-%d-%H%M%S")
-            ))
+            let stamp = chrono::Local::now().format("%Y-%m-%d-%H%M%S");
+            (directory.join(format!("unsaved-{stamp}")), ".md")
         }
     };
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&path)
-        .with_context(|| format!("create {}", path.display()))?;
-    file.write_all(text.as_bytes())?;
-    file.write_all(b"\n")?;
-    file.sync_all()?;
-    Ok(path)
+    write_new(&stem, extension, text)
+}
+
+/// Write `text` to `<stem><extension>`, or `<stem>-1<extension>` and so on:
+/// the first of those names nothing is at yet. So an earlier rescue is never
+/// overwritten, a symlink planted at the name is never followed (a new file
+/// is created with `O_EXCL`, which refuses one), and the file is always
+/// created 0600, like the dictation files.
+fn write_new(stem: &Path, extension: &str, text: &str) -> Result<PathBuf> {
+    for collision in 0_u32..1000 {
+        let mut name = stem.as_os_str().to_owned();
+        if collision > 0 {
+            name.push(format!("-{collision}"));
+        }
+        name.push(extension);
+        let path = PathBuf::from(name);
+        let mut file = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error).with_context(|| format!("create {}", path.display())),
+        };
+        file.write_all(text.as_bytes())?;
+        file.write_all(b"\n")?;
+        file.sync_all()?;
+        return Ok(path);
+    }
+    bail!("{} and 999 names after it are taken", stem.display())
 }
 
 impl Drop for Pane {
@@ -1547,5 +1566,31 @@ mod tests {
     fn damage_over_no_rows_is_nothing_to_draw() {
         assert!(everything(0).is_empty());
         assert_eq!(everything(3).range(), Some((0, 2)));
+    }
+
+    /// A rescue never replaces an earlier one, never writes through a
+    /// symlink someone left at its name, and is private whatever was there.
+    #[test]
+    fn a_rescue_takes_a_new_private_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let notes = directory.path().join("notes.md");
+        let earlier = directory.path().join("notes.md.unsaved");
+        std::fs::write(&earlier, "the earlier rescue\n").unwrap();
+        std::fs::set_permissions(&earlier, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let target = directory.path().join("target");
+        std::fs::write(&target, "not ours\n").unwrap();
+        std::os::unix::fs::symlink(&target, directory.path().join("notes.md.unsaved-1")).unwrap();
+
+        let kept = keep_beside(notes.to_str().unwrap(), "dictated").unwrap();
+        assert_eq!(kept, directory.path().join("notes.md.unsaved-2"));
+        assert_eq!(std::fs::read_to_string(&kept).unwrap(), "dictated\n");
+        let mode = std::fs::metadata(&kept).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        assert_eq!(
+            std::fs::read_to_string(&earlier).unwrap(),
+            "the earlier rescue\n"
+        );
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "not ours\n");
     }
 }

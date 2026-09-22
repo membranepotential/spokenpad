@@ -2145,3 +2145,18 @@ transcript.
   by a group) and say nothing about who listens.
 - Test: the decision is unit-tested (`same_user`); a test cannot listen as
   another user without root, so the refusal itself is not run.
+
+## A pane's rescue file is always a new private file (2026-09-22)
+
+The 2026-09-22 audit (P3-011): when Neovim refused to write a buffer, the pane
+wrote its text to `<file>.unsaved` with `truncate`, so an earlier rescue was
+overwritten, a symlink at that name was followed, and a file that existed
+kept its old mode although the docs promise 0600.
+
+- Chosen: the rescue takes the first free name of `<file>.unsaved`,
+  `<file>.unsaved-1`, … (for a buffer with no file, `unsaved-<time>.md`,
+  `unsaved-<time>-1.md`, … in the state directory), created with `O_EXCL`,
+  which refuses any file or symlink already at the name, and mode 0600.
+- Test: `a_rescue_takes_a_new_private_file` plants a 0644 rescue and a
+  symlink at the next name; both stay untouched and the text lands, 0600, in
+  the name after them. It fails on the old code.
