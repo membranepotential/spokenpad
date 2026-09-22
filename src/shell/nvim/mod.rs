@@ -1825,10 +1825,11 @@ fn pane_target(config: &Nvim) -> Result<(place::Target, String, x11::Manager)> {
     use crate::shell::pane::xkb;
 
     let display = config.display.clone().context(
-        "the dictation pane needs an X display, and $DISPLAY was not set when \
-         spokenpad started. On Wayland without Xwayland, set nvim.mode = \"attach\" \
-         and run `spokenpad editor` in a terminal; with Xwayland, import DISPLAY into \
-         the user manager (`systemctl --user import-environment DISPLAY`)",
+        "the dictation pane needs an X display, and neither spokenpad nor the systemd \
+         user manager has $DISPLAY. On X11, or on Wayland with Xwayland, import it: \
+         `systemctl --user import-environment DISPLAY XAUTHORITY`, and press again. \
+         On Wayland without Xwayland, set nvim.mode = \"attach\" and run \
+         `spokenpad editor` in a terminal",
     )?;
     xkb::load()?;
     let name =
@@ -1840,6 +1841,50 @@ fn pane_target(config: &Nvim) -> Result<(place::Target, String, x11::Manager)> {
         display,
         x11::manager(&connection, screen),
     ))
+}
+
+/// `nvim`, with the session's display and sockets as the systemd user
+/// manager has them now: for the daemon that manager started, before each
+/// pane. A service keeps the environment the manager had when it started,
+/// so a `DISPLAY` imported afterwards (`systemctl --user import-environment`)
+/// would otherwise take a restart to reach it. A variable the manager does
+/// not have keeps the value the daemon started with, and so does all of it
+/// when the manager cannot be asked.
+///
+/// Not for any other process: a test or a command in a terminal asking the
+/// manager would get the user's own display instead of the one it was given.
+/// And not for `XAUTHORITY`: the pane's own X connection reads it from the
+/// daemon's environment, which a process with threads cannot safely change,
+/// so a cookie file imported later still takes a restart.
+pub fn with_manager_session(mut nvim: Nvim) -> Nvim {
+    match wm::run(&["systemctl", "--user", "show-environment"]) {
+        Ok(listing) => apply_manager_session(&mut nvim, &listing),
+        Err(error) => log::debug!("could not read the user manager's environment: {error:#}"),
+    }
+    nvim
+}
+
+/// What `systemctl --user show-environment` printed, applied to `nvim`: one
+/// `NAME=value` per line. A value systemd had to quote (`NAME=$'…'`, for a
+/// character outside the plain set) is left alone; none of these holds one.
+fn apply_manager_session(nvim: &mut Nvim, listing: &str) {
+    let value = |name: &str| {
+        listing
+            .lines()
+            .filter_map(|line| line.split_once('='))
+            .find(|(key, _)| *key == name)
+            .map(|(_, value)| value)
+            .filter(|value| !value.is_empty() && !value.starts_with("$'"))
+    };
+    if let Some(display) = value("DISPLAY") {
+        nvim.display = Some(display.to_owned());
+    }
+    if let Some(socket) = value("SWAYSOCK") {
+        nvim.sway_socket = Some(PathBuf::from(socket));
+    }
+    if let Some(runtime) = value("XDG_RUNTIME_DIR") {
+        nvim.runtime_dir = Some(PathBuf::from(runtime));
+    }
 }
 
 /// sway focuses every window it maps unless a `no_focus` rule matches it,

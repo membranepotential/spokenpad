@@ -2315,3 +2315,28 @@ could see.
   not need.
 - Test: `a_pane_mode_editor_with_no_window_is_stopped_not_adopted`; before
   the change the session adopted the headless editor and returned its file.
+
+## The pane takes the display the user manager has now (2026-09-22)
+
+The fresh-user walkthrough (C4): the daemon, a systemd service, keeps the
+environment the user manager had when it started. A user who imported
+`DISPLAY` after the first press still got "the dictation window could not
+open", and the message did not say that a restart was needed.
+
+- Chosen: `shell::nvim::with_manager_session` reads `systemctl --user
+  show-environment` (argument vector, 2 s limit) and takes `DISPLAY`,
+  `SWAYSOCK` and `XDG_RUNTIME_DIR` from it when the manager has them; the
+  socket-activated daemon applies it to the `[nvim]` settings it reloads
+  before each pane. A command in a terminal or a test never asks the
+  manager, which would hand it the user's own display. The message for a
+  missing display says to import `DISPLAY XAUTHORITY` and press again.
+- Not done: `XAUTHORITY`. The pane's X connection (libxcb) reads it from the
+  daemon's own environment, which a process with threads cannot safely
+  change, and x11rb offers no connect with explicit credentials; a cookie
+  file imported after the daemon started still takes a restart. The common
+  cookie, `~/.Xauthority`, is found without the variable.
+- Rejected: the manager's D-Bus API. `systemctl` needs no new dependency,
+  and one short process per pane is nothing beside starting Neovim.
+- Test: `the_managers_session_replaces_the_one_the_daemon_started_with`
+  (the listing's parser; a quoted or empty value is not taken). The hook in
+  `shell/daemon.rs` is wired separately.

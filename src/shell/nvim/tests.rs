@@ -60,6 +60,40 @@ fn a_pane_mode_editor_with_no_window_is_stopped_not_adopted() {
     assert!(!config.socket_path.exists(), "its socket is cleared");
 }
 
+/// The user manager's display and sockets replace the ones the daemon
+/// started with; what the manager does not have, or had to quote, does not.
+#[test]
+fn the_managers_session_replaces_the_one_the_daemon_started_with() {
+    let started = Nvim {
+        display: None,
+        sway_socket: Some(PathBuf::from("/run/user/1000/sway-ipc.old.sock")),
+        runtime_dir: Some(PathBuf::from("/run/user/1000")),
+        ..Nvim::default()
+    };
+    let mut nvim = started.clone();
+    apply_manager_session(
+        &mut nvim,
+        "HOME=/home/someone\nDISPLAY=:1\nXDG_RUNTIME_DIR=\nLANG=$'de_DE.UTF-8'\n",
+    );
+    assert_eq!(nvim.display.as_deref(), Some(":1"));
+    assert_eq!(nvim.sway_socket, started.sway_socket, "not in the listing");
+    assert_eq!(
+        nvim.runtime_dir, started.runtime_dir,
+        "empty in the listing"
+    );
+
+    let mut nvim = started.clone();
+    apply_manager_session(
+        &mut nvim,
+        "SWAYSOCK=/run/user/1000/sway-ipc.new.sock\nDISPLAY=$'weird\\n'\n",
+    );
+    assert_eq!(nvim.display, None, "a quoted value is not taken");
+    assert_eq!(
+        nvim.sway_socket.as_deref(),
+        Some(Path::new("/run/user/1000/sway-ipc.new.sock"))
+    );
+}
+
 /// Only a path that resolves into the dictation directory is trusted with a
 /// transcript: not one that climbs out with `..`, not a symlink inside that
 /// points out, and nothing while the directory does not exist.
