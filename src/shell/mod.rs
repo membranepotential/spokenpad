@@ -13,4 +13,5 @@ pub mod models;
 pub mod nvim;
 pub mod pane;
 pub mod recorder;
+pub(crate) mod sync;
 pub mod wm;

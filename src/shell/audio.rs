@@ -8,7 +8,10 @@
 use crate::{
     config::{Audio, Recording},
     core::{frames::Frames, session::RecordingStatus},
-    shell::recorder::{CaptureRecorder, Unfinished},
+    shell::{
+        recorder::{CaptureRecorder, Unfinished},
+        sync::lock,
+    },
 };
 use anyhow::{Context, Result, anyhow, bail};
 use portaudio as pa;
@@ -16,7 +19,7 @@ use std::{
     collections::VecDeque,
     fmt,
     sync::{
-        Arc, Mutex, MutexGuard,
+        Arc, Mutex,
         atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering},
     },
     thread,
@@ -1050,12 +1053,6 @@ fn match_device_query<I: Copy>(query: &str, devices: &[DeviceCandidate<I>]) -> R
             bail!("multiple input audio devices match {query:?}:\n{choices}")
         }
     }
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[cfg(test)]

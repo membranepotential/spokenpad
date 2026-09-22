@@ -7,6 +7,7 @@
 use crate::{
     config::{MAX_POSTROLL_SECONDS, MAX_PREROLL_SECONDS, Recording},
     core::{frames::Frames, session::RecordingStatus, state::MAX_CAPTURE},
+    shell::sync::lock,
 };
 use anyhow::{Context, Result, bail, ensure};
 use chrono::Local;
@@ -18,7 +19,7 @@ use std::{
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex, MutexGuard,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc::{self, Receiver, Sender},
     },
@@ -116,16 +117,34 @@ pub struct Unfinished {
     pub through: Frames,
 }
 
+/// The recording directory's budget, and what pruning passes over. Shared
+/// with every writer thread, which prunes before it writes.
+#[derive(Clone)]
+struct Pruning {
+    directory: PathBuf,
+    max_total_bytes: u64,
+    /// Recordings being written.
+    open: Arc<Mutex<HashSet<PathBuf>>>,
+    /// Finished recordings the daemon still has to transcribe: a capture
+    /// made before the speech model was ready exists only here, so pruning
+    /// passes over these as over the ones still being written.
+    kept: Arc<Mutex<HashSet<PathBuf>>>,
+}
+
+impl Pruning {
+    fn run(&self) {
+        prune_recordings(&self.directory, self.max_total_bytes, |path| {
+            lock(&self.open).contains(path) || lock(&self.kept).contains(path)
+        });
+    }
+}
+
 /// One asynchronous WAV writer per capture.
 pub struct CaptureRecorder {
     config: Recording,
     sample_rate: u32,
     lifecycle: Mutex<Lifecycle>,
-    open_paths: Arc<Mutex<HashSet<PathBuf>>>,
-    /// Finished recordings the daemon still has to transcribe: a capture
-    /// made before the speech model was ready exists only here, so pruning
-    /// passes over these as over the ones still being written.
-    kept: Arc<Mutex<HashSet<PathBuf>>>,
+    pruning: Pruning,
     /// What the last daemon left unfinished, until the event loop takes it.
     unfinished: Mutex<Vec<Unfinished>>,
     writer_join: Duration,
@@ -141,12 +160,17 @@ impl CaptureRecorder {
             Vec::new()
         };
         let kept = unfinished.iter().map(|u| u.path.clone()).collect();
+        let pruning = Pruning {
+            directory: config.dir.clone(),
+            max_total_bytes: config.max_total_bytes,
+            open: Arc::new(Mutex::new(HashSet::new())),
+            kept: Arc::new(Mutex::new(kept)),
+        };
         let recorder = Self {
             config,
             sample_rate,
             lifecycle: Mutex::new(Lifecycle::default()),
-            open_paths: Arc::new(Mutex::new(HashSet::new())),
-            kept: Arc::new(Mutex::new(kept)),
+            pruning,
             unfinished: Mutex::new(unfinished),
             writer_join: WRITER_JOIN,
         };
@@ -159,11 +183,7 @@ impl CaptureRecorder {
                     recorder.config.dir.display()
                 );
             }
-            prune_recordings(
-                &recorder.config.dir,
-                recorder.config.max_total_bytes,
-                |path| lock(&recorder.kept).contains(path),
-            );
+            recorder.pruning.run();
         }
         recorder
     }
@@ -220,12 +240,12 @@ impl CaptureRecorder {
 
     /// Keeps `path` from being pruned until [`release`](Self::release).
     pub fn keep(&self, path: &Path) {
-        lock(&self.kept).insert(path.to_owned());
+        lock(&self.pruning.kept).insert(path.to_owned());
     }
 
     /// Lets `path` be pruned again, once it is transcribed.
     pub fn release(&self, path: &Path) {
-        lock(&self.kept).remove(path);
+        lock(&self.pruning.kept).remove(path);
     }
 
     pub fn status(&self) -> RecordingStatus {
@@ -298,31 +318,20 @@ impl CaptureRecorder {
             drop_reported: AtomicBool::new(false),
             max_queued,
         });
-        lock(&self.open_paths).insert(path);
+        lock(&self.pruning.open).insert(path);
 
         let writer_state = Arc::clone(&state);
-        let open_paths = Arc::clone(&self.open_paths);
-        let kept = Arc::clone(&self.kept);
-        let directory = self.config.dir.clone();
-        let max_total_bytes = self.config.max_total_bytes;
+        let pruning = self.pruning.clone();
         let writer = thread::Builder::new()
             .name("spokenpad-recorder".into())
             .spawn(move || {
-                drain(
-                    writer_state,
-                    receiver,
-                    sink,
-                    &directory,
-                    max_total_bytes,
-                    open_paths,
-                    &kept,
-                );
+                drain(writer_state, receiver, sink, &pruning);
             });
         let writer = match writer {
             Ok(writer) => writer,
             Err(error) => {
                 state.broken.store(true, Ordering::Release);
-                lock(&self.open_paths).remove(&state.path);
+                lock(&self.pruning.open).remove(&state.path);
                 log::error!(
                     "could not start recording thread for {}: {error}",
                     state.path.display()
@@ -445,15 +454,10 @@ fn drain(
     state: Arc<RecordingState>,
     receiver: Receiver<Arc<[f32]>>,
     mut sink: Box<dyn WavSink>,
-    directory: &Path,
-    max_total_bytes: u64,
-    open_paths: Arc<Mutex<HashSet<PathBuf>>>,
-    kept: &Mutex<HashSet<PathBuf>>,
+    pruning: &Pruning,
 ) {
-    prune_recordings(directory, max_total_bytes, |path| {
-        lock(&open_paths).contains(path) || lock(kept).contains(path)
-    });
-    secure_recordings(directory);
+    pruning.run();
+    secure_recordings(&pruning.directory);
 
     loop {
         report_dropped(&state, sink.sample_rate());
@@ -488,7 +492,7 @@ fn drain(
             state.path.display()
         );
     }
-    lock(&open_paths).remove(&state.path);
+    lock(&pruning.open).remove(&state.path);
 }
 
 fn report_dropped(state: &RecordingState, sample_rate: u32) {
@@ -656,7 +660,7 @@ pub(crate) fn prune_recordings(
             let path = entry.path();
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if !name.starts_with(CAPTURE_PREFIX) || !name.ends_with(CAPTURE_SUFFIX) {
+            if !is_capture_name(&name) {
                 return Ok(None);
             }
             let metadata = fs::symlink_metadata(&path)?;
@@ -709,7 +713,7 @@ fn secure_recordings(directory: &Path) {
         let path = entry.path();
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if !name.starts_with(CAPTURE_PREFIX) || !name.ends_with(CAPTURE_SUFFIX) {
+        if !is_capture_name(&name) {
             continue;
         }
         let result = (|| -> Result<()> {
@@ -805,12 +809,6 @@ fn open_capture(directory: &Path) -> Result<(PathBuf, File)> {
         "{}: {MAX_SAME_SECOND} recordings already have timestamp {stamp}",
         directory.display()
     )
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[cfg(test)]
@@ -1503,7 +1501,7 @@ mod tests {
             recorder.status(),
             RecordingStatus::Truncated(first_path.clone())
         );
-        assert!(lock(&recorder.open_paths).contains(&first_path));
+        assert!(lock(&recorder.pruning.open).contains(&first_path));
 
         let second_path = temporary.path().join("capture-second.wav");
         fs::write(&second_path, []).unwrap();
@@ -1514,7 +1512,7 @@ mod tests {
         // A prune while both paths are open must keep the abandoned writer's
         // file. Once released, it removes only its own registry entry.
         prune_recordings(temporary.path(), 0, |candidate| {
-            lock(&recorder.open_paths).contains(candidate)
+            lock(&recorder.pruning.open).contains(candidate)
         });
         assert!(first_path.exists());
         assert!(second_path.exists());
@@ -1525,7 +1523,7 @@ mod tests {
         *lock(released) = true;
         condition.notify_all();
         let deadline = Instant::now() + Duration::from_secs(1);
-        while lock(&recorder.open_paths).contains(&first_path) {
+        while lock(&recorder.pruning.open).contains(&first_path) {
             assert!(Instant::now() < deadline, "abandoned writer was not pruned");
             thread::sleep(Duration::from_millis(5));
         }
