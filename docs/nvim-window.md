@@ -134,9 +134,23 @@ along with everything in the table:
 zero it changes nothing, and announcing it would oblige spokenpad to answer
 it.
 
-**Verified on i3 only.** The other window managers are read from their source
-(the experiment's table says which), not run. Try pane mode before you rely on
-it, and say what you find.
+**Where it is verified.** Each of these runs headless in the test suite,
+with the pane opened the way the daemon opens it and the focus sampled every
+5 ms while it opens and redraws:
+
+| window manager | the pane is focused on map | test |
+|---|---|---|
+| i3 | never, also as the first window on an empty workspace | `tests/pane_window.rs` |
+| Openbox 3.6 | never, also on an empty desktop | `tests/pane_focus_wms.rs` |
+| KWin 6.7 (Wayland, Xwayland) | never, with focus stealing prevention at its default or off; but KWin stacks the pane **below** the focused window, so a pane that overlaps it is partly hidden | `tests/pane_focus_wms.rs` |
+| sway 1.12 (Xwayland) | **always — unsupported.** sway focuses every new window unless a `no_focus` rule matches it or it refuses input, and reads neither the user time nor the window type. Use attach or managed mode on sway. | `tests/pane_focus_wms.rs` pins this |
+
+Measured in
+[2026-09-22-pane-focus-other-wms.md](experiments/2026-09-22-pane-focus-other-wms.md).
+Mutter, xfwm4, bspwm and Hyprland are only read from their source, in the
+[P0 experiment](experiments/2026-09-21-own-window-p0-properties.md), and
+awesome is known to need more. Try pane mode before you rely on it there, and
+say what you find.
 
 ### What it costs to run
 

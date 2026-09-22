@@ -1,11 +1,13 @@
 //! A headless desktop the pane tests start for themselves: an `Xvfb` on a
 //! free display number and an `i3` with a generated config and its own IPC
-//! socket.
+//! socket. [`desktops`] starts sway, Openbox and KWin the same way.
 //!
-//! Nothing here ever touches the user's session. The display number is above
-//! `:50`, i3 gets `-c` and a private `ipc-socket`, and every process is
+//! Nothing here ever touches the user's session. An Xvfb's display number is
+//! above `:50`, i3 gets `-c` and a private `ipc-socket`, and every process is
 //! stopped on the way out, also when an assertion fails.
 #![allow(dead_code)]
+
+pub mod desktops;
 
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -60,8 +62,9 @@ pub fn tools_or_skip(programs: &[&str]) -> bool {
     assert!(
         std::env::var_os("SPOKENPAD_ALLOW_MISSING_X11").is_some(),
         "{} not installed; this test needs a headless X server, i3, nvim and \
-         fontconfig, and the HiDPI test Alacritty (pacman: xorg-server-xvfb i3-wm \
-         neovim xorg-setxkbmap alacritty). \
+         fontconfig, the HiDPI test Alacritty, and the window manager tests sway, \
+         Xwayland, Openbox and KWin (pacman: xorg-server-xvfb i3-wm neovim \
+         xorg-setxkbmap alacritty sway xorg-xwayland openbox kwin). \
          Set SPOKENPAD_ALLOW_MISSING_X11=1 to skip it deliberately.",
         missing.join(", ")
     );
@@ -97,6 +100,18 @@ impl Killed {
     }
 }
 
+/// Where an X server came from, which decides what "this test's own" means
+/// for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Origin {
+    /// An Xvfb this test started, on a number above `:50`.
+    Xvfb,
+    /// The Xwayland of a Wayland compositor this test started. Its number is
+    /// whichever one the compositor took, and the test learned it from that
+    /// compositor, never from its own environment.
+    Xwayland,
+}
+
 /// The X server this test owns, and the connection it watches it over. This
 /// connection is the test's own: the pane opens a second one of its own.
 pub struct XServer {
@@ -104,7 +119,11 @@ pub struct XServer {
     pub display: String,
     pub connection: RustConnection,
     pub root: Window,
-    child: Killed,
+    origin: Origin,
+    /// The process this server lives and dies with: the Xvfb itself, or the
+    /// compositor that runs Xwayland. Declared after the connection, so it is
+    /// stopped after the connection closes.
+    owner: Killed,
 }
 
 impl XServer {
@@ -168,8 +187,38 @@ impl XServer {
             display,
             connection,
             root,
-            child,
+            origin: Origin::Xvfb,
+            owner: child,
         })
+    }
+
+    /// The Xwayland of a compositor this test started, on the display that
+    /// compositor named. `compositor` is owned from here on: dropping the
+    /// server stops it. Stopping its Xwayland first is the desktop's job
+    /// (`desktops::Sway`, `desktops::KwinWayland`).
+    pub fn xwayland(display: String, compositor: Killed) -> Self {
+        let number = display
+            .trim_start_matches(':')
+            .parse()
+            .unwrap_or_else(|_| panic!("{display:?} is not a local X display"));
+        let (connection, screen_index) =
+            wait_for(START_TIMEOUT, "Xwayland to accept connections", || {
+                x11rb::connect(Some(&display)).ok()
+            });
+        let root = connection.setup().roots[screen_index].root;
+        Self {
+            number,
+            display,
+            connection,
+            root,
+            origin: Origin::Xwayland,
+            owner: compositor,
+        }
+    }
+
+    /// The pid of the process this server lives with.
+    pub fn owner_pid(&self) -> u32 {
+        self.owner.0.id()
     }
 
     /// Load a keyboard layout into this server, the way a user would.
@@ -215,14 +264,22 @@ impl XServer {
     /// test did not start, and any display whose server has died.
     pub fn assert_is_ours(&mut self) {
         assert!(
-            self.number >= 50,
+            self.origin == Origin::Xwayland || self.number >= 50,
             "display :{} is not one this test started",
             self.number
         );
         assert!(
-            self.child.alive(),
-            "the Xvfb this test started is gone; refusing to send events anywhere else"
+            self.owner.alive(),
+            "the X server this test started is gone; refusing to send events anywhere else"
         );
+    }
+
+    /// Wait until the server has handled every request this connection sent.
+    /// A property written here, then a map sent over another connection,
+    /// reaches the server in that order only after this.
+    pub fn sync(&self) {
+        self.connection.flush().expect("flush");
+        self.input_focus();
     }
 
     pub fn input_focus(&self) -> Window {
@@ -297,7 +354,7 @@ fn read_display_number(child: &mut Killed) -> Option<u32> {
 /// move the focus, and a private IPC socket, so no client of this test can
 /// reach the i3 the user is running.
 pub struct I3 {
-    socket: PathBuf,
+    ipc: Ipc,
     _directory: tempfile::TempDir,
     _child: Killed,
 }
@@ -329,7 +386,7 @@ impl I3 {
                 .expect("start i3"),
         );
         let this = Self {
-            socket,
+            ipc: Ipc { socket },
             _directory: directory,
             _child: child,
         };
@@ -339,10 +396,48 @@ impl I3 {
         this
     }
 
-    /// One i3 IPC request over its own socket, framed by the daemon's own
-    /// protocol code in `core::wm`.
+    /// One i3 IPC request over its own socket.
     pub fn request(&self, message: Message, payload: &str) -> Result<String> {
-        let mut stream = UnixStream::connect(&self.socket).context("connect to the i3 socket")?;
+        self.ipc.request(message, payload)
+    }
+
+    pub fn tree(&self) -> Value {
+        self.ipc.tree()
+    }
+
+    pub fn command(&self, command: &str) {
+        self.ipc.command(command);
+    }
+
+    pub fn version(&self) -> String {
+        self.ipc.version()
+    }
+
+    /// What i3 says about one X11 window, once it manages it.
+    pub fn node(&self, window: Window) -> Option<Node> {
+        find_node(&self.tree(), window)
+    }
+
+    pub fn wait_until_managed(&self, window: Window) {
+        wait_for(START_TIMEOUT, "i3 to manage the window", || {
+            self.node(window)
+        });
+    }
+}
+
+/// A client of one i3-compatible IPC socket — i3's, or sway's, which speaks
+/// the same protocol — framed by the daemon's own protocol code in
+/// `core::wm`. It only ever connects to the path it was built with, which the
+/// test generated; `I3SOCK` and `SWAYSOCK` are never read.
+#[derive(Debug, Clone)]
+pub struct Ipc {
+    pub socket: PathBuf,
+}
+
+impl Ipc {
+    pub fn request(&self, message: Message, payload: &str) -> Result<String> {
+        let mut stream = UnixStream::connect(&self.socket)
+            .context("connect to the window manager's IPC socket")?;
         stream.set_read_timeout(Some(Duration::from_secs(5)))?;
         stream.write_all(&encode(message, payload)?)?;
         stream.shutdown(Shutdown::Write).ok();
@@ -355,13 +450,14 @@ impl I3 {
     }
 
     pub fn tree(&self) -> Value {
-        serde_json::from_str(&self.request(Message::GetTree, "").expect("the i3 tree"))
-            .expect("the i3 tree is JSON")
+        serde_json::from_str(&self.request(Message::GetTree, "").expect("the tree"))
+            .expect("the tree is JSON")
     }
 
     pub fn command(&self, command: &str) {
         let reply = self.request(Message::RunCommand, command).expect("run it");
-        spokenpad::core::wm::check_command_reply(&reply).expect("i3 accepted the command");
+        spokenpad::core::wm::check_command_reply(&reply)
+            .unwrap_or_else(|error| panic!("the window manager refused {command:?}: {error:#}"));
     }
 
     pub fn version(&self) -> String {
@@ -376,43 +472,39 @@ impl I3 {
             })
             .unwrap_or_else(|| "unknown".to_owned())
     }
+}
 
-    /// What i3 says about one X11 window, once it manages it.
-    pub fn node(&self, window: Window) -> Option<Node> {
-        fn walk(node: &Value, window: Window, found: &mut Option<Node>) {
-            if node.get("window").and_then(Value::as_u64) == Some(u64::from(window)) {
-                *found = Some(Node {
-                    focused: node.get("focused").and_then(Value::as_bool) == Some(true),
-                    floating: matches!(
-                        node.get("floating").and_then(Value::as_str),
-                        Some("auto_on" | "user_on")
-                    ),
-                });
-                return;
-            }
-            for key in ["nodes", "floating_nodes"] {
-                for child in node
-                    .get(key)
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                {
-                    if found.is_none() {
-                        walk(child, window, found);
-                    }
+/// What an i3 or sway tree says about X11 window `window`, if it shows it.
+pub fn find_node(tree: &Value, window: Window) -> Option<Node> {
+    fn walk(node: &Value, window: Window, found: &mut Option<Node>) {
+        if node.get("window").and_then(Value::as_u64) == Some(u64::from(window)) {
+            *found = Some(Node {
+                focused: node.get("focused").and_then(Value::as_bool) == Some(true),
+                // i3 says `floating` on the window's node; sway says it by
+                // the node's type.
+                floating: matches!(
+                    node.get("floating").and_then(Value::as_str),
+                    Some("auto_on" | "user_on")
+                ) || node.get("type").and_then(Value::as_str) == Some("floating_con"),
+            });
+            return;
+        }
+        for key in ["nodes", "floating_nodes"] {
+            for child in node
+                .get(key)
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                if found.is_none() {
+                    walk(child, window, found);
                 }
             }
         }
-        let mut found = None;
-        walk(&self.tree(), window, &mut found);
-        found
     }
-
-    pub fn wait_until_managed(&self, window: Window) {
-        wait_for(START_TIMEOUT, "i3 to manage the window", || {
-            self.node(window)
-        });
-    }
+    let mut found = None;
+    walk(tree, window, &mut found);
+    found
 }
 
 /// What the i3 tree says about a window.

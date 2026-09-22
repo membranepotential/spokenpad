@@ -238,6 +238,9 @@ fn ablate(
 ) -> (Watched, Observed) {
     let mut pane = Watched::open(server);
     ablate(server, pane.id());
+    // The rewrite went over the test's connection and the map goes over the
+    // pane's: only a round trip puts them in that order at the server.
+    server.sync();
     let observed = map_and_watch(server, i3, &mut pane);
     (pane, observed)
 }

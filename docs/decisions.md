@@ -1088,3 +1088,39 @@ asked the display's resolution. The earlier reason for pixels, that the pane
   cells with a live Alacritty's at 96, 144 and 192 dpi; every earlier pane
   test ran without `Xft.dpi`, where 16 px is exactly 12 pt, which is why none
   noticed.
+
+## Pane mode verified on Openbox and KWin, unsupported on sway (2026-09-22)
+
+Pane mode is meant to become the default, and until now its focus guarantee
+had been run on i3 only. The same story now runs headless on the other window
+managers installed here, with the pane opened as the daemon opens it and the
+focus sampled every 5 ms
+([experiment](experiments/2026-09-22-pane-focus-other-wms.md)).
+
+- **Openbox 3.6.1 and KWin 6.7.5 (Wayland, with Xwayland) never focus the
+  pane**, on map, while it redraws, for the next passage's pane, and on an
+  empty desktop. KWin holds at its default focus stealing prevention and with
+  it turned off. `tests/pane_focus_wms.rs` asserts it.
+- **sway 1.12 focuses the pane every time it maps, so pane mode is
+  unsupported on sway.** sway's `view_map` gives focus to any new window
+  unless a user's `no_focus` rule matches it or its ICCCM input model is "No
+  Input". It reads neither `_NET_WM_USER_TIME` nor the window type, so no
+  property the pane sets can stop it, and the no-focus-call rule rules out
+  anything else. A test pins this and fails the day it stops being true.
+- **Not shipped: `WM_HINTS input = False` for sway.** It keeps sway from
+  focusing the pane on map, and a click then focuses it with the X input
+  focus left at `PointerRoot`. Whether real keys from sway's seat then reach
+  the pane is unmeasured. Openbox and KWin did not select an `input = False`
+  window the same way in every run. It would also have to apply to sway
+  only. It stays an open option, not a fix.
+- **Not shipped: `_NET_WM_STATE_ABOVE`.** KWin stacks the unfocused pane
+  below the focused window. `_NET_WM_STATE_ABOVE` set before the map puts it
+  on top without focusing it, on KWin and Openbox. That changes stacking,
+  not focus, and is left for a separate decision.
+- **The harness** (`tests/harness/desktops.rs`) runs each window manager in
+  an empty environment with a private `HOME`, `XDG_CONFIG_HOME`,
+  `XDG_RUNTIME_DIR` and, for KWin, session bus, and with a generated
+  configuration. It stops each compositor's Xwayland before the compositor,
+  because Xwayland runs with `-terminate` and otherwise outlived sway by
+  several seconds. KWin 6 has no `kwin_x11` in the `kwin` package, so X11
+  KWin is not covered.
