@@ -1649,7 +1649,7 @@ fn inside_dictation_dir(config: &Nvim, candidate: &Path) -> std::io::Result<Opti
 }
 
 fn new_file(config: &Nvim) -> Result<PathBuf> {
-    fs::create_dir_all(&config.dictation_dir).with_context(|| {
+    crate::shell::dirs::create_private(&config.dictation_dir).with_context(|| {
         format!(
             "create dictation directory {}",
             config.dictation_dir.display()
@@ -1737,7 +1737,7 @@ pub struct OwnershipMarker {
 impl OwnershipMarker {
     fn write(socket: &Path) -> Result<Self> {
         if let Some(parent) = socket.parent() {
-            fs::create_dir_all(parent)
+            crate::shell::dirs::create_private(parent)
                 .with_context(|| format!("create socket directory {}", parent.display()))?;
         }
         let value = new_marker()?;
@@ -1772,7 +1772,7 @@ impl Drop for OwnershipMarker {
 
 pub(crate) fn write_marker(path: &Path, marker: &str) -> Result<()> {
     let parent = path.parent().context("ownership marker has no parent")?;
-    fs::create_dir_all(parent)?;
+    crate::shell::dirs::create_private(parent)?;
     let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
     temporary
         .as_file()
@@ -2028,7 +2028,7 @@ fn editor_command(config: &Nvim) -> Result<(NewFileGuard, Command)> {
     }
     let passage = NewFileGuard::take(config)?;
     if let Some(parent) = config.socket_path.parent() {
-        fs::create_dir_all(parent)
+        crate::shell::dirs::create_private(parent)
             .with_context(|| format!("create socket directory {}", parent.display()))?;
     }
     let marker = new_marker()?;
@@ -2042,11 +2042,8 @@ fn editor_command(config: &Nvim) -> Result<(NewFileGuard, Command)> {
 }
 
 fn materialize_bundled_init() -> Result<PathBuf> {
-    use std::os::unix::fs::DirBuilderExt;
     let directory = config::state_dir().join("private");
-    if !directory.exists() {
-        fs::DirBuilder::new().mode(0o700).create(&directory)?;
-    }
+    crate::shell::dirs::create_private(&directory)?;
     let path = directory.join("dictation_init.lua");
     if fs::read_to_string(&path).ok().as_deref() == Some(BUNDLED_INIT) {
         return Ok(path);

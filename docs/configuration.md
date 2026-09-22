@@ -184,6 +184,8 @@ and no keystrokes are synthesised ([nvim-window.md](nvim-window.md)).
   change. A real file rather than a scratch buffer, because a transcript
   lost with a closed buffer is the failure this project exists to prevent.
   Put a time in the template, or two sessions in one day share a page.
+  The directory is created 0700 when it does not exist; one that exists is
+  left as you set it.
 - `startup_timeout_seconds` (20): generous, because a first open took 13.5 s
   while a plugin manager did one-time work, and killing a healthy editor is
   the worse failure.

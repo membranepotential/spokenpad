@@ -128,7 +128,7 @@ fn lock(socket: &Path) -> Result<File> {
     name.push(".pending.lock");
     let path = PathBuf::from(name);
     let directory = path.parent().context("socket path has no directory")?;
-    fs::create_dir_all(directory)?;
+    crate::shell::dirs::create_private(directory)?;
     let file = OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -153,7 +153,7 @@ fn lock(socket: &Path) -> Result<File> {
 fn write_pointer(socket: &Path, path: &Path) -> Result<()> {
     let pointer = pointer_path(socket);
     let directory = pointer.parent().context("socket path has no directory")?;
-    fs::create_dir_all(directory)?;
+    crate::shell::dirs::create_private(directory)?;
     let mut temporary = tempfile::NamedTempFile::new_in(directory)?;
     writeln!(temporary, "{}", utf8_path(path)?)?;
     temporary

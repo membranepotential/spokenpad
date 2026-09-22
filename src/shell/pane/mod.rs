@@ -1359,7 +1359,7 @@ fn keep_beside(name: &str, text: &str) -> Result<PathBuf> {
         false => (PathBuf::from(format!("{name}.unsaved")), ""),
         true => {
             let directory = crate::config::state_dir();
-            std::fs::create_dir_all(&directory)?;
+            crate::shell::dirs::create_private(&directory)?;
             let stamp = chrono::Local::now().format("%Y-%m-%d-%H%M%S");
             (directory.join(format!("unsaved-{stamp}")), ".md")
         }

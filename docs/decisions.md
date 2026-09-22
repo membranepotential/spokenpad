@@ -2440,8 +2440,10 @@ configured `recording.dir` to 0700 at every press, even one the user shares
   directories inside it. A directory that exists is otherwise left as it is;
   the daemon warns once at the start when a recording directory can be
   listed by others.
-- Not done here: the dictation directory is created by `shell/nvim` and
-  `shell/pane`, which should create it with `dirs::create_private` too.
+- `shell/nvim` and `shell/pane` create theirs the same way: the dictation
+  directory, the editor socket's directory (where the pending passage's
+  lock and pointer live), the bundled init's, and the state directory a
+  pane's rescue file falls back to.
 
 ## One model family, VAD and preview always on (2026-09-22)
 
