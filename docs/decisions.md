@@ -2670,3 +2670,23 @@ manager had one.
   tty2) moves the first session's next pane to `:1`. Only the same user is
   affected: the manager is per user, and so is the daemon.
 - Test: `a_config_that_does_not_load_still_takes_the_managers_session`.
+
+## A starting `spokenpad editor` is never stopped as invisible (2026-09-23)
+
+The review of 2026-09-23 asked whether a press in pane mode can `qall!` an
+editor the user has just started with `spokenpad editor`, before its
+terminal UI attaches: `stop_invisible` stops an editor of spokenpad's with
+no UI. Measured on Neovim 0.12.5
+([experiment](experiments/2026-09-23-editor-marker-before-ui.md)): the
+terminal UI attaches before Neovim runs the `--cmd` that sets the marker,
+so the editor is spokenpad's only once it has a UI, and cannot be stopped
+while it starts.
+
+- Chosen: no change.
+- Rejected: stopping only an editor this daemon spawned for a pane, or only
+  one that has had no UI for a grace period. Neither is needed for the race
+  asked about, and the first would also spare what `:restart` leaves behind.
+- Open: the same measurement suggests that the server `:restart` leaves
+  behind carries no marker either, since it waits for a UI before `--cmd`,
+  and would then be refused as unrelated rather than stopped. Not probed
+  with a real `:restart`.

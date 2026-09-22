@@ -788,7 +788,10 @@ impl NvimSession {
     /// behind (Neovim 0.12 starts a new server with the same arguments,
     /// which waits for a UI the pane never gives it), or the editor of a pane
     /// a crashed daemon took with it. It has had no window to be typed into,
-    /// so it holds nothing to lose.
+    /// so it holds nothing to lose. An editor the user is starting with
+    /// `spokenpad editor` is never one: its terminal UI attaches before the
+    /// `--cmd` that makes it spokenpad's runs
+    /// (docs/experiments/2026-09-23-editor-marker-before-ui.md).
     fn stop_invisible(&self, mut client: RpcClient) -> Result<()> {
         log::info!(
             "stopping the editor on {}: no window shows it (left behind by `:restart`?)",
