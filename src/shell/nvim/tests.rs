@@ -1742,6 +1742,29 @@ fn bundled_lua_loads_cleanly_under_the_installed_nvim() {
     }
 }
 
+/// The only clipboard write is the opt-in whole-buffer copy: the bundled
+/// init does not route every yank and delete to the system clipboard.
+#[test]
+fn the_bundled_init_leaves_yanks_off_the_clipboard() {
+    if !nvim_or_skip() {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let init = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lua/dictation_init.lua");
+    let output = Command::new("nvim")
+        .args(["--headless", "-i", "NONE", "-u"])
+        .arg(&init)
+        .args(["-c", "lua io.stdout:write(vim.o.clipboard)", "-c", "qall!"])
+        .env("NVIM_LOG_FILE", directory.path().join("nvim.log"))
+        .env("XDG_CONFIG_HOME", directory.path())
+        .env("XDG_DATA_HOME", directory.path())
+        .env("XDG_STATE_HOME", directory.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", output.status);
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+}
+
 #[test]
 fn an_indicator_level_is_clamped_into_the_meter_range() {
     // The meter raises its input to a fractional power, so a negative or

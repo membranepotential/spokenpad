@@ -77,16 +77,16 @@ vim.opt.autoread = true
 vim.opt.mouse = "a"
 vim.opt.termguicolors = true
 
--- Yank goes to the system clipboard, as it does in almost everyone's config.
--- This window is where you read a transcript and copy a piece of it out, so a
--- `y` that does not reach the clipboard makes it useless for its actual job.
---
--- spokenpad does touch the clipboard now, but only in one place and only this
--- far: `Spokenpad.copy_buffer` (spokenpad.lua) sets the `+` register to the
--- whole dictation buffer after every release, through this same clipboard
--- provider. The daemon still spawns no clipboard process of its own, pastes
--- nothing, and writes to no window the user did not open for this.
-vim.opt.clipboard = "unnamedplus"
+-- The clipboard option stays at nvim's default: a plain `y`, `d` or `x` keeps
+-- to nvim's own registers, and text reaches the system clipboard only when
+-- the user asks for it, with `"+y`. Routing every yank and delete there would
+-- leave pieces of dictation in a clipboard manager's history that nobody
+-- chose to copy. The one write spokenpad makes itself is
+-- `Spokenpad.copy_buffer` (spokenpad.lua), which sets the `+` register to the
+-- whole dictation buffer after a release, and only with
+-- `nvim.copy_to_clipboard` set (off by default). The daemon spawns no
+-- clipboard process of its own, pastes nothing, and writes to no window the
+-- user did not open for this.
 
 -- No colourscheme, deliberately: this inherits the terminal's own colours, so
 -- the window looks like every other terminal on the desktop instead of like

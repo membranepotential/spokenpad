@@ -2193,3 +2193,17 @@ The 2026-09-22 audit found three weak spots in `shell/control.rs`:
 - P3-019: a daemon that does not know a request is almost always one left
   running across a package upgrade; the CLI now says so and names
   `systemctl --user restart spokenpad`.
+
+## The bundled init no longer sends yanks to the clipboard (2026-09-22)
+
+The 2026-09-22 audit (P3-015): `dictation_init.lua` set
+`clipboard=unnamedplus`, so with `nvim.init = "bundled"` every `y`, `d` or
+`x` in the dictation window also went to the `+` selection, where a clipboard
+manager keeps it. The hard rule is that spokenpad's only clipboard write is
+the opt-in whole-buffer copy (`nvim.copy_to_clipboard`); the comment above
+the option still described the always-on copy of before 2026-09-21.
+
+- Chosen: the option is left at nvim's default. Text reaches the clipboard
+  when the user asks, with `"+y`.
+- Test: `the_bundled_init_leaves_yanks_off_the_clipboard` starts nvim with
+  the bundled init and reads `clipboard`; it read `unnamedplus` before.
