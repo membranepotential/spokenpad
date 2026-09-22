@@ -1820,14 +1820,18 @@ fn apply_capture_event(event: CaptureEvent, session: &mut Session, now: Instant)
         CaptureEvent::MemoryCapReached { recovery } => {
             // The notice names the recovery WAV by file name, so that a narrow
             // window still has room for it; the whole path goes here instead.
-            let notice = Notice::MemoryCap(recovery.clone());
+            let minutes = (MAX_UTTERANCE_SECONDS / 60) as u64;
+            let notice = Notice::MemoryCap {
+                recovery: recovery.clone(),
+                minutes,
+            };
             match &recovery {
                 RecordingStatus::Recorded(path) | RecordingStatus::Truncated(path) => {
                     log::warn!("{notice} ({})", path.display())
                 }
                 RecordingStatus::NotRecorded => log::warn!("{notice}"),
             }
-            session.cap(recovery, now)
+            session.cap(recovery, minutes, now)
         }
         CaptureEvent::Flags(flags) => {
             log::warn!("PortAudio: {flags}");

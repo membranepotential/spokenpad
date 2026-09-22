@@ -1029,9 +1029,10 @@ fn a_long_notice_keeps_the_phase_label_and_its_headline_in_a_narrow_window() {
     }
     let directory = tempfile::tempdir().unwrap();
     let (mut session, _, _editor) = dictating(&headless(directory.path()));
-    let notice = Notice::MemoryCap(RecordingStatus::Recorded(
-        "/tmp/spokenpad/capture-example.wav".into(),
-    ));
+    let notice = Notice::MemoryCap {
+        recovery: RecordingStatus::Recorded("/tmp/spokenpad/capture-example.wav".into()),
+        minutes: 60,
+    };
     let notice = notice.text();
     // The state the memory cap actually leaves behind: still recording, with
     // previews stopped for good.

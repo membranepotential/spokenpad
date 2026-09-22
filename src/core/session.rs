@@ -33,7 +33,12 @@ pub enum Notice {
     CaptureIncomplete,
     NearlySilent,
     PreviewPaused,
-    MemoryCap(RecordingStatus),
+    /// A capture reached the in-memory ceiling, `minutes` of held audio, and
+    /// ended; `recovery` says where the whole of it is.
+    MemoryCap {
+        recovery: RecordingStatus,
+        minutes: u64,
+    },
     /// A latched capture heard no speech for `capture.silence_timeout_seconds` and
     /// ended itself.
     SilenceTimeout,
@@ -173,62 +178,85 @@ fn file_name(path: &Path) -> Cow<'_, str> {
         .to_string_lossy()
 }
 
+/// How much a notice matters. Exactly one is shown per capture, so when two
+/// things happen to the same one this ranking decides which the user reads;
+/// [`Session::notify`] is the only place it is applied.
+///
+/// Lowest first: the order of the variants is the ranking, and
+/// [`Notice::priority`] maps every notice to one. News about audio that was
+/// lost outranks news about a capture that ended cleanly: the two auto-stops
+/// lost nothing, and everything spoken is in the editor.
+///
+/// The speech model's own notices rank in the same list, because the window
+/// shows one notice: the capture's, unless the model's outranks it
+/// ([`Session::shown_notice`]). A model that cannot load at all is worse news
+/// than a gap in one capture; one that is on its way is less than anything
+/// that went wrong with the capture just made.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Priority {
+    /// Cosmetic: only the live tail stopped.
+    PreviewPaused,
+    /// The wait is over; text is on its way.
+    TranscribingRecordings,
+    /// Transcription waits, for seconds.
+    ModelLoading,
+    /// Transcription waits, and nothing is lost.
+    ModelDownloading,
+    /// Nothing was recorded, and nothing was lost.
+    HeldTooBriefly,
+    /// Everything arrived and may still be worth nothing.
+    NearlySilent,
+    /// An edit to the config did not take.
+    ConfigInvalid,
+    /// A latch was quiet long enough to end.
+    SilenceTimeout,
+    /// A capture kept on disk ran to its ceiling and ended.
+    KeptTooLong,
+    /// The capture ran to the length limit and ended.
+    LengthLimit,
+    /// Audio came back, with a hole in the recording.
+    MicrophoneGap,
+    /// Nothing is transcribed until it loads.
+    ModelUnavailable,
+    /// The rest of one recording waits, to be retried or recovered.
+    RecordingPartlyTranscribed,
+    /// The rest of one recording is gone.
+    RecordingShortened,
+    /// A whole capture is gone after all.
+    RecordingLost,
+    /// The whole capture is gone: no model, no recording.
+    NotKept,
+    /// Audio is missing and did not come back.
+    MicrophoneUnavailable,
+    /// Most of what was said never arrived.
+    CaptureIncomplete,
+    /// The capture is over and the audio is only in a WAV.
+    MemoryCap,
+}
+
 impl Notice {
-    /// How much this notice matters. Exactly one is shown per capture, so when
-    /// two things happen to the same one this ranking decides which the user
-    /// reads; [`Session::notify`] is the only place it is applied.
-    ///
-    /// Highest first, and this list is the definition. News about audio that
-    /// was lost outranks news about a capture that ended cleanly: the two
-    /// auto-stops below lost nothing, and everything spoken is in the editor.
-    ///
-    /// The speech model's own notices rank in the same list, because the
-    /// window shows one notice: the capture's, unless the model's outranks
-    /// it ([`Session::shown_notice`]). A model that cannot load at all is
-    /// worse news than a gap in one capture; one that is on its way is less
-    /// than anything that went wrong with the capture just made.
-    ///
-    /// 1. `MemoryCap` — the capture is over and the audio is only in a WAV.
-    /// 2. `CaptureIncomplete` — most of what was said never arrived.
-    /// 3. `MicrophoneUnavailable` — audio is missing and did not come back.
-    /// 4. `NotKept` — the whole capture is gone: no model, no recording.
-    /// 5. `RecordingLost` — a whole capture is gone after all.
-    /// 6. `RecordingShortened` — the rest of one is gone.
-    /// 7. `RecordingPartlyTranscribed` — the rest of one waits, to be retried
-    ///    or recovered.
-    /// 8. `ModelUnavailable` — nothing is transcribed until it loads.
-    /// 9. `MicrophoneGap` — audio came back, with a hole in the recording.
-    /// 10. `LengthLimit` — the capture ran to the length limit and ended.
-    /// 11. `KeptTooLong` — the same, at the ceiling of a capture kept on disk.
-    /// 12. `SilenceTimeout` — a latch was quiet long enough to end.
-    /// 13. `ConfigInvalid` — an edit to the config did not take.
-    /// 14. `NearlySilent` — everything arrived and may still be worth nothing.
-    /// 15. `HeldTooBriefly` — nothing was recorded, and nothing was lost.
-    /// 16. `ModelDownloading` — transcription waits, and nothing is lost.
-    /// 17. `ModelLoading` — the same, for seconds.
-    /// 18. `TranscribingRecordings` — the wait is over; text is on its way.
-    /// 19. `PreviewPaused` — cosmetic: only the live tail stopped.
-    pub fn priority(&self) -> u8 {
+    /// Where this notice stands in the [`Priority`] ranking.
+    pub fn priority(&self) -> Priority {
         match self {
-            Self::MemoryCap(_) => 18,
-            Self::CaptureIncomplete => 17,
-            Self::MicrophoneUnavailable => 16,
-            Self::NotKept => 15,
-            Self::RecordingLost(_) => 14,
-            Self::RecordingShortened(_) => 13,
-            Self::RecordingPartlyTranscribed { .. } => 12,
-            Self::ModelUnavailable { .. } => 11,
-            Self::MicrophoneGap => 10,
-            Self::LengthLimit => 9,
-            Self::KeptTooLong { .. } => 8,
-            Self::SilenceTimeout => 7,
-            Self::ConfigInvalid(_) => 6,
-            Self::NearlySilent => 5,
-            Self::HeldTooBriefly => 4,
-            Self::ModelDownloading { .. } => 3,
-            Self::ModelLoading { .. } => 2,
-            Self::TranscribingRecordings(_) => 1,
-            Self::PreviewPaused => 0,
+            Self::MemoryCap { .. } => Priority::MemoryCap,
+            Self::CaptureIncomplete => Priority::CaptureIncomplete,
+            Self::MicrophoneUnavailable => Priority::MicrophoneUnavailable,
+            Self::NotKept => Priority::NotKept,
+            Self::RecordingLost(_) => Priority::RecordingLost,
+            Self::RecordingShortened(_) => Priority::RecordingShortened,
+            Self::RecordingPartlyTranscribed { .. } => Priority::RecordingPartlyTranscribed,
+            Self::ModelUnavailable { .. } => Priority::ModelUnavailable,
+            Self::MicrophoneGap => Priority::MicrophoneGap,
+            Self::LengthLimit => Priority::LengthLimit,
+            Self::KeptTooLong { .. } => Priority::KeptTooLong,
+            Self::SilenceTimeout => Priority::SilenceTimeout,
+            Self::ConfigInvalid(_) => Priority::ConfigInvalid,
+            Self::NearlySilent => Priority::NearlySilent,
+            Self::HeldTooBriefly => Priority::HeldTooBriefly,
+            Self::ModelDownloading { .. } => Priority::ModelDownloading,
+            Self::ModelLoading { .. } => Priority::ModelLoading,
+            Self::TranscribingRecordings(_) => Priority::TranscribingRecordings,
+            Self::PreviewPaused => Priority::PreviewPaused,
         }
     }
     /// The short form, drawn in every window however narrow. Fixed wording per
@@ -241,7 +269,7 @@ impl Notice {
             Self::CaptureIncomplete => "capture incomplete",
             Self::NearlySilent => "nearly silent",
             Self::PreviewPaused => "preview paused",
-            Self::MemoryCap(_) => "memory limit reached",
+            Self::MemoryCap { .. } => "memory limit reached",
             Self::SilenceTimeout => "stopped after silence",
             Self::LengthLimit => "reached the time limit",
             Self::NotKept => "capture not kept",
@@ -272,19 +300,28 @@ impl Notice {
             }
             Self::NearlySilent => "check microphone gain and device".into(),
             Self::PreviewPaused => "long uncommitted tail".into(),
-            Self::MemoryCap(RecordingStatus::Recorded(path)) => format!(
-                "past 60 minutes; the capture ended here and is in {} — recover with spokenpad transcribe",
+            Self::MemoryCap {
+                recovery: RecordingStatus::Recorded(path),
+                minutes,
+            } => format!(
+                "past {minutes} minutes; the capture ended here and is in {} — recover with spokenpad transcribe",
                 file_name(path)
             )
             .into(),
-            Self::MemoryCap(RecordingStatus::Truncated(_)) => {
-                "past 60 minutes AND the recording failed; press the key to start a new capture"
-                    .into()
-            }
-            Self::MemoryCap(RecordingStatus::NotRecorded) => {
-                "past 60 minutes with no recovery recording; press the key to start a new capture"
-                    .into()
-            }
+            Self::MemoryCap {
+                recovery: RecordingStatus::Truncated(_),
+                minutes,
+            } => format!(
+                "past {minutes} minutes AND the recording failed; press the key to start a new capture"
+            )
+            .into(),
+            Self::MemoryCap {
+                recovery: RecordingStatus::NotRecorded,
+                minutes,
+            } => format!(
+                "past {minutes} minutes with no recovery recording; press the key to start a new capture"
+            )
+            .into(),
             Self::SilenceTimeout => {
                 "no speech for capture.silence_timeout_seconds; press the key to dictate again".into()
             }
@@ -645,11 +682,11 @@ impl Session {
     /// The in-memory ceiling ends this capture: nothing more can be decoded,
     /// so it is decoded now and the recorder stops with it. Returns the
     /// command the shell has to carry out, like [`Session::event`] does.
-    pub fn cap(&mut self, recovery: RecordingStatus, now: Instant) -> Command {
+    pub fn cap(&mut self, recovery: RecordingStatus, minutes: u64, now: Instant) -> Command {
         self.previews = Previews::Capped;
         let command = self.event(Event::Exhausted { at: now });
         self.due = None;
-        self.notify(Notice::MemoryCap(recovery));
+        self.notify(Notice::MemoryCap { recovery, minutes });
         command
     }
     /// Raises `notice`, unless what is already shown matters more. Ties go to
@@ -870,7 +907,7 @@ mod tests {
         start(&mut s);
         let u = s.current.clone().unwrap();
         let id = u.id;
-        let command = s.cap(RecordingStatus::NotRecorded, Instant::now());
+        let command = s.cap(RecordingStatus::NotRecorded, 60, Instant::now());
         // The shell carries this out: it is what stops the recorder. Marking
         // the utterance released is not enough -- the capture kept running.
         assert!(matches!(
@@ -891,7 +928,10 @@ mod tests {
         s.tick_finished(id, None, Instant::now());
         assert_eq!(
             s.notice(),
-            Some(&Notice::MemoryCap(RecordingStatus::NotRecorded))
+            Some(&Notice::MemoryCap {
+                recovery: RecordingStatus::NotRecorded,
+                minutes: 60
+            })
         );
         assert!(!s.previewing());
         assert!(!s.tick_due(Instant::now() + Duration::from_secs(30)));
@@ -901,7 +941,10 @@ mod tests {
     #[test]
     fn the_notice_ranking_is_strict_and_total() {
         let ranked = [
-            Notice::MemoryCap(RecordingStatus::NotRecorded),
+            Notice::MemoryCap {
+                recovery: RecordingStatus::NotRecorded,
+                minutes: 60,
+            },
             Notice::CaptureIncomplete,
             Notice::MicrophoneUnavailable,
             Notice::NotKept,
@@ -1054,9 +1097,13 @@ mod tests {
     fn the_memory_cap_notice_outlives_every_later_complaint() {
         let mut s = Session::new(true, Duration::from_secs(1), None);
         start(&mut s);
-        let capped = Notice::MemoryCap(RecordingStatus::Recorded("/tmp/capture.wav".into()));
+        let capped = Notice::MemoryCap {
+            recovery: RecordingStatus::Recorded("/tmp/capture.wav".into()),
+            minutes: 60,
+        };
         s.cap(
             RecordingStatus::Recorded("/tmp/capture.wav".into()),
+            60,
             Instant::now(),
         );
         for later in [
@@ -1100,11 +1147,20 @@ mod tests {
     /// so the headline has to be short and the path in it a file name.
     #[test]
     fn a_notice_splits_into_a_short_headline_and_its_detail() {
-        let notice = Notice::MemoryCap(RecordingStatus::Recorded(
-            "/tmp/spokenpad/capture-example.wav".into(),
-        ));
+        let notice = Notice::MemoryCap {
+            recovery: RecordingStatus::Recorded("/tmp/spokenpad/capture-example.wav".into()),
+            minutes: 60,
+        };
         let text = notice.text();
         assert_eq!(text.headline, "memory limit reached");
+        let shorter = Notice::MemoryCap {
+            recovery: RecordingStatus::NotRecorded,
+            minutes: 45,
+        };
+        assert!(
+            shorter.detail().contains("past 45 minutes"),
+            "the ceiling the shell reports, not a number of its own"
+        );
         assert!(
             text.headline.chars().count() <= 24,
             "a headline has to fit beside the phase label: {}",
