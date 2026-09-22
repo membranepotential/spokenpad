@@ -4,7 +4,7 @@
 [progressive commit](progressive-commit.md), and [Rust implementation](rust.md).
 
 spokenpad is entirely Rust: one statically linked binary runs the daemon,
-`spokenpad editor`, `transcribe` and `check`. The WER harness is the
+`spokenpad editor`, `transcribe`, `check` and `fetch-models`. The WER harness is the
 `examples/eval.rs` example ([evaluation.md](evaluation.md)).
 
 ## Production components
@@ -25,13 +25,15 @@ imperative shell, and `config.rs` sits at the root because both sides read it.
 | `core/session.rs` | Utterance lifecycle, preview cadence, and the one user-visible notice | internal channels |
 | `core/decode.rs` | Committed sample offset, settled commits, release tails, preview isolation | worker messages |
 | `core/segments.rs` | VAD merge/pad/settlement: spans in, decode windows out | none |
+| `core/models.rs` | The pinned default model set: each file's fixed URL, size and sha256, which configurations use it, and the comparison against a pin | none |
+| `shell/models.rs` | Download and verify the default models: the program's only network access. HTTPS only, redirects included, to the URLs in `core/models.rs`; a timeout per phase and a body budget from the pinned size; never a byte past it; `.part` renamed into place only once size and sha256 match; one process at a time per directory (`flock` on `.fetch.lock`) | network (Hugging Face, GitHub releases), filesystem |
 | `shell/inference.rs` | CPU-only models; the sherpa recognizer and the Silero detector | ONNX Runtime |
-| `shell/control.rs` | Bind the control socket, or take over the one systemd passed (socket activation); stamp and forward each request; the client the CLI uses | Unix socket |
+| `shell/control.rs` | Bind the control socket, or take over the one systemd passed (socket activation); stamp and forward each request, each line under one deadline; the client the CLI uses, which starts `spokenpad.socket` once when its socket is missing and says through `notify-send` why a press failed | Unix socket, `systemctl`, `notify-send` |
 | `shell/audio.rs` | Pre-roll, immutable capture chunks, dropping committed audio, the memory ceiling, stream repair (backed off while the microphone stays missing) | PortAudio (behind `InputBackend`) |
 | `shell/recorder.rs` | Persist every capture independently of decode, prune the directory, and keep the list of recordings not transcribed yet for the next start (`waiting.tsv`) | filesystem |
 | `core/grid.rs` | Neovim's `ext_linegrid` redraw events, typed, and the screen they fold into; which rows each one changed | none |
 | `core/keys.rs` | A keysym, its modifiers and the text a layout produced, as the notation `nvim_input` reads | none |
-| `shell/nvim/mod.rs` | Editor lifecycle in both modes (pane, attach), ownership proof, transactional appends, indicator, `spokenpad editor` | Unix socket |
+| `shell/nvim/mod.rs` | Editor lifecycle in both modes (pane, attach), ownership proof (a listener of this user only, `SO_PEERCRED`), transactional appends, indicator, `spokenpad editor`; in pane mode, stops an editor no UI shows (what `:restart` leaves); the display from the user manager (`with_manager_session`) | Unix socket, `systemctl` |
 | `shell/pane/mod.rs` | The pane: its loop, the renderer, and what `spokenpad check` looks for | X11 |
 | `shell/pane/host.rs` | The pane's thread: the two things the daemon tells it, whether a pane is open, whether the user closed the last one, and restarting after a panic | internal channels |
 | `shell/pane/x11.rs` | The window, the properties that keep a window manager from focusing it, `PutImage`, and `Xft.dpi` from x11rb's resource database, as winit reads it | X11, `~/.Xresources` |
@@ -42,7 +44,7 @@ imperative shell, and `config.rs` sits at the root because both sides read it.
 | `shell/pane/xkb.rs` | libxcb and libxkbcommon, opened with `dlopen` when a pane opens | shared libraries |
 | `shell/nvim/passage.rs` | With no editor open: append to the pending dictation file, and the pointer the next editor opens | filesystem |
 | `shell/nvim/rpc.rs` | msgpack-RPC transport with absolute deadlines; pure codec | Unix socket |
-| `shell/wm.rs` | The pane's `no_focus` rule sent to sway over its IPC socket before each pane, one request per connection under a deadline; short-lived helpers such as `notify-send`, bounded in time and output | IPC socket, subprocesses |
+| `shell/wm.rs` | The pane's `no_focus` rule sent to sway over its IPC socket before each pane, one request per connection under a deadline; a Unix socket's peer credentials; short-lived helpers such as `notify-send`, bounded in time and output | IPC socket, subprocesses |
 | `shell/logging.rs` | Private 0600 diagnostic log, rotated at 1 MB | filesystem |
 | `shell/daemon.rs` | `run` (the shell) and `serve` (the event loop) | all of the above |
 
@@ -75,6 +77,8 @@ unit-tested without a device, a thread, or a process. Nothing there may import
   cell, the way Alacritty and FreeType compute them.
 - `core/wm.rs` — the i3 IPC protocol, which sway shares, as values: frames,
   replies, the focused workspace, the pane's `no_focus` command.
+- `core/models.rs` — the pinned default model set as literals: the only URLs
+  the program ever fetches, never built from configuration or input.
 - one pure half still lives inside a shell module: in `shell/nvim`, the RPC
   codec, the editor argv, ownership parsing, and `passage::append_paragraph`.
 
@@ -100,7 +104,9 @@ Until the pipeline is built, a capture is recorded to its recovery WAV only:
 the loop drops its in-memory audio as it arrives, and at the release queues
 the WAV. Once the inference thread reports `Ready`, each queued WAV goes to it
 as `Work::Recording` and is decoded a `preview.max_seconds` window at a time
-through the same `Worker::tick` and `Worker::finish` a live capture uses. The
+through the same `Worker::tick` and `Worker::finish` a live capture uses; a
+recording's way through that is one value, `Transcription { stage: Stage }`
+in `shell/daemon.rs`. The
 speech model's state (`core::session::Recognition`) becomes a winbar notice
 that shows when it outranks the capture's own. A failed load is reported and
 retried at the next press; the daemon does not exit over it.
@@ -184,14 +190,16 @@ is decoded and everything spoken is kept:
 
 | rule | when | setting |
 |---|---|---|
-| `Cause::Silence` | a latch with no key down has heard no speech for the timeout | `capture.silence_timeout_s`, 300 s |
+| `Cause::Silence` | a latch with no key down has heard no speech for the timeout | `capture.silence_timeout_seconds`, 300 s |
 | `Cause::Length` | any capture has run for `MAX_CAPTURE` | none: it keeps the WAV readable |
 | `Cause::Memory` | `AudioCapture` reports the in-memory ceiling | none: it bounds this machine's RAM |
 
 Only the shell can see the ceiling, so it arrives as `Event::Exhausted` rather
 than as a rule over the clock; the other two are the clock alone. What tells
 the table a capture is not forgotten is `Event::Speech`, which `Session` raises
-whenever the recognizer produced text — a settled commit or a live preview.
+whenever the recognizer produced text — a settled commit or a live preview —
+and whenever the detector heard speech in the open tail (`Preview::heard`),
+so a long sentence that has not settled yet is speech too.
 With no VAD model, or with the progressive tick off, nothing produces text
 before the release, so the silence rule is off and the other two bound the
 capture. "No key down" is `last_press` older than `KEY_SETTLED`: auto-repeat
@@ -250,8 +258,9 @@ Closing a pane ends the editor inside it, so the pane writes every modified
 buffer before it quits, and that teardown fits inside the grace the daemon's
 shutdown gives the thread — divided into a write budget and a quit budget,
 and checked against the grace at compile time. Text Neovim will not write
-comes back with the failure and is kept beside its file as `.unsaved`, rather
-than discarded along with the editor.
+comes back with the failure and is kept beside its file in a new private
+`.unsaved` file (`.unsaved-1` and on when that name is taken), rather than
+discarded along with the editor.
 
 The daemon tells that thread two things, open and stop. A window that closes
 needs no word to end the passage: the editor dies with the window, its socket
@@ -259,8 +268,12 @@ goes with it, and the next key-down finds a dead socket and asks for a new
 pane. What the thread does record is whether the user closed it — the window
 manager's `WM_DELETE_WINDOW`, or Neovim announcing on the pane's channel, from
 `VimLeavePre` with `v:dying` at 0 and `v:exitreason` at `quit`, that it was
-told to quit (`:restart` is not) — and when, stamped
-as that arrives, and cleared when the next pane is asked for. The
+told to quit (`:restart` is not) — and when: the close request when it
+arrived, Neovim's announcement by the user's last key or click in the
+window, which is what told it to quit, both as the X watcher read them; so
+a press made right after `:q` is never older than the close even when
+Neovim reports it late. The record is cleared when the next pane is asked
+for. The
 editor thread asks after every piece of work and every 66 ms, stops opening
 panes for text until the next key press, and sends the time to the event
 loop as `ResultEvent::WindowClosed`, which becomes `state::Event::WindowClosed`:
