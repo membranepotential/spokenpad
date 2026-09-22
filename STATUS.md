@@ -11,6 +11,9 @@ never takes focus. Fully local, CPU-only. Next milestone: public release.
   window_* keys), autosave so `:q` always writes, closing the window
   mid-capture cancels it, log the pane layout — running — review, merge,
   deploy, then migrate the user's config.
+- hover-focus (worktree, investigation) — why the pane does not take focus
+  on hover under i3 focus_follows_mouse yes (user's setting), and whether
+  hover focus can be allowed without focus on map — running — report.
 
 ## Next
 1. User live check: typing elsewhere ok, `Grüße @ € {}` ok; still to try:
