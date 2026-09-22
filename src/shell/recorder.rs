@@ -13,9 +13,9 @@ use chrono::Local;
 use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
 use std::{
     collections::HashSet,
-    fs::{self, DirBuilder, File, OpenOptions},
+    fs::{self, File, OpenOptions},
     io::{BufReader, BufWriter, Write},
-    os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
+    os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, MutexGuard,
@@ -26,7 +26,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-const DIR_MODE: u32 = 0o700;
 const FILE_MODE: u32 = 0o600;
 const CAPTURE_PREFIX: &str = "capture-";
 const CAPTURE_SUFFIX: &str = ".wav";
@@ -152,6 +151,14 @@ impl CaptureRecorder {
             writer_join: WRITER_JOIN,
         };
         if recorder.config.enabled {
+            // The user's directory is theirs to open; the recordings in it
+            // are 0600 either way.
+            if crate::shell::dirs::shared(&recorder.config.dir).unwrap_or(false) {
+                log::warn!(
+                    "{} can be listed by other users, who can see when and how long you dictated; spokenpad leaves its permissions as they are",
+                    recorder.config.dir.display()
+                );
+            }
             prune_recordings(
                 &recorder.config.dir,
                 recorder.config.max_total_bytes,
@@ -248,14 +255,9 @@ impl CaptureRecorder {
         self.detach();
 
         let opened = (|| -> Result<_> {
-            DirBuilder::new()
-                .recursive(true)
-                .mode(DIR_MODE)
-                .create(&self.config.dir)
-                .with_context(|| {
-                    format!("create recording directory {}", self.config.dir.display())
-                })?;
-            narrow_directory(&self.config.dir);
+            crate::shell::dirs::create_private(&self.config.dir).with_context(|| {
+                format!("create recording directory {}", self.config.dir.display())
+            })?;
             let (path, file) = open_capture(&self.config.dir)?;
             let spec = mono_pcm16(self.sample_rate);
             let mut wav = WavWriter::new(BufWriter::new(file), spec)
@@ -778,15 +780,6 @@ fn read_waiting_list(directory: &Path) -> Vec<Unfinished> {
         .collect()
 }
 
-fn narrow_directory(directory: &Path) {
-    if let Err(error) = fs::set_permissions(directory, fs::Permissions::from_mode(DIR_MODE)) {
-        log::warn!(
-            "could not set permissions on {}: {error}",
-            directory.display()
-        );
-    }
-}
-
 fn open_capture(directory: &Path) -> Result<(PathBuf, File)> {
     let stamp = Local::now().format("%Y-%m-%d-%H%M%S");
     for index in 0..MAX_SAME_SECOND {
@@ -1047,6 +1040,32 @@ mod tests {
         );
     }
 
+    /// A recording directory spokenpad creates is private; one the user made
+    /// keeps the permissions they gave it, capture after capture.
+    #[test]
+    fn a_recording_directory_is_created_private_and_never_narrowed() {
+        let temporary = tempdir().unwrap();
+        let created = temporary.path().join("audio");
+        let recorder = CaptureRecorder::new(config(created.clone()), 16_000);
+        recorder.start();
+        recorder.stop();
+        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&created), 0o700);
+
+        let theirs = temporary.path().join("shared");
+        fs::create_dir(&theirs).unwrap();
+        fs::set_permissions(&theirs, fs::Permissions::from_mode(0o750)).unwrap();
+        let recorder = CaptureRecorder::new(config(theirs.clone()), 16_000);
+        recorder.start();
+        recorder.write(&[0.5; 16]);
+        recorder.stop();
+        assert_eq!(mode(&theirs), 0o750, "the user's directory was changed");
+        let RecordingStatus::Recorded(path) = recorder.status() else {
+            panic!("not recorded")
+        };
+        assert_eq!(mode(&path), FILE_MODE, "the recording itself is private");
+    }
+
     /// With recording off the list is neither read nor written: the
     /// recordings a daemon with recording on left waiting are still there
     /// when recording is turned on again.
@@ -1120,7 +1139,7 @@ mod tests {
                 .permissions()
                 .mode()
                 & 0o777,
-            DIR_MODE
+            0o700
         );
         assert_eq!(
             fs::metadata(path).unwrap().permissions().mode() & 0o777,

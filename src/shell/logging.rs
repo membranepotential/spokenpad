@@ -9,6 +9,12 @@ use std::{
     sync::Mutex,
 };
 
+/// The log file is rotated before it would grow past this many bytes...
+const MAX_LOG_BYTES: u64 = 1_000_000;
+/// ...into `<log>.1`, the older ones moving up to `<log>.<ROTATED_LOGS>`,
+/// and the oldest dropped.
+const ROTATED_LOGS: usize = 3;
+
 struct LogFile {
     path: PathBuf,
     file: File,
@@ -26,9 +32,23 @@ fn open(path: &Path) -> std::io::Result<File> {
     Ok(f)
 }
 impl LogFile {
+    /// Opens the log at `path` for appending, creating it 0600 and any
+    /// missing directory above it 0700.
+    fn create(path: &Path) -> std::io::Result<Self> {
+        if let Some(parent) = path.parent() {
+            crate::shell::dirs::create_private(parent)?;
+        }
+        let file = open(path)?;
+        let bytes = file.metadata()?.len();
+        Ok(Self {
+            path: path.to_owned(),
+            file,
+            bytes,
+        })
+    }
     fn write(&mut self, line: &str) -> std::io::Result<()> {
-        if self.bytes + line.len() as u64 > 1_000_000 {
-            for i in (1..=3).rev() {
+        if self.bytes + line.len() as u64 > MAX_LOG_BYTES {
+            for i in (1..=ROTATED_LOGS).rev() {
                 let from = if i == 1 {
                     self.path.clone()
                 } else {
@@ -95,19 +115,7 @@ pub fn init(verbose: bool, path: Option<&Path>) -> Result<()> {
     let file = if p.as_os_str().eq_ignore_ascii_case("none") {
         None
     } else {
-        let result = (|| -> std::io::Result<LogFile> {
-            if let Some(parent) = p.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            let file = open(p)?;
-            let bytes = file.metadata()?.len();
-            Ok(LogFile {
-                path: p.to_owned(),
-                file,
-                bytes,
-            })
-        })();
-        match result {
+        match LogFile::create(p) {
             Ok(f) => Some(f),
             Err(e) => {
                 eprintln!("spokenpad: could not open log {}: {e}", p.display());
@@ -121,4 +129,32 @@ pub fn init(verbose: bool, path: Option<&Path>) -> Result<()> {
     }))?;
     log::set_max_level(LevelFilter::Debug);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn mode(path: &Path) -> u32 {
+        fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    /// The log's directory is created private, as the rest of the state
+    /// directory is, and the log rotates into numbered files at its limit.
+    #[test]
+    fn the_log_lives_in_a_private_directory_and_rotates() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("state/spokenpad/spokenpad.log");
+        let mut log = LogFile::create(&path).unwrap();
+        assert_eq!(mode(&temporary.path().join("state/spokenpad")), 0o700);
+        assert_eq!(mode(&path), 0o600);
+        let line = "x".repeat(MAX_LOG_BYTES as usize / 2 + 1);
+        for _ in 0..=2 * ROTATED_LOGS {
+            log.write(&line).unwrap();
+        }
+        let rotated = |i: usize| PathBuf::from(format!("{}.{i}", path.display()));
+        assert!((1..=ROTATED_LOGS).all(|i| rotated(i).exists()));
+        assert!(!rotated(ROTATED_LOGS + 1).exists(), "the oldest is dropped");
+    }
 }

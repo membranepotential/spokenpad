@@ -2421,3 +2421,23 @@ was undelivered they point at the recovery WAV, which holds the audio anyway.
 - Rejected: keeping the text in the last-resort "undelivered" lines as a
   rescue copy. The recovery WAV is that copy, and `spokenpad transcribe`
   turns it back into text.
+
+## Directories spokenpad creates are private; the user's are left alone (2026-09-22)
+
+The log, which `main` opens before anything else, created
+`$XDG_STATE_HOME/spokenpad` with the umask's 0755, and the daemon lock's
+0700 then found it there and changed nothing (audit P2-013). Every file in it
+is 0600, but a listing of the dictation and recording directories shows
+when and how much the user dictated. Meanwhile the recorder forced a
+configured `recording.dir` to 0700 at every press, even one the user shares
+(P3-012).
+
+- Chosen: `shell::dirs`. Every directory spokenpad creates, and every parent
+  it creates on the way, is 0700 (`create_private`). Its own state directory
+  is narrowed to 0700 at each start when an older version left it open
+  (`secure_own`), which also covers the default dictation and recording
+  directories inside it. A directory that exists is otherwise left as it is;
+  the daemon warns once at the start when a recording directory can be
+  listed by others.
+- Not done here: the dictation directory is created by `shell/nvim` and
+  `shell/pane`, which should create it with `dirs::create_private` too.

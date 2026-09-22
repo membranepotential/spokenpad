@@ -33,11 +33,8 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use std::{
     collections::VecDeque,
-    fs::{self, File, OpenOptions},
-    os::{
-        fd::AsRawFd,
-        unix::fs::{DirBuilderExt, OpenOptionsExt},
-    },
+    fs::{File, OpenOptions},
+    os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -664,10 +661,7 @@ impl std::error::Error for AnotherDaemon {}
 /// Holds the lock for the daemon lifetime. Never unlink a lock another process may hold.
 fn daemon_lock() -> Result<File> {
     let dir = crate::config::state_dir();
-    fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(&dir)
+    crate::shell::dirs::create_private(&dir)
         .with_context(|| format!("create {}", dir.display()))?;
     let path = dir.join("daemon.lock");
     let file = OpenOptions::new()

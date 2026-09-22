@@ -132,8 +132,9 @@ silence_timeout_s = 300
 # Every capture is bounded in length as well: see [capture] above.
 enabled = true
 
-# Where the recordings go. Created mode 0700, each file mode 0600 -- a capture
-# holds whatever you dictated, which is why the log file is 0600 too.
+# Where the recordings go. Created mode 0700 if it does not exist; one that
+# exists keeps the permissions you gave it (the daemon warns when others can
+# list it). Each file is mode 0600 -- a capture holds whatever you dictated.
 # Defaults to $XDG_STATE_HOME/spokenpad/audio (~/.local/state/spokenpad/audio).
 # ~ and $VAR are expanded; an unset $VAR is an error rather than a literal
 # directory named after it.

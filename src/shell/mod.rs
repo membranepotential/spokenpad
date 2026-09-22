@@ -6,7 +6,7 @@
 pub mod audio;
 pub mod control;
 pub mod daemon;
-
+pub mod dirs;
 pub mod inference;
 pub mod logging;
 pub mod models;

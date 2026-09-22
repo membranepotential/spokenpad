@@ -132,7 +132,18 @@ fn run(args: Args) -> Result<u8> {
         None => unsafe { Socket::from_systemd(&config::control_socket()) }?,
         Some(_) => None,
     };
+    // Before the log, which is the first to write into it.
+    let state = config::state_dir();
+    let narrowed = spokenpad::shell::dirs::secure_own(&state);
     spokenpad::shell::logging::init(args.verbose, args.log_file.as_deref())?;
+    match narrowed {
+        Ok(true) => log::info!(
+            "{} could be listed by other users; narrowed it to 0700",
+            state.display()
+        ),
+        Ok(false) => {}
+        Err(e) => log::warn!("could not make {} private: {e}", state.display()),
+    }
     let source = config::Source {
         path: args.config,
         model_dir: args.model_dir,
@@ -254,15 +265,15 @@ fn run(args: Args) -> Result<u8> {
             // Nothing from here on may end the daemon over a setting: it has
             // taken presses on its socket, and one that exits leaves them
             // unanswered while systemd starts it again.
-            let dump = args
-                .dump_audio
-                .filter(|dir| match std::fs::create_dir_all(dir) {
-                    Ok(()) => true,
-                    Err(e) => {
-                        log::error!("not dumping audio: create {}: {e}", dir.display());
-                        false
-                    }
-                });
+            let dump =
+                args.dump_audio
+                    .filter(|dir| match spokenpad::shell::dirs::create_private(dir) {
+                        Ok(()) => true,
+                        Err(e) => {
+                            log::error!("not dumping audio: create {}: {e}", dir.display());
+                            false
+                        }
+                    });
             match spokenpad::shell::daemon::run(config, source, inherited, dump.as_deref()) {
                 Err(e) if e.is::<spokenpad::shell::daemon::AnotherDaemon>() => {
                     eprintln!("spokenpad: {e:#}");
