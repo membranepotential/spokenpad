@@ -187,12 +187,23 @@ impl std::error::Error for ShorterThanItsText {}
 struct Requests {
     receiver: Receiver<Received>,
     early: VecDeque<Received>,
-    /// The clock at the head request's stamp was already handed out.
-    head_clocked: bool,
-    /// This drain already ended with the clock at the current time.
-    drained: bool,
+    drain: Drain,
     /// False once the sender is gone: the control socket closed.
     alive: bool,
+}
+
+/// Where one drain of [`Requests`] stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Drain {
+    /// Next is the clock: at the head request's stamp, or, with none
+    /// waiting, at the current time.
+    Clock,
+    /// The clock at the head request's stamp was handed out; the request
+    /// itself is next.
+    Request,
+    /// The drain ended with the clock at the current time; the next call
+    /// returns `None` and begins a new drain.
+    Done,
 }
 
 impl Requests {
@@ -200,8 +211,7 @@ impl Requests {
         Self {
             receiver,
             early: VecDeque::new(),
-            head_clocked: false,
-            drained: false,
+            drain: Drain::Clock,
             alive: true,
         }
     }
@@ -216,16 +226,20 @@ impl Requests {
             self.early.push_back(request);
         }
         if let Some(&head) = self.early.front() {
-            self.drained = false;
-            if std::mem::replace(&mut self.head_clocked, true) {
-                self.head_clocked = false;
-                self.early.pop_front();
-                return Some(Event::Request(head));
-            }
-            return Some(Event::Clock { now: head.at });
+            return Some(match self.drain {
+                Drain::Request => {
+                    self.drain = Drain::Clock;
+                    self.early.pop_front();
+                    Event::Request(head)
+                }
+                Drain::Clock | Drain::Done => {
+                    self.drain = Drain::Request;
+                    Event::Clock { now: head.at }
+                }
+            });
         }
-        if std::mem::replace(&mut self.drained, true) {
-            self.drained = false;
+        if self.drain == Drain::Done {
+            self.drain = Drain::Clock;
             return None;
         }
         let now = Instant::now();
@@ -233,11 +247,13 @@ impl Requests {
         // first, or the clock could close a window that it continues.
         match self.receive() {
             Some(request) => {
-                self.drained = false;
                 self.early.push_back(request);
                 self.next()
             }
-            None => Some(Event::Clock { now }),
+            None => {
+                self.drain = Drain::Done;
+                Some(Event::Clock { now })
+            }
         }
     }
 

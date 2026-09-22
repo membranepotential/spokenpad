@@ -427,6 +427,18 @@ enum Previews {
     Capped,
 }
 
+/// Where the next tick of the capture that is recording stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tick {
+    /// None is scheduled: nothing is recording, ticks are off, or the
+    /// capture reached the ceiling.
+    Idle,
+    /// The next is due at this instant.
+    Due(Instant),
+    /// One is in flight for this utterance, asked for at this instant.
+    Pending(UtteranceId, Instant),
+}
+
 pub struct Session {
     pub state: State,
     pub current: Option<Arc<Utterance>>,
@@ -437,8 +449,7 @@ pub struct Session {
     /// Where the latest speech the detector heard in this capture ends.
     speech_through: Frames,
     next_id: u64,
-    due: Option<Instant>,
-    pending: Option<(UtteranceId, Instant)>,
+    tick: Tick,
     interval: Duration,
     enabled: bool,
     silence: Option<Duration>,
@@ -465,8 +476,7 @@ impl Session {
             preview_epoch: Frames::ZERO,
             speech_through: Frames::ZERO,
             next_id: 0,
-            due: None,
-            pending: None,
+            tick: Tick::Idle,
             interval,
             enabled,
             configured: None,
@@ -524,14 +534,17 @@ impl Session {
                 self.notice = None;
                 self.previews = Previews::Running;
                 self.warned_tick_failure = false;
-                self.pending = None;
-                self.due = self.enabled.then(|| Instant::now() + self.interval);
+                self.tick = if self.enabled {
+                    Tick::Due(Instant::now() + self.interval)
+                } else {
+                    Tick::Idle
+                };
             }
             Command::Decode { cause, .. } => {
                 if let Some(u) = &self.current {
                     u.release();
                 }
-                self.due = None;
+                self.tick = Tick::Idle;
                 match cause {
                     // Nothing to say: the user's own key, or the ceiling,
                     // whose notice [`Session::cap`] raises with the file
@@ -545,7 +558,7 @@ impl Session {
                 if let Some(u) = &self.current {
                     u.cancel();
                 }
-                self.due = None;
+                self.tick = Tick::Idle;
                 self.preview.clear();
                 match reason {
                     DiscardReason::TooShort => self.notify(Notice::HeldTooBriefly),
@@ -595,30 +608,28 @@ impl Session {
         self.state.recording()
             && self.enabled
             && self.previews != Previews::Capped
-            && self.pending.is_none()
-            && self.due.is_some_and(|d| now >= d)
+            && matches!(self.tick, Tick::Due(due) if now >= due)
     }
     pub fn requested(&mut self, now: Instant) {
         if let Some(u) = &self.current {
-            self.pending = Some((u.id, now));
-            self.due = None;
+            self.tick = Tick::Pending(u.id, now);
         }
     }
     pub fn tick_finished(&mut self, id: UtteranceId, preview: Option<Preview>, now: Instant) {
         if !self.is_current(id) || !self.state.recording() {
             return;
         }
-        let elapsed = self
-            .pending
-            .filter(|(i, _)| *i == id)
-            .map(|(_, at)| now.saturating_duration_since(at))
-            .unwrap_or_default();
-        self.pending = None;
+        let elapsed = match self.tick {
+            Tick::Pending(pending, at) if pending == id => now.saturating_duration_since(at),
+            _ => Duration::ZERO,
+        };
         // Re-armed even while the cosmetic tail is paused: those ticks are
         // what commit the settled chunks the pause is waiting for.
-        if self.previews != Previews::Capped {
-            self.due = Some(now + self.interval.saturating_sub(elapsed).max(elapsed));
-        }
+        self.tick = if self.previews == Previews::Capped {
+            Tick::Idle
+        } else {
+            Tick::Due(now + self.interval.saturating_sub(elapsed).max(elapsed))
+        };
         let Some(Preview {
             text,
             through,
@@ -700,7 +711,7 @@ impl Session {
     pub fn cap(&mut self, recovery: RecordingStatus, minutes: u64, now: Instant) -> Command {
         self.previews = Previews::Capped;
         let command = self.event(Event::Exhausted { at: now });
-        self.due = None;
+        self.tick = Tick::Idle;
         self.notify(Notice::MemoryCap { recovery, minutes });
         command
     }
@@ -794,7 +805,9 @@ mod tests {
         let mut s = Session::new(true, interval, None);
         start(&mut s);
         let id = s.current.as_ref().unwrap().id;
-        let due = s.due.expect("first recording must arm the preview timer");
+        let Tick::Due(due) = s.tick else {
+            panic!("first recording must arm the preview timer")
+        };
         assert!(!s.tick_due(due - Duration::from_millis(1)));
         assert!(s.tick_due(due));
         s.requested(due);
