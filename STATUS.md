@@ -18,8 +18,11 @@ never takes focus. Fully local, CPU-only. Next milestone: public release.
    `Grüße @ € { }`; colours/font with tokyonight; close window, dictate again).
 2. After p3-focus passes: default mode = pane. User decides: push (62 commits unpushed); make the repo public.
 3. Lost chunk: the end-of-slice close is both the one lost chunk and the
-   whole 0.35-point gain (flip run: revert = old text on all 181). Open: a
-   guard that keeps the gain; see experiments/2026-09-22-empty-chunk-flips.md.
+   whole 0.35-point gain. Open: a guard that keeps the gain (see
+   experiments/2026-09-22-empty-chunk-flips.md).
+3b. After packaging + p3-focus merge: pane size as columns x lines (like
+   Alacritty window.dimensions, clamped to the screen) and floating/tiled
+   option; tiled must never take focus on any WM (test per WM).
 4. Small: trailing-pad overlap cost unmeasured; beam + vocabulary untested.
 5. Before public: fresh-user walkthrough, audit + security review, README
    screenshot; history scan clean except a Handy transcripts.json (user checks).
