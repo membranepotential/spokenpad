@@ -44,8 +44,8 @@ failures.
 
 The references are not human. They come from
 [Gladia](https://gladia.io) through
-[`scripts/gladia-references.sh`](../scripts/gladia-references.sh), the one
-development tool that uploads these recordings anywhere, run by hand with the
+`scripts/gladia-references.sh`, a local script that is not in the
+repository and the one development tool that uploads these recordings anywhere, run by hand with the
 speaker's consent. Measured against the five hand-checked references above,
 that reference is itself **17.0% wrong**, almost entirely on technical
 vocabulary — so the corpus compares systems well and states absolute accuracy

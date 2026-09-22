@@ -1,7 +1,8 @@
 //! Open the dictation pane by hand, on whichever display you point it at.
 //!
-//! Nothing in the daemon does this yet; the example exists so the pane can be
-//! looked at, and so a screenshot of it can be written out and judged.
+//! The daemon opens the pane itself on a key press; this example opens one
+//! with no daemon, so the pane can be looked at and a screenshot of it
+//! written out and judged.
 //!
 //! ```sh
 //! # in your own session (the window will not take the focus)

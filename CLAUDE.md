@@ -104,9 +104,10 @@ those belongs in `src/shell/`.
 - `examples/eval.rs` (WER on the five committed clips),
   `examples/corpus.rs` (the whole local corpus through either decode path,
   with the counts WER hides: empty chunks, lost endings, chunk seams that
-  wrote a word twice), `examples/verify_native.rs` (JSON dump of segments and
-  progressive commits), `examples/pane.rs` (opens the pane on a given
-  display, floating or `--tiled`, and can write a screenshot).
+  wrote a word twice), `examples/pane.rs` (opens the pane on a given
+  display, floating or `--tiled`, and can write a screenshot),
+  `examples/screenshot.rs` (composes `docs/screenshot.png` headless). They
+  are development tools, not usage examples (`examples/README.md`).
 - `tests/harness/mod.rs` is the headless desktop the pane tests share (its own
   Xvfb above `:50`, its own i3, XTEST input that refuses any other display).
   `tests/pane_window.rs` proves the window never takes focus on i3, and
@@ -121,9 +122,10 @@ those belongs in `src/shell/`.
   `tests/pane_hidpi.rs` sets `Xft.dpi`
   and compares the pane's cells with a live Alacritty's (llvmpipe, private
   `HOME`).
-- `scripts/gladia-references.sh` (a development tool that **uploads the
-  recordings to Gladia** to build the frozen dataset in `eval-samples/local/`;
-  never run by the program). `eval-samples/README.md` is tracked and describes
+- `scripts/gladia-references.sh` is local and git-ignored: the author's
+  development tool that **uploads the recordings to Gladia** to build the
+  frozen dataset in `eval-samples/local/`; never run by the program, not in
+  the repository. `eval-samples/README.md` is tracked and describes
   both evaluation sets; the dataset carries its own git-ignored README. Models (`$XDG_DATA_HOME/spokenpad/models`, pinned
   sha256) come from `spokenpad fetch-models` or the first launch.
 - `packaging/aur/PKGBUILD` (the Arch package, built from a GitHub tag

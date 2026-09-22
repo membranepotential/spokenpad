@@ -238,10 +238,8 @@ Until 2026-09-21 a differential check compared exact segment bounds,
 settlement, transcripts, progressive commit offsets and the release remainder
 against the Python reference used during the port; it validated the port on
 all five evaluation WAVs and a 102.5 s simulated live passage, and is retired
-with that reference. Its Rust half remains as
-`cargo run --release --example verify_native -- <wav>...`, which prints the
-segments, transcripts and a simulated progressive passage as JSON for
-inspection by hand.
+with that reference. Its Rust half, `examples/verify_native.rs`, was removed
+on 2026-09-22: `examples/corpus.rs` counts what it showed by hand.
 
 The follow-up regression reproduced the invisible first preview and delayed
 scrolling on an attached 40×10 Neovim grid. It now checks visible first-preview

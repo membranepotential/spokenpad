@@ -2079,3 +2079,16 @@ nothing else the pointer does not do on purpose.
   focus-follows-mouse policies and sway were not run. On several monitors a
   pane opened around the pointer may leave its border on the neighbouring
   monitor, within reach.
+
+## Two development examples removed, the Gladia script untracked (2026-09-22)
+
+The user asked what `examples/` is for before the repository goes public.
+It holds development tools, not usage examples; `examples/README.md` now
+says so. Two were stale: `verify_native.rs` printed segments and commits for
+inspection by hand, which `corpus.rs` now counts, and `decode_probe.rs`
+served the beam-search experiment
+([2026-09-21](experiments/2026-09-21-beam-search-upstream-fix.md)), which
+shipped nothing; its experiment names the commit that holds it. Both are
+deleted. `scripts/gladia-references.sh`, which uploads the author's
+recordings to Gladia, is useful to the author alone: it is git-ignored and
+kept only in the author's checkout; the docs call it local.

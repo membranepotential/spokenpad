@@ -12,6 +12,10 @@ eval-samples/*.wav
 # recordings, and other local-only evaluation data.
 eval-samples/local/
 
+# The author's development tool that uploads recordings to Gladia for
+# reference transcripts (eval-samples/README.md); local only.
+scripts/gladia-references.sh
+
 # API keys for development tools (reference transcripts); never committed.
 .env
 

@@ -227,7 +227,4 @@ release through the real event loop and a real nvim, and a latched capture that
 runs through a pause long enough to settle, and a latch nobody ends: it stops
 on the silence rule, commits what was said exactly once, shows the notice, and
 closes its recovery WAV. Two ignored tests measure the
-memory and check the real Silero against the silence that was dropped. `examples/verify_native.rs` prints the
-segment bounds, settlement flags, commit offsets, raw text and final
-remainder of a simulated live passage as JSON, for inspection against the
-real models.
+memory and check the real Silero against the silence that was dropped.

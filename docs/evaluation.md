@@ -216,7 +216,7 @@ New recordings get a **new dataset version** (`--version`, a new `--out`
 directory) rather than being mixed into an old one, so numbers stay comparable
 across experiments; the dataset README says how.
 
-`scripts/gladia-references.sh` builds one by copying each wav in, hashing it,
+The author's local, untracked `scripts/gladia-references.sh` builds one by copying each wav in, hashing it,
 sending it to [Gladia](https://gladia.io) and keeping the transcript. The
 author's corpus of 2026-09-21 is 181 captures and 75 minutes:
 124 English, 38 German and 19 that nobody spoke in
