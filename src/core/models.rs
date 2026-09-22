@@ -170,7 +170,7 @@ mod tests {
     }
 
     #[test]
-    fn files_to_ensure_is_empty_for_a_custom_dir_or_family() {
+    fn files_to_ensure_is_empty_for_a_custom_model() {
         let asr = Asr {
             model_dir: "/somewhere/else".into(),
             ..Asr::default()

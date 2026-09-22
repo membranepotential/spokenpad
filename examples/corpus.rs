@@ -10,7 +10,7 @@
 //!
 //! Two paths, because they fail differently:
 //!
-//! * `live` drives [`Worker`] as `shell/daemon.rs` does -- a tick every
+//! * `live` drives [`Worker`] as `shell/daemon` does -- a tick every
 //!   `preview.interval_seconds` of audio over the audio since the committed offset,
 //!   bounded by `preview.max_seconds`, every settled chunk committed once, then
 //!   the release decoding only what is still held.
@@ -383,10 +383,7 @@ impl std::ops::AddAssign for Tally {
 /// deliberately no config key for it.
 ///
 /// With `padding` set, this pads here and asks the recognizer for `Bare`, which
-/// is what `shell::inference` does for a window it decodes in one piece. A
-/// Whisper window over 28 s is cut into pieces *inside* the recognizer, which
-/// pads each piece; padding out here puts the zeros after the last piece only.
-/// So leave `padding` unset when measuring Whisper.
+/// is what `shell::inference` does for a window it decodes in one piece.
 struct Probe<R> {
     inner: R,
     padding: Option<usize>,
@@ -453,7 +450,7 @@ fn engine(config: &Config, padding: Option<usize>) -> Result<Engine> {
 
 // -- the two paths ----------------------------------------------------------------
 
-/// Replays one capture through `shell/daemon.rs`'s own loop: a tick every
+/// Replays one capture through `shell/daemon`'s own loop: a tick every
 /// `tick` samples over the audio since the committed offset, bounded by
 /// `preview.max_seconds`, each settled chunk committed once, then the release
 /// decoding only the audio still held. Returns the committed texts in order.

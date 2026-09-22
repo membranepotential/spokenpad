@@ -462,9 +462,9 @@ pub struct Session {
 impl Session {
     /// `silence` is how long a latched capture may hear no speech before it
     /// ends itself. It belongs to the caller that knows whether anything can
-    /// report speech at all: with no VAD model, or with the progressive tick
-    /// off, the recognizer runs only at the release and there is no silence
-    /// to measure, so it is `None`.
+    /// report speech at all: until the speech model has loaded, a capture is
+    /// only recorded and there is no silence to measure, so the daemon passes
+    /// `None` here and the timeout later, through [`Session::configure`].
     pub fn new(enabled: bool, interval: Duration, silence: Option<Duration>) -> Self {
         Self {
             silence,

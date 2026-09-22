@@ -163,7 +163,7 @@ fn flock(file: &fs::File, operation: libc::c_int) -> io::Result<()> {
 
 /// Downloads the default model files this configuration would load and
 /// does not have yet (see [`files_to_ensure`]): nothing for a
-/// user-configured `model_dir`, `asr.family` or `vad.model`. Reports
+/// user-configured `asr.model_dir` or `vad.model`. Reports
 /// `(done, total)` bytes as it goes.
 ///
 /// Whether anything is missing is decided by file size alone, which reads no

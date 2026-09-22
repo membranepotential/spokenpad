@@ -241,9 +241,9 @@ fn end(started: Instant, released: Instant, cause: Cause) -> (State, Command) {
 }
 
 /// One transition. `silence` is how long a latched capture may hear no speech
-/// before it ends itself, or `None` where nothing can report speech: with no
-/// VAD model, or with the progressive tick off, the recognizer runs only at
-/// the release and [`Event::Speech`] never arrives.
+/// before it ends itself, or `None` where nothing can report speech: before
+/// the speech model has loaded, a capture is only recorded and
+/// [`Event::Speech`] never arrives.
 pub fn step(state: State, event: Event, silence: Option<Duration>) -> (State, Command) {
     use Command::Nothing;
     use Hold::*;

@@ -46,7 +46,15 @@ imperative shell, and `config.rs` sits at the root because both sides read it.
 | `shell/nvim/rpc.rs` | msgpack-RPC transport with absolute deadlines; pure codec | Unix socket |
 | `shell/wm.rs` | The pane's `no_focus` rule sent to sway over its IPC socket before each pane, one request per connection under a deadline; a Unix socket's peer credentials; short-lived helpers such as `notify-send`, bounded in time and output | IPC socket, subprocesses |
 | `shell/logging.rs` | Private 0600 diagnostic log, rotated at 1 MB | filesystem |
-| `shell/daemon.rs` | `run` (the shell) and `serve` (the event loop) | all of the above |
+| `shell/sync.rs` | One policy for a poisoned mutex, on the capture path and in the pane's shared state | none |
+| `shell/dirs.rs` | Every directory spokenpad creates is 0700; its own state directory is narrowed to that | filesystem |
+| `shell/daemon/mod.rs` | `run` (the shell: lock, control socket, signals, PortAudio, the model loader, and the config reload, which under socket activation takes the user manager's display) and `serve` (the event loop, one `Loop` method per step of a pass) | all of the above |
+| `shell/daemon/engine.rs` | The inference thread: builds the pipeline if it was handed a loader, then decodes each piece of work in order | internal channels |
+| `shell/daemon/editor.rs` | The editor thread: the dictation editor's connection, each piece of text to it or to the pending passage | internal channels |
+| `shell/daemon/capture.rs` | A capture released or discarded, and what the device reports in between | internal channels |
+| `shell/daemon/transcriptions.rs` | Every recording whose text is not all written yet, and the list the next start reads (`waiting.tsv`) | filesystem |
+| `shell/daemon/requests.rs` | The control requests, as the event loop reads them with their clock | internal channels |
+| `shell/daemon/lock.rs` | The per-user daemon lock (`flock` on `daemon.lock`), and the wait for it under socket activation | filesystem |
 
 The Neovim presentation code is embedded from `src/lua/spokenpad.lua` (one
 file: the buffer, the winbar indicator, the level meter, the preview extmark,
@@ -106,7 +114,7 @@ the WAV. Once the inference thread reports `Ready`, each queued WAV goes to it
 as `Work::Recording` and is decoded a `preview.max_seconds` window at a time
 through the same `Worker::tick` and `Worker::finish` a live capture uses; a
 recording's way through that is one value, `Transcription { stage: Stage }`
-in `shell/daemon.rs`. The
+in `shell/daemon/transcriptions.rs`. The
 speech model's state (`core::session::Recognition`) becomes a winbar notice
 that shows when it outranks the capture's own. A failed load is reported and
 retried at the next press; the daemon does not exit over it.
@@ -200,9 +208,9 @@ the table a capture is not forgotten is `Event::Speech`, which `Session` raises
 whenever the recognizer produced text — a settled commit or a live preview —
 and whenever the detector heard speech in the open tail (`Preview::heard`),
 so a long sentence that has not settled yet is speech too.
-With no VAD model, or with the progressive tick off, nothing produces text
-before the release, so the silence rule is off and the other two bound the
-capture. "No key down" is `last_press` older than `KEY_SETTLED`: auto-repeat
+A capture that began before the speech model had loaded is only recorded,
+so nothing reports speech for it and the silence rule is off; the other two
+bound it. "No key down" is `last_press` older than `KEY_SETTLED`: auto-repeat
 fires the *toggle* binding for a held Shift+key, so a latch being re-pressed
 is a held key and the length limit is what bounds it.
 

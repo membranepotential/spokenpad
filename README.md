@@ -294,8 +294,10 @@ dictation file as its own paragraph and saved after every utterance.
   provider.
 - **The microphone:** spokenpad records from the default input device, the
   one your sound server (PipeWire, PulseAudio) uses as its default source.
-  To use another, set `audio.device` in the config to words from its name,
-  such as `device = "USB"`: they are matched, case-insensitive and in order,
+  `spokenpad check` lists every input device with its host API and marks
+  the one the daemon opens; listing opens none of them. To use another, set
+  `audio.device` in the config to words from its name, such as
+  `device = "USB"`: they are matched, case-insensitive and in order,
   against PortAudio's device name and host API. The daemon picks it up after
   `systemctl --user restart spokenpad`. A capture that says "nearly silent"
   in the winbar is the usual sign of the wrong microphone.
@@ -549,7 +551,8 @@ spokenpad cancel                  discard the capture being recorded
 spokenpad editor                  open the dictation editor in this terminal
 spokenpad transcribe WAV [--out PATH] [--from SECONDS]
                                   decode a recording, from SECONDS in
-spokenpad check                   validate the config and load the models
+spokenpad check                   validate the config, load the models and
+                                  list the input devices
 spokenpad fetch-models [--dir DIR]
                                   download the default models ahead of time
 ```
