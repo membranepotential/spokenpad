@@ -2565,3 +2565,21 @@ device PortAudio sees, with its host API, marks the one the daemon opens for
 matches none or several. It initialises PortAudio to list them and opens no
 stream. The marking is `shell::audio::listing`, a pure function over the
 same `match_device_query` the daemon uses, so the two cannot disagree.
+
+## A failed release decode leaves the capture to the next start (2026-09-23)
+
+A live capture whose release decode failed, for example a recognizer error on
+the second of three segments, was taken off the list of recordings whose
+text is not all written. Only "decode failed" reached the log: no notice, no
+line in `waiting.tsv`, and its WAV was not kept from pruning, although each
+segment commits at its own speech end and the list knew exactly how far the
+text reached. A failed transcription of a recording already went through
+the retry path.
+
+- Chosen: a failed release decode is treated like a failed transcription
+  that got further than the attempt before, since it was the first attempt:
+  the capture is kept from pruning, listed from where its text reaches, and
+  the window says "recording partly transcribed; the next start tries the
+  rest again". If the next start fails at the same point, the notice gives
+  the `spokenpad transcribe --from` that recovers it, as for any recording.
+- Test: `a_capture_whose_release_decode_fails_is_left_to_the_next_start`.

@@ -194,10 +194,16 @@ struct Counting {
     words: bool,
     delay: Duration,
     calls: Arc<Mutex<Vec<usize>>>,
+    /// Every decode fails while this is set, as a recognizer error would.
+    failing: Arc<AtomicBool>,
 }
 
 impl Recognizer for Counting {
     fn transcribe(&mut self, samples: &[f32], _: TrailingSilence) -> Result<String> {
+        anyhow::ensure!(
+            !self.failing.load(Ordering::Acquire),
+            "the recognizer failed"
+        );
         let loud = loud_samples(samples);
         lock(&self.calls).push(loud);
         thread::sleep(self.delay);
@@ -285,6 +291,8 @@ struct Harness {
     control: Option<ControlServer>,
     stopping: Arc<AtomicBool>,
     calls: Arc<Mutex<Vec<usize>>>,
+    /// Makes every decode fail while set.
+    failing: Arc<AtomicBool>,
     socket: PathBuf,
     dictation: PathBuf,
     recordings: PathBuf,
@@ -397,6 +405,7 @@ impl Harness {
         config.validate().expect("harness config is valid");
 
         let calls = Arc::new(Mutex::new(Vec::new()));
+        let failing = Arc::new(AtomicBool::new(false));
         let microphone = FakeMicrophone::default();
         let capture = AudioCapture::with_backend(
             microphone.clone(),
@@ -405,12 +414,14 @@ impl Harness {
         );
         let build = {
             let (words, delay, calls) = (settings.words, settings.delay, Arc::clone(&calls));
+            let failing = Arc::clone(&failing);
             let (vad, chunk) = (settings.vad.clone(), settings.chunk);
             move || Pipeline {
                 recognizer: Counting {
                     words,
                     delay,
                     calls: Arc::clone(&calls),
+                    failing: Arc::clone(&failing),
                 },
                 // Neither: one open window over whatever holds speech, which
                 // never settles, so the release decodes it.
@@ -480,6 +491,7 @@ impl Harness {
             control,
             stopping,
             calls,
+            failing,
             socket,
             dictation,
             recordings,
@@ -1947,6 +1959,59 @@ fn a_capture_held_at_the_stop_is_transcribed_at_the_next_start() {
     h.finish();
 }
 
+/// A live capture whose release decode fails is not dropped: the window
+/// says so, the recording stays listed from where its text reaches, and the
+/// next start transcribes the rest, every sample once across the two runs.
+#[test]
+fn a_capture_whose_release_decode_fails_is_left_to_the_next_start() {
+    if !nvim_available() {
+        return;
+    }
+    let settings = || Settings {
+        vad: Some(brisk_vad()),
+        words: false,
+        ..Settings::default()
+    };
+    let h = Harness::start(settings());
+    let list = h.recordings.join("waiting.tsv");
+    h.press(true);
+    h.say(&tone(1.5));
+    wait_until("a chunk is committed while the latch runs", || {
+        dictated(&h) > 0
+    });
+    // From here on every decode fails: the ticks commit nothing more, and
+    // the release decode of the tail fails.
+    h.failing.store(true, Ordering::Release);
+    h.say(&tone(1.0));
+    h.press_only(true);
+    h.release_for_good();
+    wait_until("the window says it was partly transcribed", || {
+        h.indicator("notice")
+            .contains("recording partly transcribed")
+    });
+    let detail = h.indicator("notice_detail");
+    assert!(
+        detail.contains("the next start tries the rest again"),
+        "{detail}"
+    );
+    let listed = fs::read_to_string(&list).expect("listed for the next start");
+    let through: usize = listed
+        .split('\t')
+        .next()
+        .and_then(|frames| frames.parse().ok())
+        .unwrap_or_else(|| panic!("{listed}"));
+    assert!(through > 0, "from where its text reaches: {listed}");
+    let loud = loud_samples(&h.recovery_wav().0);
+    assert!(dictated(&h) < loud, "the tail is not written yet");
+
+    let h = h.restart(settings());
+    wait_until("the rest is transcribed", || dictated(&h) == loud);
+    wait_until("the list goes once nothing is left", || !list.exists());
+    thread::sleep(Duration::from_millis(300));
+    assert_eq!(dictated(&h), loud, "nothing is written twice");
+    h.finish();
+}
+
 /// What every dictation file of `h` counts, summed.
 fn dictated(h: &Harness) -> usize {
     fs::read_dir(&h.dictation)
@@ -2275,6 +2340,7 @@ fn replay_into_capture(minutes: usize, dropping: bool) -> usize {
             words: false,
             delay: Duration::ZERO,
             calls: Arc::new(Mutex::new(Vec::new())),
+            failing: Arc::new(AtomicBool::new(false)),
         },
         segmenter: Chunker::Speech(Vad::default()),
     });

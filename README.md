@@ -352,6 +352,8 @@ caught up. The log always has the full sentence and paths.
   when the daemon stops (a restart, an upgrade, a logout), or whose last text
   is not written yet, is listed the same way, and the next start transcribes
   the rest of it from where its text reached. A capture you cancel is not.
+  Neither is one whose last decode fails: the winbar says "recording partly
+  transcribed", and the next start tries the rest again.
 - **A model that cannot be had does not stop dictation.** Offline on the
   first run, a failed download, or a missing configured `asr.model_dir`: the
   winbar says "no speech model" and why, the recordings are kept, and the

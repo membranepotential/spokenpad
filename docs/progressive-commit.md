@@ -212,7 +212,10 @@ every capture with a recovery WAV is on the daemon's list of recordings whose
 text is not all written (`Transcription`, in `shell/daemon/transcriptions.rs`, with a `Stage`:
 capturing, finishing its tail, kept until the model is ready, sent to the
 engine, or left to retry). A user's cancel takes it off; its last `Finished`
-does too. What is still on the list at the stop — a capture held then, which
+does too, unless that decode failed: a release decode that fails leaves the
+capture to retry, kept from pruning and listed from where its text reaches,
+with the "recording partly transcribed" notice, since this daemon's attempt
+was the first. What is still on the list at the stop — a capture held then, which
 the stop cancels, or one whose release decode did not end within the
 shutdown's wait for the engine — goes to `waiting.tsv` with how far its text
 reaches, and the next start transcribes the rest, as it does a recording made

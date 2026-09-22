@@ -38,7 +38,8 @@ pub(super) enum Stage {
     /// Sent to the engine as a recording.
     Sent,
     /// Its transcription failed after getting further than the attempt
-    /// before; the next start tries the rest again.
+    /// before, or its release decode failed; the next start tries the rest
+    /// again.
     Retry,
 }
 
@@ -107,9 +108,9 @@ pub(super) fn persist<'a, B: InputBackend>(
 }
 
 /// A decode of utterance `id` ended, with `error` if it failed: a live
-/// capture's tail, whose text is all written now, or a recording's
-/// transcription, which [`settle`] judges. True when the list the next start
-/// reads changed.
+/// capture's tail, whose text is all written now unless it failed, or a
+/// recording's transcription, which [`settle`] judges. True when the list
+/// the next start reads changed.
 pub(super) fn finished<B: InputBackend>(
     id: UtteranceId,
     error: Option<&anyhow::Error>,
@@ -130,10 +131,19 @@ pub(super) fn finished<B: InputBackend>(
             }
             true
         }
-        Stage::Finishing => {
-            transcriptions.remove(id);
-            false
-        }
+        Stage::Finishing => match error {
+            None => {
+                transcriptions.remove(id);
+                false
+            }
+            // This daemon's only attempt at it: the next start transcribes
+            // the rest from its recording, from where its text reaches.
+            Some(_) => {
+                retry_at_next_start(recording, rate, capture, session);
+                recording.stage = Stage::Retry;
+                true
+            }
+        },
         Stage::Capturing | Stage::Kept | Stage::Retry => false,
     }
 }
@@ -173,15 +183,7 @@ fn settle<B: InputBackend>(
             false
         }
         Some(_) if recording.through > recording.from => {
-            log::error!(
-                "{} was transcribed through {seconds:.2}s only; the next start tries the rest again",
-                path.display()
-            );
-            session.notify(Notice::RecordingPartlyTranscribed {
-                path: path.clone(),
-                through: Duration::from_secs_f64(seconds),
-                rest: Rest::NextStart,
-            });
+            retry_at_next_start(recording, rate, capture, session);
             true
         }
         // It failed where it failed before: trying again would too. Kept
@@ -200,6 +202,28 @@ fn settle<B: InputBackend>(
             false
         }
     }
+}
+
+/// Leaves the rest of a recording whose transcription failed to the next
+/// start, from where its text reaches, and says so. Kept from pruning until
+/// then: it is the only copy of that rest.
+fn retry_at_next_start<B: InputBackend>(
+    recording: &Transcription,
+    rate: u32,
+    capture: &AudioCapture<B>,
+    session: &mut Session,
+) {
+    let (path, seconds) = (&recording.path, recording.through.seconds(rate));
+    capture.keep_recording(path);
+    log::error!(
+        "{} was transcribed through {seconds:.2}s only; the next start tries the rest again",
+        path.display()
+    );
+    session.notify(Notice::RecordingPartlyTranscribed {
+        path: path.clone(),
+        through: Duration::from_secs_f64(seconds),
+        rest: Rest::NextStart,
+    });
 }
 
 /// Releases a capture made before the speech model was ready. There is

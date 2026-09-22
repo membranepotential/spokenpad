@@ -56,8 +56,9 @@ pub enum Notice {
     /// A recording kept to be transcribed is shorter than the text already
     /// written from it: the file was cut or replaced, and the rest is gone.
     RecordingShortened(PathBuf),
-    /// The transcription of a recording failed after its text through
-    /// `through` was written; `rest` says who transcribes the rest.
+    /// The transcription of a recording, or the release decode of a live
+    /// capture, failed after its text through `through` was written; `rest`
+    /// says who transcribes the rest.
     RecordingPartlyTranscribed {
         path: PathBuf,
         through: Duration,
@@ -106,7 +107,8 @@ pub enum Recognition {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Rest {
     /// The next start tries it again, from where the text reaches: this
-    /// attempt got further than the last.
+    /// attempt got further than the last, or was a live capture's release
+    /// decode, the first attempt at it.
     NextStart,
     /// The user, with `spokenpad transcribe --from`: it failed where it
     /// failed before.
