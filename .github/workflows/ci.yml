@@ -2,8 +2,10 @@
 #
 # Runs in an Arch Linux container on purpose: spokenpad ships as an Arch
 # package, and its tests drive the real programs it runs against -- nvim, a
-# headless Xvfb with its own i3, Alacritty for the HiDPI comparison, and
-# systemd-socket-activate -- in the versions Arch ships.
+# headless Xvfb with its own i3, Alacritty for the HiDPI comparison, the
+# window managers the pane's focus is checked on (Openbox, sway and KWin,
+# the last two headless with Xwayland), and systemd-socket-activate -- in
+# the versions Arch ships.
 #
 # No SPOKENPAD_ALLOW_MISSING_* variable is set: a test whose tools are
 # missing fails instead of skipping, so a skip can never pass for a pass.
@@ -34,6 +36,7 @@ jobs:
           libxcb libxkbcommon-x11 fontconfig ttf-dejavu
           xorg-server-xvfb i3-wm xorg-setxkbmap xclip
           alacritty mesa
+          openbox sway kwin xorg-xwayland dbus
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
