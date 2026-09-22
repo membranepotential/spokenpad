@@ -413,7 +413,7 @@ cannot pass silently. Keys are not configured here; see
 | `nvim.terminal` | `"alacritty"` | managed mode only: the terminal for that window |
 | `nvim.font_family`, `nvim.font_size` | `"monospace"`, `11.25` | pane mode only: the font it draws with, sized in points exactly as Alacritty's `font.size` (scaled by the X resource `Xft.dpi`), so the same numbers give the same cells — provided `Xft.dpi` is set (`xrdb` or `~/.Xresources`): the pane does not read an XSETTINGS daemon's `Xft/DPI` or RandR's physical screen size, which Alacritty falls back to, and uses 96 dpi instead |
 | `nvim.pane_layout` | `"floating"` | pane mode only: `"tiled"` has i3 and sway tile it beside your window instead; allowed only where proven unfocused (i3, sway, Openbox, KWin), floating elsewhere |
-| `nvim.pane_dimensions` | `{ columns = 72, lines = 20 }` | pane mode only: its size in cells, as Alacritty's `window.dimensions`, cut to what fits on the monitor; about a third of a 1080p screen at the default font |
+| `nvim.pane_dimensions` | `{ columns = 72, lines = 20 }` | pane mode only: its size in cells, as Alacritty's `window.dimensions`, cut to what fits on the monitor; about a third of a 1080p screen at the default font. The window adds a fixed margin of 4 pixels at 96 dpi on every side |
 | `nvim.init` | your Neovim config | `"bundled"` opens the window about 3× faster; pair it with `nvim.colorscheme` |
 | `nvim.copy_to_clipboard` | `false` | copy the whole buffer to `+` after every release |
 

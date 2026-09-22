@@ -162,15 +162,20 @@ fn the_pane_measures_its_cells_like_alacritty_at_every_resolution() {
                 path.display()
             );
             let window = geometry(&server, pane.window().id());
-            ((metrics.width, metrics.height), window)
+            ((metrics.width, metrics.height, pane.padding()), window)
         };
+        let padding = (4.0 * case.dpi / 96.0).floor() as u32;
+        assert_eq!(
+            pane_cells.2, padding,
+            "{label}: the margin is not four pixels at 96 dpi, scaled"
+        );
         assert_eq!(
             pane_window,
             (
-                pane_cells.0 * u32::from(COLUMNS),
-                pane_cells.1 * u32::from(ROWS)
+                pane_cells.0 * u32::from(COLUMNS) + 2 * padding,
+                pane_cells.1 * u32::from(ROWS) + 2 * padding
             ),
-            "{label}: the pane's window is not a whole grid of its cells"
+            "{label}: the pane's window is not a whole grid of its cells and its margin"
         );
 
         // Alacritty, with the same font and grid, on the same server.
@@ -184,8 +189,8 @@ fn the_pane_measures_its_cells_like_alacritty_at_every_resolution() {
         );
         println!(
             "{label}: alacritty cells {}x{}",
-            alacritty_window.0 / u32::from(COLUMNS),
-            alacritty_window.1 / u32::from(ROWS),
+            (alacritty_window.0 - 2 * padding) / u32::from(COLUMNS),
+            (alacritty_window.1 - 2 * padding) / u32::from(ROWS),
         );
         assert_eq!(
             pane_window, alacritty_window,
@@ -283,7 +288,7 @@ fn alacritty(
         format!(
             "[window]\n\
              dimensions = {{ columns = {COLUMNS}, lines = {ROWS} }}\n\
-             padding = {{ x = 0, y = 0 }}\n\
+             padding = {{ x = 4, y = 4 }}\n\
              [font]\n\
              size = {}\n\
              normal = {{ family = \"{family}\" }}\n",

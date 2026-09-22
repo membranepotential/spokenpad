@@ -1611,3 +1611,21 @@ A consequence to know: while a command is half typed, the editor thread
 waits, and a daemon stopped then runs out its 3 s grace with the text still
 queued, and the pane goes with the process. The 4 s of deadlines before this
 ran it out the same way.
+
+## The pane keeps a margin around its grid (2026-09-22)
+
+In the live check the grid ran into the window's edges and the user found
+it cramped, asking for "half an em or maybe four pixels". The pane now keeps
+4 pixels at 96 dpi on every side, scaled by `Xft.dpi` / 96 and rounded down
+(8 at the user's 192 dpi), in Neovim's default background, outside the grid.
+The window is the grid plus the margin; the margin comes off the monitor
+before the grid is fitted to it; clicks are mapped through it.
+
+- Chosen: 4 logical pixels rather than half an em. At the default font half
+  an em is 3 to 4 pixels at 96 dpi anyway, and a margin in pixels is how
+  Alacritty's `window.padding` works, so the pane and a terminal with
+  `padding = { x = 4, y = 4 }` stay the same size (`tests/pane_hidpi.rs`).
+- Chosen: the rounding Alacritty uses, down (`floor`), so the two agree at
+  every resolution, not only at whole multiples of 96 dpi.
+- Rejected: a setting. One fixed value was asked for, and a setting with one
+  user is a choice nobody has to make.

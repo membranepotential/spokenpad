@@ -405,9 +405,12 @@ window_fraction = 0.33
 
 # Pane mode only: the pane's size in character cells, as Alacritty's
 # `window.dimensions`. A grid larger than the monitor under the pointer is cut
-# to as many whole cells as fit. 72x20 at the default font is 648x360 pixels at
-# 96 dpi, about a third of a 1920x1080 screen each way. Its top-left corner
-# goes to the pointer, as for the managed window above.
+# to as many whole cells as fit. The window adds a fixed margin of 4 pixels at
+# 96 dpi on every side (8 at 192 dpi), in the editor's background colour, as
+# Alacritty's `window.padding = { x = 4, y = 4 }` would. 72x20 at the default
+# font is 656x368 pixels at 96 dpi, about a third of a 1920x1080 screen each
+# way. Its top-left corner goes to the pointer, as for the managed window
+# above.
 pane_dimensions = { columns = 72, lines = 20 }
 
 # Pane mode only: "floating" (the default) opens the pane above your windows

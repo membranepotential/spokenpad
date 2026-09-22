@@ -349,8 +349,8 @@ fn the_pane_draws_what_neovim_draws() {
     let smaller = Rect {
         x: rect.x,
         y: rect.y,
-        width: u32::from(COLUMNS - 20) * metrics.width,
-        height: u32::from(ROWS - 4) * metrics.height,
+        width: u32::from(COLUMNS - 20) * metrics.width + 2 * pane.padding(),
+        height: u32::from(ROWS - 4) * metrics.height + 2 * pane.padding(),
     };
     pane.window().place(smaller).expect("resize the pane");
     let size = wait_for(PATIENCE, "the pane to follow the new window size", || {
@@ -543,18 +543,123 @@ fn the_winbar_background_is_continuous_after_a_stop() {
         "a winbar cell is not on the winbar's background: {backgrounds:06x?}"
     );
     // And as drawn: the top pixel row of the winbar, which no glyph in it
-    // reaches, is the winbar's colour from edge to edge.
+    // reaches, is the winbar's colour from one margin to the other.
     let (pixels, width, _) = pane.framebuffer();
-    let top = &pixels[..usize::from(width)];
+    let padding = pane.padding() as usize;
+    let columns = usize::from(pane.size().0) * pane.metrics().width as usize;
+    let row = padding * usize::from(width);
+    let top = &pixels[row + padding..row + padding + columns];
     let gaps: Vec<usize> = top
         .iter()
         .enumerate()
         .filter(|(_, pixel)| **pixel != WINBAR)
-        .map(|(x, _)| x)
+        .map(|(x, _)| padding + x)
         .collect();
     assert!(
         gaps.is_empty(),
         "the winbar is not {WINBAR:06x} at x = {gaps:?}"
+    );
+}
+
+/// The grid sits inside a margin of four pixels at 96 dpi. The margin takes
+/// Neovim's default background and follows it when it changes, and a click
+/// lands on the cell under the pointer, or on the nearest cell when it is in
+/// the margin.
+#[test]
+fn the_grid_sits_in_a_margin_of_the_default_background() {
+    if !harness::tools_or_skip(&["Xvfb", "nvim", "fc-match"]) {
+        return;
+    }
+    const BACKGROUND: u32 = 0x203040;
+    let mut server = XServer::start();
+    // Said, not assumed: with no `RESOURCE_MANAGER` the pane reads
+    // `~/.Xresources`, which may name another resolution.
+    server.set_resources("Xft.dpi:\t96\n");
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let config = dictation_config(directory.path());
+    let file = config.dictation_dir.join("dictation-2026-09-22-000002.md");
+    std::fs::write(&file, "").expect("create the dictation file");
+    let mut pane = pane_on(&server, &config, &file);
+    let padding = pane.padding();
+    assert_eq!(padding, 4, "four pixels at 96 dpi");
+    call(
+        &mut pane,
+        "nvim_exec_lua",
+        vec![
+            Value::from(format!(
+                "vim.api.nvim_buf_set_lines(0, 0, -1, false, {{ 'eins', 'zwei', 'drei drei drei' }})\n\
+                 vim.api.nvim_set_hl(0, 'Normal', {{ bg = {BACKGROUND} }})"
+            )),
+            Value::Array(Vec::new()),
+        ],
+        PATIENCE,
+    );
+    wait_for(PATIENCE, "the new default background", || {
+        let _ = pane.step(Duration::from_millis(50));
+        (pane.screen().defaults().background.0 == BACKGROUND).then_some(())
+    });
+    let _ = pane.step(Duration::from_millis(200));
+    shoot(&pane, "pane-margin.png");
+
+    let (pixels, width, height) = pane.framebuffer();
+    let (width, height) = (u32::from(width), u32::from(height));
+    let metrics = pane.metrics();
+    let (columns, rows) = pane.size();
+    assert_eq!(
+        (width, height),
+        (
+            u32::from(columns) * metrics.width + 2 * padding,
+            u32::from(rows) * metrics.height + 2 * padding
+        ),
+        "the window is the grid and its margin"
+    );
+    let in_margin = |x: u32, y: u32| {
+        x < padding || y < padding || x >= width - padding || y >= height - padding
+    };
+    let wrong: Vec<(u32, u32)> = (0..height)
+        .flat_map(|y| (0..width).map(move |x| (x, y)))
+        .filter(|&(x, y)| in_margin(x, y) && pixels[(y * width + x) as usize] != BACKGROUND)
+        .collect();
+    assert!(
+        wrong.is_empty(),
+        "{} margin pixels are not the default background, the first at {:?}",
+        wrong.len(),
+        wrong.first()
+    );
+
+    let rect = pane.window().geometry().expect("the pane's geometry");
+    let cursor = |pane: &mut Pane| {
+        let value = call(pane, "nvim_win_get_cursor", vec![Value::from(0)], PATIENCE);
+        let parts = value.as_array().expect("a position").clone();
+        (
+            parts[0].as_u64().expect("a line"),
+            parts[1].as_u64().expect("a column"),
+        )
+    };
+    let mut click_at = |pane: &mut Pane, x: u32, y: u32| {
+        click(
+            &mut server,
+            i16::try_from(rect.x + x as i32).expect("on screen"),
+            i16::try_from(rect.y + y as i32).expect("on screen"),
+        );
+        let _ = pane.step(Duration::from_millis(300));
+        let _ = pane.step(Duration::from_millis(100));
+        cursor(pane)
+    };
+    // Near the bottom-right corner of the third row's sixth cell: without
+    // the margin taken off, this would be the fourth row's seventh.
+    let inside = click_at(
+        &mut pane,
+        padding + 6 * metrics.width - padding / 2,
+        padding + 3 * metrics.height - padding / 2,
+    );
+    assert_eq!(inside, (3, 5), "a click in a cell lands on that cell");
+    // The top-left corner of the margin, just outside the first cell.
+    let corner = click_at(&mut pane, padding / 2, padding / 2);
+    assert_eq!(
+        corner,
+        (1, 0),
+        "a click in the margin lands on the nearest cell"
     );
 }
 
@@ -602,9 +707,10 @@ fn the_pane_is_sized_in_cells_and_cut_to_the_monitor() {
         pane.show().expect("map the pane");
         sleep(SETTLE);
         let metrics = pane.metrics();
+        let padding = pane.padding();
         let (width, height) = (
-            monitor.width / metrics.width,
-            monitor.height / metrics.height,
+            (monitor.width - 2 * padding) / metrics.width,
+            (monitor.height - 2 * padding) / metrics.height,
         );
         let expected = (
             columns.min(u16::try_from(width).unwrap()),
@@ -624,8 +730,8 @@ fn the_pane_is_sized_in_cells_and_cut_to_the_monitor() {
         assert_eq!(
             (rect.width, rect.height),
             (
-                u32::from(expected.0) * metrics.width,
-                u32::from(expected.1) * metrics.height
+                u32::from(expected.0) * metrics.width + 2 * padding,
+                u32::from(expected.1) * metrics.height + 2 * padding
             )
         );
         assert!(
@@ -729,11 +835,13 @@ vim.api.nvim_win_set_cursor(0, { 1, 0 })
 /// background, which is how "was anything actually drawn here?" is asked.
 fn painted_pixels(pane: &Pane, columns: std::ops::Range<u32>) -> usize {
     let metrics = pane.metrics();
+    let padding = pane.padding();
     let background = pane.screen().defaults().background.0;
     let (pixels, width, _) = pane.framebuffer();
-    (0..metrics.height)
+    (padding..padding + metrics.height)
         .flat_map(|y| {
-            (columns.start * metrics.width..columns.end * metrics.width).map(move |x| (x, y))
+            (padding + columns.start * metrics.width..padding + columns.end * metrics.width)
+                .map(move |x| (x, y))
         })
         .filter(|(x, y)| pixels[(y * u32::from(width) + x) as usize] != background)
         .count()

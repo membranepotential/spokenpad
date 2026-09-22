@@ -85,6 +85,16 @@ impl Dpi {
     pub fn get(self) -> f64 {
         self.0
     }
+
+    /// The blank margin the pane keeps around its grid on every side, in
+    /// pixels: four at 96 dpi, scaled by `Xft.dpi` / 96 and rounded down, as
+    /// Alacritty scales its `window.padding`. Fixed, not a setting: the grid
+    /// touching the window's edge looked cramped, and four logical pixels is
+    /// the small margin asked for.
+    pub fn padding(self) -> u32 {
+        const LOGICAL: f64 = 4.0;
+        (LOGICAL * self.0 / Self::DEFAULT.0).floor() as u32
+    }
 }
 
 impl fmt::Display for Dpi {
@@ -458,6 +468,16 @@ pub fn cell_metrics(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_padding_is_four_logical_pixels_rounded_down() {
+        let padding = |dpi: f64| Dpi::new(dpi).expect("a resolution").padding();
+        assert_eq!(padding(96.0), 4);
+        assert_eq!(padding(144.0), 6);
+        assert_eq!(padding(192.0), 8);
+        assert_eq!(padding(108.0), 4);
+        assert_eq!(padding(12.0), 0);
+    }
 
     /// `fsSelection`, the typographic ascender, descender and gap, and the
     /// strikeout size and position.

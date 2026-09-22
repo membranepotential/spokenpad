@@ -164,18 +164,22 @@ impl Pane {
         let display = x11::Display::connect(&options.display)?;
         let font = Font::load(&options.family, options.size, display.dpi())?;
         let metrics = font.metrics();
-        // A window is a whole number of cells: the pane draws cells, and a
-        // partial column at the right edge is a strip nothing ever paints.
-        // On a monitor, no more cells than fit on it.
+        let padding = display.dpi().padding();
+        // A window is a whole number of cells inside a fixed margin: the pane
+        // draws cells, and a partial column at the right edge is a strip that
+        // only the margin's colour would ever fill. On a monitor, no more
+        // cells than fit on it with the margin.
         let dimensions = match &options.target {
-            Some(target) => options
-                .dimensions
-                .fit(target.monitor, (metrics.width, metrics.height)),
+            Some(target) => {
+                options
+                    .dimensions
+                    .fit(target.monitor, (metrics.width, metrics.height), padding)
+            }
             None => options.dimensions,
         };
         let (columns, rows) = (dimensions.columns.get(), dimensions.lines.get());
-        let width = metrics.width * u32::from(columns);
-        let height = metrics.height * u32::from(rows);
+        let width = metrics.width * u32::from(columns) + 2 * padding;
+        let height = metrics.height * u32::from(rows) + 2 * padding;
         // X11 counts a window's size in 16 bits, so a grid that would not fit
         // on any screen has to be refused rather than silently wrapped.
         let (width, height) = match (u16::try_from(width), u16::try_from(height)) {
@@ -221,7 +225,7 @@ impl Pane {
             events,
             watcher: None,
             stopping,
-            canvas: Canvas::new(width, height, metrics),
+            canvas: Canvas::new(width, height, metrics, padding),
             columns,
             rows,
             origin: placed.map(|rect| (rect.x, rect.y)),
@@ -284,6 +288,11 @@ impl Pane {
 
     pub fn metrics(&self) -> CellMetrics {
         self.metrics
+    }
+
+    /// The blank margin around the grid, in pixels on each side.
+    pub fn padding(&self) -> u32 {
+        self.canvas.padding
     }
 
     pub fn size(&self) -> (u16, u16) {
@@ -445,8 +454,9 @@ impl Pane {
             return Ok(());
         }
         self.canvas.resize(width, height);
-        let columns = (u32::from(width) / self.metrics.width).max(1) as u16;
-        let rows = (u32::from(height) / self.metrics.height).max(1) as u16;
+        let inside = |extent: u16| u32::from(extent).saturating_sub(2 * self.canvas.padding);
+        let columns = (inside(width) / self.metrics.width).max(1) as u16;
+        let rows = (inside(height) / self.metrics.height).max(1) as u16;
         if (columns, rows) != (self.columns, self.rows) {
             self.columns = columns;
             self.rows = rows;
@@ -491,10 +501,12 @@ impl Pane {
             .input_mouse(button, "drag", &modifiers, row, column)
     }
 
-    /// Which cell a window coordinate is in, clamped to the grid.
+    /// Which cell a window coordinate is in, clamped to the grid: a click in
+    /// the margin goes to the cell nearest it.
     fn cell_at(&self, x: i16, y: i16) -> (u16, u16) {
-        let column = (x.max(0) as u32 / self.metrics.width) as u16;
-        let row = (y.max(0) as u32 / self.metrics.height) as u16;
+        let inside = |at: i16| (at.max(0) as u32).saturating_sub(self.canvas.padding);
+        let column = (inside(x) / self.metrics.width).min(u32::from(u16::MAX)) as u16;
+        let row = (inside(y) / self.metrics.height).min(u32::from(u16::MAX)) as u16;
         (
             row.min(self.rows.saturating_sub(1)),
             column.min(self.columns.saturating_sub(1)),
@@ -535,15 +547,29 @@ impl Pane {
             self.damage(Damage::rows(first, last));
             self.window.wake()?;
         }
+        // The margin is Neovim's default background, like a terminal's
+        // padding. Each row's band already covers its left and right margin
+        // (`paint_row`); the strips above the first row and below the last
+        // are painted with them. Below the last is also whatever a window
+        // that is not a whole number of cells tall has left over.
+        let background = self.screen.defaults().background;
         let height = usize::from(self.canvas.height);
-        let top = usize::from(first) * self.metrics.height as usize;
-        let mut bottom = ((usize::from(last) + 1) * self.metrics.height as usize).min(height);
+        let padding = self.canvas.padding as usize;
+        let cell = self.metrics.height as usize;
+        let mut top = padding + usize::from(first) * cell;
+        let mut bottom = (padding + (usize::from(last) + 1) * cell).min(height);
+        if first == 0 {
+            self.canvas.fill(
+                0,
+                0,
+                u32::from(self.canvas.width),
+                padding as u32,
+                background,
+            );
+            top = 0;
+        }
         if last == self.rows.saturating_sub(1) {
-            // A window is rarely a whole number of cells tall. The strip under
-            // the last row belongs to no cell, so nothing would ever paint it
-            // and it would stay black under a light colourscheme.
-            let background = self.screen.defaults().background;
-            let leftover = u32::from(self.canvas.height) - bottom as u32;
+            let leftover = height.saturating_sub(bottom) as u32;
             self.canvas.fill(
                 0,
                 bottom as u32,
@@ -578,7 +604,7 @@ impl Pane {
             ..
         } = self;
         let metrics = canvas.metrics;
-        let top = u32::from(row) * metrics.height;
+        let (origin, top) = canvas.origin(row, 0);
         canvas.fill(
             0,
             top,
@@ -601,7 +627,7 @@ impl Pane {
                 _ => 1,
             };
             let style = screen.style(cell.highlight);
-            let left = column as u32 * metrics.width;
+            let left = origin + column as u32 * metrics.width;
             canvas.fill(
                 left,
                 top,
@@ -650,8 +676,7 @@ fn paint_cursor(
         None => (under.background, under.foreground),
     };
     let metrics = canvas.metrics;
-    let left = u32::from(position.column) * metrics.width;
-    let top = u32::from(row) * metrics.height;
+    let (left, top) = canvas.origin(row, position.column);
     let fraction = |whole: u32| (whole * u32::from(style.percentage) / 100).max(1);
     if !focused {
         canvas.outline(left, top, metrics.width, metrics.height, background);
@@ -701,16 +726,27 @@ struct Canvas {
     width: u16,
     height: u16,
     metrics: CellMetrics,
+    /// The blank margin around the grid, in pixels on each side.
+    padding: u32,
 }
 
 impl Canvas {
-    fn new(width: u16, height: u16, metrics: CellMetrics) -> Self {
+    fn new(width: u16, height: u16, metrics: CellMetrics, padding: u32) -> Self {
         Self {
             pixels: vec![0; usize::from(width) * usize::from(height)],
             width,
             height,
             metrics,
+            padding,
         }
+    }
+
+    /// The top-left pixel of a cell.
+    fn origin(&self, row: u16, column: u16) -> (u32, u32) {
+        (
+            self.padding + u32::from(column) * self.metrics.width,
+            self.padding + u32::from(row) * self.metrics.height,
+        )
     }
 
     fn resize(&mut self, width: u16, height: u16) {

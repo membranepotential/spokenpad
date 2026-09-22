@@ -376,14 +376,27 @@ sway an empty workspace refuses both layouts alike.
 Alacritty's `window.dimensions` — on the monitor under the pointer, with its
 top-left corner at the pointer, clamped fully on-screen. A grid larger than
 the monitor is cut to as many whole cells as fit (`Dimensions::fit`), and
-Neovim is told the grid the window has. The default is 648x360 pixels at the
-default 11.25 pt and 96 dpi: a third of a 1920x1080 screen each way, what the
-pane was before it was sized in cells; at 192 dpi it is the same third of a
-3840x2160 screen. The monitor and corner follow the same rule managed mode
-uses, and the same pure functions in `core/geometry.rs` decide them. The
-monitors come from RandR and the pointer from the X server itself, rather
-than from a window manager's IPC socket, so this works under a window manager
-spokenpad has never heard of.
+Neovim is told the grid the window has.
+
+Around the grid the window keeps a **margin** of 4 pixels at 96 dpi on every
+side, scaled by `Xft.dpi` / 96 and rounded down as Alacritty scales its
+`window.padding` (`Dpi::padding`): 8 at 192 dpi. It is painted in Neovim's
+default background and repainted when that changes, it is not part of the
+grid, and a click in it goes to the nearest cell. The window is the grid plus
+the margin, and the margin comes off the monitor before the grid is fitted to
+it. It is fixed, not a setting: the grid running into the window's edge looked
+cramped, and this is the small margin that was asked for.
+`tests/pane_hidpi.rs` checks the window against Alacritty's with
+`padding = { x = 4, y = 4 }` at 96, 144 and 192 dpi.
+
+The default is 656x368 pixels at the default 11.25 pt and 96 dpi, about a
+third of a 1920x1080 screen each way, what the pane was before it was sized
+in cells; at 192 dpi it is the same third of a 3840x2160 screen. The monitor
+and corner follow the same rule managed mode uses, and the same pure
+functions in `core/geometry.rs` decide them. The monitors come from RandR
+and the pointer from the X server itself, rather than from a window manager's
+IPC socket, so this works under a window manager spokenpad has never heard
+of.
 
 Under Xwayland the pointer is **not** asked for: `QueryPointer` there answers
 with wherever the pointer last was over an X window, which is not where it is,

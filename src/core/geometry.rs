@@ -77,9 +77,11 @@ impl Dimensions {
     }
 
     /// These dimensions, cut down to as many cells of `cell` pixels (width,
-    /// height) as fit on `output`, and never below one cell each way.
-    pub fn fit(self, output: Rect, (cell_width, cell_height): (u32, u32)) -> Self {
-        let fitting = |wanted: NonZeroU16, room: u32, cell: u32| {
+    /// height) as fit on `output` with `padding` pixels left blank on every
+    /// side, and never below one cell each way.
+    pub fn fit(self, output: Rect, (cell_width, cell_height): (u32, u32), padding: u32) -> Self {
+        let fitting = |wanted: NonZeroU16, extent: u32, cell: u32| {
+            let room = extent.saturating_sub(padding.saturating_mul(2));
             let most = u16::try_from(room / cell.max(1)).unwrap_or(u16::MAX);
             NonZeroU16::new(wanted.get().min(most)).unwrap_or(NonZeroU16::MIN)
         };
@@ -160,10 +162,13 @@ mod tests {
             height: 1080,
         };
         // 9x18 cells: 213 columns and 60 lines fit.
-        assert_eq!(cells(72, 20).fit(output, (9, 18)), cells(72, 20));
-        assert_eq!(cells(500, 500).fit(output, (9, 18)), cells(213, 60));
+        assert_eq!(cells(72, 20).fit(output, (9, 18), 0), cells(72, 20));
+        assert_eq!(cells(500, 500).fit(output, (9, 18), 0), cells(213, 60));
+        // The padding on both sides comes off first: 1904x1064 is left.
+        assert_eq!(cells(500, 500).fit(output, (9, 18), 8), cells(211, 59));
         // A cell wider than the output still leaves one.
-        assert_eq!(cells(72, 20).fit(output, (4000, 4000)), cells(1, 1));
+        assert_eq!(cells(72, 20).fit(output, (4000, 4000), 0), cells(1, 1));
+        assert_eq!(cells(72, 20).fit(output, (9, 18), 5000), cells(1, 1));
         // The window is then clamped whole onto the output at the pointer.
         let rect = placement(output, Some((1900, 1000)), (72 * 9, 20 * 18));
         assert_eq!(
