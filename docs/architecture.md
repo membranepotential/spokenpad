@@ -18,7 +18,7 @@ imperative shell, and `config.rs` sits at the root because both sides read it.
 | `core/control.rs` | The control protocol: `Request`, `Reply`, their one-line codec, the stamped `Received` | none |
 | `core/state.rs` | Total session-state transition function over requests and the clock; the minimum hold, the repeat window, and the limits that end a capture nobody ends | none |
 | `core/frames.rs` | `Frames`: capture-absolute sample offsets, distinct from slice indices | none |
-| `core/geometry.rs` | Which output the pointer is on, and the clamped window rect | none |
+| `core/geometry.rs` | Which output the pointer is on, and where the window goes: its frame a gap beside the pointer, or around it | none |
 | `core/font.rs` | The pane's font size in points, `Xft.dpi`, and the cell a face makes: Alacritty's and FreeType's arithmetic, rounding included | none |
 | `core/text.rs` | Filler stripping, exact replacements, whitespace repair | none |
 | `core/wm.rs` | i3/sway IPC framing; the tree's focused workspace; the pane's runtime `no_focus` command for sway | none |

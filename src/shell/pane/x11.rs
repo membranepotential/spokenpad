@@ -9,7 +9,7 @@
 //! | `_NET_WM_USER_TIME = 0` | "do not focus this window when it is mapped" (EWMH). On i3 this is the whole guarantee, and it holds even for the first window on an empty workspace. |
 //! | `_NET_WM_WINDOW_TYPE_UTILITY` | floats the window on tiling window managers, and blocks focus on the ones that ignore user time (bspwm, Hyprland's Xwayland). With `nvim.pane_layout = "tiled"` it is `_NET_WM_WINDOW_TYPE_NORMAL` instead, which tiling window managers tile; that is allowed only under [`TILED_PROVEN`], where the user time and the sway rule hold it unfocused, as `tests/pane_focus_wms.rs` proves per window manager. |
 //! | `_NET_WM_STATE_ABOVE` | stacks the window above the one the user is typing in. KWin stacks a window it refused focus *below* the active one otherwise. It gives no focus anywhere measured. |
-//! | `WM_HINTS input = True` | the ICCCM "passive input" model: the window manager may give the window the focus *later*, when the user clicks it, so they can type into it. |
+//! | `WM_HINTS input = True` | the ICCCM "passive input" model: the window manager may give the window the focus *later*, when the user clicks it or, under focus-follows-mouse, moves the pointer into it, so they can type into it. |
 //! | `WM_CLASS = spokenpad-pane` | the name the `no_focus` rule matches that spokenpad adds to sway before the map (`shell::wm::Wm::refuse_focus`): sway reads none of the properties above. |
 //!
 //! **`_NET_WM_USER_TIME` is written once, as 0, and never again.** The EWMH
@@ -25,10 +25,15 @@
 use crate::config::PaneLayout;
 use crate::core::{
     font::{Dpi, XftDpi},
-    geometry::Rect,
+    geometry::{Extents, Rect},
 };
 use anyhow::{Context, Result, ensure};
-use std::{ffi::CString, sync::Arc};
+use std::{
+    ffi::CString,
+    sync::Arc,
+    thread::sleep,
+    time::{Duration, Instant},
+};
 use x11rb::{
     COPY_DEPTH_FROM_PARENT,
     connection::{Connection, RequestConnection as _},
@@ -38,8 +43,8 @@ use x11rb::{
         res::{ClientIdMask, ClientIdSpec, ConnectionExt as _},
         xproto::{
             AtomEnum, ClientMessageEvent, ConfigureWindowAux, ConnectionExt as _, CreateGCAux,
-            CreateWindowAux, EventMask, Gcontext, Gravity, ImageFormat, ImageOrder, PropMode,
-            WindowClass,
+            CreateWindowAux, EventMask, Gcontext, Gravity, ImageFormat, ImageOrder, MapState,
+            PropMode, WindowClass,
         },
     },
     wrapper::ConnectionExt as _,
@@ -64,6 +69,7 @@ x11rb::atom_manager! {
         _NET_WM_WINDOW_TYPE_NORMAL,
         _NET_WM_STATE,
         _NET_WM_STATE_ABOVE,
+        _NET_FRAME_EXTENTS,
         // Not a standard property: the pane sends itself a client message of
         // this type to wake the thread blocked waiting for X events, so that
         // thread can notice it should stop.
@@ -339,7 +345,14 @@ impl Window {
                 height.into(),
             )),
             min_size: Some((16, 16)),
-            win_gravity: Some(Gravity::NORTH_WEST),
+            // Static: a position this window asks for is its own, inside
+            // whatever frame the window manager draws, here and in a later
+            // `ConfigureWindow` alike. With the default north-west gravity
+            // Openbox and KWin put the frame's corner there instead, while i3
+            // puts the window's there; i3 reads no gravity, and puts the frame
+            // at this first position:
+            // `docs/experiments/2026-09-22-pane-frame-extents.md`.
+            win_gravity: Some(Gravity::STATIC),
             ..WmSizeHints::new()
         }
         .set_normal_hints(connection, self.id)?;
@@ -425,6 +438,76 @@ impl Window {
             .check()?;
         self.connection.flush()?;
         Ok(())
+    }
+
+    /// Wait, at most `timeout`, until the window is viewable: mapped by the
+    /// window manager, which frames a window before it maps it. Whether it
+    /// became viewable.
+    pub fn await_viewable(&self, timeout: Duration) -> Result<bool> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let attributes = self.connection.get_window_attributes(self.id)?.reply()?;
+            if attributes.map_state == MapState::VIEWABLE {
+                return Ok(true);
+            }
+            if Instant::now() >= deadline {
+                return Ok(false);
+            }
+            sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// The window's rectangle in root coordinates, and how far the window
+    /// manager's frame reaches past it: the rectangle of the window's
+    /// top-level ancestor when the window manager reparented it into a
+    /// frame, else `_NET_FRAME_EXTENTS`, else no frame at all.
+    pub fn framed(&self) -> Result<(Rect, Extents)> {
+        let window = self.geometry()?;
+        let root = self.connection.setup().roots[self.screen].root;
+        let mut top = self.id;
+        loop {
+            let parent = self.connection.query_tree(top)?.reply()?.parent;
+            if parent == root || parent == x11rb::NONE {
+                break;
+            }
+            top = parent;
+        }
+        if top != self.id {
+            let geometry = self.connection.get_geometry(top)?.reply()?;
+            // `GetGeometry` puts a window at the outer corner of its X
+            // border, and counts its size inside that border.
+            let border = u32::from(geometry.border_width);
+            let frame = Rect {
+                x: geometry.x.into(),
+                y: geometry.y.into(),
+                width: u32::from(geometry.width) + 2 * border,
+                height: u32::from(geometry.height) + 2 * border,
+            };
+            return Ok((window, Extents::between(window, frame)));
+        }
+        let extents = self
+            .connection
+            .get_property(
+                false,
+                self.id,
+                self.atoms._NET_FRAME_EXTENTS,
+                AtomEnum::CARDINAL,
+                0,
+                4,
+            )?
+            .reply()?
+            .value32()
+            .and_then(|values| match values.collect::<Vec<u32>>()[..] {
+                [left, right, top, bottom] => Some(Extents {
+                    left,
+                    right,
+                    top,
+                    bottom,
+                }),
+                _ => None,
+            })
+            .unwrap_or(Extents::NONE);
+        Ok((window, extents))
     }
 
     /// The window's position in root coordinates and its current size.

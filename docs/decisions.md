@@ -2012,3 +2012,70 @@ to the other file and the file lost the line.
   alone.
 - Test: the `BufLeave` test in `src/shell/nvim/tests.rs` runs with
   `set nohidden`; without the option it fails.
+
+## The pane opens beside the pointer, never under it (2026-09-22)
+
+The user runs i3 with its default `focus_follows_mouse yes`. Moving the
+mouse into the pane did not focus it, and a nudge of one to three pixels up
+or left did: the pane opened with its window's corner on the pointer, so the
+pointer started inside i3's frame and only a move back across its edge
+counted ([investigation](experiments/2026-09-22-pane-hover-focus.md)). The
+user decided on 2026-09-22 that the pane may be focused by hover, and by
+nothing else the pointer does not do on purpose.
+
+- Changed rule: the user's own click, or their pointer moving into the pane
+  under focus-follows-mouse, may focus it; nothing else may. Still no focus at
+  the map, a redraw, the pane's own move or resize, a window closing under
+  it, or a jiggle where the pointer rested when it opened.
+- Chosen: the pane's outer frame opens a gap away from the pointer, right of
+  and below it; on each axis where that does not fit, left of or above it;
+  where neither fits, centred on it (`geometry::placement`, `Side`). One axis
+  with a side keeps the pointer outside the frame. With neither, the pane
+  opens around the pointer: the window itself, not its frame, is centred on
+  it and kept on the monitor. Kept on the monitor by its frame instead, a
+  screen-sized pane near a corner left its border one pixel beside the
+  pointer, and i3 focused it when a jiggle moved the pointer from the window
+  onto its own border: `tests/pane_hover.rs` caught that.
+- Chosen: the gap is 20 pixels at 96 dpi, scaled by `Xft.dpi` / 96, rounded
+  up and never below 20 (`Gap::at`): 40 at 192 dpi. The investigation found
+  no focus from any point within 6 pixels of the pointer with the frame 20 or
+  more away, at 96 dpi. At 192 dpi a desktop draws frames, text and the
+  pointer twice as large, and 20 device pixels would be 10 at 96 dpi;
+  scaling keeps the distance the user sees, and costs only a pane that opens
+  a little further from the pointer.
+- Chosen: before the map, the position asked for leaves 48 pixels (scaled
+  the same way) for a frame on every side (`Extents::assumed`). i3 puts the
+  frame at a position asked for before the map, Openbox and KWin with static
+  gravity the window, and the largest frame measured reaches 36 pixels
+  (KWin's title bar): 48 keeps the gap either way
+  ([frame extents](experiments/2026-09-22-pane-frame-extents.md)).
+- Chosen: `win_gravity = Static`, and after the map one `ConfigureWindow`
+  that places the frame the window manager drew: its size from the window's
+  top-level ancestor when the window manager reparented it, else
+  `_NET_FRAME_EXTENTS`, else no frame. With static gravity every window
+  manager measured reads that request as the window's own position, i3
+  included, so one move is exact. `Pane::show` waits at most 0.5 s for the
+  window to be viewable first, and leaves a window the window manager sized
+  itself (a tile) where the window manager put it. The window's focus
+  properties are unchanged, and every focus test runs as before.
+- Kept: under Xwayland the pointer is not read, and the pane asks for the
+  bottom-right corner, now with its frame (KWin on Wayland reports a 36-pixel
+  title bar) inside the monitor. sway centres Xwayland windows whatever they
+  ask for.
+- Tests: unit tests of `placement` (every pointer position on a monitor,
+  for several sizes and frames: the pointer is outside the frame by the gap,
+  or inside the window by the gap from every edge the monitor does not hold
+  back); `tests/pane_hover.rs` on i3 with `focus_follows_mouse yes` (floating
+  at 96 and 192 dpi, tiled beside the pointer and under it, and the centred
+  cases near the screen's edge) and Openbox with `followMouse yes`, with and
+  without `underMouse`: no focus at the map, on a jiggle over the 169 points
+  within 6 pixels of the resting pointer, or on the pane's own resize; focus
+  when the pointer moves in from outside. With a gap of 0 the jiggle
+  focused the pane on both, as in the investigation.
+- Not covered: a pane too large to open beside the pointer on Openbox with
+  `underMouse yes` (not its default) is focused at the map, since it opens
+  under the pointer (investigation, row I). A tiled pane goes where the
+  window manager tiles it, possibly under the pointer. KWin's
+  focus-follows-mouse policies and sway were not run. On several monitors a
+  pane opened around the pointer may leave its border on the neighbouring
+  monitor, within reach.

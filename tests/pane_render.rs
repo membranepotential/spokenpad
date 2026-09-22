@@ -945,14 +945,18 @@ impl Drop for KillNaming {
 /// repository rather than materialised into the user's state directory.
 /// `nvim.pane_dimensions` is a grid in cells, as Alacritty's
 /// `window.dimensions`; on a monitor too small for it the pane keeps as many
-/// cells as fit, and lies wholly on the monitor with its corner as close to
-/// the pointer as that allows. Neovim is told the grid the window has.
+/// cells as fit, and lies wholly on the monitor, beside the pointer where
+/// there is room and around it where there is none. Neovim is told the grid
+/// the window has.
 #[test]
 fn the_pane_is_sized_in_cells_and_cut_to_the_monitor() {
     if !harness::tools_or_skip(&["Xvfb", "nvim", "fc-match"]) {
         return;
     }
     let server = XServer::start();
+    // Set, so the pane cannot read the resolution, and with it the gap from
+    // the pointer, from the user's own `~/.Xresources`.
+    server.set_resources("Xft.dpi: 96\n");
     let directory = tempfile::tempdir().expect("a temporary directory");
     let config = dictation_config(directory.path());
     let monitor = Rect {
@@ -1016,9 +1020,26 @@ fn the_pane_is_sized_in_cells_and_cut_to_the_monitor() {
                 && rect.y + rect.height as i32 <= 800,
             "not wholly on the monitor: {rect:?}"
         );
-        // As close to the pointer as the monitor allows.
-        assert_eq!(rect.x, 1100.min(1280 - rect.width as i32));
-        assert_eq!(rect.y, 700.min(800 - rect.height as i32));
+        // No window manager draws a frame here, so the window is the frame.
+        let (width, height) = (rect.width as i32, rect.height as i32);
+        if columns == 40 {
+            // No room right of or below the pointer: left of and above it,
+            // its last pixel 20 short of the pointer.
+            assert_eq!(
+                (rect.x + width - 1, rect.y + height - 1),
+                (1100 - 20, 700 - 20)
+            );
+        } else {
+            // As large as the monitor, with room on no side of the pointer:
+            // around it, centred on it as far as the monitor allows.
+            assert_eq!(
+                (rect.x, rect.y),
+                (
+                    (1100 - width / 2).min(1280 - width).max(0),
+                    (700 - height / 2).min(800 - height).max(0)
+                )
+            );
+        }
     }
 }
 

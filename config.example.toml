@@ -387,21 +387,24 @@ transparent = true
 # 96 dpi on every side (8 at 192 dpi), in the editor's background colour, as
 # Alacritty's `window.padding = { x = 4, y = 4 }` would. 72x20 at the default
 # font is 656x368 pixels at 96 dpi, about a third of a 1920x1080 screen each
-# way. Its top-left corner goes to the pointer, clamped fully on screen, so
-# it lands beside whatever you are reading. Under Wayland the pointer cannot
-# be read -- Xwayland answers with where it last was over an X window -- so
-# there it opens in a corner of the monitor instead.
+# way. It opens beside the pointer, never under it: its frame 20 pixels at
+# 96 dpi (40 at 192) right of and below the pointer, or left of or above it
+# where the monitor has no room, so a nudge of the mouse does not focus it
+# under focus-follows-mouse. A pane too large to fit beside the pointer
+# either way opens centred around it. Under Wayland the pointer cannot be
+# read -- Xwayland answers with where it last was over an X window -- so
+# there it asks for the monitor's bottom-right corner instead.
 pane_dimensions = { columns = 72, lines = 20 }
 
 # Pane mode only: "floating" (the default) opens the pane above your windows
-# at the pointer. "tiled" makes it an ordinary window: i3 and sway tile it
+# beside the pointer. "tiled" makes it an ordinary window: i3 and sway tile it
 # beside the window you are typing in, at the size of its tile; Openbox, KWin
-# and other stacking window managers have no tiles and show it at the pointer
-# as they would a floating one. A tiled pane gives up the window type that
+# and other stacking window managers have no tiles and show it beside the
+# pointer as they would a floating one. A tiled pane gives up the window type that
 # keeps some window managers from focusing it, so it is allowed only where it
 # is proven never to take the focus: i3, sway, Openbox and KWin. Anywhere
-# else the pane opens floating, and a notification says why. Your click
-# still focuses it. Applies to the next window after you save. The log says
+# else the pane opens floating, and a notification says why. Your click, or
+# under focus-follows-mouse your pointer moving into it, still focuses it. Applies to the next window after you save. The log says
 # which layout each pane opened with; one logged as tiled that floats all
 # the same is floated by a rule in your window manager's config -- on i3 the
 # old managed-mode `for_window [instance="spokenpad"] floating enable`

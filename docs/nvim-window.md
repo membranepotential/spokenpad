@@ -212,6 +212,23 @@ Mutter, xfwm4, bspwm and Hyprland are only read from their source, in the
 awesome is known to need more. Try pane mode before you rely on it there, and
 say what you find.
 
+**Under focus-follows-mouse**, moving the pointer into the pane focuses it,
+as it would any window; that and your click are the only ways it gets the
+focus. It opens beside the pointer, never under it ([Where it
+opens](#where-it-opens)), so a pointer that rests or jiggles where it was
+does not enter it. `tests/pane_hover.rs` proves both halves:
+
+| window manager | focused at the map, by a 6-pixel jiggle, or by its own resize | focused when the pointer moves in |
+|---|---|---|
+| i3 4.25, `focus_follows_mouse yes`, floating at 96 and 192 dpi, tiled, and too large to fit beside the pointer | never | yes |
+| Openbox 3.6, `followMouse yes`, `underMouse` no and yes | never | yes |
+
+Openbox with `underMouse yes` (not its default) focuses whatever window
+comes to be under the pointer, so a pane too large to open beside the
+pointer, which opens around it, is focused there at the map
+([investigation](experiments/2026-09-22-pane-hover-focus.md)). KWin's
+focus-follows-mouse policies and sway's are not run.
+
 ### What it costs to run
 
 | | |
@@ -421,11 +438,13 @@ buffer, and the log says that too.
 ### Floating or tiled
 
 `nvim.pane_layout = "floating"`, the default, opens the pane above your
-windows at the pointer. `"tiled"` makes it an ordinary window
+windows beside the pointer. `"tiled"` makes it an ordinary window
 (`_NET_WM_WINDOW_TYPE_NORMAL` instead of `_UTILITY`): i3 and sway tile it
 beside the window you are typing in, at the size of its tile, and the pane
 follows the tile's size. Openbox and KWin have no tiles; there it is an
-ordinary window at the pointer, kept above like the floating one.
+ordinary window beside the pointer, kept above like the floating one. A
+tiled pane goes where the window manager tiles it, which may be under the
+pointer.
 
 A tiled pane gives up `_UTILITY`, which is what refuses focus on window
 managers that ignore the user time (bspwm, Hyprland's Xwayland). So tiled is
@@ -457,10 +476,35 @@ Delete such a rule, or anchor it (`instance="^spokenpad$"`).
 ### Where it opens
 
 `nvim.pane_dimensions` cells — `{ columns = 72, lines = 20 }` by default, as
-Alacritty's `window.dimensions` — on the monitor under the pointer, with its
-top-left corner at the pointer, clamped fully on-screen. A grid larger than
-the monitor is cut to as many whole cells as fit (`Dimensions::fit`), and
-Neovim is told the grid the window has.
+Alacritty's `window.dimensions` — on the monitor under the pointer, beside
+the pointer and never under it. A grid larger than the monitor is cut to as
+many whole cells as fit (`Dimensions::fit`), and Neovim is told the grid the
+window has.
+
+The window's outer frame — the window with the border and title bar the
+window manager draws around it — opens a **gap** from the pointer: 20 pixels
+at 96 dpi, scaled by `Xft.dpi` / 96 and rounded up (`Gap::at`), 40 at 192
+dpi. Each axis is placed on its own (`Side` in `core/geometry.rs`):
+
+- right of the pointer, or below it, when the frame fits there;
+- else left of it, or above it, its last pixel the gap short of the pointer;
+- else centred on it, as far as the monitor allows.
+
+One axis with a side keeps the pointer outside the frame, the gap away. A
+pane too large for a side on either axis opens **around** the pointer: the
+window itself, not its frame, is centred on it and kept on the monitor, so
+the pointer is at least the gap inside every edge the monitor does not hold
+back. On a 1280x800 screen the default pane has no room beside a pointer in
+the middle of the screen; on 1920x1080 it has room everywhere.
+
+The gap is what keeps focus-follows-mouse from focusing the pane by
+accident. i3 focuses a window when the pointer crosses onto its frame, from
+outside or from inside the window, and the pane used to open with its
+window's corner on the pointer: a nudge of one to three pixels up or left
+focused it ([investigation](experiments/2026-09-22-pane-hover-focus.md)).
+Twenty pixels is well beyond a hand's jiggle, and scaled with the display
+because a desktop at 192 dpi draws its frames and its pointer twice as
+large.
 
 Around the grid the window keeps a **margin** of 4 pixels at 96 dpi on every
 side, scaled by `Xft.dpi` / 96 and rounded down as Alacritty scales its
@@ -478,8 +522,7 @@ third of a 1920x1080 screen each way, what the pane was before it was sized
 in cells; at 192 dpi it is the same third of a 3840x2160 screen. Pure
 functions in `core/geometry.rs` decide the monitor and the corner:
 `pick_output` takes the monitor under the pointer, else the primary, else the
-first, and `placement` clamps the window fully onto it, so a pointer near an
-edge tucks the window flush against it. The monitors come from RandR and the
+first, and `placement` puts the frame beside the pointer on it, as above. The monitors come from RandR and the
 pointer from the X server itself, rather than from a window manager's IPC
 socket, so this works under a window manager spokenpad has never heard of.
 The pane is placed **once**, when it opens, and never again: a window that
@@ -489,17 +532,28 @@ put it somewhere they wanted it.
 Under Xwayland the pointer is **not** asked for: `QueryPointer` there answers
 with wherever the pointer last was over an X window, which is not where it is,
 and a window at a stale position looks deliberate in a way a corner does not.
-With `WAYLAND_DISPLAY` set the window goes to the corner instead.
+With `WAYLAND_DISPLAY` set the frame goes to the bottom-right corner instead;
+sway centres an Xwayland window whatever it asks for.
 
-The position is asked for in `WM_NORMAL_HINTS` before the window is mapped, so
-it appears in about the right place, and corrected once afterwards — a window
-manager that draws a frame places the frame rather than the window inside it,
-which on i3 is four pixels across and eighteen down.
+Nobody knows the frame before the window is mapped. So the position asked
+for in `WM_NORMAL_HINTS` leaves 48 pixels (scaled like the gap) for a frame on
+every side (`Extents::assumed`): i3 puts its frame at that position and
+Openbox and KWin the window, and the largest frame measured is KWin's
+36-pixel title bar, so the gap holds either way. Once the window manager has
+mapped the window (`Pane::show` waits up to 0.5 s), the pane reads the frame
+— the window's top-level ancestor if the window manager reparented it into
+one, else `_NET_FRAME_EXTENTS`, else none — and moves the window once, so
+that the frame sits exactly where `placement` puts it. The window's gravity
+is static, which makes every window manager measured take that move as the
+window's own position
+([frame extents](experiments/2026-09-22-pane-frame-extents.md)). A window
+manager that sized the window itself (a tile) placed it too, and is left to.
 
 ## Focus, and why there is no focus code
 
 The window must never take focus — it appears while you are reading something
-else, and you keep reading. The pane's own properties do that everywhere but
+else, and you keep reading. Your click, or your pointer moving into it under
+focus-follows-mouse, may focus it; nothing else may. The pane's own properties do that everywhere but
 sway, and on sway a rule spokenpad adds over sway's IPC
 ([above](#why-it-needs-no-rule)). Either way spokenpad contains **no focus
 call at all**: not `xdotool windowfocus`, and not a "remember the focused

@@ -191,3 +191,9 @@ and no virtual-pointer tool (wlrctl, ydotool) is installed.
   policies (expected to behave like Openbox `underMouse`), a real pane with
   nvim inside (the bare X11 window was used; the pane adds no event mask that
   i3 reads), and HiDPI title bars taller than 18 px.
+- Decided on 2026-09-22: hover may focus the pane, which opens with its frame
+  20 pixels (scaled by `Xft.dpi`) from the pointer, and around it where it
+  fits on neither side:
+  [decisions.md](../decisions.md#the-pane-opens-beside-the-pointer-never-under-it-2026-09-22).
+  `tests/pane_hover.rs` now runs this investigation's jiggle against a real
+  pane, including at 192 dpi, where i3's title bar is 30 pixels.

@@ -289,9 +289,14 @@ dictating into, aborting the transcription in progress.
 
 **Rule:** no window this project opens may take keyboard focus by itself,
 at any point in its lifecycle: not when it appears, not when it is shown
-again, not when it redraws. The user's own deliberate click may focus it, so
-they can edit in it; that is the user moving the focus, not the window. How
-the rule holds depends on `nvim.mode`:
+again, not when it redraws, not when it moves or resizes itself, not when a
+window under it closes. The user's own click, or their pointer moving into
+the pane under focus-follows-mouse, may focus it; nothing else may. Both are
+the user moving the focus, not the window, and both let them edit in it. A
+pointer that only rests or jiggles where it was when the pane opened is not
+a move into it (amended on 2026-09-22, when hover was allowed; see
+[decisions.md](decisions.md#the-pane-opens-beside-the-pointer-never-under-it-2026-09-22)).
+How the rule holds depends on `nvim.mode`:
 
 - **Pane mode opens exactly one: a window spokenpad draws itself**, and it
   needs no rule in the user's configuration. The window carries
@@ -334,6 +339,27 @@ the rule holds depends on `nvim.mode`:
     empty workspace in that moment gets a focused window. Closing it would
     need the window manager to decide at map time, which only a rule in its
     own configuration does.
+  - **It opens beside the pointer, never under it.** Under
+    focus-follows-mouse a window manager focuses the window the pointer
+    enters, i3 as soon as the pointer crosses onto the frame, from outside
+    or from inside the window. A pane opened with its corner on the pointer
+    was focused by a nudge of one to three pixels
+    ([investigation](experiments/2026-09-22-pane-hover-focus.md)). So its
+    outer frame opens 20 pixels (scaled by `Xft.dpi` / 96) right of and
+    below the pointer, or left of or above it where the monitor has no room,
+    and a pane that fits on neither side of it on either axis opens around
+    it, the pointer at least 20 pixels inside every edge of the window that
+    the monitor does not hold back (`core/geometry.rs`). The frame is
+    measured after the map, and the window moved once so that the frame,
+    not the window, keeps that distance. `tests/pane_hover.rs` proves it on
+    i3 with `focus_follows_mouse yes` (floating at 96 and 192 dpi, tiled,
+    and a pane too large to fit beside the pointer) and on Openbox with
+    `followMouse yes`, with and without `underMouse`: no focus at the map,
+    on a jiggle over every point within 6 pixels of the resting pointer, or
+    on the pane's own resize; focus when the pointer moves in from outside.
+    Not held: Openbox with `underMouse yes` (not its default) focuses a pane
+    too large to open beside the pointer, since it opens under it; a tiled
+    pane goes where the window manager tiles it.
   - **There is no focus call**, as everywhere else in this project.
 
   The proof runs headless, with the pane opened the way the daemon opens it

@@ -763,6 +763,19 @@ fn focus_holder(desktop: &mut dyn Desktop) -> Window {
     server.connection.flush().expect("flush");
     desktop.map_until_managed(id);
     sleep(SETTLE);
+    // The user clicked into the window they dictate into, and the pointer
+    // rests there: the pane opens beside it, leaving part of the holder free
+    // to click. Left where Xvfb starts it, mid-screen, the pointer has no
+    // room beside it on a 1280x800 screen, and the pane opens around it.
+    let (x, y, width, height) = screen_rect(desktop.server(), id);
+    desktop.select(
+        id,
+        (
+            (x + width as i32 / 4) as i16,
+            (y + height as i32 / 4) as i16,
+        ),
+    );
+    sleep(SETTLE);
     make_focused(desktop, id);
     id
 }

@@ -2,10 +2,11 @@
 //!
 //! Pure functions decide it: [`geometry::pick_output`] chooses the monitor,
 //! and the pane then puts its `nvim.pane_dimensions`, cut down to what fits
-//! on that monitor, at the pointer with [`geometry::placement`], clamped
-//! fully on-screen. What is here is only the asking: the monitors from
-//! RandR, and the pointer from the X server itself — never a window manager,
-//! so it works under one spokenpad has never heard of.
+//! on that monitor, beside the pointer with [`geometry::placement`]: its
+//! frame a [`geometry::Gap`] right of and below the pointer, else left of or
+//! above it, else centred on it. What is here is only the asking: the
+//! monitors from RandR, and the pointer from the X server itself — never a
+//! window manager, so it works under one spokenpad has never heard of.
 //!
 //! **Under Xwayland the pointer is not usable.** `QueryPointer` answers with
 //! the last position the pointer had over an X window, so on a Wayland
@@ -21,8 +22,8 @@ use x11rb::{
     xcb_ffi::XCBConnection,
 };
 
-/// Where a pane opens: the monitor, and the pointer its top-left corner goes
-/// to when the pointer can be read.
+/// Where a pane opens: the monitor, and the pointer it opens beside when the
+/// pointer can be read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Target {
     pub monitor: Rect,

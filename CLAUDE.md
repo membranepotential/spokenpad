@@ -41,8 +41,12 @@ Design history is `docs/decisions.md`; add an entry when you change behaviour.
   and its process is sway, the pane first adds `no_focus [instance="^spokenpad-pane$"
   class="^spokenpad-pane$"]` over the IPC socket that process listens on,
   and refuses to open otherwise: no process named, another wlroots
-  compositor, no socket of that sway, or an empty focused workspace. The user's own click
-  may focus a window; nothing else may. The code contains no focus call.
+  compositor, no socket of that sway, or an empty focused workspace. The pane
+  opens with its outer frame 20 px (scaled by `Xft.dpi` / 96) beside the
+  pointer, or around it when it fits beside it on neither axis, so a pointer
+  resting or jiggling where it was never enters it. The user's own click, or
+  their pointer moving into the pane under focus-follows-mouse, may focus it;
+  nothing else may. The code contains no focus call.
 - Committed speech is decoded exactly once; the release decodes only the tail.
   The one exception: a VAD chunk that decodes to "" is decoded once more
   without trailing silence (`TrailingSilence::Bare`).
@@ -87,7 +91,7 @@ those belongs in `src/shell/`.
   over stdio, `nvim_ui_attach`), `font.rs` (`fc-match` plus swash glyphs, and a
   character fallback kept off the drawing path), `keyboard.rs` (the user's real layout, dead keys,
   Compose), `place.rs` (RandR monitors and the X pointer, fed to
-  `core/geometry.rs`), `xkb.rs` (libxcb and libxkbcommon opened with `dlopen`
+  `core/geometry.rs`, which puts the pane's frame beside the pointer), `xkb.rs` (libxcb and libxkbcommon opened with `dlopen`
   when a pane opens, so the binary starts without them in the other modes).
 - Editor UI: `src/lua/spokenpad.lua` (winbar, preview extmark, transactional
   `append_once`, the dictation buffer saved promptly on every change and
@@ -108,6 +112,8 @@ those belongs in `src/shell/`.
   `tests/pane_window.rs` proves the window never takes focus on i3, and
   `tests/pane_focus_wms.rs` on sway, Openbox and KWin (Wayland and X11), each
   in a private headless session (`tests/harness/desktops.rs`);
+  `tests/pane_hover.rs` proves that under focus-follows-mouse (i3, Openbox)
+  only a deliberate move into the pane focuses it;
   `tests/pane_render.rs` runs a real embedded nvim in it and checks the
   drawing against nvim's own screen; `tests/pane_daemon.rs` drives the real
   `shell::daemon::serve` in pane mode; `tests/pane_typing.rs` types into a

@@ -4,8 +4,10 @@
 //! The window never takes keyboard focus when it appears ([`x11`] explains the
 //! properties that make that true), floats on tiling window managers or tiles
 //! there (`nvim.pane_layout`), and needs no rule in the user's configuration;
-//! on sway the daemon adds one over IPC before it opens. The user can click
-//! into it and type.
+//! on sway the daemon adds one over IPC before it opens. It opens beside the
+//! pointer, never under it ([`geometry::placement`]), so under
+//! focus-follows-mouse only a deliberate move into it focuses it. The user can
+//! click into it and type.
 //!
 //! How the pieces fit:
 //!
@@ -38,7 +40,7 @@ pub mod xkb;
 use crate::config::{FontFamily, PaneLayout};
 use crate::core::{
     font::{Dpi, Points},
-    geometry::{self, Dimensions, Rect},
+    geometry::{self, Anchor, Dimensions, Extents, Gap, Rect},
     grid::{Cell, CursorShape, Damage, RedrawEvent, Rgb, Screen, Style, Underline},
 };
 use crate::shell::nvim::rpc::waiting_for_keys;
@@ -90,8 +92,8 @@ pub struct Options {
     /// daemon passes what is left of the one deadline it gave the whole
     /// open, so this cannot outlive it.
     pub attach_timeout: Duration,
-    /// The monitor to open on and the pointer to put the top-left corner at,
-    /// or `None` to open at the origin and let the window manager decide.
+    /// The monitor to open on and the pointer to open beside, or `None` to
+    /// open at the origin and let the window manager decide.
     pub target: Option<place::Target>,
     pub title: String,
 }
@@ -168,6 +170,11 @@ vim.api.nvim_create_autocmd("VimLeavePre", {
 })
 "#;
 
+/// How long [`Pane::show`] waits for the window manager to frame and map the
+/// window before it gives up placing it by its frame. The window is up by
+/// then either way; this only bounds how long the first text waits behind it.
+const FRAME_WAIT: Duration = Duration::from_millis(500);
+
 pub struct Pane {
     window: Window,
     keyboard: Keyboard,
@@ -183,9 +190,10 @@ pub struct Pane {
     canvas: Canvas,
     columns: u16,
     rows: u16,
-    /// The top-left corner the pane was placed at, which [`Self::show`]
-    /// moves it to again once it is mapped; `None` without a target.
-    origin: Option<(i32, i32)>,
+    /// The monitor and the anchor the pane was placed by before the map,
+    /// which [`Self::show`] places it by again once the window manager has
+    /// framed it; `None` without a target.
+    spot: Option<(Rect, Anchor)>,
     /// Rows changed since the last frame was drawn.
     pending: Damage,
     /// Whether what is pending is a whole frame. Neovim ends one with
@@ -232,9 +240,10 @@ impl Pane {
         // The display first: its resolution decides how many pixels a point
         // is, and so how big the window has to be.
         let display = x11::Display::connect(&options.display)?;
-        let font = Font::load(&options.family, options.size, display.dpi())?;
+        let dpi = display.dpi();
+        let font = Font::load(&options.family, options.size, dpi)?;
         let metrics = font.metrics();
-        let padding = display.dpi().padding();
+        let padding = dpi.padding();
         // A window is a whole number of cells inside a fixed margin: the pane
         // draws cells, and a partial column at the right edge is a strip that
         // only the margin's colour would ever fill. On a monitor, no more
@@ -261,10 +270,22 @@ impl Pane {
             ),
         };
         let size = (u32::from(width), u32::from(height));
-        let placed = options
-            .target
-            .as_ref()
-            .map(|target| geometry::placement(target.monitor, target.pointer, size));
+        let spot = options.target.as_ref().map(|target| {
+            let anchor = match target.pointer {
+                Some(at) => Anchor::Pointer {
+                    at,
+                    gap: Gap::at(dpi),
+                },
+                None => Anchor::Corner,
+            };
+            (target.monitor, anchor)
+        });
+        // Nobody has said how large the frame will be yet, nor on which side
+        // of this position the window manager will draw it: leave room for
+        // one on every side. `show` places the frame itself once it exists.
+        let placed = spot.map(|(monitor, anchor)| {
+            geometry::placement(monitor, anchor, size, Extents::assumed(dpi))
+        });
         let window = Window::open(
             display,
             placed.unwrap_or(Rect {
@@ -298,7 +319,7 @@ impl Pane {
             canvas: Canvas::new(width, height, metrics, padding),
             columns,
             rows,
-            origin: placed.map(|rect| (rect.x, rect.y)),
+            spot,
             pending: Damage::NONE,
             frame_ready: false,
             focused: false,
@@ -332,33 +353,46 @@ impl Pane {
 
     /// Map the window. It will not take the focus; see [`x11`].
     ///
-    /// With a target, the window is then moved to the corner it was placed
-    /// at: the position asked for before the map gets it close, and this
-    /// corrects for whatever frame the window manager drew around it. It is
-    /// a few pixels, and it happens before Neovim has drawn anything.
+    /// With a target, the window is then placed again, by the frame the
+    /// window manager drew around it: the position asked for before the map
+    /// left room for any frame, and this puts the frame itself the gap from
+    /// the pointer, or flush in the corner. It is one move, before Neovim has
+    /// drawn anything.
     pub fn show(&mut self) -> Result<()> {
         self.window.map()?;
-        if let Some((x, y)) = self.origin
-            && let Err(error) = self.place_at(x, y)
+        if let Some((monitor, anchor)) = self.spot
+            && let Err(error) = self.frame_at(monitor, anchor)
         {
-            log::debug!("could not correct the pane's position: {error:#}");
+            log::debug!("could not place the pane by its frame: {error:#}");
         }
         Ok(())
     }
 
-    /// Move the window's top-left corner, keeping the size it was opened at.
+    /// Place the mapped window so that its frame, as the window manager drew
+    /// it, lies where [`geometry::placement`] puts it.
     ///
-    /// The position asked for before the map gets it close; a window manager
-    /// that draws a frame places that frame rather than the window inside it,
-    /// and correcting it afterwards is exact. Measured on i3 in
-    /// `docs/experiments/2026-09-21-own-window-p0-properties.md`.
-    pub fn place_at(&mut self, x: i32, y: i32) -> Result<()> {
-        self.window.place(Rect {
-            x,
-            y,
-            width: u32::from(self.canvas.width),
-            height: u32::from(self.canvas.height),
-        })
+    /// A window manager that sized the window itself — a tiling one that
+    /// tiled it — decides where it goes too, and is left to.
+    fn frame_at(&self, monitor: Rect, anchor: Anchor) -> Result<()> {
+        ensure!(
+            self.window.await_viewable(FRAME_WAIT)?,
+            "the window manager did not show the pane within {FRAME_WAIT:?}"
+        );
+        let (window, frame) = self.window.framed()?;
+        let size = (u32::from(self.canvas.width), u32::from(self.canvas.height));
+        if (window.width, window.height) != size {
+            log::debug!(
+                "the window manager sized the pane {}x{}, so it places it too",
+                window.width,
+                window.height
+            );
+            return Ok(());
+        }
+        let placed = geometry::placement(monitor, anchor, size, frame);
+        if (placed.x, placed.y) != (window.x, window.y) {
+            self.window.place(placed)?;
+        }
+        Ok(())
     }
 
     pub fn window(&self) -> &Window {
@@ -1436,7 +1470,7 @@ fn display_summary(display: Option<&str>) -> Result<(String, Dpi)> {
             rect.width,
             rect.height,
             match wayland {
-                true => " (through Xwayland: the pane opens in a corner, not at the pointer)",
+                true => " (through Xwayland: the pane opens in a corner, not beside the pointer)",
                 false => "",
             }
         ),

@@ -19,8 +19,8 @@ applications.
 - **Works on any Linux desktop.** The daemon is controlled by commands you
   bind to any key in your window manager or desktop. It reads no keyboard, so
   it needs no special permissions and works on X11 and Wayland alike. By
-  default spokenpad opens its own dictation window at the mouse pointer, one
-  that never takes the focus (X11, and Wayland through Xwayland); you can
+  default spokenpad opens its own dictation window beside the mouse pointer,
+  one that never takes the focus (X11, and Wayland through Xwayland); you can
   instead open the editor yourself in any terminal.
 - **Choice of model.** Parakeet TDT 0.6B v3 by default, or Whisper and
   SenseVoice models from sherpa-onnx. Parakeet can be biased towards your own
@@ -72,7 +72,7 @@ which answers it at once and records while it loads its model. Then:
 3. Log out and back in, or start the socket for this session:
    `systemctl --user start spokenpad.socket`.
 4. Hold your push-to-talk key and speak: the dictation window opens by
-   itself at the mouse pointer, without taking the focus. On Wayland without
+   itself beside the mouse pointer, without taking the focus. On Wayland without
    Xwayland there is no X display for it; set `nvim.mode = "attach"` and open
    the editor in any terminal with `spokenpad editor` instead.
 
@@ -280,6 +280,16 @@ caught up. The log always has the full sentence and paths.
   Insert mode (at once when you leave it), with no `:w` and without your
   format-on-save; `:q` writes and quits, and so does `:q!`: quitting never
   discards an edit.
+- **The window opens beside the pointer, never under it.** Its frame keeps
+  20 pixels (scaled by `Xft.dpi` / 96) right of and below the pointer, or
+  left of or above it where the monitor has no room. So under
+  focus-follows-mouse (i3's default) a nudge of the mouse does not focus it,
+  and moving the pointer into it does, as with any window: that and your
+  click are the only ways it gets the focus. A window too large to fit beside
+  the pointer either way opens centred around it; move the pointer out and
+  back in, or click, to focus it. Under Wayland (Xwayland) the pointer cannot
+  be read: the window asks for the monitor's bottom-right corner instead,
+  and sway centres it.
 - **You can type into the window while you dictate.** In Insert mode your
   cursor stays where you are typing: dictated text lands at the end of the
   text, and what you type stays in one piece beside it. In Normal mode, a
@@ -358,7 +368,7 @@ caught up. The log always has the full sentence and paths.
 ## A window that opens by itself
 
 By default the daemon opens the dictation window itself, on the first
-key-down: a window it draws, at the mouse pointer (`mode = "pane"`). It needs
+key-down: a window it draws, beside the mouse pointer (`mode = "pane"`). It needs
 no rule in your window manager's config: the window carries the properties
 that make a window manager refuse it focus, and on sway the daemon adds a
 `no_focus` rule over sway's IPC before each window. It works on X11, and on

@@ -382,13 +382,13 @@ pub enum Mode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PaneLayout {
-    /// Above the others, at the pointer (`_NET_WM_WINDOW_TYPE_UTILITY`):
+    /// Above the others, beside the pointer (`_NET_WM_WINDOW_TYPE_UTILITY`):
     /// tiling window managers float it.
     #[default]
     Floating,
     /// An ordinary window (`_NET_WM_WINDOW_TYPE_NORMAL`): tiling window
     /// managers tile it beside the window you are typing in. Stacking window
-    /// managers have no tiles, and treat it as an ordinary window at the
+    /// managers have no tiles, and treat it as an ordinary window beside the
     /// pointer.
     Tiled,
 }
