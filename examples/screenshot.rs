@@ -44,6 +44,10 @@ use std::{
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     thread::sleep,
     time::{Duration, Instant},
 };
@@ -116,15 +120,27 @@ fn main() -> Result<()> {
     let home = tempfile::tempdir().context("make an isolated HOME")?;
     isolate(home.path());
 
-    let (_xvfb, display) = start_xvfb(args.width, args.height)?;
-    let (_i3, _i3_dir) = start_i3(&display)?;
+    // Every `Killed` below reaps its whole process tree on drop, but a raw
+    // SIGTERM (what `timeout` and a plain `kill` send) or SIGINT (Ctrl-C)
+    // ends a Rust process without running any destructor at all -- nothing
+    // here would be reaped, only orphaned. This turns both into an ordinary
+    // flag the waits below check, so the signal instead becomes a `main`
+    // that returns, which runs every `Drop` exactly as an error return does.
+    let stopping = Arc::new(AtomicBool::new(false));
+    signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&stopping))
+        .context("install a SIGINT handler")?;
+    signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&stopping))
+        .context("install a SIGTERM handler")?;
+
+    let (_xvfb, display) = start_xvfb(args.width, args.height, &stopping)?;
+    let (_i3, _i3_dir) = start_i3(&display, &stopping)?;
 
     let scratch = tempfile::tempdir().context("make a scratch directory")?;
 
     // ---------------------------------------------- an ordinary editor window
     let snippet = scratch.path().join("session_snippet.rs");
     std::fs::write(&snippet, BACKGROUND_SNIPPET).context("write the background snippet")?;
-    let _background = Killed(
+    let _background = Killed::spawn(
         Command::new("xterm")
             .args([
                 "-fa",
@@ -139,6 +155,12 @@ fn main() -> Result<()> {
                 "session_snippet.rs - nvim",
                 "-e",
                 "nvim",
+                // Never the operator's `~/.config/nvim` or its plugins
+                // (rust-analyzer among them, on this machine): `isolate`
+                // already points `$HOME` elsewhere, but `--clean` refuses
+                // them regardless of the environment, so this background
+                // window carries the same guarantee on its own.
+                "--clean",
                 "-R",
                 "--cmd",
                 "colorscheme habamax",
@@ -147,13 +169,12 @@ fn main() -> Result<()> {
             .env("DISPLAY", &display)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .context("start the background xterm (is xterm installed?)")?,
-    );
+            .stderr(Stdio::null()),
+    )
+    .context("start the background xterm (is xterm installed?)")?;
     // nvim has to start, read its (clean) config and draw a screen's worth
     // of syntax highlighting inside it; there is no socket to poll for that.
-    sleep(Duration::from_millis(1200));
+    interruptible_sleep(Duration::from_millis(1200), &stopping)?;
 
     // -------------------------------------------------------- the pane itself
     let file = scratch.path().join("dictation-2026-09-22-091500.md");
@@ -270,7 +291,7 @@ fn main() -> Result<()> {
     )
     .context("Spokenpad.push")?;
 
-    pump_until(&mut pane, Duration::from_secs(10), |pane| {
+    pump_until(&mut pane, Duration::from_secs(10), &stopping, |pane| {
         grid_text(pane).contains("export path")
     })?;
     // A few more idle frames so the cursor's blink phase and the preview's
@@ -278,7 +299,7 @@ fn main() -> Result<()> {
     for _ in 0..10 {
         let _ = pane.step(Duration::from_millis(50));
     }
-    sleep(Duration::from_millis(300));
+    interruptible_sleep(Duration::from_millis(300), &stopping)?;
 
     // --------------- the composited screen, not just the pane's framebuffer
     let (connection, screen) =
@@ -317,10 +338,14 @@ fn grid_text(pane: &Pane) -> String {
         .join("\n")
 }
 
-/// Pumps the pane's X event loop until `ready` is true or `timeout` passes.
+/// Pumps the pane's X event loop until `ready` is true, `timeout` passes, or
+/// `stopping` is set (Ctrl-C/SIGTERM): a wait that never checked it would
+/// hold the whole scene, background nvim included, open for the full ten
+/// seconds after the signal that was supposed to end this.
 fn pump_until(
     pane: &mut Pane,
     timeout: Duration,
+    stopping: &AtomicBool,
     mut ready: impl FnMut(&Pane) -> bool,
 ) -> Result<()> {
     let deadline = Instant::now() + timeout;
@@ -329,6 +354,7 @@ fn pump_until(
         if ready(pane) {
             return Ok(());
         }
+        ensure!(!stopping.load(Ordering::Relaxed), "interrupted");
         ensure!(
             Instant::now() < deadline,
             "timed out waiting for the pane to draw the pushed text"
@@ -336,19 +362,31 @@ fn pump_until(
     }
 }
 
+/// `sleep`, but ended early by `stopping` instead of only by the clock.
+fn interruptible_sleep(duration: Duration, stopping: &AtomicBool) -> Result<()> {
+    let deadline = Instant::now() + duration;
+    while Instant::now() < deadline {
+        ensure!(!stopping.load(Ordering::Relaxed), "interrupted");
+        sleep(Duration::from_millis(50).min(deadline.saturating_duration_since(Instant::now())));
+    }
+    Ok(())
+}
+
 /// An `Xvfb` of this script's own, above `:70` so it can never be the user's
 /// `:0`. `-displayfd` is the readiness signal: the server writes the number
 /// it took once it is listening, and closes its stdout instead if another
 /// process already holds that number.
-fn start_xvfb(width: u16, height: u16) -> Result<(Killed, String)> {
+fn start_xvfb(width: u16, height: u16, stopping: &AtomicBool) -> Result<(Killed, String)> {
     for number in 70..200 {
         let display = format!(":{number}");
-        let mut child = Command::new("Xvfb")
+        let mut command = Command::new("Xvfb");
+        command
             .args([display.as_str(), "-displayfd", "1", "-screen", "0"])
             .arg(format!("{width}x{height}x24"))
             .args(["-nolisten", "tcp"])
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::null());
+        let mut child = command
             .spawn()
             .context("start Xvfb (is xorg-server-xvfb installed?)")?;
         let mut line = String::new();
@@ -358,15 +396,17 @@ fn start_xvfb(width: u16, height: u16) -> Result<(Killed, String)> {
             .filter(|read| *read > 0)
             .and_then(|_| line.trim().parse::<u32>().ok());
         if took == Some(number) {
+            let killed = Killed::adopt(child);
             let deadline = Instant::now() + Duration::from_secs(10);
             while x11rb::connect(Some(&display)).is_err() {
+                ensure!(!stopping.load(Ordering::Relaxed), "interrupted");
                 ensure!(
                     Instant::now() < deadline,
                     "Xvfb did not accept connections on {display} within 10s"
                 );
                 sleep(Duration::from_millis(50));
             }
-            return Ok((Killed(child), display));
+            return Ok((killed, display));
         }
         let _ = child.kill();
         let _ = child.wait();
@@ -381,7 +421,7 @@ fn start_xvfb(width: u16, height: u16) -> Result<(Killed, String)> {
 /// mapping the background editor is exactly the race that once left it
 /// floating, tiny and unmanaged in a corner, with the rest of the screen
 /// showing nothing but i3's black default background.
-fn start_i3(display: &str) -> Result<(Killed, tempfile::TempDir)> {
+fn start_i3(display: &str, stopping: &AtomicBool) -> Result<(Killed, tempfile::TempDir)> {
     let directory = tempfile::tempdir().context("make a scratch directory for i3")?;
     let socket = directory.path().join("i3.sock");
     let config = directory.path().join("i3.config");
@@ -390,24 +430,25 @@ fn start_i3(display: &str) -> Result<(Killed, tempfile::TempDir)> {
         format!("focus_follows_mouse no\nipc-socket {}\n", socket.display()),
     )
     .context("write the i3 config")?;
-    let child = Command::new("i3")
+    let mut command = Command::new("i3");
+    command
         .args(["-c".as_ref(), config.as_os_str()])
         .env("DISPLAY", display)
         .env_remove("I3SOCK")
         .env_remove("SWAYSOCK")
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .context("start i3 (is i3-wm installed?)")?;
+        .stderr(Stdio::null());
+    let killed = Killed::spawn(&mut command).context("start i3 (is i3-wm installed?)")?;
     let deadline = Instant::now() + Duration::from_secs(10);
     while ipc_request(&socket, Message::GetVersion, "").is_err() {
+        ensure!(!stopping.load(Ordering::Relaxed), "interrupted");
         ensure!(
             Instant::now() < deadline,
             "i3 did not answer on its IPC socket within 10s"
         );
         sleep(Duration::from_millis(50));
     }
-    Ok((Killed(child), directory))
+    Ok((killed, directory))
 }
 
 /// One i3 IPC request, the same wire format `tests/harness` speaks
@@ -452,24 +493,81 @@ fn isolate(home: &Path) {
     }
 }
 
-/// A child process stopped, gracefully first, when this drops.
+/// A child process, and every descendant it has when this drops, stopped:
+/// `SIGTERM` to the whole tree, then `SIGKILL` for whatever is still there
+/// after a grace period.
+///
+/// Not just this child's own pid or process group. A terminal emulator's own
+/// job control makes the program it execs into a pty its own session leader
+/// the moment it starts, so `xterm`'s background `nvim` was never in
+/// `xterm`'s process group; a signal aimed only at `xterm` orphaned it
+/// instead of reaching it, and once orphaned, `try_wait` on `xterm` has
+/// nothing left to say about it either. Walking `/proc` for the whole
+/// descendant tree, fresh, every time, is what actually reaches a process
+/// like that. `SIGKILL` is unconditional at the end, not only for whatever
+/// `try_wait` still calls running: it is what reaches an `nvim` stuck
+/// spinning after an X error and ignoring `SIGTERM`, the one case that
+/// prompted this, and a `kill` on a pid already gone is a harmless `ESRCH`.
 struct Killed(Child);
+
+impl Killed {
+    fn spawn(command: &mut Command) -> Result<Self> {
+        Ok(Self(command.spawn()?))
+    }
+
+    /// Wraps a child this already spawned and decided to keep, such as
+    /// [`start_xvfb`]'s retry loop, which must read a child's stdout before
+    /// it knows whether that child is the one to keep.
+    fn adopt(child: Child) -> Self {
+        Self(child)
+    }
+}
 
 impl Drop for Killed {
     fn drop(&mut self) {
-        // SAFETY: `id()` is this child's pid, and it is not reaped until the
-        // `wait` below, so the pid cannot have been reused by another
-        // process in between.
-        let _ = unsafe { libc::kill(self.0.id() as libc::pid_t, libc::SIGTERM) };
+        let pid = self.0.id() as libc::pid_t;
+        let tree = descendant_tree(pid);
+        signal_all(&tree, libc::SIGTERM);
         let deadline = Instant::now() + Duration::from_secs(3);
-        while Instant::now() < deadline {
-            if matches!(self.0.try_wait(), Ok(Some(_)) | Err(_)) {
-                return;
-            }
+        while Instant::now() < deadline && matches!(self.0.try_wait(), Ok(None)) {
             sleep(Duration::from_millis(20));
         }
+        signal_all(&tree, libc::SIGKILL);
         let _ = self.0.kill();
         let _ = self.0.wait();
+    }
+}
+
+/// `pid` and every process descended from it at the moment this is called,
+/// found by walking `/proc/<pid>/task/<pid>/children` (Linux-only, and only
+/// ever asked about this process's own descendants, all of them this same
+/// user's).
+fn descendant_tree(pid: libc::pid_t) -> Vec<libc::pid_t> {
+    let mut found = vec![pid];
+    let mut frontier = vec![pid];
+    while let Some(parent) = frontier.pop() {
+        let Ok(text) = std::fs::read_to_string(format!("/proc/{parent}/task/{parent}/children"))
+        else {
+            continue;
+        };
+        for child in text
+            .split_whitespace()
+            .filter_map(|field| field.parse::<libc::pid_t>().ok())
+        {
+            found.push(child);
+            frontier.push(child);
+        }
+    }
+    found
+}
+
+/// `signal` to every pid in `tree`, ignoring `ESRCH` from one already gone.
+fn signal_all(tree: &[libc::pid_t], signal: libc::c_int) {
+    for &pid in tree {
+        // SAFETY: every pid here was read moments ago from this process's
+        // own descendants under `/proc`, this user's throughout; signalling
+        // one that has since exited is the documented, harmless `ESRCH`.
+        let _ = unsafe { libc::kill(pid, signal) };
     }
 }
 
