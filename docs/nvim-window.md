@@ -215,6 +215,11 @@ off the drawing path:
   answering. A single `fc-match` that does not come back is killed after
   250 ms.
 
+The family's own four faces are looked up once, when the pane opens, and
+may take up to 5 s each: nothing is drawn yet, and on a busy machine
+`fc-match` alone was measured at 280 ms on average, which under the drawing
+path's 250 ms made the pane fail to open.
+
 Two hundred ideographs the family does not cover take one frame and one
 `fc-match`; the same page drawn again costs no lookup at all.
 

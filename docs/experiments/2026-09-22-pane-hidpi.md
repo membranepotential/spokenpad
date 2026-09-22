@@ -2,7 +2,8 @@
 
 _2026-09-22, main at bcb219f plus this change. Alacritty 0.17.0 (94e7c887),
 crossfont 0.8.1, winit 0.30.13, FreeType 2.14.3, fontconfig 2.18.3, Mesa
-llvmpipe under Xvfb._
+llvmpipe under Xvfb. Timings in the last section were taken while other
+agents' builds ran on the machine._
 
 ## Question
 
@@ -123,6 +124,17 @@ Screenshots at 192 dpi, SauceCodePro 12 pt, 60x8 cells: the pane before
 same glyph sizes and positions. They are not committed. `tests/pane_hidpi.rs`
 writes its own pair per resolution into `SPOKENPAD_PANE_SCREENSHOTS`.
 
+**A second finding, on the way.** `shell::pane::font`'s unit tests failed once
+in a full test run under load. `fc-match` was killed after the drawing path's
+250 ms bound, including for the four faces loaded when a pane opens, which is
+not the drawing path:
+
+| machine | `fc-match` mean | max | font tests failing |
+|---|---|---|---|
+| idle-ish (load 11, other builds running) | 17 ms | 21 ms | 0 of 15 runs |
+| 96 busy-loop processes on 12 cores (load 26–35) | 280 ms | 354 ms | 6 of 6 runs, before |
+| same | — | — | 0 of 6 runs, after |
+
 ## Conclusion
 
 The pane now takes `nvim.font_size` in points, reads `Xft.dpi` from the root
@@ -133,6 +145,9 @@ thickness, and underline patterns that scale with the underline. No test
 noticed before because every pane test ran on a server with no `Xft.dpi`,
 where 16 px happens to be what 12 pt is; `tests/pane_hidpi.rs` now sets the
 resource and compares with Alacritty itself.
+
+The faces a pane loads when it opens may now take 5 s per `fc-match`; the
+250 ms bound stays on the drawing path's fallback lookups.
 
 Not matched: winit also reads XSETTINGS' `Xft/DPI` before the resource, and
 falls back to RandR's physical size when neither is set; the pane reads only

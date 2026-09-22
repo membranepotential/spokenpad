@@ -18,7 +18,9 @@
 //! asks fontconfig once rather than five hundred times; a paint that has
 //! spent [`FALLBACK_BUDGET`] asking stops and leaves the rest to the next
 //! one, which is what [`Font::deferred`] tells the caller; and a single
-//! `fc-match` that does not answer is killed after [`MATCH_TIMEOUT`].
+//! `fc-match` that does not answer is killed after [`MATCH_TIMEOUT`]. The
+//! family's own faces are looked up once, when the pane opens, under the
+//! looser [`LOAD_TIMEOUT`].
 pub use crate::core::font::CellMetrics;
 use crate::{
     config::FontFamily,
@@ -105,9 +107,18 @@ pub enum Coverage {
 /// it converges.
 const FALLBACK_BUDGET: Duration = Duration::from_millis(50);
 
-/// How long a single `fc-match` may take before it is killed. Four times what
-/// it costs on a cold cache, and the bound on the worst one frame can do.
+/// How long a single `fc-match` for a fallback character may take before it
+/// is killed. Four times what it costs on a cold cache, and the bound on the
+/// worst one frame can do.
 const MATCH_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// How long `fc-match` may take for the configured family's own faces, when
+/// the pane opens. Not the drawing path's bound: nothing is drawn yet, the
+/// open has its own deadline, and on a busy machine a single `fc-match` was
+/// measured at 280 ms on average (96 busy processes on 12 cores). A pane that
+/// failed to open because fontconfig was slow would be worse than one that
+/// opened late.
+const LOAD_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// One font file, loaded.
 struct Loaded {
@@ -186,7 +197,7 @@ impl Font {
         let Answer {
             found: plain,
             hinting,
-        } = read_match(&Face::PLAIN.pattern(family, size))?;
+        } = read_match(&Face::PLAIN.pattern(family, size), LOAD_TIMEOUT)?;
         let faces = [
             Face::PLAIN,
             Face {
@@ -206,7 +217,7 @@ impl Font {
         for face in faces {
             let found = match face {
                 Face::PLAIN => plain.clone(),
-                face => read_match(&face.pattern(family, size))?.found,
+                face => read_match(&face.pattern(family, size), LOAD_TIMEOUT)?.found,
             };
             let substituted = face != Face::PLAIN && found == plain;
             loaded.push(Loaded {
@@ -386,7 +397,11 @@ fn covers(face: &Loaded, character: char) -> bool {
 /// The font fontconfig picks for one character, preferring the configured
 /// family's own idea of a substitute.
 fn match_character(family: &FontFamily, character: char) -> Result<Matched> {
-    read_match(&format!("{family}:charset={:x}", character as u32)).map(|answer| answer.found)
+    read_match(
+        &format!("{family}:charset={:x}", character as u32),
+        MATCH_TIMEOUT,
+    )
+    .map(|answer| answer.found)
 }
 
 /// A font file and the face inside it.
@@ -404,7 +419,7 @@ struct Answer {
 /// The family needs no checking here: [`FontFamily`] is parsed where the
 /// configuration is read, and cannot hold anything fontconfig would take as
 /// pattern syntax.
-fn read_match(pattern: &str) -> Result<Answer> {
+fn read_match(pattern: &str, timeout: Duration) -> Result<Answer> {
     // Not `output()`: that waits for as long as the process takes, and this
     // runs in the thread that draws the window. A fontconfig rebuilding a
     // stale cache over a network mount would otherwise hold the pane for as
@@ -417,12 +432,12 @@ fn read_match(pattern: &str) -> Result<Answer> {
         .stderr(Stdio::piped())
         .spawn()
         .context("run fc-match; the pane needs fontconfig to find a font")?;
-    let deadline = Instant::now() + MATCH_TIMEOUT;
+    let deadline = Instant::now() + timeout;
     while child.try_wait()?.is_none() {
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            bail!("fc-match did not answer for {pattern:?} within {MATCH_TIMEOUT:?}");
+            bail!("fc-match did not answer for {pattern:?} within {timeout:?}");
         }
         std::thread::sleep(Duration::from_millis(2));
     }
@@ -579,7 +594,7 @@ mod tests {
     use super::*;
 
     fn font_or_skip() -> Option<Font> {
-        if read_match(FontFamily::default().as_str()).is_err() {
+        if read_match(FontFamily::default().as_str(), LOAD_TIMEOUT).is_err() {
             assert!(
                 std::env::var_os("SPOKENPAD_ALLOW_MISSING_X11").is_some(),
                 "fc-match found no monospace font; the pane cannot draw without one. \
