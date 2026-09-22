@@ -210,6 +210,20 @@ destroy it. The `Utterance` lifecycle (`Live` → `Released` | `Cancelled`,
 monotone) prevents work queued for an older capture from advancing or resetting
 a newer one's offset.
 
+A stop of the daemon is not a cancel of what it owes. From its first moment
+every capture with a recovery WAV is on the daemon's list of recordings whose
+text is not all written (`Transcription`, in `shell/daemon.rs`, with a `Stage`:
+capturing, finishing its tail, kept until the model is ready, sent to the
+engine, or left to retry). A user's cancel takes it off; its last `Finished`
+does too. What is still on the list at the stop — a capture held then, which
+the stop cancels, or one whose release decode did not end within the
+shutdown's wait for the engine — goes to `waiting.tsv` with how far its text
+reaches, and the next start transcribes the rest, as it does a recording made
+before the model was ready. A running daemon writes only the recordings made
+before the model was ready to that list: after a crash, a capture decoded as
+it was captured would otherwise be written a second time from where the list
+last saw it.
+
 ## Invariants
 
 - No committed region is decoded again on release.

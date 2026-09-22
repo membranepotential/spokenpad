@@ -2388,3 +2388,22 @@ commit with the end of all the audio it held. After the first of several
 segments, a recording being transcribed claimed to be done: a daemon stopped
 then, or a recognizer error on the next segment, left the rest unlisted, and
 the next start skipped it. Each segment now commits at its own speech end.
+
+## A capture the stop cuts short is transcribed at the next start (2026-09-22)
+
+`waiting.tsv` listed only recordings made before the speech model was ready.
+A live capture whose release decode had not ended when the stop's wait for
+the engine ran out (three seconds), or one still held at the stop, which the
+stop cancels, kept its WAV but was on no list: its untranscribed tail was
+lost without a word in the log (audit P2-019). `tests/e2e.rs` reproduced
+both.
+
+- Chosen: one list of recordings whose text is not all written,
+  `Transcription` with a `Stage`, entered by every capture with a WAV at its
+  start. It replaces three collections that encoded the same lifecycle by
+  which one held a recording (audit P2-001, P3-006). A user's cancel takes a
+  capture off it; the stop writes everything still on it, with a log line
+  each, and the next start transcribes the rest.
+- Rejected: listing live captures while the daemon runs. The list is not
+  rewritten per commit, so after a crash the next start would write again
+  everything committed since the capture began.

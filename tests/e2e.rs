@@ -1877,6 +1877,75 @@ fn recordings_left_at_a_stop_are_transcribed_at_the_next_start() {
     h.finish();
 }
 
+/// A live capture whose release decode the stop cuts short is listed for the
+/// next start like a recording made before the model was ready, and that
+/// start transcribes it: every sample once across the two runs.
+#[test]
+fn a_capture_whose_decode_the_stop_cuts_short_is_transcribed_at_the_next_start() {
+    let settings = |delay| Settings {
+        editor: false,
+        delay,
+        vad: Some(brisk_vad()),
+        words: false,
+        ..Settings::default()
+    };
+    // The first preview's decode outlasts the shutdown's wait for the engine,
+    // and the release decode is queued behind it.
+    let mut h = Harness::start(settings(Duration::from_secs(5)));
+    h.press(false);
+    h.say(&tone(1.0));
+    h.release_for_good();
+    wait_until("a decode is under way", || !h.calls().is_empty());
+    h.stop();
+    let list = h.recordings.join("waiting.tsv");
+    let saved = fs::read_to_string(&list).expect("the stop listed the capture");
+    assert_eq!(saved.lines().count(), 1, "{saved}");
+    assert_eq!(dictated(&h), 0, "nothing was written before the stop");
+    let loud = loud_samples(&h.recovery_wav().0);
+
+    let h = h.restart(settings(Duration::ZERO));
+    wait_until("the capture is transcribed", || dictated(&h) == loud);
+    wait_until("the list goes once nothing is left", || !list.exists());
+    thread::sleep(Duration::from_millis(300));
+    assert_eq!(dictated(&h), loud, "nothing is written twice");
+    h.finish();
+}
+
+/// A capture still held when the daemon stops is listed from where its text
+/// reaches, and the next start transcribes the rest of it.
+#[test]
+fn a_capture_held_at_the_stop_is_transcribed_at_the_next_start() {
+    let settings = || Settings {
+        editor: false,
+        vad: Some(brisk_vad()),
+        words: false,
+        ..Settings::default()
+    };
+    let mut h = Harness::start(settings());
+    h.press(true);
+    h.say(&tone(1.5));
+    wait_until("a chunk is committed while the latch runs", || {
+        dictated(&h) > 0
+    });
+    h.stop();
+    let list = h.recordings.join("waiting.tsv");
+    let saved = fs::read_to_string(&list).expect("the stop listed the held capture");
+    let through: usize = saved
+        .split('\t')
+        .next()
+        .and_then(|frames| frames.parse().ok())
+        .unwrap_or_else(|| panic!("{saved}"));
+    assert!(through > 0, "from where its text reaches: {saved}");
+    let loud = loud_samples(&h.recovery_wav().0);
+
+    let h = h.restart(settings());
+    wait_until("the rest is transcribed", || dictated(&h) == loud);
+    wait_until("the list goes once nothing is left", || !list.exists());
+    thread::sleep(Duration::from_millis(300));
+    assert_eq!(dictated(&h), loud, "nothing is written twice");
+    h.finish();
+}
+
 /// What every dictation file of `h` counts, summed.
 fn dictated(h: &Harness) -> usize {
     fs::read_dir(&h.dictation)

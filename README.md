@@ -340,6 +340,10 @@ caught up. The log always has the full sentence and paths.
   at the same point before, the notice gives the `spokenpad transcribe --from
   SECONDS` that recovers it. One cut short since it was recorded says
   "recording shortened".
+- **Stopping the daemon does not lose a capture.** A capture still recording
+  when the daemon stops (a restart, an upgrade, a logout), or whose last text
+  is not written yet, is listed the same way, and the next start transcribes
+  the rest of it from where its text reached. A capture you cancel is not.
 - **A model that cannot be had does not stop dictation.** Offline on the
   first run, a failed download, or a missing configured `asr.model_dir`: the
   winbar says "no speech model" and why, the recordings are kept, and the

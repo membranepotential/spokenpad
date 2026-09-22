@@ -86,15 +86,77 @@ pub enum PipelineSource<R, S> {
     Load(Loader<R, S>),
 }
 
-/// A capture made before the speech model was ready, or left untranscribed
-/// by the last daemon: its recovery WAV, the utterance it is, how far into
-/// the WAV its transcription has committed text, and where this daemon's
-/// attempt at it began.
-struct Waiting {
+/// A recording whose text is not all written yet: its recovery WAV, the
+/// utterance it is, how far into the WAV its text reaches, where this
+/// daemon's attempt at it began, and where it is now.
+struct Transcription {
     path: PathBuf,
     id: UtteranceId,
     through: Frames,
     from: Frames,
+    stage: Stage,
+}
+
+/// Where a [`Transcription`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stage {
+    /// Still being captured.
+    Capturing,
+    /// Released, and decoded as it was captured: only its tail is left.
+    Finishing,
+    /// Captured before the speech model was ready, or left untranscribed by
+    /// the last daemon: kept on disk until the model is ready.
+    Kept,
+    /// Sent to the engine as a recording.
+    Sent,
+    /// Its transcription failed after getting further than the attempt
+    /// before; the next start tries the rest again.
+    Retry,
+}
+
+impl Stage {
+    /// Whether a crash, which writes no list, should leave it listed. A
+    /// capture decoded as it was captured is listed only at an orderly stop:
+    /// its text since the last list would be written twice.
+    fn listed_while_running(self) -> bool {
+        match self {
+            Self::Kept | Self::Sent | Self::Retry => true,
+            Self::Capturing | Self::Finishing => false,
+        }
+    }
+}
+
+/// Every recording whose text is not all written yet, in the order they
+/// were made.
+#[derive(Default)]
+struct Transcriptions(Vec<Transcription>);
+
+impl Transcriptions {
+    /// The recordings made while the speech model was not ready that it has
+    /// yet to transcribe, as the window counts them.
+    fn waiting(&self) -> usize {
+        self.0
+            .iter()
+            .filter(|t| matches!(t.stage, Stage::Kept | Stage::Sent))
+            .count()
+    }
+    fn get_mut(&mut self, id: UtteranceId) -> Option<&mut Transcription> {
+        self.0.iter_mut().find(|t| t.id == id)
+    }
+    fn remove(&mut self, id: UtteranceId) -> Option<Transcription> {
+        let at = self.0.iter().position(|t| t.id == id)?;
+        Some(self.0.remove(at))
+    }
+    /// Notes how far a recording's text reaches.
+    fn advance(&mut self, commit: &Commit) {
+        if let Some(t) = self.get_mut(commit.utterance.id) {
+            t.through = t.through.max(commit.through);
+        }
+    }
+    /// Those the list the next start reads holds while this daemon runs.
+    fn listed_while_running(&self) -> impl Iterator<Item = &Transcription> {
+        self.0.iter().filter(|t| t.stage.listed_while_running())
+    }
 }
 
 /// A recording ends, or stops being readable, before the text already written
@@ -561,9 +623,17 @@ fn report_user_close(nvim: &mut NvimSession, events: &Sender<ResultEvent>) {
 }
 
 /// Ends a capture that is thrown away rather than decoded. Its recovery WAV
-/// is kept, whatever the reason.
-fn discard<B: InputBackend>(capture: &mut AudioCapture<B>, reason: DiscardReason) {
+/// is kept, whatever the reason, but nothing transcribes the rest of it.
+fn discard<B: InputBackend>(
+    capture: &mut AudioCapture<B>,
+    session: &Session,
+    transcriptions: &mut Transcriptions,
+    reason: DiscardReason,
+) {
     capture.stop_capture();
+    if let Some(utterance) = &session.current {
+        transcriptions.remove(utterance.id);
+    }
     match reason {
         DiscardReason::TooShort => log::info!(
             "capture held under {}ms; discarded, WAV retained",
@@ -816,30 +886,27 @@ where
         }
         PipelineSource::Load(_) => Recognition::Preparing(Preparing::Loading),
     };
-    // Captures made before the model was ready, not yet sent to it; those
-    // sent to it and not transcribed yet; and those whose transcription
-    // failed partway, for the next start. The first are those the last
-    // daemon left, from where their text reached. All three are on the list
-    // the next start reads (`persist`).
-    let mut waiting: VecDeque<Waiting> = capture
-        .take_unfinished()
-        .into_iter()
-        .map(|Unfinished { path, through }| {
-            log::info!(
-                "{} was left untranscribed by the last run; it is transcribed from {:.2}s once the speech model is ready",
-                path.display(),
-                through.seconds(rate)
-            );
-            Waiting {
-                path,
-                id: session.reserve_id(),
-                through,
-                from: through,
-            }
-        })
-        .collect();
-    let mut transcribing: Vec<Waiting> = Vec::new();
-    let mut retry: Vec<Waiting> = Vec::new();
+    // First those the last daemon left, from where their text reached.
+    let mut transcriptions = Transcriptions(
+        capture
+            .take_unfinished()
+            .into_iter()
+            .map(|Unfinished { path, through }| {
+                log::info!(
+                    "{} was left untranscribed by the last run; it is transcribed from {:.2}s once the speech model is ready",
+                    path.display(),
+                    through.seconds(rate)
+                );
+                Transcription {
+                    path,
+                    id: session.reserve_id(),
+                    through,
+                    from: through,
+                    stage: Stage::Kept,
+                }
+            })
+            .collect(),
+    );
     // Whether the capture that is recording, or was last, decodes as it goes.
     // One made before the model was ready does not: it is on disk only.
     let mut live = false;
@@ -909,15 +976,19 @@ where
                             send(&work_tx, Work::Load)?;
                             recognition = Recognition::Preparing(Preparing::Loading);
                         }
-                        if let Err(e) = capture.start_capture() {
-                            // The press cleared the previous notice; cancel
-                            // first, then say why nothing is being recorded.
-                            session.event(Event::Request(Received {
-                                request: Request::Cancel,
-                                at: Instant::now(),
-                            }));
-                            session.notify(Notice::MicrophoneUnavailable);
-                            log::error!("capture could not start: {e:#}");
+                        match capture.start_capture() {
+                            Ok(()) => begin(&session, &capture, &mut transcriptions),
+                            Err(e) => {
+                                // The press cleared the previous notice;
+                                // cancel first, then say why nothing is being
+                                // recorded.
+                                session.event(Event::Request(Received {
+                                    request: Request::Cancel,
+                                    at: Instant::now(),
+                                }));
+                                session.notify(Notice::MicrophoneUnavailable);
+                                log::error!("capture could not start: {e:#}");
+                            }
                         }
                         // Either way: on the first press of a session there is
                         // no editor yet, and a notice pushed at a window that
@@ -941,7 +1012,7 @@ where
                             EditorWork::Indicator(indicator_of(
                                 &session,
                                 0.,
-                                recognition.notice(waiting.len() + transcribing.len()),
+                                recognition.notice(transcriptions.waiting()),
                             )),
                         )?;
                         let (captured, postroll) = capture.finish_capture(released, || {
@@ -964,16 +1035,23 @@ where
                             dump_dir.filter(|_| live),
                         )?;
                         if live {
+                            if let Some(t) = transcriptions.get_mut(tail.utterance.id) {
+                                t.stage = Stage::Finishing;
+                            }
                             send(&work_tx, Work::Finish(tail))?;
                         } else {
-                            keep(&mut session, tail.utterance.id, &capture, &mut waiting);
-                            let _ = persist(
+                            keep(
+                                &mut session,
+                                tail.utterance.id,
                                 &capture,
-                                waiting.iter().chain(&transcribing).chain(&retry),
+                                &mut transcriptions,
                             );
+                            let _ = persist(&capture, transcriptions.listed_while_running());
                         }
                     }
-                    Command::Discard(reason) => discard(&mut capture, reason),
+                    Command::Discard(reason) => {
+                        discard(&mut capture, &session, &mut transcriptions, reason)
+                    }
                     Command::Nothing => {}
                 }
             }
@@ -996,7 +1074,7 @@ where
                     ResultEvent::WindowClosed { at } => {
                         if let Command::Discard(reason) = session.event(Event::WindowClosed { at })
                         {
-                            discard(&mut capture, reason);
+                            discard(&mut capture, &session, &mut transcriptions, reason);
                             send(&editor_tx, EditorWork::ClosedMidCapture)?;
                         }
                     }
@@ -1007,7 +1085,7 @@ where
                         recognition = Recognition::Unavailable(reason);
                     }
                     ResultEvent::Commit(c) => {
-                        advance(&mut transcribing, &c);
+                        transcriptions.advance(&c);
                         commit(c, &mut session, &processor, &editor_tx)?;
                     }
                     ResultEvent::Tick {
@@ -1063,22 +1141,16 @@ where
                             }
                             Err(e) => log::error!("decode failed for utterance {}: {e:#}", id.0),
                         }
-                        if let Some(at) = transcribing.iter().position(|t| t.id == id) {
-                            let recording = transcribing.remove(at);
-                            let to_go = waiting.len() + transcribing.len();
-                            settle(
-                                recording,
-                                result.as_ref().err(),
-                                rate,
-                                &capture,
-                                &mut session,
-                                &mut retry,
-                            );
-                            log::info!("{to_go} recordings to go");
-                            let _ = persist(
-                                &capture,
-                                waiting.iter().chain(&transcribing).chain(&retry),
-                            );
+                        if finished(
+                            id,
+                            result.as_ref().err(),
+                            rate,
+                            &capture,
+                            &mut session,
+                            &mut transcriptions,
+                        ) {
+                            log::info!("{} recordings to go", transcriptions.waiting());
+                            let _ = persist(&capture, transcriptions.listed_while_running());
                         }
                         session.finish(id);
                         // Every `Commit` of this utterance was sent on this
@@ -1151,7 +1223,11 @@ where
                 )?;
             }
             if recognition == Recognition::Ready {
-                for recording in waiting.drain(..) {
+                for recording in transcriptions
+                    .0
+                    .iter_mut()
+                    .filter(|t| t.stage == Stage::Kept)
+                {
                     // Kept since its release; see `keep`.
                     send(
                         &work_tx,
@@ -1161,7 +1237,7 @@ where
                             from: recording.through,
                         },
                     )?;
-                    transcribing.push(recording);
+                    recording.stage = Stage::Sent;
                 }
             }
             // Audio the worker has committed is never read again, and a
@@ -1182,7 +1258,7 @@ where
                 EditorWork::Indicator(indicator_of(
                     &session,
                     level,
-                    recognition.notice(waiting.len() + transcribing.len()),
+                    recognition.notice(transcriptions.waiting()),
                 )),
             )?;
             ensure!(
@@ -1193,9 +1269,10 @@ where
         }
         Ok(())
     })();
-    // A capture still being held has nothing the user is waiting for. One
-    // already released is inside its final decode, and that text is owed to
-    // the user: the bounded join below, not a cancel, is what limits the wait.
+    // A capture still being held has nothing the user is waiting for now: it
+    // is cancelled, and listed below for the next start. One already released
+    // is inside its final decode, and that text is owed to the user: the
+    // bounded join below, not a cancel, is what limits the wait.
     if let Some(u) = &session.current
         && u.ticking()
     {
@@ -1210,7 +1287,7 @@ where
     for event in results.try_iter() {
         match event {
             ResultEvent::Commit(c) => {
-                advance(&mut transcribing, &c);
+                transcriptions.advance(&c);
                 if let Err(e) = commit(c, &mut session, &processor, &editor_tx) {
                     log::error!("could not queue a commit made during shutdown: {e:#}");
                 }
@@ -1219,17 +1296,14 @@ where
             // commits were drained from the same channel, in order, by the
             // arm above, on an earlier pass of this same `for`.
             ResultEvent::Finished { id, result, .. } => {
-                if let Some(at) = transcribing.iter().position(|t| t.id == id) {
-                    let recording = transcribing.remove(at);
-                    settle(
-                        recording,
-                        result.as_ref().err(),
-                        rate,
-                        &capture,
-                        &mut session,
-                        &mut retry,
-                    );
-                }
+                finished(
+                    id,
+                    result.as_ref().err(),
+                    rate,
+                    &capture,
+                    &mut session,
+                    &mut transcriptions,
+                );
                 if let Err(e) = send(&editor_tx, EditorWork::Copy) {
                     log::error!("could not queue a shutdown clipboard copy: {e:#}");
                 }
@@ -1242,18 +1316,13 @@ where
             | ResultEvent::WindowClosed { .. } => {}
         }
     }
-    // The next start transcribes the rest; only if it cannot know about them
-    // does the user have to.
-    let saved = persist(&capture, waiting.iter().chain(&transcribing).chain(&retry));
-    let unfinished: Vec<Unfinished> = waiting
-        .into_iter()
-        .chain(transcribing)
-        .chain(retry)
-        .map(|Waiting { path, through, .. }| Unfinished { path, through })
-        .collect();
+    // What is left is not all written: captures the stop cut short, and
+    // recordings still waiting. The next start transcribes the rest; only if
+    // it cannot know about them does the user have to.
+    let saved = persist(&capture, transcriptions.0.iter());
     match saved {
         Ok(()) => {
-            for Unfinished { path, through } in &unfinished {
+            for Transcription { path, through, .. } in &transcriptions.0 {
                 log::warn!(
                     "{} is not transcribed past {:.2}s; the next start transcribes the rest",
                     path.display(),
@@ -1262,7 +1331,7 @@ where
             }
         }
         Err(()) => {
-            for Unfinished { path, through } in &unfinished {
+            for Transcription { path, through, .. } in &transcriptions.0 {
                 if *through == Frames::ZERO {
                     log::warn!(
                         "{} is not transcribed; recover it with `spokenpad transcribe {}`",
@@ -1299,7 +1368,7 @@ where
 /// next start may write again the text committed since the last call.
 fn persist<'a, B: InputBackend>(
     capture: &AudioCapture<B>,
-    recordings: impl Iterator<Item = &'a Waiting>,
+    recordings: impl Iterator<Item = &'a Transcription>,
 ) -> Result<(), ()> {
     let unfinished: Vec<Unfinished> = recordings
         .map(|recording| Unfinished {
@@ -1312,24 +1381,56 @@ fn persist<'a, B: InputBackend>(
     })
 }
 
-/// Says what became of a recording's transcription, and puts on `retry` one
-/// that failed after getting further than its last attempt, for the next
-/// start. Every other one is released from the pruning's keeping, except one
-/// the user is told to recover by hand.
-fn settle<B: InputBackend>(
-    recording: Waiting,
+/// A decode of utterance `id` ended, with `error` if it failed: a live
+/// capture's tail, whose text is all written now, or a recording's
+/// transcription, which [`settle`] judges. True when the list the next start
+/// reads changed.
+fn finished<B: InputBackend>(
+    id: UtteranceId,
     error: Option<&anyhow::Error>,
     rate: u32,
     capture: &AudioCapture<B>,
     session: &mut Session,
-    retry: &mut Vec<Waiting>,
-) {
+    transcriptions: &mut Transcriptions,
+) -> bool {
+    let Some(recording) = transcriptions.get_mut(id) else {
+        return false;
+    };
+    match recording.stage {
+        Stage::Sent => {
+            if settle(recording, error, rate, capture, session) {
+                recording.stage = Stage::Retry;
+            } else {
+                transcriptions.remove(id);
+            }
+            true
+        }
+        Stage::Finishing => {
+            transcriptions.remove(id);
+            false
+        }
+        Stage::Capturing | Stage::Kept | Stage::Retry => false,
+    }
+}
+
+/// Says what became of a recording's transcription, and whether the next
+/// start should try the rest again: true for one that failed after getting
+/// further than its last attempt. Every other one is released from the
+/// pruning's keeping, except one the user is told to recover by hand.
+fn settle<B: InputBackend>(
+    recording: &Transcription,
+    error: Option<&anyhow::Error>,
+    rate: u32,
+    capture: &AudioCapture<B>,
+    session: &mut Session,
+) -> bool {
     let path = &recording.path;
     let seconds = recording.through.seconds(rate);
     match error {
         None => {
             capture.release_recording(path);
             log::info!("transcribed {}", path.display());
+            false
         }
         Some(e) if e.is::<ShorterThanItsText>() => {
             capture.release_recording(path);
@@ -1337,12 +1438,14 @@ fn settle<B: InputBackend>(
                 "{} is shorter than the text already written from it; the rest is gone",
                 path.display()
             );
-            session.notify(Notice::RecordingShortened(recording.path));
+            session.notify(Notice::RecordingShortened(path.clone()));
+            false
         }
         Some(_) if recording.through == Frames::ZERO => {
             capture.release_recording(path);
             log::error!("{} was not transcribed", path.display());
-            session.notify(Notice::RecordingLost(recording.path));
+            session.notify(Notice::RecordingLost(path.clone()));
+            false
         }
         Some(_) if recording.through > recording.from => {
             log::error!(
@@ -1354,7 +1457,7 @@ fn settle<B: InputBackend>(
                 through: Duration::from_secs_f64(seconds),
                 rest: Rest::NextStart,
             });
-            retry.push(recording);
+            true
         }
         // It failed where it failed before: trying again would too. Kept
         // from pruning, since the notice sends the user to it.
@@ -1365,10 +1468,11 @@ fn settle<B: InputBackend>(
                 path.display()
             );
             session.notify(Notice::RecordingPartlyTranscribed {
-                path: recording.path,
+                path: path.clone(),
                 through: Duration::from_secs_f64(seconds),
                 rest: Rest::ByHand,
             });
+            false
         }
     }
 }
@@ -1637,26 +1741,21 @@ fn keep<B: InputBackend>(
     session: &mut Session,
     id: UtteranceId,
     capture: &AudioCapture<B>,
-    waiting: &mut VecDeque<Waiting>,
+    transcriptions: &mut Transcriptions,
 ) {
     session.finish(id);
-    match capture.recording_status() {
-        RecordingStatus::Recorded(path) | RecordingStatus::Truncated(path) => {
+    match transcriptions.get_mut(id) {
+        Some(recording) => {
             log::info!(
                 "the speech model is not ready; {} is transcribed once it is",
-                path.display()
+                recording.path.display()
             );
             // The only copy of this capture: pruning must pass it by until
             // it is transcribed.
-            capture.keep_recording(&path);
-            waiting.push_back(Waiting {
-                path,
-                id,
-                through: Frames::ZERO,
-                from: Frames::ZERO,
-            });
+            capture.keep_recording(&recording.path);
+            recording.stage = Stage::Kept;
         }
-        RecordingStatus::NotRecorded => {
+        None => {
             log::error!(
                 "the speech model is not ready and nothing was recorded: this capture is lost"
             );
@@ -1665,15 +1764,27 @@ fn keep<B: InputBackend>(
     }
 }
 
-/// Notes how far a recording being transcribed has committed text, for the
-/// warning a shutdown gives about the rest.
-fn advance(transcribing: &mut [Waiting], commit: &Commit) {
-    if let Some(recording) = transcribing
-        .iter_mut()
-        .find(|recording| recording.id == commit.utterance.id)
-    {
-        recording.through = recording.through.max(commit.through);
-    }
+/// Lists the capture that just started, by its recovery WAV: from here on
+/// its text is owed to the user, and a stop before all of it is written
+/// leaves it to the next start. A capture with no recording cannot be
+/// listed.
+fn begin<B: InputBackend>(
+    session: &Session,
+    capture: &AudioCapture<B>,
+    transcriptions: &mut Transcriptions,
+) {
+    let (Some(utterance), RecordingStatus::Recorded(path) | RecordingStatus::Truncated(path)) =
+        (&session.current, capture.recording_status())
+    else {
+        return;
+    };
+    transcriptions.0.push(Transcription {
+        path,
+        id: utterance.id,
+        through: Frames::ZERO,
+        from: Frames::ZERO,
+        stage: Stage::Capturing,
+    });
 }
 
 fn note_postroll(postroll: PostRoll, session: &mut Session) {
