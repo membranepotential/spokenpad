@@ -5,7 +5,7 @@ text appears in a Neovim window that never takes focus. Speech recognition runs
 locally on the CPU, and nothing is ever pasted or typed into other
 applications.
 
-![The spokenpad dictation window floating over an editor mid-dictation: committed text at the top, a grey live preview below it, and a winbar showing a latched recording with a level meter.](docs/screenshot.png)
+![The spokenpad dictation window floating over an editor mid-dictation: committed text at the top, a grey live preview below it, and a winbar showing a latched recording with a level meter.](https://raw.githubusercontent.com/membranepotential/spokenpad/main/docs/screenshot.png)
 
 ## Features
 
@@ -18,12 +18,13 @@ applications.
   or so, however long you talked.
 - **Nothing is lost.** Every recording is also saved as a WAV. If a decode
   fails, `spokenpad transcribe` recovers the text from it.
-- **Works on any Linux desktop.** The daemon is controlled by commands you
-  bind to any key in your window manager or desktop. It reads no keyboard, so
-  it needs no special permissions and works on X11 and Wayland alike. By
-  default spokenpad opens its own dictation window beside the mouse pointer,
-  one that never takes the focus (X11, and Wayland through Xwayland); you can
-  instead open the editor yourself in any terminal.
+- **Controlled from any Linux desktop.** The daemon is controlled by
+  commands you bind to any key in your window manager or desktop. It reads
+  no keyboard, so it needs no special permissions and works on X11 and
+  Wayland alike. By default spokenpad opens its own dictation window beside
+  the mouse pointer, one that never takes the focus (X11, and Wayland
+  through Xwayland; verified on i3, sway, Openbox and KWin); anywhere else,
+  you can open the editor yourself in any terminal.
 - **Choice of model.** Parakeet TDT 0.6B v3 by default, or Whisper and
   SenseVoice models from sherpa-onnx. Parakeet can be biased towards your own
   vocabulary (project names, commands).
@@ -51,50 +52,68 @@ applications.
 
 ## Install
 
-On Arch Linux, build and install the package in
-[`packaging/aur`](packaging/aur/PKGBUILD):
+On Arch Linux and Manjaro, once spokenpad is on the AUR, install it with
+your AUR helper: `yay -S spokenpad` (or `pamac build spokenpad` on Manjaro).
+Until then, build the package from this repository; `makepkg` needs
+`base-devel` and `git`:
 
 ```sh
+sudo pacman -S --needed base-devel git
 git clone https://github.com/membranepotential/spokenpad
 cd spokenpad/packaging/aur
 makepkg -si
 ```
 
-It installs `/usr/bin/spokenpad` and two systemd user units, and enables
-`spokenpad.socket` for every user. There is no service to enable: the socket
-listens from login on, and the first `spokenpad start` starts the daemon,
-which answers it at once and records while it loads its model. Then:
+The package installs:
 
-1. Download the speech model, about 670 MB, to
-   `~/.local/share/spokenpad/models`, verified against pinned sha256 sums:
-   ```sh
-   spokenpad fetch-models
-   ```
-   If you skip this, the daemon downloads it on your first press, records
-   what you dictate meanwhile, and shows the progress in the dictation
-   window. `spokenpad check` loads the model and reports whether this
-   machine can open a pane window.
-2. [Bind your keys](#bind-your-keys).
-3. Log out and back in, or start the socket for this session:
-   `systemctl --user start spokenpad.socket`.
-4. Hold your push-to-talk key and speak: the dictation window opens by
-   itself beside the mouse pointer, without taking the focus. On Wayland without
-   Xwayland there is no X display for it; set `nvim.mode = "attach"` and open
-   the editor in any terminal with `spokenpad editor` instead.
+- `/usr/bin/spokenpad`;
+- the systemd user units `spokenpad.socket`, enabled for every user, and
+  `spokenpad.service`, which the socket starts on the first key press: there
+  is no service to enable;
+- example key bindings in `/usr/share/spokenpad/i3/spokenpad.conf` and
+  `/usr/share/spokenpad/sway/spokenpad.conf`;
+- this README and `config.example.toml` in `/usr/share/doc/spokenpad/`, and
+  the licences in `/usr/share/licenses/spokenpad/`.
 
-The daemon runs under your systemd user manager, not inside your session, so
-it sees only the environment the manager has. That matters only for
-[a window that opens by itself](#a-window-that-opens-by-itself): GNOME, KDE
-Plasma and most display managers import `DISPLAY` for you. On a plain i3 or
-sway session, add this to the window manager's config:
+Then:
+
+1. [Bind your keys](#bind-your-keys). This is the one step spokenpad cannot
+   take for you: it reads no keyboard.
+2. Hold your push-to-talk key and speak. The dictation window opens beside
+   the mouse pointer without taking the focus.
+   - The first press after installing starts `spokenpad.socket` if it is not
+     running yet (the package enables it from your next login on).
+   - The first press on a new machine downloads the speech model, about
+     670 MB, into `~/.local/share/spokenpad/models`, checked against pinned
+     sha256 sums. The window shows the progress; what you say meanwhile is
+     recorded and transcribed once the model is ready.
+   - On Wayland without Xwayland there is no X display for the window: set
+     `nvim.mode = "attach"` and open the editor in any terminal with
+     `spokenpad editor` instead.
+
+Two commands are there if you want them first: `spokenpad fetch-models`
+downloads the model ahead of time, and `spokenpad check` loads it and says
+whether this machine can open the dictation window.
+
+The daemon runs under your systemd user manager, not inside your session,
+and takes the X display from the manager before each window it opens. Most
+sessions give the manager one: the startx and display manager session
+scripts on Arch (`/etc/X11/xinit/xinitrc.d/50-systemd-user.sh`), GNOME,
+KDE Plasma, and sway's `/etc/sway/config.d/50-systemd-user.conf`. If the
+window does not open and a notification says there is no display — a custom
+`~/.xinitrc`, or a sway config that does not include `/etc/sway/config.d/*`
+— add this to your window manager's config, and press again:
 ```
 exec systemctl --user import-environment DISPLAY XAUTHORITY
 ```
-On sway, import `SWAYSOCK WAYLAND_DISPLAY DISPLAY` instead.
+On sway, import `DISPLAY SWAYSOCK` instead. An X server whose cookie is not
+in `~/.Xauthority` also needs `XAUTHORITY` in the daemon's own environment:
+if you imported it after the daemon started, run
+`systemctl --user restart spokenpad` once.
 
-To update, rebuild the package; a running daemon keeps the old binary until
-`systemctl --user restart spokenpad` or your next login. Watch it with
-`journalctl --user -u spokenpad -f`. The full debug log is
+To update, rebuild or reinstall the package; a running daemon keeps the old
+binary until `systemctl --user restart spokenpad` or your next login. Watch
+it with `journalctl --user -u spokenpad -f`. The full debug log is
 `~/.local/state/spokenpad/spokenpad.log`.
 
 **Upgrading from `scripts/install.sh`.** That script is gone. Remove what it
@@ -155,58 +174,65 @@ its socket (`$XDG_RUNTIME_DIR/spokenpad.sock`) and exits:
 | `spokenpad cancel` | a key you can reach while holding the push-to-talk key |
 
 A binding takes its key away from every application, so pick keys you use
-for nothing else. F13 to F24 are free on most systems, and a programmable
-keyboard (QMK, VIA) or a remapper such as keyd can send them from any key.
-Do not bind `cancel` to Escape: every application would lose Escape. If
-your window manager does not find `spokenpad`, write the full path,
-`/usr/bin/spokenpad`.
+for nothing else. Push-to-talk wants a single key rather than a chord: a
+window manager runs the release binding when the key comes up, and a chord
+whose modifier comes up first may never run it. The examples use **Pause**
+to talk and **Scroll Lock** to cancel: most keyboards have both (on a laptop
+often behind Fn), and almost no program uses them. Other good choices are
+F13 to F24, which a programmable keyboard (QMK, VIA) or a remapper such as
+keyd can send from any key. Do not bind `cancel` to Escape: every
+application would lose Escape. `xev` (X11) or `wev` (Wayland) shows the name
+and keycode of any key. If your window manager does not find `spokenpad`,
+write the full path, `/usr/bin/spokenpad`.
 
-The examples use F16 to talk and F17 to cancel. The standard XKB layouts
-name these keys `XF86Launch7` and `XF86Launch8`, not `F16` and `F17`; their
-X11 keycodes are 194 and 195. `xev` (X11) or `wev` (Wayland) shows the name
-and keycode of any key.
+The same i3 and sway bindings, commented out, are installed in
+`/usr/share/spokenpad/i3/spokenpad.conf` and
+`/usr/share/spokenpad/sway/spokenpad.conf`, with how to include them.
 
-**i3** (`~/.config/i3/config`), by keycode:
+**i3** (`~/.config/i3/config`): change the key in the first two lines.
 
 ```
-bindcode 194 exec --no-startup-id spokenpad start
-bindcode --release 194 exec --no-startup-id spokenpad stop
-bindcode Shift+194 exec --no-startup-id spokenpad toggle
-bindcode 195 exec --no-startup-id spokenpad cancel
-exec --no-startup-id xset -r 194
+set $spokenpad_talk Pause
+set $spokenpad_cancel Scroll_Lock
+bindsym $spokenpad_talk exec --no-startup-id spokenpad start
+bindsym --release $spokenpad_talk exec --no-startup-id spokenpad stop
+bindsym Shift+$spokenpad_talk exec --no-startup-id spokenpad toggle
+bindsym $spokenpad_cancel exec --no-startup-id spokenpad cancel
+exec --no-startup-id xset -r 127
 ```
 
-The last line turns off auto-repeat for keycode 194. Push-to-talk works
-without it, but a Shift+F16 held past the repeat delay would end its own
-latched recording. The same bindings, commented out, are in
-[`packaging/i3/spokenpad.conf`](packaging/i3/spokenpad.conf) and
-[`packaging/sway/spokenpad.conf`](packaging/sway/spokenpad.conf).
+The last line turns off auto-repeat for keycode 127, which is Pause; for
+another key use its keycode from `xev`. Push-to-talk works without it, but
+a Shift+Pause held past the repeat delay would end its own latched
+recording.
 
 **sway** (`~/.config/sway/config`):
 
 ```
-bindsym --no-repeat XF86Launch7 exec spokenpad start
-bindsym --release XF86Launch7 exec spokenpad stop
-bindsym --no-repeat Shift+XF86Launch7 exec spokenpad toggle
-bindsym --no-repeat XF86Launch8 exec spokenpad cancel
+set $spokenpad_talk Pause
+set $spokenpad_cancel Scroll_Lock
+bindsym --no-repeat $spokenpad_talk exec spokenpad start
+bindsym --release $spokenpad_talk exec spokenpad stop
+bindsym --no-repeat Shift+$spokenpad_talk exec spokenpad toggle
+bindsym --no-repeat $spokenpad_cancel exec spokenpad cancel
 ```
 
 **Hyprland** 0.55 and newer (Lua config):
 
 ```lua
-hl.bind("XF86Launch7", hl.dsp.exec_cmd("spokenpad start"))
-hl.bind("XF86Launch7", hl.dsp.exec_cmd("spokenpad stop"), { release = true })
-hl.bind("SHIFT + XF86Launch7", hl.dsp.exec_cmd("spokenpad toggle"))
-hl.bind("XF86Launch8", hl.dsp.exec_cmd("spokenpad cancel"))
+hl.bind("Pause", hl.dsp.exec_cmd("spokenpad start"))
+hl.bind("Pause", hl.dsp.exec_cmd("spokenpad stop"), { release = true })
+hl.bind("SHIFT + Pause", hl.dsp.exec_cmd("spokenpad toggle"))
+hl.bind("Scroll_Lock", hl.dsp.exec_cmd("spokenpad cancel"))
 ```
 
 Hyprland 0.54 and older (`hyprland.conf`):
 
 ```
-bind = , XF86Launch7, exec, spokenpad start
-bindr = , XF86Launch7, exec, spokenpad stop
-bind = SHIFT, XF86Launch7, exec, spokenpad toggle
-bind = , XF86Launch8, exec, spokenpad cancel
+bind = , Pause, exec, spokenpad start
+bindr = , Pause, exec, spokenpad stop
+bind = SHIFT, Pause, exec, spokenpad toggle
+bind = , Scroll_Lock, exec, spokenpad cancel
 ```
 
 Hyprland binds do not repeat unless you ask for it.
@@ -214,7 +240,14 @@ Hyprland binds do not repeat unless you ask for it.
 **GNOME, KDE Plasma and other desktops** run a custom shortcut only when the
 key goes down, so push-to-talk is not possible there. Add a custom shortcut
 for `spokenpad toggle` instead: press it once to start, and again to stop.
-Tap it rather than hold it. Add a second shortcut for `spokenpad cancel`.
+Tap it rather than hold it; since it is only tapped, a chord works well
+here, such as Super+Alt+D. Add a second shortcut for `spokenpad cancel`,
+such as Super+Alt+X.
+
+- GNOME: Settings → Keyboard → View and Customize Shortcuts → Custom
+  Shortcuts → Add Shortcut: a name, the command, and the key.
+- KDE Plasma 6: System Settings → Keyboard → Shortcuts → Add New → Command
+  or Script: the command, then the key.
 
 How spokenpad copes with a key that repeats while held: a `start` while
 recording is ignored, and a `start` within 150 ms of a `stop` means the key
@@ -257,6 +290,13 @@ dictation file as its own paragraph and saved after every utterance.
   and, after every release, the dictation Neovim copies the whole buffer to
   its `+` register, ready to paste wherever you want, through the same
   provider.
+- **The microphone:** spokenpad records from the default input device, the
+  one your sound server (PipeWire, PulseAudio) uses as its default source.
+  To use another, set `audio.device` in the config to words from its name,
+  such as `device = "USB"`: they are matched, case-insensitive and in order,
+  against PortAudio's device name and host API. The daemon picks it up after
+  `systemctl --user restart spokenpad`. A capture that says "nearly silent"
+  in the winbar is the usual sign of the wrong microphone.
 - **Files:** one Markdown file per editor, in
   `~/.local/state/spokenpad/dictation/`. It is a scratch pad you never save:
   every change you make in it is written promptly, and `:q` always writes
@@ -405,8 +445,11 @@ key-down: a window it draws, beside the mouse pointer (`mode = "pane"`). It need
 no rule in your window manager's config: the window carries the properties
 that make a window manager refuse it focus, and on sway the daemon adds a
 `no_focus` rule over sway's IPC before each window. It works on X11, and on
-Wayland through Xwayland; verified headless on i3, sway, Openbox and KWin
-(Wayland and X11) — **new, try it before you rely on it**. It does not survive
+Wayland through Xwayland. That it never takes the focus is verified,
+headless, on i3, sway, Openbox and KWin (Wayland and X11); GNOME (Mutter),
+Hyprland and other window managers are not tested — **new, try it before you
+rely on it**, and on an untested desktop `mode = "attach"` is the safe
+choice. It does not survive
 a daemon restart: the window belongs to the daemon, which writes everything
 in it to its file before it goes. On sway it will not open on an empty
 workspace, since sway focuses the first window on one whatever the rules say.
@@ -415,13 +458,11 @@ workspace, since sway focuses the first window on one whatever the rules say.
 terminal), and the daemon writes into it; it works on any desktop, Wayland
 without Xwayland included. No window may take focus, and none does.
 
-`mode = "managed"`, which opened your terminal on i3 or sway and needed a
-`no_focus` rule in your config, was removed on 2026-09-22: the pane does the
-same with no rule. A config that still sets it, or `terminal`,
-`window_instance` or `window_fraction`, is refused with a message that says
-so; delete those lines. The window rules the package used to ship in
-`/usr/share/spokenpad/i3` and `sway` are gone too, and so is any need for
-them.
+`mode = "managed"` (your terminal on i3 or sway, with a `no_focus` rule in
+your config) was removed on 2026-09-22; a config that still sets it, or
+`terminal`, `window_instance` or `window_fraction`, is refused with a message
+that says so. Delete those lines, and any `for_window` rule you added for
+spokenpad: the pane needs none.
 
 **Setting up the pane:**
 
@@ -433,20 +474,20 @@ them.
    # pane_dimensions = { columns = 72, lines = 20 }
    # pane_layout = "tiled"       # i3 and sway tile it instead of floating it
    ```
-2. Import `DISPLAY` (and `XAUTHORITY`) into systemd, as in install step 4 —
-   the window is X11 even on Wayland. On sway, import `SWAYSOCK` too: sway's
-   own `/etc/sway/config.d/50-systemd-user.conf` does, if your config
-   includes `/etc/sway/config.d/*`. Without it the daemon looks for sway's
+   `[nvim]` changes apply to the next window; no restart is needed.
+2. The window is X11 even on Wayland, so the daemon needs `DISPLAY` from
+   your systemd user manager, as described under [Install](#install). On
+   sway it also looks for `SWAYSOCK` there; without it, it finds sway's
    socket in `$XDG_RUNTIME_DIR` by the process that runs the display, and
    refuses to open the pane when it cannot reach sway.
 3. `spokenpad check` says whether the libraries, the font and the display are
-   all there, and names what is missing. Then restart the service.
+   all there, and names what is missing.
 
 With no display, or with a library missing, dictation still works: the text
 goes to a dictation file and the next editor opens on it. Nothing is lost and
 the daemon does not fail.
 
-Details and placement: [docs/nvim-window.md](docs/nvim-window.md).
+Details and placement: [docs/nvim-window.md](https://github.com/membranepotential/spokenpad/blob/main/docs/nvim-window.md).
 
 ## Configuration
 
@@ -515,7 +556,10 @@ log to stderr), `--log-file PATH` (`none` for no file). The daemon also takes
 Exit codes: `2` model files missing (`check`, `transcribe`), `3` another
 spokenpad daemon is already running, `4` the WAV given to `transcribe` is
 unreadable or not 16 kHz, `1` anything else, including `start`, `stop`,
-`toggle` or `cancel` finding no daemon listening. The daemon itself does not
+`toggle` or `cancel` finding no daemon listening. On the socket
+`spokenpad.socket` listens on, they first try to start that unit once, and
+say why they failed in a desktop notification as well, since a key
+binding's output goes nowhere. The daemon itself does not
 exit over a missing model, a microphone it cannot open, or a config file
 that does not load (it runs on the defaults): it says so in the winbar and
 tries again at the next press or window.
@@ -538,7 +582,7 @@ flatters any system that writes what that reference writes.
 
 The five committed clips in `eval-samples/` are a regression check for changes,
 not a benchmark: `cargo run --release --example=eval` scores 18.7% there. See
-[docs/evaluation.md](docs/evaluation.md) and [docs/asr.md](docs/asr.md).
+[docs/evaluation.md](https://github.com/membranepotential/spokenpad/blob/main/docs/evaluation.md) and [docs/asr.md](https://github.com/membranepotential/spokenpad/blob/main/docs/asr.md).
 
 ## Development
 
@@ -555,17 +599,17 @@ cargo install --locked --path . --root ~/.local    # run your build: see packagi
 The Neovim tests start real headless editors and fail if `nvim` is missing;
 set `SPOKENPAD_ALLOW_MISSING_NVIM=1` to skip them.
 
-Technical documentation is in [docs/](docs/README.md): the
-[architecture](docs/architecture.md), the [hard constraints](docs/constraints.md),
-the [progressive commit](docs/progressive-commit.md) design, the
-[dictation window](docs/nvim-window.md), and the [decision log](docs/decisions.md).
+Technical documentation is in [docs/](https://github.com/membranepotential/spokenpad/blob/main/docs/README.md): the
+[architecture](https://github.com/membranepotential/spokenpad/blob/main/docs/architecture.md), the [hard constraints](https://github.com/membranepotential/spokenpad/blob/main/docs/constraints.md),
+the [progressive commit](https://github.com/membranepotential/spokenpad/blob/main/docs/progressive-commit.md) design, the
+[dictation window](https://github.com/membranepotential/spokenpad/blob/main/docs/nvim-window.md), and the [decision log](https://github.com/membranepotential/spokenpad/blob/main/docs/decisions.md).
 
 ## License
 
-spokenpad's source is MIT, see [LICENSE](LICENSE). The binary also contains
+spokenpad's source is MIT, see [LICENSE](https://github.com/membranepotential/spokenpad/blob/main/LICENSE). The binary also contains
 sherpa-onnx (Apache-2.0), ONNX Runtime (MIT) and the other libraries of
 sherpa-onnx's prebuilt archive, eSpeak NG (GPL-3.0-or-later) among them; the
 default models it downloads are NVIDIA's Parakeet TDT 0.6B v3 (CC-BY-4.0)
-and Silero VAD (MIT). [THIRD-PARTY.md](THIRD-PARTY.md) lists every component
+and Silero VAD (MIT). [THIRD-PARTY.md](https://github.com/membranepotential/spokenpad/blob/main/THIRD-PARTY.md) lists every component
 and its licence; the package installs it to
 `/usr/share/licenses/spokenpad/`.
