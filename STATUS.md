@@ -9,8 +9,8 @@ never takes focus. Fully local, CPU-only. Next milestone: public release.
 ## Now (2026-09-22: polish for the public release)
 - p3-focus — pane never takes focus on sway/Xwayland, openbox, kwin
   (headless, own sessions); gates pane as default — agent running.
-- packaging — socket activation, accept before model load, no auto
-  download, PKGBUILD + CI, install.sh removed — agent running.
+- packaging — socket activation, accept before model load, record while
+  models download, config reload per window, PKGBUILD + CI — agent running.
 
 ## Next
 1. User: P4 live check of `nvim.mode = "pane"` on i3 (steps: set the mode,
@@ -20,8 +20,7 @@ never takes focus. Fully local, CPU-only. Next milestone: public release.
 3. Lost chunk: the end-of-slice close is both the one lost chunk and the
    whole 0.35-point gain (flip run: revert = old text on all 181). Open: a
    guard that keeps the gain; see experiments/2026-09-22-empty-chunk-flips.md.
-4. Small: trailing-pad overlap (4 seams / 6 words) cost
-   unmeasured; beam + a real vocabulary never measured.
+4. Small: trailing-pad overlap cost unmeasured; beam + vocabulary untested.
 5. Before public: fresh-user walkthrough, audit + security review, README
    screenshot; history scan clean except a Handy transcripts.json (user checks).
 
@@ -51,8 +50,9 @@ never takes focus. Fully local, CPU-only. Next milestone: public release.
 - Hard constraints: docs/constraints.md. No input device is read. No paste.
 - 09-22 (user): Arch PKGBUILD, no install script; daemon starts by socket
   activation only (spokenpad.socket shipped enabled); models stay out of the
-  package: `spokenpad fetch-models` is the one explicit setup step, no
-  automatic download; default mode becomes pane after P3 focus checks on
+  package, automatic download stays: missing models download in the
+  background while dictations record to disk and show a message; config
+  reloads when a window opens; default mode becomes pane after P3 focus checks on
   sway/Xwayland + another X11 WM; the dev subset prefers the least private
   captures; dictation content never enters the public repo.
 - 09-21 (user): post-roll stays; no "no speech" notice; no LLM cleanup; no
