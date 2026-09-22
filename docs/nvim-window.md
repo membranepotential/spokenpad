@@ -19,13 +19,16 @@ detection.
 
 | `nvim.mode` | who opens it | where it works | focus |
 |---|---|---|---|
-| `attach` (default) | you, with `spokenpad editor` | any terminal, any desktop: X11 or Wayland, any window manager | the daemon opens no window, so it cannot take focus |
+| `attach` | you, with `spokenpad editor` | any terminal, any desktop: X11 or Wayland, any window manager | the daemon opens no window, so it cannot take focus |
 | `managed` | the daemon, on the first key-down, in `nvim.terminal` | i3 or sway | proven: the running window manager's `no_focus` rule, before the window exists |
-| `pane` | the daemon, on the first key-down, in a window it draws itself | X11, and Wayland through Xwayland | the window's own properties; on sway, a `no_focus` rule the daemon adds over IPC |
+| `pane` (default) | the daemon, on the first key-down, in a window it draws itself | X11, and Wayland through Xwayland | the window's own properties; on sway, a `no_focus` rule the daemon adds over IPC |
 
-`attach` is the default because it is the one that works everywhere with no
-window-manager rules to install: a new user gets a working setup on any
-desktop, and nothing spokenpad does can move focus. `managed` is the
+`pane` is the default since its focus guarantee was proven on i3, sway,
+Openbox and KWin (Wayland and X11): a window that appears by itself beside
+what you are reading, with nothing to install in your window manager.
+`attach` works everywhere else — any terminal, any desktop, also Wayland
+without Xwayland, where there is no X display for a pane; a pane that cannot
+open says so in its notification, and names `attach`. `managed` is the
 original behaviour, generalised from alacritty on i3 to five terminals on i3
 and sway; it is worth its setup for a window that appears by itself, beside
 what you are reading. `pane` is that same window without the setup and

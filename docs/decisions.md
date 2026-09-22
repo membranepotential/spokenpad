@@ -1396,3 +1396,22 @@ window manager, or be refused where that cannot be proven.
   through the daemon's open path, floating and tiled.
 - The layout is read with `[nvim]` for every new window, so a change applies
   to the next pane.
+
+## The pane is the default mode (2026-09-22)
+
+The user decided that `nvim.mode = "pane"` becomes the default, now that its
+focus guarantee is proven headless on i3, sway, Openbox and KWin (Wayland
+and X11), floating and tiled.
+
+- A new user presses the key and the dictation window appears at the
+  pointer, unfocused, with nothing to install in the window manager.
+- **With no X display** — Wayland without Xwayland, or `DISPLAY` never
+  imported into the user manager — the pane cannot open. The text goes to
+  the dictation file as always, and the desktop notification now gives the
+  reason, which names `nvim.mode = "attach"` and `spokenpad editor`, rather
+  than only saying that no editor is open. `spokenpad check` says the same.
+- `attach` remains the mode that works on any desktop; `managed` is
+  unchanged.
+- Tests that run the binary remove `DISPLAY`, `WAYLAND_DISPLAY` and
+  `SWAYSOCK` from its environment, so the default mode cannot reach the
+  user's display.

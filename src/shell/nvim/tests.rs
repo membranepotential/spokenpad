@@ -5,6 +5,27 @@ use crate::{
 };
 use std::os::unix::{fs::PermissionsExt, net::UnixListener};
 
+/// The pane is the default, and a session with no X display — Wayland
+/// without Xwayland, or `DISPLAY` never imported — cannot open one. It says
+/// so, names attach mode, and remembers why for the notification that tells
+/// the user where the text went instead.
+#[test]
+fn a_pane_without_a_display_says_to_use_attach_mode() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = Nvim {
+        display: None,
+        socket_path: directory.path().join("nvim.sock"),
+        dictation_dir: directory.path().join("dictation"),
+        ..Nvim::default()
+    };
+    assert_eq!(config.mode, Mode::Pane, "the pane is the default mode");
+    let mut session = NvimSession::new(config);
+    let error = format!("{:#}", session.ensure().unwrap_err());
+    assert!(error.contains("needs an X display"), "{error}");
+    assert!(error.contains("nvim.mode = \"attach\""), "{error}");
+    assert_eq!(session.refused.as_deref(), Some(error.as_str()));
+}
+
 /// The editor tests need a real Neovim. A missing one is a broken environment,
 /// not a reason to report a green suite, so it fails unless the operator says
 /// otherwise.

@@ -313,6 +313,7 @@ trailing_space = false
 
 # Who opens that neovim.
 #
+#   "pane"     (the default) see below.
 #   "attach"   you do: run `spokenpad editor` in any terminal, on any desktop
 #              (X11 or Wayland, any window manager). The daemon never opens a
 #              window, so it can never take focus. With no editor open,
@@ -335,8 +336,11 @@ trailing_space = false
 #              DISPLAY into the user manager. New in 2026-09; verified
 #              headless on i3, sway, Openbox and KWin (Wayland and X11), so
 #              try it before you rely on it. `spokenpad check` says whether
-#              this machine can.
-mode = "attach"
+#              this machine can. It is the default. With no X display
+#              (Wayland without Xwayland) it cannot open, the text goes to
+#              the dictation file, and the notification says to use
+#              "attach".
+mode = "pane"
 
 # Managed mode only: the terminal the window opens in -- "alacritty",
 # "kitty", "foot" (Wayland only), "wezterm" or "ghostty". spokenpad knows how

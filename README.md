@@ -18,9 +18,10 @@ applications.
   fails, `spokenpad transcribe` recovers the text from it.
 - **Works on any Linux desktop.** The daemon is controlled by commands you
   bind to any key in your window manager or desktop. It reads no keyboard, so
-  it needs no special permissions and works on X11 and Wayland alike. You open
-  the dictation editor in any terminal. On i3 and sway, spokenpad can open a
-  floating window for you.
+  it needs no special permissions and works on X11 and Wayland alike. By
+  default spokenpad opens its own dictation window at the mouse pointer, one
+  that never takes the focus (X11, and Wayland through Xwayland); you can
+  instead open the editor yourself in any terminal.
 - **Choice of model.** Parakeet TDT 0.6B v3 by default, or Whisper and
   SenseVoice models from sherpa-onnx. Parakeet can be biased towards your own
   vocabulary (project names, commands).
@@ -35,12 +36,12 @@ applications.
   downloads sherpa-onnx's prebuilt static libraries from GitHub.
 - About 700 MB of disk for the default model, and about 1.2 GB of RAM while it
   runs.
-- Only for `nvim.mode = "pane"`, the window spokenpad draws itself: an X
-  display (Wayland works through Xwayland), `fontconfig` for `fc-match`, and
-  `libxcb`, `libxkbcommon` and `libxkbcommon-x11`. These are opened when a
+- For the window spokenpad draws itself (`nvim.mode = "pane"`, the default):
+  an X display (Wayland works through Xwayland), `fontconfig` for `fc-match`,
+  and `libxcb`, `libxkbcommon` and `libxkbcommon-x11`. These are opened when a
   pane opens rather than linked, so the daemon starts and dictates without
-  them in the other two modes; `spokenpad check` reports whether this machine
-  has them.
+  them — the text then goes to a file — and the other two modes never need
+  them; `spokenpad check` reports whether this machine has them.
 
 ## Install
 
@@ -70,8 +71,10 @@ which answers it at once and records while it loads its model. Then:
 2. [Bind your keys](#bind-your-keys).
 3. Log out and back in, or start the socket for this session:
    `systemctl --user start spokenpad.socket`.
-4. Open the dictation editor in any terminal: `spokenpad editor`. Then hold
-   your push-to-talk key and speak.
+4. Hold your push-to-talk key and speak: the dictation window opens by
+   itself at the mouse pointer, without taking the focus. On Wayland without
+   Xwayland there is no X display for it; set `nvim.mode = "attach"` and open
+   the editor in any terminal with `spokenpad editor` instead.
 
 The daemon runs under your systemd user manager, not inside your session, so
 it sees only the environment the manager has. That matters only for
@@ -323,10 +326,12 @@ caught up. The log always has the full sentence and paths.
 
 ## A window that opens by itself
 
-By default you open the editor (`spokenpad editor`) and the daemon writes into
-it. Two modes have the daemon open it for you instead, on the first key-down,
-as a floating window at the mouse pointer. Neither may take focus, and neither
-does.
+By default the daemon opens the dictation window itself, on the first
+key-down: a window it draws, at the mouse pointer (`mode = "pane"`).
+`mode = "managed"` opens your terminal there instead. `mode = "attach"` has you
+open the editor yourself (`spokenpad editor`, in any terminal), and the daemon
+writes into it; it works on any desktop, Wayland without Xwayland included.
+No window may take focus, and none does.
 
 | | `mode = "managed"` | `mode = "pane"` |
 |---|---|---|
@@ -356,11 +361,13 @@ does.
 
 **Pane:**
 
-1. ```toml
+1. Nothing to set: it is the default. What you may want to change:
+   ```toml
    [nvim]
-   mode = "pane"
    # font_family = "monospace"   # whatever `fc-match monospace` gives
    # font_size = 11.25           # points, as Alacritty's font.size
+   # pane_dimensions = { columns = 72, lines = 20 }
+   # pane_layout = "tiled"       # i3 and sway tile it instead of floating it
    ```
 2. Import `DISPLAY` (and `XAUTHORITY`) into systemd, as in install step 4 —
    the window is X11 even on Wayland. On sway, import `SWAYSOCK` too: sway's
@@ -390,7 +397,7 @@ cannot pass silently. Keys are not configured here; see
 | `capture.silence_timeout_s` | `300` | seconds without speech after which a latched capture ends by itself; `0` turns it off, and the four-hour limit still applies. Must be at least twice `preview.interval_ms` |
 | `asr.family` | `"parakeet"` | model family: `parakeet`, `whisper` or `sense_voice` ([docs/asr.md](docs/asr.md)) |
 | `asr.vocabulary` | `[]` | words to bias Parakeet towards, such as `["kubectl", "nginx"]`; switches to beam search, which sometimes drops a sentence ([docs/asr.md](docs/asr.md)) |
-| `nvim.mode` | `"attach"` | `attach`: you run `spokenpad editor`; `managed`: the daemon opens a terminal on i3 or sway; `pane`: the daemon opens a window it draws itself |
+| `nvim.mode` | `"pane"` | `pane`: the daemon opens a window it draws itself; `managed`: the daemon opens a terminal on i3 or sway; `attach`: you run `spokenpad editor` |
 | `nvim.terminal` | `"alacritty"` | managed mode only: the terminal for that window |
 | `nvim.font_family`, `nvim.font_size` | `"monospace"`, `11.25` | pane mode only: the font it draws with, sized in points exactly as Alacritty's `font.size` (scaled by the X resource `Xft.dpi`), so the same numbers give the same cells — provided `Xft.dpi` is set (`xrdb` or `~/.Xresources`): the pane does not read an XSETTINGS daemon's `Xft/DPI` or RandR's physical screen size, which Alacritty falls back to, and uses 96 dpi instead |
 | `nvim.pane_layout` | `"floating"` | pane mode only: `"tiled"` has i3 and sway tile it beside your window instead; never focused either way |

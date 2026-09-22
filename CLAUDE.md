@@ -5,12 +5,13 @@ manager to `spokenpad start`/`stop` (push-to-talk), `toggle` (latch) and
 `cancel`, which talk to the daemon over its control socket
 (`$XDG_RUNTIME_DIR/spokenpad.sock`); the transcript lands in a dictation
 Neovim over msgpack-RPC.
-`nvim.mode = "attach"` (default): the user runs `spokenpad editor` in any
-terminal; `"managed"`: the daemon opens a floating terminal on i3 or sway;
-`"pane"`: the daemon opens a window it draws itself, with `nvim --embed` in
-it, needing no rule in the user's config (X11 and Xwayland; verified headless
+`nvim.mode = "pane"` (default): the daemon opens a window it draws itself,
+with `nvim --embed` in it, floating or tiled (`nvim.pane_layout`), sized in
+cells (`nvim.pane_dimensions`), needing no rule in the user's config (X11 and Xwayland; verified headless
 on i3, sway, Openbox, KWin Wayland and X11; on sway the daemon adds a
-`no_focus` rule over IPC).
+`no_focus` rule over IPC); `"managed"`: the daemon opens a floating terminal
+on i3 or sway; `"attach"`: the user runs `spokenpad editor` in any terminal,
+the choice for Wayland without Xwayland.
 Rust only, CPU only (sherpa-onnx linked statically: Parakeet TDT by default, Whisper
 or SenseVoice via `asr.family`; Silero VAD).
 

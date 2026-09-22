@@ -1543,9 +1543,10 @@ fn pane_target(config: &Nvim) -> Result<(place::Target, String, x11::Manager)> {
     use crate::shell::pane::xkb;
 
     let display = config.display.clone().context(
-        "nvim.mode = \"pane\" needs an X display and $DISPLAY was not set when \
-         spokenpad started; on Wayland, import it into the user manager alongside \
-         WAYLAND_DISPLAY",
+        "the dictation pane needs an X display, and $DISPLAY was not set when \
+         spokenpad started. On Wayland without Xwayland, set nvim.mode = \"attach\" \
+         and run `spokenpad editor` in a terminal; with Xwayland, import DISPLAY into \
+         the user manager (`systemctl --user import-environment DISPLAY`)",
     )?;
     xkb::load()?;
     let name =

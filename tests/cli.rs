@@ -9,7 +9,12 @@ fn command(directory: &TempDir) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_spokenpad"));
     cmd.env("XDG_STATE_HOME", directory.path())
         .env("XDG_CONFIG_HOME", directory.path())
-        .env("XDG_RUNTIME_DIR", directory.path());
+        .env("XDG_RUNTIME_DIR", directory.path())
+        // The default mode is the pane, which reads the display for
+        // `spokenpad check` and opens its window there: never the user's.
+        .env_remove("DISPLAY")
+        .env_remove("WAYLAND_DISPLAY")
+        .env_remove("SWAYSOCK");
     cmd.args(["--log-file", "none"]);
     cmd
 }

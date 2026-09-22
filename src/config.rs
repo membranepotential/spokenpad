@@ -373,10 +373,11 @@ pub enum Mode {
     /// The daemon does, in `terminal`, on the first key-down, after proving
     /// the running i3 or sway refuses that window focus.
     Managed,
-    /// The daemon does, in a window it draws itself, on the first key-down.
-    /// Needs no window-manager rule and no terminal: the window carries the
-    /// properties that make a window manager refuse it focus. X11, and
-    /// Wayland through Xwayland.
+    /// The daemon does, in a window it draws itself, on the first key-down;
+    /// the default. Needs no rule in the user's configuration and no
+    /// terminal: the window carries the properties that make a window
+    /// manager refuse it focus, and on sway the daemon adds a `no_focus` rule
+    /// over IPC. X11, and Wayland through Xwayland.
     Pane,
 }
 
@@ -513,7 +514,7 @@ pub struct Nvim {
 impl Default for Nvim {
     fn default() -> Self {
         Self {
-            mode: Mode::Attach,
+            mode: Mode::Pane,
             terminal: Terminal::Alacritty,
             editor: vec!["nvim".into()],
             init: None,
@@ -1195,8 +1196,8 @@ mod tests {
         assert_eq!(c.vad.model, models_dir().join("silero_vad.onnx"));
     }
     #[test]
-    fn the_editor_mode_is_explicit_and_attach_by_default() {
-        assert_eq!(Config::default().nvim.mode, Mode::Attach);
+    fn the_editor_mode_is_explicit_and_pane_by_default() {
+        assert_eq!(Config::default().nvim.mode, Mode::Pane);
         let managed = Config::parse("[nvim]\nmode = 'managed'\nterminal = 'foot'", None).unwrap();
         assert_eq!(managed.nvim.mode, Mode::Managed);
         assert_eq!(managed.nvim.terminal, Terminal::Foot);

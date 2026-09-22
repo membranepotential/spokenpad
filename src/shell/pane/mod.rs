@@ -1080,7 +1080,10 @@ pub fn requirements(config: &crate::config::Nvim) -> Vec<Requirement> {
 /// its resolution.
 fn display_summary(display: Option<&str>) -> Result<(String, Dpi)> {
     let name = display
-        .context("$DISPLAY was not set when spokenpad started")?
+        .context(
+            "$DISPLAY was not set when spokenpad started; on Wayland without Xwayland, \
+             set nvim.mode = \"attach\" and run `spokenpad editor` in a terminal",
+        )?
         .to_owned();
     xkb::load()?;
     let cstring = std::ffi::CString::new(name.clone()).context("the display name has a NUL")?;
