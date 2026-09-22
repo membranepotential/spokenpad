@@ -568,6 +568,12 @@ dictation buffer with your autocommands, format-on-save included, on `:edit`,
 `:bnext`, `:!` and `:make` as well. Another file you open in the dictation
 editor is yours to save.
 
+**`:q!` does not discard.** Neither does `:qa!` or `:cq`: `VimLeavePre`
+runs for every quit, and `QuitPre` before `:q!` and `:qa!` as before `:q`,
+and each writes the dictation buffer, so a change you made is in the file
+however you quit. There is no way to throw away an
+edit by quitting; undo it (`u`) and let the next write save that instead.
+
 A window is a passage. Closing it ends the passage, and the next dictation
 opens a new window on a new file rather than appending under everything said
 an hour ago — dictation started as a day-long log and that was wrong in use.

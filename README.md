@@ -278,7 +278,8 @@ caught up. The log always has the full sentence and paths.
 - **What you type is saved as you type it.** A change in the dictation file
   is written at once in Normal mode, and 300 ms after you stop typing in
   Insert mode (at once when you leave it), with no `:w` and without your
-  format-on-save; `:q` writes and quits.
+  format-on-save; `:q` writes and quits, and so does `:q!`: quitting never
+  discards an edit.
 - **You can type into the window while you dictate.** In Insert mode your
   cursor stays where you are typing: dictated text lands at the end of the
   text, and what you type stays in one piece beside it. In Normal mode, a
