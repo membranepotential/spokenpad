@@ -32,7 +32,15 @@ jobs:
   check:
     name: fmt + clippy + tests
     runs-on: ubuntu-latest
-    container: archlinux:base-devel
+    container:
+      image: archlinux:base-devel
+      # sway and kwin_wayland carry the file capability cap_sys_nice=ep on
+      # Arch. Docker leaves CAP_SYS_NICE out of a container's bounding set,
+      # and the kernel refuses to exec a binary whose file capabilities it
+      # cannot grant in full: without this, starting either fails with
+      # EPERM. CAP_SYS_NICE lets them raise their scheduling priority and
+      # nothing more; --privileged is not needed.
+      options: --cap-add=SYS_NICE
     steps:
       # Before checkout: the container has no git, and actions/checkout without
       # git downloads a tarball with no .git.

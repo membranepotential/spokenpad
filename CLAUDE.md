@@ -154,7 +154,9 @@ those belongs in `src/shell/`.
   downloads. `.github/workflows/ci.yml` (actions pinned by commit) runs
   fmt, clippy and every test in an Arch container, on the checked sherpa
   archive, with every tool the tests drive installed and no
-  `SPOKENPAD_ALLOW_MISSING_*` set.
+  `SPOKENPAD_ALLOW_MISSING_*` set. The container gets `CAP_SYS_NICE`:
+  sway and kwin_wayland carry it as a file capability, and without it in
+  the bounding set their exec fails with EPERM.
 
 ## Commands
 
