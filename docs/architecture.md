@@ -257,12 +257,14 @@ The daemon tells that thread two things, open and stop. A window that closes
 needs no word to end the passage: the editor dies with the window, its socket
 goes with it, and the next key-down finds a dead socket and asks for a new
 pane. What the thread does record is whether the user closed it — the window
-manager's `WM_DELETE_WINDOW`, or Neovim exiting with status 0 — and when. The
+manager's `WM_DELETE_WINDOW`, or Neovim announcing on the pane's channel, from
+`VimLeavePre` with `v:dying` at 0, that it was told to quit — and when, stamped
+as that arrives, and cleared when the next pane is asked for. The
 editor thread asks after every piece of work and every 66 ms, stops opening
 panes for text until the next key press, and sends the time to the event
 loop as `ResultEvent::WindowClosed`, which becomes `state::Event::WindowClosed`:
 a capture running since before that time is cancelled like `spokenpad
-cancel`. A pane whose editor died by any other exit is not a close: the
+cancel`. A pane whose editor went without announcing it is not a close: the
 capture goes on and its next text opens a new pane. Committed text never
 travels over the drawing channel; it goes over the editor's own socket, as in
 attach mode.

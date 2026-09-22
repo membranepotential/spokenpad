@@ -310,16 +310,19 @@ impl NvimSession {
     }
 
     /// Whether text, arriving with no editor attached, may open a pane: not
-    /// after the user closed the last one, and not while the last one is
-    /// still closing — its editor gone, its window not yet — since that may
-    /// be the user's close, not yet recorded. A pane that failed on its own
-    /// is replaced, so that the capture it showed has a window again.
+    /// after the user closed the last one, whether or not that close has
+    /// been reported to the daemon yet, and not while the last one is still
+    /// closing — its editor gone, its window not yet — since that may be the
+    /// user's close, not yet recorded. A pane that failed on its own is
+    /// replaced, so that the capture it showed has a window again.
+    ///
+    /// `alive` is read first: the pane's thread records a close before it
+    /// clears `alive`, so a pane found gone has its close already recorded.
     fn may_open_for_text(&self) -> bool {
         self.closed_by_user.is_none()
-            && !self
-                .pane
-                .as_ref()
-                .is_some_and(|pane| pane.alive().load(Ordering::Acquire))
+            && !self.pane.as_ref().is_some_and(|pane| {
+                pane.alive().load(Ordering::Acquire) || pane.closed_by_user_pending()
+            })
     }
 
     /// When the user closed the pane — its window, or `:q` in it — if they

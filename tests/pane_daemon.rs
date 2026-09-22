@@ -252,14 +252,17 @@ fn the_daemon_opens_a_pane_dictates_into_it_and_cleans_up() {
     println!("stopping the daemon left no window and no editor behind");
 }
 
-/// A latched capture whose pane closes under it. Three closes, each on a
-/// capture that has already committed text:
+/// A latched capture whose pane closes under it, with an editor that is slow
+/// to exit: it runs a job that ignores `SIGTERM`, as a language server may,
+/// so Neovim closes its channels and then waits two seconds for the job.
 ///
 /// - the window manager closes the window (`WM_DELETE_WINDOW`): the capture
 ///   is cancelled — the recording stops growing, and speech after the close
 ///   is never transcribed — the committed text stays in its file, and no
 ///   window or file opens;
-/// - `:q` typed into the pane: the same;
+/// - `:q` typed into the pane: the same, however long the exit takes;
+/// - `:q` with no capture running, and the key pressed at once: the new
+///   capture goes on, in a new pane, and is not taken for the closed one's;
 /// - the editor killed: not the user's doing, so the capture goes on, and
 ///   its next text opens a new pane rather than being lost.
 #[test]
@@ -318,11 +321,57 @@ fn closing_the_pane_cancels_the_capture_it_showed() {
     daemon.assert_nothing_more(&i3, &recorded, "`:q`");
     println!("`:q` cancelled the capture and opened nothing");
 
-    // ------------------------------------------------ the editor is killed
+    // ------------------------------- `:q`, and the key pressed right after
     daemon.send(Request::Toggle);
     daemon.say(&speech);
     daemon.wait_for_text(3, "the third capture's text");
-    wait_for(PATIENCE, "i3 to manage the third pane", || pane_window(&i3));
+    daemon.send(Request::Toggle);
+    let settled = daemon.spoken_count();
+    std::thread::sleep(Duration::from_secs(1));
+    assert_eq!(daemon.spoken_count(), settled, "the third capture is done");
+    let pane = wait_for(PATIENCE, "i3 to manage the third pane", || pane_window(&i3));
+    let (x, y) = wait_for(PATIENCE, "the third pane's place", || {
+        pane_centre(&i3, pane)
+    });
+    click(&mut server, x, y);
+    wait_for(PATIENCE, "the click to focus the pane", || {
+        i3.node(pane).filter(|node| node.focused).map(drop)
+    });
+    let recordings = daemon.wavs().len();
+    assert!(type_text(&mut server, ":q"), "the layout types `:q`");
+    assert!(press_keysym(&mut server, RETURN), "the layout has Return");
+    daemon.send(Request::Toggle);
+    wait_for(PATIENCE, "the next capture to start", || {
+        (daemon.wavs().len() > recordings).then_some(())
+    });
+    daemon.say(&speech);
+    let fourth = daemon.wait_for_text(4, "the fourth capture's text in a new pane");
+    let wav = daemon.wavs().pop().expect("the fourth capture's recording");
+    let size = || std::fs::metadata(&wav).map(|meta| meta.len()).unwrap_or(0);
+    let before = size();
+    daemon.say(&speech);
+    assert!(
+        size() > before,
+        "the capture started after the close was cancelled with it"
+    );
+    let pane = wait_for(PATIENCE, "i3 to manage the fourth pane", || {
+        pane_window(&i3)
+    });
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(
+        pane_window(&i3),
+        Some(pane),
+        "the new pane was closed with the old one"
+    );
+    daemon.send(Request::Toggle);
+    assert!(contains(&fourth, SPOKEN));
+    println!("a capture started right after `:q` went on in a new pane");
+
+    // ------------------------------------------------ the editor is killed
+    daemon.send(Request::Toggle);
+    daemon.say(&speech);
+    daemon.wait_for_text(4, "the fifth capture's text");
+    wait_for(PATIENCE, "i3 to manage the fifth pane", || pane_window(&i3));
     let before = daemon.spoken_count();
     kill_editor(&daemon.socket);
     daemon.say(&speech);
@@ -539,11 +588,21 @@ impl Daemon {
 
     /// A daemon that commits while the capture runs: a second of speech is a
     /// chunk, settled once the next one begins, and each is recorded.
+    ///
+    /// Its editor is slow to exit: a job that ignores `SIGTERM` makes Neovim
+    /// wait two seconds for it after it closed its channels.
     fn with_chunks(display: &str) -> Self {
         Self::with(Some(display.to_owned()), Some(Chunks(16_000)), |config| {
             config.recording.enabled = true;
             config.preview.enabled = true;
             config.preview.interval_ms = 200;
+            config.nvim.editor = [
+                "nvim",
+                "--cmd",
+                "call jobstart(['sh', '-c', 'trap \"\" TERM; sleep 30'])",
+            ]
+            .map(str::to_owned)
+            .into();
         })
     }
 

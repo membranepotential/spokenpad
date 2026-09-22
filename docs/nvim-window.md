@@ -322,16 +322,25 @@ that is not a gap; for CJK input it is, and `attach` is the answer there.
   asked by the editor thread after every piece of work and every 66 ms), and
   the state machine cancels only a capture that started before the close
   (`Event::WindowClosed`), so a key pressed right after closing starts a
-  recording that goes on.
+  recording that goes on. The close is stamped when the window manager's
+  request, or Neovim's word that it is quitting, arrives, and a close
+  recorded for one pane is cleared when the next is asked for, so it is never
+  taken for the next pane's.
 - **You `:q` in it.** The same, from the other end, a running recording
-  cancelled included: Neovim exiting with status 0 (`:q`, `:wq`, `:qa`) is
-  your close. `:q` always writes and quits: the dictation file is saved on
-  every change, and before `:quit`, `:wq` or `:qall` looks at what is unsaved
+  cancelled included. When the pane attaches, it registers a `VimLeavePre`
+  autocommand in its Neovim that, with `v:dying` at 0 — a quit Neovim was
+  told to do: `:q`, `:wq`, `:qa`, `:cq` — sends a notification on the pane's
+  own channel before any channel closes. That notification is what makes an
+  exit your close, not the exit status or its timing: Neovim closes its
+  channels and then waits up to two seconds for its jobs (a language server
+  that ignores `SIGTERM`), and the pane does not wait for the process at all.
+  `:q` always writes and quits: the dictation file is saved on every change,
+  and before `:quit`, `:wq` or `:qall` looks at what is unsaved
   ([The file](#the-file)).
-- **The editor dies.** Killed, crashed, or exiting with another status
-  (`:cq` too): not your close. The pane goes, a recording goes on, and its
-  next text opens a new pane on the pending passage — nothing is lost to a
-  crash. In attach mode the daemon cannot tell `:q` in an editor it did not
+- **The editor dies.** Killed, crashed, or taken down by a deadly signal
+  (which sets `v:dying`): it says nothing before its channel closes, so it
+  is not your close. The pane goes, a recording goes on, and its next text
+  opens a new pane on the pending passage — nothing is lost to a crash. In attach mode the daemon cannot tell `:q` in an editor it did not
   start from that editor dying, so there quitting the editor never cancels
   a recording.
 - **The daemon restarts.** The window goes with it — it is a thread of that

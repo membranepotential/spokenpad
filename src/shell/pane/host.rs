@@ -63,9 +63,11 @@ struct Shared {
     /// Whether the daemon is waiting for a call Neovim holds behind a
     /// half-typed command, which the pane then says in its last row.
     held: AtomicBool,
-    /// When the user closed the last pane, until the daemon asks. Set before
-    /// `alive` goes false, so that a caller who finds the pane gone and no
-    /// close recorded knows it did not end by the user's hand.
+    /// When the user closed the pane that is open or last was, until the
+    /// daemon asks. Set before `alive` goes false, so that a caller who finds
+    /// the pane gone and no close recorded knows it did not end by the
+    /// user's hand; cleared when the next pane is asked for, so a close is
+    /// never taken for the next pane's.
     closed_by_user: Mutex<Option<Instant>>,
 }
 
@@ -150,13 +152,23 @@ impl PaneHost {
     }
 
     /// When the user closed the last pane — its window, or `:q` in it — if
-    /// they did since the last time this was asked.
+    /// they did since the last time this was asked: the moment the window
+    /// manager's request or Neovim's word that it is quitting arrived.
     pub fn take_closed_by_user(&self) -> Option<Instant> {
         self.shared
             .closed_by_user
             .lock()
             .expect("the pane's close")
             .take()
+    }
+
+    /// Whether a close by the user is recorded and not taken yet.
+    pub fn closed_by_user_pending(&self) -> bool {
+        self.shared
+            .closed_by_user
+            .lock()
+            .expect("the pane's close")
+            .is_some()
     }
 
     /// Say in the pane, or stop saying, that the daemon is waiting for a call
@@ -230,16 +242,12 @@ fn serve(work: Receiver<Work>, shared: Arc<Shared>) {
                     Ok(Status::Running) => {}
                     Ok(Status::Finished(ending)) => {
                         match ending {
-                            Ending::ByUser => {
+                            Ending::ByUser { at } => {
                                 log::info!("the dictation pane closed: the user closed it");
-                                *shared.closed_by_user.lock().expect("the pane's close") =
-                                    Some(Instant::now());
+                                *shared.closed_by_user.lock().expect("the pane's close") = Some(at);
                             }
-                            Ending::EditorFailed(status) => log::warn!(
-                                "the dictation pane closed: its editor exited with {status}"
-                            ),
-                            Ending::Lost => log::warn!(
-                                "the dictation pane closed: its editor went away without saying how"
+                            Ending::EditorDied => log::warn!(
+                                "the dictation pane closed: its editor went away without being told to quit"
                             ),
                         }
                         // Dropping it writes every modified buffer and reaps
@@ -266,6 +274,9 @@ fn serve(work: Receiver<Work>, shared: Arc<Shared>) {
         };
         match next {
             Work::Open { opening, answer } => {
+                // A close recorded for the pane before this one is that
+                // pane's; the one about to open must not inherit it.
+                *shared.closed_by_user.lock().expect("the pane's close") = None;
                 // Any pane still open is replaced, not stacked: one window is
                 // one passage, and the caller only asks when it has none.
                 pane = None;

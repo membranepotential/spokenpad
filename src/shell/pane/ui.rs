@@ -21,7 +21,7 @@ use rmpv::Value;
 use std::{
     io::{BufReader, Write},
     os::unix::process::CommandExt,
-    process::{Child, ChildStdin, Command, ExitStatus, Stdio},
+    process::{Child, ChildStdin, Command, Stdio},
     sync::mpsc::Sender,
     thread::JoinHandle,
     time::{Duration, Instant},
@@ -39,6 +39,9 @@ pub enum FromEditor {
         error: Value,
         result: Value,
     },
+    /// Neovim is quitting because it was told to (`VimLeavePre` with
+    /// `v:dying` at 0); `Gone` follows.
+    Leaving,
     /// The channel ended: Neovim exited, or its stdout closed.
     Gone,
 }
@@ -182,22 +185,6 @@ impl Editor {
         stdin.flush().context("flush the channel to nvim")
     }
 
-    /// How Neovim exited, once its channel has ended: waited for up to
-    /// `within`, since the channel closes a moment before the process is
-    /// gone. `None` if it is still running by then.
-    pub fn exit_status(&mut self, within: Duration) -> Option<ExitStatus> {
-        let deadline = Instant::now() + within;
-        loop {
-            match self.process.try_wait() {
-                Ok(Some(status)) => return Some(status),
-                Ok(None) if Instant::now() < deadline => {
-                    std::thread::sleep(Duration::from_millis(5));
-                }
-                Ok(None) | Err(_) => return None,
-            }
-        }
-    }
-
     /// Closing stdin is the polite half: `--embed` treats the channel closing
     /// as the UI detaching, and Neovim exits once its last UI is gone.
     /// Ask Neovim to quit and wait `grace` for it, then kill its session.
@@ -263,6 +250,9 @@ fn read_channel(stdout: std::process::ChildStdout, events: &Sender<Event>) {
         let event = match message {
             rpc::Message::Notification { method, arguments } if method == "redraw" => {
                 FromEditor::Redraw(RedrawEvent::parse_batch(&arguments))
+            }
+            rpc::Message::Notification { method, .. } if method == "spokenpad_leaving" => {
+                FromEditor::Leaving
             }
             rpc::Message::Response { id, error, result } => {
                 FromEditor::Response { id, error, result }

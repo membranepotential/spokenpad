@@ -1883,3 +1883,32 @@ it.
   changes. That the user's configuration carries it is not verified; the
   docs say how to check and to delete or anchor it.
 - `examples/pane.rs` takes `--tiled`, which the experiment used.
+
+## The pane's editor says when it was told to quit (2026-09-22)
+
+Review of the close that cancels a capture found two faults.
+
+- The exit status decided whether a `:q` was the user's close, read within
+  0.5 s of Neovim's channel closing. Neovim closes its channels and then
+  waits up to two seconds for its jobs: with a job that ignores `SIGTERM` (a
+  language server may), a `:q` exits with status 0 two seconds after the
+  channel closed, was read as a crash, and the capture went on. It also held
+  the pane's thread for half a second. Chosen instead: when the pane
+  attaches, it registers a `VimLeavePre` autocommand that, with `v:dying`
+  at 0, notifies the pane's own channel before any channel closes. The
+  notice, not the status or the timing, makes the exit the user's close,
+  and nothing waits for the process. `:cq` now counts as a close, being one
+  the user typed; a kill, a crash or a deadly signal (which sets `v:dying`)
+  sends nothing and stays a crash.
+- The recorded close was stamped after that wait and was not tied to a
+  pane: a key pressed while the old pane was still exiting could open a new
+  pane, and the old close, stamped later than the new capture's start, then
+  cancelled the new capture and dropped the new pane's connection. Chosen:
+  the close is stamped when the window manager's request or the notice
+  arrives, and cleared when the next pane is asked for. Text that finds the
+  last pane gone also checks for a close not yet reported, so it cannot open
+  a pane in that moment.
+- Tests: the pane-close test in `tests/pane_daemon.rs` runs with an editor
+  whose job ignores `SIGTERM`, and adds `:q` followed at once by a key
+  press: the new capture keeps recording in a new pane that stays open. With
+  the previous detection it fails at the `:q`.

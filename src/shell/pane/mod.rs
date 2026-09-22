@@ -50,7 +50,7 @@ use std::{
     io::Write,
     os::unix::fs::OpenOptionsExt,
     path::PathBuf,
-    process::{Command, ExitStatus},
+    process::Command,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -121,23 +121,35 @@ pub enum Status {
 /// Why a pane finished, which decides what becomes of the capture it showed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ending {
-    /// The user closed it: the window manager asked (`WM_DELETE_WINDOW`), or
-    /// Neovim exited with status 0 (`:q`, `:wq`, `:qa`). The daemon cancels a
-    /// capture that was running.
-    ByUser,
-    /// Neovim exited with another status or was killed by a signal. Nothing
-    /// the user meant: the capture goes on, and its next text opens a new
-    /// pane.
-    EditorFailed(ExitStatus),
-    /// Neovim's channel closed and the process had not exited a moment later,
-    /// or the pane lost its sources of events. Treated as a failure.
-    Lost,
+    /// The user closed it, at `at`: the window manager asked
+    /// (`WM_DELETE_WINDOW`), or Neovim said it was quitting because it was
+    /// told to (`:q`, `:wq`, `:qa`, `:cq`). The daemon cancels a capture that
+    /// was running.
+    ByUser { at: Instant },
+    /// Neovim went away without saying so — killed, crashed, a deadly signal
+    /// — or the pane lost its sources of events. Nothing the user meant: the
+    /// capture goes on, and its next text opens a new pane.
+    EditorDied,
 }
 
-/// How long a pane waits, after Neovim's channel closed, for the process to
-/// say how it exited: long enough for an exit that is under way, short
-/// enough that a wedged one does not hold the pane's thread.
-const EXIT_WAIT: Duration = Duration::from_millis(500);
+/// Registered in the embedded Neovim once it is attached: on a quit it was
+/// told to do, it says so on the pane's own channel, before any channel
+/// closes. `VimLeavePre` runs for `:q`, `:wq`, `:qa` and `:cq` with
+/// `v:dying` at 0; a deadly signal sets `v:dying`, and a kill or a crash runs
+/// nothing at all. So the notice is independent of how long the process then
+/// takes to exit — Neovim waits up to two seconds for its jobs, an LSP among
+/// them — and a crash can never produce it.
+const ANNOUNCE_LEAVING: &str = r#"
+local channel = ...
+vim.api.nvim_create_autocmd("VimLeavePre", {
+  group = vim.api.nvim_create_augroup("SpokenpadPane", { clear = true }),
+  callback = function()
+    if vim.v.dying == 0 then
+      pcall(vim.rpcnotify, channel, "spokenpad_leaving")
+    end
+  end,
+})
+"#;
 
 pub struct Pane {
     window: Window,
@@ -170,6 +182,9 @@ pub struct Pane {
     dragging: Option<&'static str>,
     /// Whether the editor has already exited, so nothing tries to talk to it.
     editor_gone: bool,
+    /// When Neovim said it was quitting because it was told to
+    /// ([`ANNOUNCE_LEAVING`]); its channel closes a moment later.
+    leaving: Option<Instant>,
     /// Whether the last row says that the daemon is waiting for a call
     /// Neovim holds behind a half-typed command ([`HELD_NOTICES`]).
     held: bool,
@@ -271,11 +286,37 @@ impl Pane {
             focused: false,
             dragging: None,
             editor_gone: false,
+            leaving: None,
             held: false,
         };
         let attach = pane.editor.attach(columns, rows)?;
         pane.await_response(attach, options.attach_timeout)
             .context("attach to the embedded nvim as a UI")?;
+        // Our own channel's id, as Neovim numbers it, for it to notify on.
+        let asked = pane
+            .editor
+            .request("nvim_get_chan_info", vec![Value::from(0)])?;
+        let info = pane
+            .await_response(asked, options.attach_timeout)
+            .context("ask the embedded nvim for the pane's channel")?;
+        let channel = info
+            .as_map()
+            .and_then(|fields| {
+                fields
+                    .iter()
+                    .find(|(key, _)| key.as_str() == Some("id"))
+                    .and_then(|(_, id)| id.as_i64())
+            })
+            .context("the embedded nvim did not say which channel the pane is")?;
+        let announce = pane.editor.request(
+            "nvim_exec_lua",
+            vec![
+                Value::from(ANNOUNCE_LEAVING),
+                Value::Array(vec![Value::from(channel)]),
+            ],
+        )?;
+        pane.await_response(announce, options.attach_timeout)
+            .context("have the embedded nvim announce a quit")?;
         pane.watcher = Some(watch(&pane.window, sender, Arc::clone(&pane.stopping))?);
         Ok(pane)
     }
@@ -350,7 +391,9 @@ impl Pane {
         let first = match self.events.recv_timeout(timeout) {
             Ok(event) => Some(event),
             Err(RecvTimeoutError::Timeout) => None,
-            Err(RecvTimeoutError::Disconnected) => return Ok(Status::Finished(Ending::Lost)),
+            Err(RecvTimeoutError::Disconnected) => {
+                return Ok(Status::Finished(Ending::EditorDied));
+            }
         };
         let queued: Vec<Event> = self.events.try_iter().collect();
         let mut status = Status::Running;
@@ -442,12 +485,15 @@ impl Pane {
                 }
                 Ok(Status::Running)
             }
+            Event::Editor(FromEditor::Leaving) => {
+                self.leaving.get_or_insert_with(Instant::now);
+                Ok(Status::Running)
+            }
             Event::Editor(FromEditor::Gone) => {
                 self.editor_gone = true;
-                Ok(Status::Finished(match self.editor.exit_status(EXIT_WAIT) {
-                    Some(status) if status.success() => Ending::ByUser,
-                    Some(status) => Ending::EditorFailed(status),
-                    None => Ending::Lost,
+                Ok(Status::Finished(match self.leaving {
+                    Some(at) => Ending::ByUser { at },
+                    None => Ending::EditorDied,
                 }))
             }
             Event::Window(event) => self.window_event(event),
@@ -483,7 +529,7 @@ impl Pane {
                 }
             }
             X::ClientMessage(event) if self.window.is_close_request(&event) => {
-                return Ok(Status::Finished(Ending::ByUser));
+                return Ok(Status::Finished(Ending::ByUser { at: Instant::now() }));
             }
             _ => {}
         }
