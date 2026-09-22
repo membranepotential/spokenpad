@@ -7,17 +7,16 @@ Hold a key (or latch with shift), speak, and text appears in an nvim that
 never takes focus. Fully local, CPU-only. Next milestone: public release.
 
 ## Now (2026-09-22: polish for the public release)
-- pane-hidpi — pane font in points scaled by Xft.dpi, same cell size as
-  Alacritty; tests at 192 dpi + Alacritty comparison — agent running.
-- packaging — design done (socket activation, PKGBUILD like jumanji, no
-  install script); implementation starts after pane-hidpi merges.
+- p3-focus — pane never takes focus on sway/Xwayland, openbox, kwin
+  (headless, own sessions); gates pane as default — agent running.
+- packaging — socket activation, accept before model load, no auto
+  download, PKGBUILD + CI, install.sh removed — agent running.
 
 ## Next
 1. User: P4 live check of `nvim.mode = "pane"` on i3 (steps: set the mode,
    `spokenpad check`, restart; dictate while typing elsewhere; click, type
    `Grüße @ € { }`; colours/font with tokyonight; close window, dictate again).
-2. P3 focus checks (sway/Xwayland, openbox, kwin; user installs sway
-   openbox) gate pane as default. User decides: push (62 commits unpushed); make the repo public.
+2. After p3-focus passes: default mode = pane. User decides: push (62 commits unpushed); make the repo public.
 3. Lost chunk: the end-of-slice close is both the one lost chunk and the
    whole 0.35-point gain (flip run: revert = old text on all 181). Open: a
    guard that keeps the gain; see experiments/2026-09-22-empty-chunk-flips.md.
@@ -27,7 +26,8 @@ never takes focus. Fully local, CPU-only. Next milestone: public release.
    screenshot; history scan clean except a Handy transcripts.json (user checks).
 
 ## Done
-- 09-22: dev subset `--subset dev` (28 captures, ~2 min run, holds every
+- 09-22: pane font in points x Xft.dpi = Alacritty cells (19x41 here),
+  deployed 11:54, user font set to SauceCodePro 12; dev subset `--subset dev` (28 captures, ~2 min run, holds every
   failure main shows; beam loss caught); `spoken` flag: 15 mixed captures,
   their references cost ~1 WER point; flip count done.
 - 09-21 (deployed as d5d7418): constant RAM while recording (1.7 vs 116 MiB per 30 min), lead padding
