@@ -129,7 +129,16 @@ cargo run --release --example=corpus -- --config eval.toml --path live \
 # only the German captures, every row, two captures decoded at a time
 cargo run --release --example=corpus -- --config eval.toml \
     --language de --all --jobs 2
+
+# the dev subset, eval-samples/local/subsets/dev.txt: 28 captures, minutes
+cargo run --release --example=corpus -- --config eval.toml --path live \
+    --subset dev --jobs 2
 ```
+
+Iterate on the dev subset and run the whole corpus before a change ships.
+`--subset NAME` reads `subsets/NAME.txt` inside the corpus, `--ids FILE` any
+list of capture file names; the subset and why its captures were chosen are in
+[eval-samples/README.md](../eval-samples/README.md#the-dev-subset).
 
 Nothing about the model is hard-wired: `--config PATH` is a full spokenpad
 configuration, so another model family, a patched sherpa-onnx or another
@@ -214,7 +223,11 @@ author's corpus of 2026-09-21 is 181 captures and 75 minutes:
 ([the experiment](experiments/2026-09-21-gladia-reference-transcripts.md)).
 The harness prints a WER per reference language, and `--language de` scores
 only one of them; a corpus of two languages has no single aggregate worth
-quoting. It is a development tool: **it uploads audio to a third party**, no
+quoting. Gladia assigns one language per capture, so the dataset also carries
+a hand-checked `spoken` language per capture (`en`, `de`, `mixed`, `none`); the
+report prints WER per `spoken` group too, and `--spoken en --spoken de` leaves
+out the 15 captures that mix both languages and whose reference is therefore
+wrong about part of them. It is a development tool: **it uploads audio to a third party**, no
 code under `src/` calls it, and the user granting that has to mean it. The raw
 response per capture and the index it builds stay in the git-ignored
 `eval-samples/local/` — the recordings are the author's own speech, and so are

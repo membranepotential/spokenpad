@@ -1024,3 +1024,29 @@ Notice ranking: news about audio that was lost still outranks news about a
 capture that ended cleanly, so `LengthLimit` and `SilenceTimeout` sit below
 the microphone notices and above `NearlySilent`. Nothing is lost when they
 fire, and the log line names the cause either way.
+
+## Iterate on a 28-capture dev subset, gate on the whole corpus (2026-09-22)
+
+Whole-corpus runs took 8–20 minutes each and were run for questions a small
+set answers. `examples/corpus.rs` now takes `--subset NAME` (a list in the
+corpus's `subsets/`) or `--ids FILE`, and the dataset carries `subsets/dev.txt`:
+28 captures, 17.8 minutes, holding every chunk failure today's `main` shows on
+the corpus, the two captures where beam search loses speech, and some
+coverage. It replays in about two minutes and reproduced the recorded run of
+`main` on those captures word for word
+([experiment](experiments/2026-09-22-dev-subset.md)).
+
+- **The subset is for counts, the corpus for WER.** It was picked for its
+  failures, so its WER (14.2%) is not the corpus's (10.9%), and between greedy
+  and beam search it points the other way. A change is judged on the full
+  corpus before it ships.
+- **Least private first.** The captures were rated for private content before
+  they were chosen; the subset holds one capture with identifying content, kept
+  because nothing else carries its failure. Ratings and reasons stay in the
+  git-ignored dataset; the tracked README lists ids and counts only.
+- **Mixed-language captures are flagged, not dropped.** The Gladia references
+  hold one language per capture; 15 captures mix both, and their reference is
+  wrong about the minority language (21.4% WER against 9.9% on the rest). The
+  dataset's hand-checked `spoken` field marks them, the report prints WER per
+  group, and `--spoken en --spoken de` scores without them. Dataset version
+  `2026-09-21.1`: same audio and references, so older numbers still compare.

@@ -24,6 +24,8 @@
 //! cargo run --release --example=corpus -- --config eval.toml
 //! cargo run --release --example=corpus -- --config eval.toml --path live \
 //!     --trailing-silence-ms 0 --jsonl out.jsonl --label greedy-nopad
+//! # 28 captures picked for their failures: iterate here, gate on the corpus
+//! cargo run --release --example=corpus -- --config eval.toml --path live --subset dev
 //! ```
 use anyhow::{Context, Result, bail, ensure};
 use clap::{Parser, ValueEnum};
@@ -97,6 +99,17 @@ struct Args {
     /// Score only captures whose reference is in this language; repeat for more
     #[arg(long, value_name = "CODE")]
     language: Vec<String>,
+    /// Score only captures whose hand-checked `spoken` language is this, `mixed`
+    /// for captures holding both; repeat for more
+    #[arg(long, value_name = "CODE")]
+    spoken: Vec<String>,
+    /// Score only the captures listed in <corpus>/subsets/NAME.txt
+    #[arg(long, value_name = "NAME", conflicts_with = "ids")]
+    subset: Option<String>,
+    /// Score only the captures listed in this file: one wav file name per line,
+    /// `#` starts a comment
+    #[arg(long, value_name = "PATH")]
+    ids: Option<PathBuf>,
     /// Score only the first N captures of the corpus
     #[arg(long, value_name = "N")]
     limit: Option<usize>,
@@ -162,6 +175,12 @@ struct Entry {
     /// capture it found no speech in.
     #[serde(default)]
     languages: Vec<String>,
+    /// The language actually spoken, checked by hand: a language code,
+    /// `mixed` when the capture holds both languages (its reference is then
+    /// right about one of them at most), `none` when nobody spoke. Absent from
+    /// an index nobody has checked.
+    #[serde(default)]
+    spoken: Option<String>,
     /// Of the wav's bytes. A dataset carries it so a replay can prove it read
     /// the audio the references were made from.
     #[serde(default)]
@@ -171,6 +190,9 @@ impl Entry {
     /// One language per capture, which is how the references are built.
     fn language(&self) -> &str {
         self.languages.first().map_or("--", String::as_str)
+    }
+    fn spoken(&self) -> &str {
+        self.spoken.as_deref().unwrap_or("--")
     }
     /// Where the wav is now: a relative `path` belongs to the dataset that
     /// names it, an absolute one speaks for itself.
@@ -196,6 +218,34 @@ fn digest(path: &Path) -> Result<String> {
         .finalize()
         .iter()
         .map(|b| format!("{b:02x}"))
+        .collect())
+}
+
+/// The capture file names a subset lists: one per line, `#` to the end of a
+/// line is a comment, blank lines are skipped.
+fn parse_ids(text: &str) -> Vec<&str> {
+    text.lines()
+        .map(|line| line.split('#').next().unwrap_or_default().trim())
+        .filter(|id| !id.is_empty())
+        .collect()
+}
+
+/// The entries a subset names, in corpus order. A name the corpus does not
+/// hold is an error: a subset that silently shrinks measures something else.
+fn select(entries: Vec<Entry>, ids: &[&str]) -> Result<Vec<Entry>> {
+    let unknown: Vec<&str> = ids
+        .iter()
+        .copied()
+        .filter(|id| !entries.iter().any(|e| e.file == *id))
+        .collect();
+    ensure!(
+        unknown.is_empty(),
+        "the subset names captures the corpus does not hold: {}",
+        unknown.join(", ")
+    );
+    Ok(entries
+        .into_iter()
+        .filter(|e| ids.contains(&e.file.as_str()))
         .collect())
 }
 
@@ -470,6 +520,7 @@ fn decode_whole(worker: &mut Engine, samples: &[f32]) -> Result<Vec<String>> {
 struct Row {
     file: String,
     language: String,
+    spoken: String,
     duration_s: f64,
     reference: String,
     hypothesis: String,
@@ -548,6 +599,7 @@ fn run_pass(
                         Row {
                             file: entry.file.clone(),
                             language: entry.language().to_owned(),
+                            spoken: entry.spoken().to_owned(),
                             duration_s: Frames(samples.len()).seconds(rate),
                             reference: entry.reference.clone(),
                             hypothesis,
@@ -737,32 +789,11 @@ fn print_report(rows: &[Row], summary: &Summary, args: &Args, plan: Plan, wall: 
         "hypothesis words {} against {} reference words",
         summary.hyp_words, summary.ref_words
     );
-    let mut languages: Vec<&str> = rows.iter().map(|r| r.language.as_str()).collect();
-    languages.sort_unstable();
-    languages.dedup();
-    if languages.len() > 1 {
-        let per_language: Vec<String> = languages
-            .iter()
-            .map(|language| {
-                let part: Vec<&Row> = rows.iter().filter(|r| r.language == *language).collect();
-                let (edits, words) = part.iter().fold((0, 0), |(e, w), r| {
-                    (
-                        e + if r.ref_words > 0 { r.edits } else { 0 },
-                        w + r.ref_words,
-                    )
-                });
-                let name = if language.is_empty() { "--" } else { language };
-                match words {
-                    0 => format!("{name} {} captures, no reference words", part.len()),
-                    _ => format!(
-                        "{name} {:.1}% ({} captures, {words} words)",
-                        edits as f64 / words as f64 * 100.0,
-                        part.len()
-                    ),
-                }
-            })
-            .collect();
-        println!("by reference language  {}", per_language.join("   "));
+    if let Some(line) = breakdown(rows, |r| &r.language) {
+        println!("by reference language  {line}");
+    }
+    if let Some(line) = breakdown(rows, |r| &r.spoken) {
+        println!("by spoken language     {line}");
     }
     println!(
         "speech chunks empty on the first decode {}, still empty after the bare retry {}  ({} decodes)",
@@ -795,6 +826,38 @@ fn print_report(rows: &[Row], summary: &Summary, args: &Args, plan: Plan, wall: 
             _ => "",
         }
     );
+}
+
+/// Corpus-level WER per group of `key`, or `None` when every row falls into
+/// one group and the aggregate already says it.
+fn breakdown<'a>(rows: &'a [Row], key: impl Fn(&'a Row) -> &'a str) -> Option<String> {
+    let mut groups: Vec<&str> = rows.iter().map(&key).collect();
+    groups.sort_unstable();
+    groups.dedup();
+    (groups.len() > 1).then(|| {
+        groups
+            .iter()
+            .map(|group| {
+                let part: Vec<&Row> = rows.iter().filter(|r| key(r) == *group).collect();
+                // A capture nobody spoke in has no WER: its edits are all
+                // insertions, counted apart as `invented`.
+                let (edits, words) = part
+                    .iter()
+                    .filter(|r| r.ref_words > 0)
+                    .fold((0, 0), |(e, w), r| (e + r.edits, w + r.ref_words));
+                let name = if group.is_empty() { "--" } else { group };
+                match words {
+                    0 => format!("{name} {} captures, no reference words", part.len()),
+                    _ => format!(
+                        "{name} {:.1}% ({} captures, {words} words)",
+                        edits as f64 / words as f64 * 100.0,
+                        part.len()
+                    ),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("   ")
+    })
 }
 
 /// Family and decoding method, as the report and the JSON lines name them.
@@ -835,7 +898,8 @@ fn write_jsonl(
     for row in rows {
         let mut value = serde_json::json!({
             "kind": "sample", "label": label, "path": plan.path.name(),
-            "file": row.file, "language": row.language, "duration_s": row.duration_s,
+            "file": row.file, "language": row.language, "spoken": row.spoken,
+            "duration_s": row.duration_s,
             "ref_words": row.ref_words, "hyp_words": row.hyp_words,
             "edits": row.edits, "wer": row.wer, "lost_tail": row.lost_tail,
             "empty_first": row.tally.empty_first,
@@ -862,6 +926,7 @@ fn write_jsonl(
             "sherpa_onnx": sherpa_onnx::version(),
             "trailing_silence_ms": plan.padding_ms(), "tick_ms": plan.tick_ms(),
             "previews": plan.previews, "jobs": args.jobs,
+            "subset": args.subset.clone().or_else(|| args.ids.as_ref().map(|p| p.display().to_string())),
             "files": summary.files, "scored": summary.scored,
             "empty_reference": summary.empty_reference, "invented": summary.invented,
             "ref_words": summary.ref_words, "hyp_words": summary.hyp_words,
@@ -901,11 +966,25 @@ fn main() -> Result<()> {
             )
         })?)
         .with_context(|| format!("parse {}", index.display()))?;
-    let mut entries: Vec<Entry> = corpus
-        .samples
+    let list = args
+        .subset
+        .as_ref()
+        .map(|name| args.corpus.join("subsets").join(format!("{name}.txt")))
+        .or_else(|| args.ids.clone());
+    let samples = match &list {
+        Some(list) => {
+            let text = std::fs::read_to_string(list)
+                .with_context(|| format!("read the subset {}", list.display()))?;
+            select(corpus.samples, &parse_ids(&text))
+                .with_context(|| format!("subset {}", list.display()))?
+        }
+        None => corpus.samples,
+    };
+    let mut entries: Vec<Entry> = samples
         .into_iter()
         .filter(|e| e.wav(&args.corpus).is_file())
         .filter(|e| args.language.is_empty() || args.language.iter().any(|l| l == e.language()))
+        .filter(|e| args.spoken.is_empty() || args.spoken.iter().any(|l| l == e.spoken()))
         .collect();
     let dropped = args.limit.map_or(0, |n| entries.len().saturating_sub(n));
     if let Some(n) = args.limit {
@@ -934,9 +1013,12 @@ fn main() -> Result<()> {
 
     let (family, decoding) = describe(&config);
     println!(
-        "corpus {} ({} captures{})",
+        "corpus {} ({} captures{}{})",
         args.corpus.display(),
         entries.len(),
+        list.as_ref()
+            .map(|l| format!(" of the subset {}", l.display()))
+            .unwrap_or_default(),
         if dropped > 0 {
             format!(", {dropped} left out by --limit")
         } else {
@@ -1005,6 +1087,7 @@ mod tests {
             path: path.into(),
             reference: String::new(),
             languages: vec![],
+            spoken: None,
             sha256: None,
         };
         // A frozen dataset names its audio relative to itself, so the same
@@ -1019,6 +1102,53 @@ mod tests {
             entry("/var/state/c.wav").wav(Path::new("/data/corpus")),
             PathBuf::from("/var/state/c.wav")
         );
+    }
+
+    #[test]
+    fn a_subset_lists_file_names_and_comments() {
+        let text = "# the dev subset\nb.wav\n\n  a.wav  # the lost chunk\n#c.wav\n";
+        assert_eq!(parse_ids(text), ["b.wav", "a.wav"]);
+    }
+
+    #[test]
+    fn a_subset_keeps_corpus_order_and_refuses_a_capture_it_does_not_hold() {
+        let entries: Vec<Entry> = ["a.wav", "b.wav", "c.wav"]
+            .iter()
+            .map(|f| Entry {
+                file: (*f).into(),
+                path: f.into(),
+                reference: String::new(),
+                languages: vec![],
+                spoken: None,
+                sha256: None,
+            })
+            .collect();
+        let picked = select(entries.clone(), &["c.wav", "a.wav"]).unwrap();
+        let names: Vec<&str> = picked.iter().map(|e| e.file.as_str()).collect();
+        assert_eq!(names, ["a.wav", "c.wav"]);
+        let Err(error) = select(entries, &["a.wav", "gone.wav"]) else {
+            panic!("a capture the corpus does not hold was accepted");
+        };
+        assert!(error.to_string().contains("gone.wav"), "{error}");
+    }
+
+    #[test]
+    fn the_breakdown_scores_each_group_and_skips_a_single_one() {
+        let mixed = Row {
+            spoken: "mixed".into(),
+            ..row(10, 10, 5, 0)
+        };
+        let silent = Row {
+            spoken: "none".into(),
+            ..row(0, 3, 3, 0)
+        };
+        let rows = [row(10, 10, 1, 0), mixed, silent];
+        assert_eq!(
+            breakdown(&rows, |r| &r.spoken).unwrap(),
+            "en 10.0% (1 captures, 10 words)   mixed 50.0% (1 captures, 10 words)   \
+             none 1 captures, no reference words"
+        );
+        assert_eq!(breakdown(&rows, |r| &r.language), None, "all en");
     }
 
     #[test]
@@ -1160,6 +1290,7 @@ mod tests {
         Row {
             file: String::new(),
             language: "en".into(),
+            spoken: "en".into(),
             duration_s: 1.0,
             reference: String::new(),
             hypothesis: String::new(),

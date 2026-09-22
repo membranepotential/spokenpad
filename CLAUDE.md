@@ -114,7 +114,8 @@ cargo test --locked --all-targets              # no mic, user display, lock or s
 cargo test --locked --test e2e -- --ignored    # real-model e2e; needs `spokenpad fetch-models` first
 cargo clippy --locked --all-targets -- -D warnings && cargo fmt --check
 cargo run --release --example=eval             # WER on the five eval clips (--whole: no VAD)
-cargo run --release --example=corpus -- --config C.toml   # the whole local corpus, both paths
+cargo run --release --example=corpus -- --config C.toml   # the whole local corpus, both paths: the release gate
+cargo run --release --example=corpus -- --config C.toml --path live --subset dev --jobs 2   # 28 captures, for iteration
 scripts/install.sh                             # deploy: the service runs ~/.local/bin/spokenpad
 ```
 
