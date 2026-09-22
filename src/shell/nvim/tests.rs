@@ -1132,7 +1132,8 @@ fn typing_into_the_dictation_buffer_saves_it_at_once() {
 
 /// Leaving the dictation buffer — `:edit`, typed in one go with a change, as
 /// a mapping or a macro runs it — writes it first, with spokenpad's own
-/// write: the user's format-on-save does not run on it.
+/// write: the user's format-on-save does not run on it. Also with the user's
+/// `set nohidden`.
 #[test]
 fn leaving_an_edited_dictation_buffer_writes_it_without_the_users_autocommands() {
     if !nvim_or_skip() {
@@ -1141,7 +1142,11 @@ fn leaving_an_edited_dictation_buffer_writes_it_without_the_users_autocommands()
     let directory = tempfile::tempdir().unwrap();
     let mut config = headless(directory.path());
     let formatted = directory.path().join("formatted");
+    // With 'nohidden' Neovim refuses to abandon a modified buffer before
+    // BufLeave could write it, unless the buffer hides itself.
     config.editor.extend([
+        "--cmd".to_owned(),
+        "set nohidden".to_owned(),
         "--cmd".to_owned(),
         format!(
             "autocmd BufWritePre * call writefile(['ran'], '{}')",

@@ -561,7 +561,9 @@ is unsaved, and `VimLeavePre` before any other way out. That covers a change
 whose own write has not run: a `TextChanged` waits while keys are still
 queued, so `dd:q` typed in one go, or run by a mapping or a macro, reaches
 the `:quit` with the buffer modified. `BufLeave` covers `:edit` and
-`:bnext` the same way. `'autowriteall'` is not set: it would write the
+`:bnext` the same way, also with your `set nohidden`: the dictation buffer's
+own `'bufhidden'` is `hide`, since Neovim refuses to abandon a modified
+buffer (E37) before `BufLeave` runs. `'autowriteall'` is not set: it would write the
 dictation buffer with your autocommands, format-on-save included, on `:edit`,
 `:bnext`, `:!` and `:make` as well. Another file you open in the dictation
 editor is yours to save.

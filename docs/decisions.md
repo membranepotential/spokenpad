@@ -1995,3 +1995,20 @@ close and cancelled the capture.
 - Test: `tests/pane_render.rs` runs `:restart` in a pane and expects
   `Ending::EditorDied`; it fails with the `v:dying` check alone. It skips on
   a Neovim without `:restart`, and kills the server `:restart` started.
+
+## The dictation buffer hides itself when left (2026-09-22)
+
+The same review: with the user's `set nohidden`, `:edit other` or `:bnext`
+on a change whose own write had not run yet stopped at E37. Neovim checks
+for an unsaved buffer it would abandon before `BufLeave`, so the `BufLeave`
+write above never ran. Measured on 0.12.5 in a headless Neovim with
+`nohidden` and a `BufLeave` write: `:edit` after `dd` fails with E37 and
+the file keeps the line; with the buffer's `'bufhidden'` at `hide` it moves
+to the other file and the file lost the line.
+
+- Chosen: `spokenpad.lua` sets the dictation buffer's own `'bufhidden'` to
+  `hide`. That is what the default `'hidden'` does for every buffer, so
+  nothing changes with the default; the user's global `'hidden'` is left
+  alone.
+- Test: the `BufLeave` test in `src/shell/nvim/tests.rs` runs with
+  `set nohidden`; without the option it fails.

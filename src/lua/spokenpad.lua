@@ -612,6 +612,10 @@ function M.setup(buf, dedicated)
   define_highlights()
   vim.api.nvim_set_option_value("filetype", "markdown", { buf = buf })
   vim.diagnostic.enable(false, { bufnr = buf })
+  -- Leaving it hides it, whatever 'hidden' says: with `set nohidden`,
+  -- `:edit other` on a change whose write has not run yet would stop at E37
+  -- before BufLeave could write it.
+  vim.api.nvim_set_option_value("bufhidden", "hide", { buf = buf })
   apply_chrome()
   -- A colourscheme change clears `default = true` links, and a window can
   -- start showing this buffer at any time, so both re-assert the indicator
