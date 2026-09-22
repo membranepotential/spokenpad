@@ -2619,3 +2619,16 @@ up to 30 s of audio.
   sample decoded once, the short word included),
   `a_release_during_a_window_committed_whole_keeps_the_decoded_segment`,
   and `the_last_pause_follows_the_last_span_with_silence_after_it`.
+
+## Exit code 6 for a missing model; 2 is clap's (2026-09-23)
+
+`--help` and the README said exit 2 meant a missing model file, but clap
+exits 2 on every command line it cannot parse, so a script could not tell a
+typo from a missing model. A missing model now exits 6, the first free code;
+2 means only a command line spokenpad cannot parse. `--help`, the README and
+`rust.md` list every code the same way.
+
+- Rejected: making clap exit with another code. 2 is the convention for a
+  usage error, and clap's own.
+- Test: `a_usage_error_is_exit_two` and
+  `invalid_config_fails_before_devices_and_missing_model_is_exit_six`.

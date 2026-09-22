@@ -26,9 +26,10 @@ use std::{
         commands below, records while a key is held, and writes what you \
         said into a Neovim window. systemd's spokenpad.socket starts it on \
         the first press; nothing else needs to run it.",
-    after_help = "Exit codes: 0 success, 1 any other error, 2 a model file is missing, \
+    after_help = "Exit codes: 0 success, 1 any other error, 2 the command line is not valid, \
         3 another daemon is running, 4 the recording given to transcribe is unreadable \
-        or not 16 kHz, 5 check found that the pane cannot open here."
+        or not 16 kHz, 5 check found that the pane cannot open here, 6 a model file is \
+        missing."
 )]
 struct Cli {
     #[command(flatten)]
@@ -174,19 +175,21 @@ impl From<Control> for Request {
 }
 
 /// Why spokenpad exited, as its exit code says. Chosen by what went wrong,
-/// never by an error's message, so a reworded error cannot change it.
+/// never by an error's message, so a reworded error cannot change it. `1`
+/// is any other error, and `2` a command line clap could not parse: clap
+/// exits with it itself, so no variant here may take it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 enum Exit {
     Success = 0,
-    /// A model file is missing (`check`, `transcribe`).
-    ModelMissing = 2,
     /// Another daemon holds the lock: a daemon started by hand.
     AnotherDaemon = 3,
     /// The recording given to `transcribe` is unreadable or not 16 kHz.
     BadRecording = 4,
     /// `check`: the pane this configuration opens cannot open here.
     PaneUnavailable = 5,
+    /// A model file is missing (`check`, `transcribe`).
+    ModelMissing = 6,
 }
 
 impl From<Exit> for ExitCode {

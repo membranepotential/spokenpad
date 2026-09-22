@@ -197,7 +197,7 @@ fn wrong_sample_rate_rejected_before_loading_model() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("48000Hz"));
 }
 #[test]
-fn invalid_config_fails_before_devices_and_missing_model_is_exit_two() {
+fn invalid_config_fails_before_devices_and_missing_model_is_exit_six() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("bad.toml");
     std::fs::write(&path, "[preview]\ninterval_seconds=0.001").unwrap();
@@ -215,8 +215,20 @@ fn invalid_config_fails_before_devices_and_missing_model_is_exit_two() {
         .arg("check")
         .output()
         .unwrap();
-    assert_eq!(code(&output), 2);
+    assert_eq!(code(&output), 6);
     assert!(output.stdout.is_empty());
+}
+/// Exit code 2 is the argument parser's, for a command line it cannot read,
+/// and means nothing else.
+#[test]
+fn a_usage_error_is_exit_two() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = command(&dir).arg("--no-such-option").output().unwrap();
+    assert_eq!(code(&output), 2);
+    let help = command(&dir).arg("--help").output().unwrap();
+    let help = String::from_utf8_lossy(&help.stdout);
+    assert!(help.contains("2 the command line is not valid"), "{help}");
+    assert!(help.contains("6 a model file is missing"), "{help}");
 }
 /// A key binding with no daemon behind it: a clear message, a nonzero exit,
 /// and nothing created, not even the config it never reads.
