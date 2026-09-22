@@ -1705,3 +1705,26 @@ unless they read the log.
 - Measured in `tests/e2e.rs`: a stop 4 s into a held append wrote the text to
   the pending passage and nowhere else, and the daemon stopped 161 ms after
   it was told to.
+
+## A stopping daemon gives up on an append within its grace (2026-09-22)
+
+Review of the two-minute cap: the `quitting` flag was looked at only once
+Neovim said it was holding the call. An append sent after the flag still
+waited its whole 2 s deadline first, and on an editor that had stopped
+answering altogether (not held: frozen) the timeout led to a reconnect and a
+repeat, about 4 s more, so the process exited before the pending-passage
+write and the text was only in the log.
+
+- Chosen: while stopping, an append is not reconnected and repeated; it is
+  unconfirmed at once and its text goes to the pending passage.
+- Chosen: a patient call wakes every half second, before its deadline too,
+  and its caller ends it when the flag is set (`Waiting::Unanswered`).
+- Chosen: a patient call sent after the flag gets a quarter second
+  (`QUITTING_TIMEOUT`) instead of two. A healthy editor appends in tens of
+  milliseconds; a slower one is given up on and the text goes to the pending
+  passage.
+- Measured (`src/shell/nvim/tests.rs`): given up 200–510 ms after the flag,
+  on an editor held by a count or frozen with `SIGSTOP`, with the flag set
+  before or during the append; 2.6 s without the first change. The frozen
+  editor, continued, ran the request as well: the documented case of text in
+  both places.

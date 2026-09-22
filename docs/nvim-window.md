@@ -879,12 +879,19 @@ is held:
   confirmed", the text to the pending passage (below), and the next utterance
   there too until the editor answers again;
 - **a daemon stop ends it at once.** The daemon sets the session's
-  `quitting` flag before its last message to the editor thread, the wait sees
-  it within half a second, and the thread writes the text to the pending
-  passage instead of spending its shutdown grace on it (measured: the daemon
-  stopped 161 ms after it was told to, in `tests/e2e.rs`). Once the flag is set, the
-  thread neither reattaches nor opens an editor: what is still queued goes to
-  the pending passage. Before, the append gave up after 2 s, the reconnection's
+  `quitting` flag before its last message to the editor thread. A patient
+  call wakes every half second, before its deadline too, and gives up when
+  it sees the flag; one sent after the flag gets a quarter second instead of
+  two (`QUITTING_TIMEOUT`); and an append given up on while stopping is not
+  reconnected and repeated, which on an editor that stopped answering took
+  seconds more. Its text goes to the pending passage. Measured in
+  `src/shell/nvim/tests.rs`, with the flag set before the append or while it
+  waits, on an editor held by a count or frozen with `SIGSTOP`: given up
+  200–510 ms after the flag. In `tests/e2e.rs` the whole daemon stopped
+  161 ms after it was told to with an append held, and within 1.6 s (1 s of
+  it the last decode) with the editor frozen, the text in the pending passage
+  both times. Once the flag is set, the thread neither reattaches nor opens
+  an editor: what is still queued goes to the pending passage. Before, the append gave up after 2 s, the reconnection's
 probe after 2 more, and the utterance was reported as failed while its
 request still sat in Neovim's queue; the next one went to a pending passage
 instead of the open window. Startup, attach and the last idle push on detach
@@ -904,8 +911,10 @@ user in the usual case, since Neovim 0.12.5 drops a request whose connection
 closed before it ran (measured: after `<Esc>` ended the command it was held
 behind, the text was not in the buffer). It is in both places only if the
 editor ran the request after all: one whose reply alone was lost on a live
-connection, or a future Neovim that runs what a closed connection had queued.
-A second copy the user can delete is the price of never losing the text.
+connection, or an editor that was not reading at all (stopped, swapped out)
+when the connection closed. Measured: continued after `SIGSTOP`, Neovim reads
+the request and the close together and runs the request first. A second copy
+the user can delete is the price of never losing the text.
 
 When the daemon exits it **detaches without closing nvim**: the user may still
 be editing what they dictated, and killing their editor because a daemon

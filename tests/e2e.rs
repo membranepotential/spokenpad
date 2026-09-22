@@ -39,7 +39,7 @@ use spokenpad::{
     shell::{
         audio::{AudioCapture, CallbackCore, InputBackend, InputStream, Teardown},
         control::{ControlServer, Socket},
-        daemon::{Devices, Loader, PipelineSource, Reload, serve},
+        daemon::{Devices, Loader, PipelineSource, Reload, SHUTDOWN_GRACE, serve},
         inference::{Transcriber, load_segmenter},
         recorder::read_capture,
     },
@@ -1609,6 +1609,57 @@ fn an_append_held_when_the_daemon_stops_goes_to_the_pending_passage() {
         "the editor ran the held append after its connection closed: {buffer:?}"
     );
     assert_eq!(h.calls().len(), 1, "decoded once: {:?}", h.calls());
+    h.finish();
+}
+
+/// The editor stops answering altogether (here: `SIGSTOP`) while the last
+/// utterance decodes, and the daemon is told to stop. The append is given up
+/// on without reconnecting and repeating it, and its text reaches the pending
+/// passage before the editor thread's shutdown grace runs out.
+#[test]
+fn a_daemon_stopping_on_a_frozen_editor_still_writes_the_pending_passage() {
+    if !nvim_available() {
+        return;
+    }
+    const DECODE: Duration = Duration::from_secs(1);
+    let mut h = Harness::start(Settings {
+        mode: Mode::Attach,
+        delay: DECODE,
+        ..Settings::default()
+    });
+    h.open_editor();
+    let editor = h.user_editor.as_ref().expect("the user's editor").id() as i32;
+    thread::sleep(Duration::from_millis(300));
+    h.press(false);
+    h.say(&tone(1.0));
+    h.release();
+    wait_until("the editor shows the decode", || {
+        h.indicator("phase").trim() == "transcribing"
+    });
+    // SAFETY: `open_editor` gave the editor a process group of its own, whose
+    // id is its pid; `kill` only signals it.
+    assert_eq!(unsafe { libc::kill(-editor, libc::SIGSTOP) }, 0);
+    let stopping = Instant::now();
+    h.stop();
+    let took = stopping.elapsed();
+    println!(
+        "the daemon stopped {} ms after it was told to, {} ms of it the decode",
+        took.as_millis(),
+        DECODE.as_millis()
+    );
+    let pointer = PathBuf::from(format!("{}.pending", h.socket.display()));
+    let passage = fs::read_to_string(&pointer).expect("a pending passage");
+    assert_eq!(
+        fs::read_to_string(passage.trim_end()).expect("read the passage"),
+        "word word\n",
+        "the text should be in the pending passage"
+    );
+    assert!(
+        took < DECODE + SHUTDOWN_GRACE,
+        "the stop took {took:?}, past the grace"
+    );
+    // SAFETY: as above.
+    assert_eq!(unsafe { libc::kill(-editor, libc::SIGCONT) }, 0);
     h.finish();
 }
 

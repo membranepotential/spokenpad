@@ -368,11 +368,13 @@ fn reconfigure(
 /// daemon is shutting down or the capture it came from was cancelled.
 ///
 /// The session's [`quitting`](NvimSession::quitting) flag changes only how:
-/// once it is set, a call Neovim holds behind a half-typed command is given
-/// up on (its text goes to the pending passage, like any unconfirmed
-/// append), and an editor that is not connected is not reattached or
-/// opened, so what is still queued goes to the pending passage within the
-/// shutdown grace instead of waiting on an editor.
+/// once it is set, an append that is not answered within a quarter second —
+/// held behind a half-typed command, or sent to an editor that stopped
+/// answering — is given up on without reconnecting and repeating it, and
+/// its text goes to the pending passage like any unconfirmed append; an
+/// editor that is not connected is not reattached or opened, so what is
+/// still queued goes there too, within the shutdown grace instead of
+/// waiting on an editor.
 fn editor_thread(
     mut nvim: NvimSession,
     running: Config,

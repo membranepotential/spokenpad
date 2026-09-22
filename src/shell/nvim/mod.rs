@@ -36,7 +36,7 @@ use crate::{
 };
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use rmpv::Value;
-use rpc::{Patience, RpcClient, RpcFailure};
+use rpc::{Patience, RpcClient, RpcFailure, Waiting};
 use std::{
     convert::Infallible,
     fs::{self, File, OpenOptions},
@@ -65,6 +65,12 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 /// deadline would only make the editor thread sit on a queue of undelivered
 /// utterances for longer before doing anything about it.
 const APPEND_TIMEOUT: Duration = Duration::from_secs(2);
+/// The same deadline once the daemon is stopping. Everything the editor
+/// thread still does has to fit in `daemon::SHUTDOWN_GRACE`, the pane's
+/// teardown included, and a healthy editor appends in some tens of
+/// milliseconds; one that is slower is given up on, and the text goes to the
+/// pending passage.
+const QUITTING_TIMEOUT: Duration = Duration::from_millis(250);
 /// Loading the Lua module, opening the dictation file and pinning its buffer.
 /// The `:edit` in there can run the user's own autocommands on a cold
 /// filetype, so it is given more room than a probe; it happens once per
@@ -379,7 +385,7 @@ impl NvimSession {
         let sent = open.client.send_request(
             "nvim_exec_lua",
             append_call(arguments.clone()),
-            deadline(APPEND_TIMEOUT),
+            patient_deadline(&self.quitting),
         );
         let id = match sent {
             Ok(id) => id,
@@ -430,12 +436,19 @@ impl NvimSession {
         let replied = open.client.reply(
             id,
             "nvim_exec_lua",
-            deadline(APPEND_TIMEOUT),
+            patient_deadline(quitting),
             Patience::WhileTyping(&mut |time| held.watch(time)),
         );
         drop(held);
         let value = match replied {
             Ok(value) => value,
+            // Stopping: there is no time to reconnect and repeat, which can
+            // take seconds on an editor that stopped answering. Unconfirmed
+            // now, the text reaches the pending passage within the grace.
+            Err(RpcFailure::Timeout(reason)) if self.quitting.load(Ordering::Acquire) => {
+                self.drop_connection();
+                bail!("append outcome is unknown, and the daemon is stopping: {reason}");
+            }
             Err(RpcFailure::Timeout(reason)) => {
                 // The request may have completed after its reply was lost.
                 // Reconnect and repeat the same operation id; the Lua side
@@ -510,7 +523,7 @@ impl NvimSession {
                 Value::from("return Spokenpad.copy_buffer()"),
                 Value::Array(Vec::new()),
             ],
-            deadline(APPEND_TIMEOUT),
+            patient_deadline(quitting),
             Patience::WhileTyping(&mut |time| held.watch(time)),
         );
         drop(held);
@@ -577,7 +590,7 @@ impl NvimSession {
         open.client.request(
             "nvim_exec_lua",
             append_call(arguments),
-            deadline(APPEND_TIMEOUT),
+            patient_deadline(quitting),
             Patience::WhileTyping(&mut |time| held.watch(time)),
         )
     }
@@ -1297,6 +1310,17 @@ fn clamp_level(level: f64) -> f64 {
     }
 }
 
+/// The first deadline of a patient call: [`APPEND_TIMEOUT`], or
+/// [`QUITTING_TIMEOUT`] once the daemon is stopping, so that a held call
+/// asks `nvim_get_mode` at once and is given up on, and a frozen editor is
+/// found out, within the shutdown grace.
+fn patient_deadline(quitting: &AtomicBool) -> Instant {
+    deadline(match quitting.load(Ordering::Acquire) {
+        true => QUITTING_TIMEOUT,
+        false => APPEND_TIMEOUT,
+    })
+}
+
 fn deadline(timeout: Duration) -> Instant {
     Instant::now() + timeout
 }
@@ -1482,8 +1506,20 @@ impl<'a> Held<'a> {
         }
     }
 
-    /// Asked every half second while Neovim holds the call.
-    fn watch(&mut self, held: Duration) -> Result<(), RpcFailure> {
+    /// Asked every half second while the call waits.
+    fn watch(&mut self, waiting: Waiting) -> Result<(), RpcFailure> {
+        let held = match waiting {
+            // Not held yet, only unanswered: nothing to say unless the
+            // daemon is stopping, which cannot wait for the deadline.
+            Waiting::Unanswered if self.quitting.load(Ordering::Acquire) => {
+                return Err(RpcFailure::Abandoned(format!(
+                    "the daemon is stopping while {} is unanswered",
+                    self.what
+                )));
+            }
+            Waiting::Unanswered => return Ok(()),
+            Waiting::Held(held) => held,
+        };
         let seconds = held.as_secs();
         match held_verdict(held, self.quitting.load(Ordering::Acquire)) {
             HeldVerdict::Abandon => {

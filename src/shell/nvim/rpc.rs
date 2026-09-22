@@ -207,11 +207,21 @@ pub(super) enum Patience<'a> {
     /// where timing out would divert text from a window that is alive and
     /// only waiting for its user.
     ///
-    /// While Neovim says it is, the call asks this, every half second, with
-    /// how long Neovim has held it so far: `Ok` waits on, and an error ends
-    /// the wait with that error. The transport has no opinion on how long is
-    /// too long; the session does.
-    WhileTyping(&'a mut dyn FnMut(Duration) -> Result<(), RpcFailure>),
+    /// The call asks this every half second while it waits, before its
+    /// deadline too: `Ok` waits on, and an error ends the wait with that
+    /// error. The transport has no opinion on how long is too long; the
+    /// session does, and can also end the wait for reasons of its own.
+    WhileTyping(&'a mut dyn FnMut(Waiting) -> Result<(), RpcFailure>),
+}
+
+/// Where a patient call is, each time it asks its caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Waiting {
+    /// Unanswered, and its deadline has not passed yet.
+    Unanswered,
+    /// Neovim says it is holding the call behind keys it waits for, and has
+    /// for this long.
+    Held(Duration),
 }
 
 /// Why no response arrived.
@@ -309,8 +319,20 @@ impl RpcClient {
         // When Neovim first said it was holding the call.
         let mut held_since: Option<Instant> = None;
         loop {
-            let (answered, outcome) = match self.next_response(deadline) {
+            // A patient call wakes every half second before its deadline, so
+            // its caller can end the wait early.
+            let until = match patient && asked.is_none() {
+                true => deadline.min(Instant::now() + MODE_POLL),
+                false => deadline,
+            };
+            let (answered, outcome) = match self.next_response(until) {
                 Ok(response) => response,
+                Err(Late::Between) if patient && asked.is_none() && Instant::now() < deadline => {
+                    if let Patience::WhileTyping(watch) = &mut patience {
+                        watch(Waiting::Unanswered)?;
+                    }
+                    continue;
+                }
                 Err(Late::Between) if patient && asked.is_none() => {
                     // `nvim_get_mode` is one of the few calls Neovim answers
                     // at once even while it waits for a key, so a live editor
@@ -341,7 +363,7 @@ impl RpcClient {
             // the caller decides how long that is worth.
             let since = *held_since.get_or_insert_with(Instant::now);
             if let Patience::WhileTyping(watch) = &mut patience {
-                watch(since.elapsed())?;
+                watch(Waiting::Held(since.elapsed()))?;
             }
             deadline = Instant::now() + MODE_POLL;
         }
@@ -874,8 +896,10 @@ mod tests {
                 "nvim_exec_lua",
                 vec![Value::from("return 1")],
                 Instant::now() + Duration::from_millis(100),
-                Patience::WhileTyping(&mut |held| {
-                    asked.push(held);
+                Patience::WhileTyping(&mut |waiting| {
+                    if let Waiting::Held(held) = waiting {
+                        asked.push(held);
+                    }
                     Ok(())
                 }),
             )
@@ -911,7 +935,10 @@ mod tests {
                 "nvim_exec_lua",
                 vec![Value::from("return 1")],
                 Instant::now() + Duration::from_millis(100),
-                Patience::WhileTyping(&mut |_| panic!("an editor that is not held asks nothing")),
+                Patience::WhileTyping(&mut |waiting| match waiting {
+                    Waiting::Held(_) => panic!("an editor that is not held is never held"),
+                    Waiting::Unanswered => Ok(()),
+                }),
             )
             .unwrap_err();
         assert!(matches!(error, RpcFailure::Timeout(_)), "{error}");
@@ -933,14 +960,50 @@ mod tests {
                 "nvim_exec_lua",
                 vec![Value::from("return 1")],
                 Instant::now() + Duration::from_millis(100),
-                Patience::WhileTyping(&mut |held| match held >= Duration::from_millis(600) {
-                    true => Err(RpcFailure::Abandoned("stopping".to_owned())),
-                    false => Ok(()),
+                Patience::WhileTyping(&mut |waiting| match waiting {
+                    Waiting::Held(held) if held >= Duration::from_millis(600) => {
+                        Err(RpcFailure::Abandoned("stopping".to_owned()))
+                    }
+                    _ => Ok(()),
                 }),
             )
             .unwrap_err();
         assert!(matches!(error, RpcFailure::Abandoned(_)), "{error}");
         assert!(started.elapsed() < Duration::from_millis(1_500));
+        drop(client);
+        peer.join().unwrap();
+    }
+
+    #[test]
+    fn a_patient_call_can_be_ended_before_its_deadline() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("frozen.sock");
+        let peer = held_editor(&socket, true, Duration::from_secs(3));
+        let mut client =
+            RpcClient::connect(&socket, Instant::now() + Duration::from_secs(1)).unwrap();
+        let started = Instant::now();
+        let mut asked = 0;
+        let error = client
+            .request(
+                "nvim_exec_lua",
+                vec![Value::from("return 1")],
+                Instant::now() + Duration::from_secs(10),
+                Patience::WhileTyping(&mut |waiting| {
+                    assert_eq!(waiting, Waiting::Unanswered);
+                    asked += 1;
+                    match asked {
+                        2 => Err(RpcFailure::Abandoned("stopping".to_owned())),
+                        _ => Ok(()),
+                    }
+                }),
+            )
+            .unwrap_err();
+        assert!(matches!(error, RpcFailure::Abandoned(_)), "{error}");
+        let took = started.elapsed();
+        assert!(
+            took >= 2 * MODE_POLL && took < 3 * MODE_POLL,
+            "asked every half second: {took:?}"
+        );
         drop(client);
         peer.join().unwrap();
     }

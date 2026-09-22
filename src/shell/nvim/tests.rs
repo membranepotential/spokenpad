@@ -1721,3 +1721,89 @@ fn a_held_call_is_waited_for_up_to_the_cap_and_never_while_stopping() {
     assert_eq!(held_verdict(Duration::ZERO, true), HeldVerdict::Abandon);
     assert_eq!(held_verdict(HELD_AT_MOST, true), HeldVerdict::Abandon);
 }
+
+/// Keys typed into the editor over its socket, as a user at its keyboard
+/// would: `nvim_input` is answered even while a command is half typed.
+fn type_into(session: &NvimSession, keys: &str) {
+    let status = Command::new("nvim")
+        .arg("--server")
+        .arg(&session.config.socket_path)
+        .args(["--remote-send", keys])
+        .status()
+        .expect("run nvim as a client");
+    assert!(status.success(), "typing {keys:?} failed");
+}
+
+/// Stop (`SIGSTOP`) or continue the editor's whole process group.
+fn freeze(guard: &ProcessGroupGuard, frozen: bool) {
+    let signal = if frozen { libc::SIGSTOP } else { libc::SIGCONT };
+    // SAFETY: the guard's pid is the group id of the editor this test spawned,
+    // which `kill` only signals; no memory is involved.
+    assert_eq!(unsafe { libc::kill(-guard.0, signal) }, 0);
+}
+
+/// Once the daemon is stopping, an append is given up on well within the
+/// shutdown grace however the editor fails to answer, and never reconnected
+/// and repeated: held behind a half-typed command or frozen, with the flag
+/// set before the append is sent or while it waits.
+#[test]
+fn a_stopping_daemon_gives_up_on_an_append_within_the_grace() {
+    if !nvim_or_skip() {
+        return;
+    }
+    // Leaves the pane's teardown its room inside `SHUTDOWN_GRACE`.
+    const BUDGET: Duration = Duration::from_millis(800);
+    for (frozen, flag_first) in [(false, true), (false, false), (true, true), (true, false)] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut session = NvimSession::new(headless(directory.path()));
+        let path = session.ensure().unwrap().expect("an editor");
+        let guard = ProcessGroupGuard::for_session(&session);
+        if frozen {
+            freeze(&guard, true);
+        } else {
+            type_into(&session, "2");
+        }
+        let quitting = session.quitting();
+        let label = format!(
+            "a {} editor, the flag set {} the append",
+            if frozen { "frozen" } else { "held" },
+            if flag_first { "before" } else { "during" }
+        );
+        let (result, flagged) = if flag_first {
+            quitting.store(true, Ordering::Release);
+            let flagged = Instant::now();
+            (session.append("given up", false), flagged)
+        } else {
+            let setter = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(300));
+                quitting.store(true, Ordering::Release);
+                Instant::now()
+            });
+            let result = session.append("given up", false);
+            (result, setter.join().unwrap())
+        };
+        let after_flag = flagged.elapsed();
+        println!(
+            "{label}: given up {} ms after the flag",
+            after_flag.as_millis()
+        );
+        assert!(
+            matches!(result, Err(AppendFailure::Unconfirmed(_))),
+            "{label}: {result:?}"
+        );
+        assert!(after_flag < BUDGET, "{label}: took {after_flag:?}");
+        assert!(!session.connected(), "{label}: still connected");
+        if frozen {
+            freeze(&guard, false);
+        }
+        type_into(&session, "<Esc>");
+        std::thread::sleep(Duration::from_millis(300));
+        // A held request is dropped with its connection. A frozen editor
+        // reads the request and the close together when it continues, and
+        // runs the request first: the documented case where the text is in
+        // the window as well as the pending passage. Never twice in either.
+        let written = fs::read_to_string(&path).unwrap();
+        let expected = if frozen { "given up\n" } else { "" };
+        assert_eq!(written, expected, "{label}");
+    }
+}
