@@ -6,44 +6,34 @@ _reconciled: 2026-09-22 @ fd36708 (merged worktrees removed; beam-fix/ kept)_
 Hold a key (or latch with shift), speak, and text appears in an nvim that
 never takes focus. Fully local, CPU-only. Next milestone: public release.
 
-## Now (2026-09-22: polish for the public release)
-- pane-wm — rebase (ABOVE + sway IPC no_focus + kwin-x11 done), then
-  pane size cols x lines, floating/tiled, default mode pane, docs — running.
-- daemon-followups — mic retry backoff, lock-failure exits vs socket start
-  limit, protect waiting WAVs at startup, partial-decode notice — running.
+## Now
+- Nothing running. main bea94c3 deployed 14:31 (socket-activated, ~/.local).
 
 ## Next
-1. User: P4 live check of pane mode on i3 (typing elsewhere, click + type
-   `Grüße @ € { }`, tokyonight, close window and dictate again).
-2. User decides: push; make the repo public.
-3. Lost chunk: the end-of-slice close is both the one lost chunk and the
+1. User: live check on i3 — pane size (nvim.pane_dimensions, default 72x20),
+   on top, typing elsewhere keeps focus, click + type `Grüße @ € { }`,
+   config edit applies at the next window, pane_layout = "tiled".
+2. Before public: fresh-user walkthrough (clean account: README only),
+   codebase audit + security review, README screenshot of the pane.
+3. User decides: push (then the first real CI run), make the repo public,
+   tag v0.2.0 (PKGBUILD source sha256 is SKIP until then).
+4. Lost chunk: the end-of-slice close is both the one lost chunk and the
    whole 0.35-point gain. Open: a guard that keeps the gain (see
-   experiments/2026-09-22-empty-chunk-flips.md).
-4. Before public: fresh-user walkthrough, audit + security review, README
-   screenshot. History scan done: clean (user checked the old Handy file).
+   experiments/2026-09-22-empty-chunk-flips.md; dev subset: ~2 min a run).
 
 ## Done
-- 09-22: packaging merged (f6912cf): socket activation, presses taken
+- 09-22: pane never focuses by itself on i3, sway (runtime no_focus rule
+  over IPC, sway found from the display), Openbox, KWin Wayland + X11; on
+  top; size in cells; tiled where proven; default mode = pane; font in pt x
+  Xft.dpi = Alacritty cells. Packaging: socket activation, presses taken
   before model ready, config reload per window, PKGBUILD, CI (never run);
-  this machine migrated 13:09 (old unit in ~/.cache/spokenpad-dev/).
-  Pane focus proven on i3, Openbox, KWin Wayland; sway steals it
-  (pinned by a test). Pane font in points x Xft.dpi = Alacritty cells (19x41 here),
-  deployed 11:54, user font set to SauceCodePro 12; dev subset `--subset dev` (28 captures, ~2 min run, holds every
-  failure main shows; beam loss caught); `spoken` flag: 15 mixed captures,
-  their references cost ~1 WER point; flip count done.
-- 09-21 (deployed as d5d7418): constant RAM while recording (1.7 vs 116 MiB per 30 min), lead padding
-  stops at committed speech, a tick sees at most preview.max_seconds.
-- Own window `nvim.mode = "pane"`: own X11 window + embedded nvim, no focus,
-  X libs loaded at run time; two review rounds fixed; headless on i3 only.
-- Auto-stop: a latch with no speech for `capture.silence_timeout_s` (300) and
-  no key down ends as a normal stop; any capture ends at 4 h.
-- sherpa-onnx 1.13.8. Corpus: 181 captures / 75 min with Gladia references
-  (git-ignored), harness examples/corpus.rs: greedy 0 lost vs beam 2 lost,
-  WER equal; 1 s padding stays; live path beats whole-file; old -> new main
-  11.20% -> 10.85%. 21% of the words are German: parakeet-unified-en (7.9%
-  English, beam + hotwords work) is no default; Qwen3-ASR too slow; GPU not
-  worth it on the GTX 1650. Beam bug cause found (blank skips frames for
-  free); one-line patch documented, not shipped.
+  daemon never exits under the socket; waiting recordings survive restarts.
+  Machine migrated 13:09 (old unit in ~/.cache/spokenpad-dev/). Corpus: dev
+  subset (28 captures, ~2 min), 15 mixed-language captures flagged.
+- 09-21: constant RAM while recording, auto-stop of forgotten latches,
+  sherpa 1.13.8, corpus harness with Gladia references: greedy stays (beam
+  loses speech), 1 s padding, no model switch (21% German words); beam bug
+  cause found, patch documented, not shipped.
 
 ## Decided (known issue: dying input stream seen once; watchdog recovers)
 - Hard constraints: docs/constraints.md. No input device is read. No paste.
