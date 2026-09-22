@@ -111,8 +111,9 @@ enum Command {
         #[command(flatten)]
         logging: Logging,
     },
-    /// Validate the configuration, load the models, and say whether the
-    /// pane can open here; opens no microphone and no window
+    /// Validate the configuration, load the models, list the input devices
+    /// with the one the daemon opens marked, and say whether the pane can
+    /// open here; records nothing and opens no window
     Check {
         #[command(flatten)]
         settings: Settings,
@@ -358,6 +359,7 @@ fn check(config: &Config) -> Result<Exit> {
     model.warm_up()?;
     SpeechSegmenter::new(&config.vad, config.audio.sample_rate)?;
     println!("Configuration valid; CPU recognizer ready; VAD ready.");
+    print_input_devices(config.audio.device.as_deref());
     println!(
         "A running daemon applies [nvim] changes to the next dictation window it opens; \
          every other section takes effect after `systemctl --user restart spokenpad`."
@@ -387,6 +389,31 @@ fn check(config: &Config) -> Result<Exit> {
          until a window can be opened."
     );
     Ok(Exit::PaneUnavailable)
+}
+
+/// The input devices, with the one the daemon opens for `audio.device`
+/// (`query`) marked. Lists them without opening any.
+fn print_input_devices(query: Option<&str>) {
+    let which = query.map_or_else(
+        || "the default input device".to_owned(),
+        |query| format!("audio.device = {query:?}"),
+    );
+    match spokenpad::shell::audio::input_devices(query) {
+        Ok((devices, why)) => {
+            println!("Input devices (* marks the one the daemon opens, for {which}):");
+            if devices.is_empty() {
+                println!("  none");
+            }
+            for device in &devices {
+                let mark = if device.chosen { '*' } else { ' ' };
+                println!("  {mark} {} ({})", device.name, device.host_api);
+            }
+            if let Some(why) = why {
+                println!("  The daemon opens none of them: {why}");
+            }
+        }
+        Err(error) => println!("Input devices: cannot list them: {error:#}"),
+    }
 }
 
 fn write_transcript(text: &str, out: Option<&Path>) -> Result<()> {

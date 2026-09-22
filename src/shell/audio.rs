@@ -982,7 +982,61 @@ fn select_input_device(portaudio: &pa::PortAudio, query: Option<&str>) -> Result
             .default_input_device()
             .context("find default input device");
     };
-    let devices = portaudio
+    match_device_query(query, &input_candidates(portaudio)?)
+}
+
+/// An input device, as `spokenpad check` lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputDevice {
+    pub name: String,
+    pub host_api: String,
+    /// The one the daemon would open.
+    pub chosen: bool,
+}
+
+/// Every input device PortAudio lists, with the one the daemon would open
+/// for `audio.device` marked: the device `query` names, or the default input
+/// device without one. When it would open none, the second half says why.
+///
+/// Initialises PortAudio, which asks each host API for its devices, and
+/// opens no stream: nothing is captured.
+pub fn input_devices(query: Option<&str>) -> Result<(Vec<InputDevice>, Option<String>)> {
+    let portaudio = pa::PortAudio::new().context("initialise PortAudio")?;
+    let candidates = input_candidates(&portaudio)?;
+    Ok(listing(
+        query,
+        portaudio.default_input_device().ok(),
+        &candidates,
+    ))
+}
+
+/// `devices` as `spokenpad check` lists them, each marked by whether the
+/// daemon would open it for `query`, or `default` without one; and when it
+/// would open none, why.
+fn listing<I: Copy + PartialEq>(
+    query: Option<&str>,
+    default: Option<I>,
+    devices: &[DeviceCandidate<I>],
+) -> (Vec<InputDevice>, Option<String>) {
+    let chosen = match query {
+        Some(query) => match_device_query(query, devices).map_err(|error| format!("{error:#}")),
+        None => default.ok_or_else(|| "there is no default input device".to_owned()),
+    };
+    let listed = devices
+        .iter()
+        .map(|device| InputDevice {
+            name: device.name.clone(),
+            host_api: device.host_api.clone(),
+            chosen: chosen.as_ref().is_ok_and(|index| *index == device.index),
+        })
+        .collect();
+    (listed, chosen.err())
+}
+
+/// The devices PortAudio lists that have an input channel, with their host
+/// API's name.
+fn input_candidates(portaudio: &pa::PortAudio) -> Result<Vec<DeviceCandidate<pa::DeviceIndex>>> {
+    portaudio
         .devices()
         .context("enumerate audio devices")?
         .filter_map(|entry| match entry {
@@ -1003,8 +1057,7 @@ fn select_input_device(portaudio: &pa::PortAudio, query: Option<&str>) -> Result
             Ok(_) => None,
             Err(error) => Some(Err(anyhow!(error))),
         })
-        .collect::<Result<Vec<_>>>()?;
-    match_device_query(query, &devices)
+        .collect()
 }
 
 #[derive(Debug)]
@@ -1066,6 +1119,43 @@ mod tests {
             name: name.into(),
             host_api: host_api.into(),
         }
+    }
+
+    /// `spokenpad check` marks the device the daemon would open: the one the
+    /// query names, the default without a query, and none, with why, when
+    /// the query names none or several.
+    #[test]
+    fn the_listing_marks_the_device_the_daemon_would_open() {
+        let devices = [
+            device(1, "Built-in Audio", "ALSA"),
+            device(2, "Scarlett USB Microphone", "PipeWire ALSA"),
+        ];
+        let marked = |query, default| {
+            let (listed, why) = listing(query, default, &devices);
+            let chosen: Vec<_> = listed
+                .iter()
+                .filter(|d| d.chosen)
+                .map(|d| d.name.as_str())
+                .collect();
+            (chosen.join(","), why)
+        };
+        assert_eq!(
+            marked(Some("usb"), Some(1)),
+            ("Scarlett USB Microphone".into(), None)
+        );
+        assert_eq!(marked(None, Some(1)), ("Built-in Audio".into(), None));
+        let (none, why) = marked(Some("webcam"), Some(1));
+        assert_eq!(none, "");
+        assert!(why.is_some_and(|why| why.contains("no input audio device matches")));
+        let (none, why) = marked(Some("a"), Some(1));
+        assert_eq!(none, "", "an ambiguous query opens nothing");
+        assert!(why.is_some_and(|why| why.contains("multiple")));
+        let (none, why) = marked(None, None);
+        assert_eq!(none, "");
+        assert_eq!(why.as_deref(), Some("there is no default input device"));
+        let (listed, _) = listing(None, Some(2), &devices);
+        assert_eq!(listed.len(), 2, "every device is listed");
+        assert_eq!(listed[1].host_api, "PipeWire ALSA");
     }
 
     #[test]

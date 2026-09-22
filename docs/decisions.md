@@ -2551,3 +2551,14 @@ Nothing changes in behaviour, and the public paths the tests use
 Rejected: moving the editor thread into `shell/nvim` as the audit suggested;
 it is the daemon's use of an editor session, and `shell/nvim` is another
 owner's.
+
+## `spokenpad check` lists the microphones (2026-09-22)
+
+The fresh-user walkthrough (C8) found no way to learn which input device the
+daemon would open, or which names `audio.device` could match: a wrong one
+showed only as "nearly silent" after a press. `check` now lists every input
+device PortAudio sees, with its host API, marks the one the daemon opens for
+`audio.device` (or the default), and says why it opens none when the query
+matches none or several. It initialises PortAudio to list them and opens no
+stream. The marking is `shell::audio::listing`, a pure function over the
+same `match_device_query` the daemon uses, so the two cannot disagree.

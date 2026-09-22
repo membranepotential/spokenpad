@@ -42,7 +42,9 @@ it is [`config.rs`](../src/config.rs).
   quick re-press never loses its first word. A discard (a tap held too
   briefly, `spokenpad cancel`) takes no post-roll.
 - `device` is a PortAudio device-name query: case-insensitive words matched
-  in order against the device name and host API.
+  in order against the device name and host API. `spokenpad check` lists the
+  input devices and marks the one the daemon opens, or says why it opens
+  none (a query that matches none, or several).
 
 ## [capture]
 
