@@ -1703,6 +1703,57 @@ fn a_capture_that_runs_through_a_long_pause_is_still_committed_whole() {
     h.finish();
 }
 
+/// Slow dictation into a latch: short phrases, pauses too short to settle a
+/// chunk, and too little speech to fill one, so that no chunk settles inside
+/// the `preview.max_seconds` window a tick reads. That window is committed
+/// whole, and the detector hearing speech keeps the silence timeout off, so
+/// the capture goes on and commits as it goes, every sample exactly once.
+#[test]
+fn slow_dictation_that_never_settles_a_chunk_still_commits_and_keeps_recording() {
+    if !nvim_available() {
+        return;
+    }
+    let h = Harness::start(Settings {
+        vad: Some(Vad {
+            chunk_seconds: 10.0,
+            pad_seconds: 0.2,
+            edge_pad_seconds: 0.2,
+            max_speech_seconds: 5.0,
+            ..Vad::default()
+        }),
+        words: false,
+        interval_ms: 200,
+        max_seconds: 2.0,
+        silence_timeout_s: 1.0,
+        ..Settings::default()
+    });
+    h.press(true);
+    let phrase: Vec<f32> = tone(0.25)
+        .into_iter()
+        .chain(vec![0.0; RATE as usize / 2])
+        .collect();
+    h.say(&phrase.repeat(8));
+    assert_eq!(
+        h.indicator("phase").trim(),
+        "recording",
+        "the latch ended while the user was still talking: {}",
+        h.winbar()
+    );
+    assert!(
+        counted(&h.text()) > 0,
+        "nothing was committed while the latch ran"
+    );
+    h.press_only(true);
+    h.release_for_good();
+    let mut loud = 0;
+    wait_until("every captured sample is committed exactly once", || {
+        let previous = loud;
+        loud = loud_samples(&h.recovery_wav().0);
+        loud > 0 && loud == previous && counted(&h.text()) == loud
+    });
+    h.finish();
+}
+
 /// The daemon takes presses before its speech model is ready. While the model
 /// downloads and loads, a capture is kept on disk only and the window says
 /// so; once the model is ready the recording is transcribed the way a live

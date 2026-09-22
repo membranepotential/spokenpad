@@ -511,7 +511,7 @@ fn decode_whole(worker: &mut Engine, samples: &[f32]) -> Result<Vec<String>> {
     let mut texts = vec![];
     worker
         .pipeline
-        .decode(samples, || false, |text| texts.push(text))?;
+        .decode(samples, || false, |text, _| texts.push(text))?;
     Ok(texts)
 }
 

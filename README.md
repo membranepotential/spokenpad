@@ -402,7 +402,8 @@ caught up. The log always has the full sentence and paths.
   returns nothing for a short sentence; such a chunk is decoded once more
   without its trailing silence.
 - **Previews pause on a long unsettled tail** (`preview.max_seconds`, 30 s)
-  and resume by themselves; text keeps landing while they are paused. Without
+  and resume by themselves; text keeps landing while they are paused, 30 s at
+  a time even when you speak so slowly that no sentence ever ends. Without
   a VAD model there is no preview, and the capture is decoded at release.
 - **A long recording costs no more memory than a short one.** Audio that has
   been transcribed is dropped as you speak; what is held is the sentence you
@@ -411,8 +412,8 @@ caught up. The log always has the full sentence and paths.
   (`capture.silence_timeout_s`). It is an ordinary stop: the tail is decoded,
   everything spoken is kept, and the winbar says "stopped after silence" until
   your next press, which starts a new recording. The timeout runs from the
-  last text the recogniser produced, so a pause while you think is not
-  silence to it — but music or a conversation in the room is speech to the
+  last speech the detector heard or text the recogniser produced, so a pause
+  while you think is not silence to it — but music or a conversation in the room is speech to the
   detector, and only the limits below end such a capture. A key that is still
   down is not stopped this way, whether it is the push-to-talk key or the
   Shift+key that latched: a held key re-fires its binding every few tens of

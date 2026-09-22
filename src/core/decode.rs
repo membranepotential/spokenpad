@@ -160,16 +160,33 @@ impl<R: Recognizer, S: Segmenter> Pipeline<R, S> {
         }
         Ok(retry)
     }
+    /// Decodes `samples` whole, segment by segment, handing each segment's
+    /// text to `on_segment` with where its speech ends in `samples`: what
+    /// that text covers, and so how far a commit of it reaches.
     pub fn decode(
         &mut self,
         samples: &[f32],
         mut abandoned: impl FnMut() -> bool,
-        mut on_segment: impl FnMut(String),
+        on_segment: impl FnMut(String, usize),
     ) -> Result<String> {
         if samples.is_empty() || abandoned() {
             return Ok(String::new());
         }
         let segments = self.split(samples)?.segments;
+        self.decode_segments(samples, &segments, abandoned, on_segment)
+    }
+    /// [`decode`](Self::decode) over the segments [`split`](Self::split)
+    /// already made of `samples`.
+    fn decode_segments(
+        &mut self,
+        samples: &[f32],
+        segments: &[Segment],
+        mut abandoned: impl FnMut() -> bool,
+        mut on_segment: impl FnMut(String, usize),
+    ) -> Result<String> {
+        if samples.is_empty() || abandoned() {
+            return Ok(String::new());
+        }
         // Silence is not decoded. `split` only returns nothing when a VAD model
         // found no speech at all; the no-segmenter path always yields one
         // whole-buffer segment, so nothing that knows less than the VAD is
@@ -182,7 +199,7 @@ impl<R: Recognizer, S: Segmenter> Pipeline<R, S> {
             return Ok(String::new());
         }
         let mut texts = vec![];
-        for s in &segments {
+        for s in segments {
             if abandoned() {
                 return Ok(texts.join(" "));
             }
@@ -193,7 +210,7 @@ impl<R: Recognizer, S: Segmenter> Pipeline<R, S> {
             }
             if !text.trim().is_empty() {
                 texts.push(text.clone());
-                on_segment(text);
+                on_segment(text, s.speech_end);
             }
         }
         // Explicit failure recovery exception: don't let segmentation erase speech.
@@ -207,7 +224,7 @@ impl<R: Recognizer, S: Segmenter> Pipeline<R, S> {
                 .transcribe(samples, TrailingSilence::Padded)?;
             if !text.trim().is_empty() && !abandoned() {
                 texts.push(text.clone());
-                on_segment(text);
+                on_segment(text, samples.len());
             }
         }
         Ok(texts.join(" "))
@@ -220,24 +237,34 @@ pub struct Commit {
     pub text: String,
     pub through: Frames,
 }
-/// Cosmetic text for the open tail. Absence of a `Preview` is the single
-/// encoding of "this tick produced nothing to show".
+/// Cosmetic text for the open tail, and what the tick heard. Absence of a
+/// `Preview` is the single encoding of "this tick produced nothing to show".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Preview {
     pub text: String,
     pub through: Frames,
+    /// Where the last speech the detector found in this tick's audio ends,
+    /// capture-absolute, settled or not; `None` when it found none. Speech
+    /// that ends later than any the capture had before is the user still
+    /// talking, whether or not the recognizer has made words of it yet.
+    pub heard: Option<Frames>,
 }
 #[derive(Default)]
 struct Progress {
     id: Option<UtteranceId>,
     through: Frames,
 }
-/// What a tick is for. `Commits` is the fallback for an open tail too long to
-/// redraw on every tick: settled chunks still commit, so the committed offset
-/// keeps moving and the audio behind it can still be dropped.
+/// What a tick is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TickKind {
+    /// The whole open tail: settled chunks commit, and the rest is decoded
+    /// for the preview.
     Preview,
+    /// A window cut from an open tail longer than it, too long to redraw on
+    /// every tick. Settled chunks still commit, so the committed offset keeps
+    /// moving and the audio behind it can still be dropped; the rest is not
+    /// decoded. A window that begins at the committed offset and settles
+    /// nothing is committed whole, so the offset moves anyway.
     Commits,
 }
 
@@ -289,28 +316,23 @@ impl<R: Recognizer, S: Segmenter> Worker<R, S> {
         let skip = self.progress.through.since(start).min(samples.len());
         let remainder = &samples[skip..];
         if remainder.is_empty() {
-            return Ok(Some(self.open_tail(String::new())));
+            return Ok(Some(self.open_tail(String::new(), None)));
         }
         let base = self.progress.through;
         let split = self.pipeline.split(remainder)?;
-        for segment in split.segments {
+        let heard = split.segments.last().map(|s| base + s.speech_end);
+        let mut open = None;
+        for segment in &split.segments {
             if !utterance.ticking() {
                 return Ok(None);
             }
-            let window = &remainder[segment.window.clone()];
-            // The preview is cosmetic and redrawn every tick, so an empty open
-            // tail is not retried; only a settled chunk's text is permanent.
             if !segment.settled {
-                let text = match kind {
-                    TickKind::Preview => self
-                        .pipeline
-                        .recognizer
-                        .transcribe(window, TrailingSilence::Padded)?,
-                    TickKind::Commits => String::new(),
-                };
-                return Ok(utterance.ticking().then(|| self.open_tail(text)));
+                open = Some(segment.window.clone());
+                break;
             }
-            let text = self.pipeline.transcribe_speech(window)?;
+            let text = self
+                .pipeline
+                .transcribe_speech(&remainder[segment.window.clone()])?;
             if utterance.cancelled() {
                 return Ok(None);
             }
@@ -322,65 +344,115 @@ impl<R: Recognizer, S: Segmenter> Worker<R, S> {
                 through: self.progress.through,
             });
         }
-        // Every window is decoded and only settled silence follows. Finishing
-        // it commits no text and decodes nothing; it is what keeps the open
-        // tail, and the audio the shell has to hold for it, bounded while
-        // nobody is speaking.
-        let silent_through = base + split.silent_through;
-        if split.silent_through > 0 && silent_through > self.progress.through {
-            if utterance.cancelled() {
-                return Ok(None);
+        match (open, kind) {
+            // The preview is cosmetic and redrawn every tick, so an empty open
+            // tail is not retried; only a settled chunk's text is permanent.
+            (Some(window), TickKind::Preview) => {
+                let text = self
+                    .pipeline
+                    .recognizer
+                    .transcribe(&remainder[window], TrailingSilence::Padded)?;
+                return Ok(utterance.ticking().then(|| self.open_tail(text, heard)));
             }
-            self.progress.through = silent_through;
-            commit(Commit {
-                utterance: Arc::clone(utterance),
-                text: String::new(),
-                through: silent_through,
-            });
+            (Some(_), TickKind::Commits) => {}
+            // Every window is decoded and only settled silence follows.
+            // Finishing it commits no text and decodes nothing; it is what
+            // keeps the open tail, and the audio the shell has to hold for
+            // it, bounded while nobody is speaking.
+            (None, _) => {
+                let silent_through = base + split.silent_through;
+                if split.silent_through > 0 && silent_through > self.progress.through {
+                    if utterance.cancelled() {
+                        return Ok(None);
+                    }
+                    self.progress.through = silent_through;
+                    commit(Commit {
+                        utterance: Arc::clone(utterance),
+                        text: String::new(),
+                        through: silent_through,
+                    });
+                }
+            }
         }
-        Ok(utterance.ticking().then(|| self.open_tail(String::new())))
+        if kind == TickKind::Commits && skip == 0 && self.progress.through == base {
+            self.commit_window(remainder, &split.segments, utterance, &mut commit)?;
+        }
+        Ok(utterance
+            .ticking()
+            .then(|| self.open_tail(String::new(), heard)))
     }
 
-    fn open_tail(&self, text: String) -> Preview {
+    fn open_tail(&self, text: String, heard: Option<Frames>) -> Preview {
         Preview {
             text,
             through: self.progress.through,
+            heard,
         }
     }
-    /// Commits `samples` whole, as far as it reaches, and keeps the
-    /// utterance going from its end: decoded as [`finish`](Self::finish)
-    /// decodes a tail, but without ending anything. For a recording being
-    /// transcribed a window at a time whose open tail filled a window with no
-    /// chunk settling in it -- no VAD model, or speech the detector never
-    /// breaks -- so that no more than a window of it is ever held. The cut
-    /// may fall inside a word: the price of the bound, paid only there.
-    pub fn commit_whole(
+    /// Commits `window`, which begins at the worker's offset and holds
+    /// `segments`, whole, and moves the offset to its end: a window cut from
+    /// a longer tail in which no chunk settled -- speech the detector never
+    /// breaks, or pauses too short to settle it -- so that no more than a
+    /// window of it is ever held. Decoded as [`finish`](Self::finish) decodes
+    /// a tail, but without ending anything, and given up between segments
+    /// once the utterance stops ticking, which leaves the offset at the last
+    /// segment committed. The cut may fall inside a word: the price of the
+    /// bound, paid only there.
+    fn commit_window(
         &mut self,
-        samples: &[f32],
-        start: Frames,
+        window: &[f32],
+        segments: &[Segment],
         utterance: &Arc<Utterance>,
-        mut commit: impl FnMut(Commit),
+        commit: &mut impl FnMut(Commit),
     ) -> Result<()> {
-        self.begin(utterance);
-        ensure!(
-            start <= self.progress.through,
-            "the held audio begins after the worker's offset"
-        );
-        let end = start + samples.len();
-        let remainder = &samples[self.progress.through.since(start).min(samples.len())..];
-        self.pipeline.decode(
-            remainder,
-            || utterance.cancelled(),
-            |text| {
-                commit(Commit {
-                    utterance: Arc::clone(utterance),
-                    text,
-                    through: end,
-                })
-            },
+        let base = self.progress.through;
+        let end = base + window.len();
+        let (_, reached) = self.decode_rest(
+            window,
+            segments,
+            base,
+            utterance,
+            || !utterance.ticking(),
+            commit,
         )?;
-        self.progress.through = self.progress.through.max(end);
+        self.progress.through = reached;
+        if utterance.ticking() && end > reached {
+            // Every segment was decoded: what follows the last one is
+            // silence, finished with as settled silence is.
+            self.progress.through = end;
+            commit(Commit {
+                utterance: Arc::clone(utterance),
+                text: String::new(),
+                through: end,
+            });
+        }
         Ok(())
+    }
+    /// Decodes `remainder`, which begins at `base` and holds `segments`,
+    /// committing each segment's text at its own speech end, so that text
+    /// never claims audio that was not decoded. Returns the text and how far
+    /// the commits reach.
+    fn decode_rest(
+        &mut self,
+        remainder: &[f32],
+        segments: &[Segment],
+        base: Frames,
+        utterance: &Arc<Utterance>,
+        abandoned: impl FnMut() -> bool,
+        commit: &mut impl FnMut(Commit),
+    ) -> Result<(String, Frames)> {
+        let mut reached = base;
+        let text =
+            self.pipeline
+                .decode_segments(remainder, segments, abandoned, |text, speech_end| {
+                    reached = base + speech_end;
+                    commit(Commit {
+                        utterance: Arc::clone(utterance),
+                        text,
+                        through: reached,
+                    });
+                })?;
+        Ok((text, reached))
     }
     /// Decodes what is left of the capture. `samples` is the audio still held,
     /// beginning at `start`; everything before it has been committed and is
@@ -397,22 +469,25 @@ impl<R: Recognizer, S: Segmenter> Worker<R, S> {
             start <= self.progress.through,
             "the held audio begins after the worker's offset"
         );
-        let end = start + samples.len();
-        let remainder = &samples[self.progress.through.since(start).min(samples.len())..];
-        let tail_frames = remainder.len();
-        let result = self.pipeline.decode(
-            remainder,
-            || utterance.cancelled(),
-            |text| {
-                commit(Commit {
-                    utterance: Arc::clone(utterance),
-                    text,
-                    through: end,
-                })
-            },
-        );
+        let skip = self.progress.through.since(start).min(samples.len());
+        let remainder = &samples[skip..];
+        let segments = if remainder.is_empty() || utterance.cancelled() {
+            Ok(Vec::new())
+        } else {
+            self.pipeline.split(remainder).map(|split| split.segments)
+        };
+        let result = segments.and_then(|segments| {
+            self.decode_rest(
+                remainder,
+                &segments,
+                start + skip,
+                utterance,
+                || utterance.cancelled(),
+                &mut commit,
+            )
+        });
         self.progress = Progress::default();
-        Ok((result?, tail_frames))
+        Ok((result?.0, remainder.len()))
     }
 }
 
@@ -475,7 +550,8 @@ mod tests {
                 .unwrap(),
             Some(Preview {
                 text: "text".into(),
-                through: Frames(8)
+                through: Frames(8),
+                heard: Some(Frames(10)),
             })
         );
         assert_eq!(
@@ -695,7 +771,8 @@ mod tests {
             .unwrap(),
             Some(Preview {
                 text: String::new(),
-                through: Frames::ZERO
+                through: Frames::ZERO,
+                heard: None,
             }),
             "an empty preview, and the committed offset stays where it was"
         );
@@ -740,7 +817,8 @@ mod tests {
                 .unwrap(),
             Some(Preview {
                 text: String::new(),
-                through: Frames(6)
+                through: Frames(6),
+                heard: None,
             })
         );
         assert_eq!(
@@ -764,7 +842,8 @@ mod tests {
             .unwrap(),
             Some(Preview {
                 text: String::new(),
-                through: Frames(6)
+                through: Frames(6),
+                heard: None,
             })
         );
     }
@@ -783,7 +862,8 @@ mod tests {
                 .unwrap(),
             Some(Preview {
                 text: String::new(),
-                through: Frames(8)
+                through: Frames(8),
+                heard: Some(Frames(10)),
             })
         );
         assert_eq!(commits.len(), 2, "both settled chunks committed");
@@ -792,6 +872,113 @@ mod tests {
             vec![vec![1.; 4], vec![1.; 4]],
             "the open tail was not decoded"
         );
+    }
+
+    /// Speech the detector never breaks: one open chunk over the whole slice,
+    /// whatever its length.
+    struct Unbroken;
+    impl Segmenter for Unbroken {
+        fn split(&mut self, s: &[f32]) -> Result<Split> {
+            Ok(Split {
+                segments: vec![Segment {
+                    window: 0..s.len(),
+                    speech_end: s.len(),
+                    settled: false,
+                }],
+                silent_through: 0,
+            })
+        }
+    }
+
+    /// A tick over a full window of a longer tail that settles nothing commits
+    /// the window whole. Otherwise every later tick reads the same window, the
+    /// committed offset never moves, and the tail grows until the release.
+    #[test]
+    fn a_commits_tick_that_settles_nothing_commits_its_window_whole() {
+        let mut w = Worker::new(Pipeline {
+            recognizer: Fake {
+                calls: vec![],
+                replies: vec![],
+                stop: None,
+            },
+            segmenter: Some(Unbroken),
+        });
+        let u = Utterance::new(1);
+        let mut commits = vec![];
+        let tail = w
+            .tick(&[1.; 10], Frames::ZERO, &u, TickKind::Commits, |c| {
+                commits.push(c)
+            })
+            .unwrap()
+            .expect("still ticking");
+        assert_eq!(tail.through, Frames(10), "the window is finished with");
+        assert_eq!(
+            commits
+                .iter()
+                .map(|c| (c.text.as_str(), c.through))
+                .collect::<Vec<_>>(),
+            vec![("text", Frames(10))]
+        );
+        // The next window begins where this one ended, and is decoded once.
+        w.tick(&[1.; 10], Frames(10), &u, TickKind::Commits, |c| {
+            commits.push(c)
+        })
+        .unwrap();
+        assert_eq!(commits.last().map(|c| c.through), Some(Frames(20)));
+        assert_eq!(w.pipeline.recognizer.calls, vec![vec![1.; 10]; 2]);
+    }
+
+    /// A preview tick is not a full window: its tail is all there is, and it
+    /// waits for the chunk to settle.
+    #[test]
+    fn a_preview_tick_that_settles_nothing_commits_nothing() {
+        let mut w = Worker::new(Pipeline {
+            recognizer: Fake {
+                calls: vec![],
+                replies: vec![],
+                stop: None,
+            },
+            segmenter: Some(Unbroken),
+        });
+        let u = Utterance::new(1);
+        w.tick(&[1.; 10], Frames::ZERO, &u, TickKind::Preview, |_| {
+            panic!("committed an open chunk")
+        })
+        .unwrap();
+        assert_eq!(w.progress.through, Frames::ZERO);
+    }
+
+    /// Each segment of a final decode commits at its own speech end, so a
+    /// decode that fails, or a daemon that stops, after the first segment
+    /// leaves the rest to be decoded again rather than skipped.
+    #[test]
+    fn a_final_decode_commits_each_segment_at_its_own_end() {
+        struct FailsSecond(usize);
+        impl Recognizer for FailsSecond {
+            fn transcribe(&mut self, _: &[f32], _: TrailingSilence) -> Result<String> {
+                self.0 += 1;
+                anyhow::ensure!(self.0 != 2, "the recognizer failed");
+                Ok("text".into())
+            }
+        }
+        let mut w = worker();
+        let u = Utterance::new(1);
+        w.resume(&u, Frames(100));
+        let mut commits = vec![];
+        w.finish(&[1.; 10], Frames(100), &u, |c| commits.push(c.through))
+            .unwrap();
+        assert_eq!(commits, vec![Frames(104), Frames(108), Frames(110)]);
+
+        let mut w = Worker::new(Pipeline {
+            recognizer: FailsSecond(0),
+            segmenter: Some(Quarters),
+        });
+        let mut commits = vec![];
+        let failed = w.finish(&[1.; 10], Frames::ZERO, &Utterance::new(2), |c| {
+            commits.push(c.through)
+        });
+        assert!(failed.is_err());
+        assert_eq!(commits, vec![Frames(4)], "the text reaches the first only");
     }
 
     #[test]
@@ -823,7 +1010,7 @@ mod tests {
             segmenter: Some(Quarters),
         };
         assert_eq!(
-            p.decode(&[1.; 8], || u.cancelled(), |_| panic!("late commit"))
+            p.decode(&[1.; 8], || u.cancelled(), |_, _| panic!("late commit"))
                 .unwrap(),
             ""
         );

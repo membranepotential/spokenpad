@@ -242,7 +242,7 @@ fn main() -> Result<()> {
         }
 
         let started = Instant::now();
-        let raw = pipeline.decode(&samples, || false, |_| {})?;
+        let raw = pipeline.decode(&samples, || false, |_, _| {})?;
         let decode_seconds = started.elapsed().as_secs_f64();
         let hypothesis = processor.process(&raw);
 

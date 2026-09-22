@@ -2360,3 +2360,31 @@ away: nothing visible happened.
 - Test: `a_press_starts_the_socket_it_finds_missing` (the start makes a
   server appear and the press is served; a failed start is reported once,
   and the error names the command) and `only_the_units_own_socket_is_started`.
+
+## A window that settles nothing is committed whole, live too (2026-09-22)
+
+The audit of 2026-09-22 (finding P1-001) traced a latch that stopped itself
+while the user was still talking, and `tests/e2e.rs` reproduced it: slow
+dictation, short phrases with pauses too short to settle a chunk, and too
+little speech to fill one. Once the open tail passed `preview.max_seconds`,
+every tick read the same first window of it, nothing in it settled, and
+nothing committed. A tick that only commits decodes no preview, so no text
+came back, and the silence timeout ended the capture mid-sentence.
+
+- Chosen: a `TickKind::Commits` window that begins at the committed offset
+  and settles nothing is committed whole, as the transcription of a
+  recording made before the model was ready already did (`decode_recording`
+  now goes through the same tick). A release stops it between segments.
+- Chosen: speech the detector found that ends later than any before it in
+  the capture counts as speech for the silence timeout (`Preview::heard`),
+  beside text the recognizer produced. Rejected: the detector alone, since a
+  settled commit's text is also proof and costs nothing to keep.
+- Rejected: cutting the window at its last pause instead of its end. The
+  split the worker sees has merged the pauses away, and the case is rare
+  enough that the cut inside a word it may cost is paid seldom.
+
+The same audit (P1-002) found that a final decode stamped every segment's
+commit with the end of all the audio it held. After the first of several
+segments, a recording being transcribed claimed to be done: a daemon stopped
+then, or a recognizer error on the next segment, left the rest unlisted, and
+the next start skipped it. Each segment now commits at its own speech end.

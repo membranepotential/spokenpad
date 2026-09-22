@@ -83,7 +83,16 @@ settling, the preview would be a re-decode of the whole growing capture. While
 the uncommitted tail exceeds `preview.max_seconds` (30 s) the tick still runs
 and still commits every settled chunk; only the cosmetic decode of the open
 tail is skipped, so the tail settles and previews resume by themselves. The
-winbar says which.
+winbar says which. Such a tick reads the first `preview.max_seconds` of the
+tail only (`TickKind::Commits`). When no chunk settles inside that window —
+slow dictation whose pauses are too short to settle a chunk and whose speech
+is too little to fill one — the window is committed whole: every segment in it
+is decoded and committed at its own speech end, and the offset moves to the
+window's end. Without that, every later tick read the same window, nothing
+committed until the release, and the tail grew with the capture. The cut at
+the window's end may fall inside a word; that is the price of the bound, and
+it is paid only there. A release during such a commit stops it between
+segments, and the release decodes the rest.
 
 The worker owns the offset because preview and release inference are serialized
 there. The main loop's hint exists only to avoid copying an entire long capture
@@ -152,12 +161,17 @@ it was.
 
 - **Silence.** A latched capture with no key down that has heard no speech
   for `capture.silence_timeout_s` (300 s) ends. "Heard speech" is text the
-  recognizer produced — a settled commit or a live preview, whichever came
-  last. `Session` raises `Event::Speech` for it, stamped when the result came
-  back rather than at the position of the audio it describes, so a slow
-  worker can only delay the stop and never end a capture whose words are
-  merely undecoded. An empty commit (settled silence) and an empty preview
-  prove nothing, which is exactly what a quiet latch produces every tick.
+  recognizer produced — a settled commit or a live preview — or speech the
+  detector found in a tick's audio that ends later than any it found before
+  in this capture (`Preview::heard`), whichever came last. The second counts
+  speech the recognizer has not made words of yet, as in a tick that only
+  commits, and speech it never makes words of. `Session` raises
+  `Event::Speech` for either, stamped when the result came back rather than
+  at the position of the audio it describes, so a slow worker can only delay
+  the stop and never end a capture whose words are merely undecoded. An
+  empty commit (settled silence), an empty preview, and the same speech
+  heard again by the next tick prove nothing, which is exactly what a quiet
+  latch produces every tick.
 
   "No key down" is `last_press` older than `KEY_SETTLED` (1 s). A held
   push-to-talk key re-fires its binding every few tens of milliseconds, and

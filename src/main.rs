@@ -194,7 +194,7 @@ fn run(args: Args) -> Result<u8> {
                 samples.len() as f64 / f64::from(rate),
                 wav.display()
             );
-            let raw = pipeline.decode(&samples, || false, |_| {})?;
+            let raw = pipeline.decode(&samples, || false, |_, _| {})?;
             let text = Processor::new(&config.text)?.process(&raw);
             if text.trim().is_empty() {
                 log::warn!("recording decoded to no text");

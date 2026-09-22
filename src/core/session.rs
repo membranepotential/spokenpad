@@ -386,6 +386,8 @@ pub struct Session {
     preview: String,
     notice: Option<Notice>,
     preview_epoch: Frames,
+    /// Where the latest speech the detector heard in this capture ends.
+    speech_through: Frames,
     next_id: u64,
     due: Option<Instant>,
     pending: Option<(UtteranceId, Instant)>,
@@ -413,6 +415,7 @@ impl Session {
             preview: String::new(),
             notice: None,
             preview_epoch: Frames::ZERO,
+            speech_through: Frames::ZERO,
             next_id: 0,
             due: None,
             pending: None,
@@ -468,6 +471,7 @@ impl Session {
                 self.current = Some(Utterance::new(self.next_id));
                 self.committed_hint = Frames::ZERO;
                 self.preview_epoch = Frames::ZERO;
+                self.speech_through = Frames::ZERO;
                 self.preview.clear();
                 self.notice = None;
                 self.previews = Previews::Running;
@@ -563,10 +567,21 @@ impl Session {
         if self.previews != Previews::Capped {
             self.due = Some(now + self.interval.saturating_sub(elapsed).max(elapsed));
         }
-        let Some(Preview { text, through }) = preview else {
+        let Some(Preview {
+            text,
+            through,
+            heard,
+        }) = preview
+        else {
             return;
         };
         self.heard(&text, now);
+        if let Some(end) = heard
+            && end > self.speech_through
+        {
+            self.speech_through = end;
+            self.event(Event::Speech { at: now });
+        }
         if through < self.committed_hint {
             return;
         }
@@ -601,10 +616,13 @@ impl Session {
             self.notice = None;
         }
     }
-    /// Text the recognizer produced is the only proof that the user is still
-    /// talking, wherever it came from: a settled commit or a live preview.
-    /// Empty text is what settled silence and a silent preview look like, so
-    /// it proves nothing and is not reported.
+    /// Text the recognizer produced proves that the user is still talking,
+    /// wherever it came from: a settled commit or a live preview. Empty text
+    /// is what settled silence and a silent preview look like, so it proves
+    /// nothing and is not reported. The other proof is speech the detector
+    /// heard end later than any it heard before in this capture
+    /// ([`Preview::heard`]), which counts before the recognizer has made
+    /// words of it, and when it never does.
     ///
     /// `now` is when the *result arrived*, not when the audio it describes
     /// was spoken, and that is deliberate. The two differ by however long the
@@ -706,6 +724,16 @@ mod tests {
         Some(Preview {
             text: text.into(),
             through: Frames(through),
+            heard: None,
+        })
+    }
+    /// A tick that decoded nothing but whose detector heard speech end at
+    /// `heard`.
+    fn heard(heard: usize) -> Option<Preview> {
+        Some(Preview {
+            text: String::new(),
+            through: Frames::ZERO,
+            heard: Some(Frames(heard)),
         })
     }
     #[test]
@@ -1165,6 +1193,37 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Speech the detector heard is the user talking before the recognizer
+    /// has made words of it -- a tick that only commits decodes no preview --
+    /// but only speech that ends later than any before it: the same speech
+    /// heard again by the next tick is not new.
+    #[test]
+    fn new_speech_the_detector_heard_restarts_the_silence_timeout() {
+        let quiet = Duration::from_secs(300);
+        let mut s = Session::new(true, Duration::from_secs(1), Some(quiet));
+        let t = Instant::now();
+        latch(&mut s, t);
+        let id = s.current.as_ref().unwrap().id;
+        let half = t + quiet / 2;
+        s.tick_finished(id, heard(16_000), half);
+        assert_eq!(
+            s.event(Event::Clock { now: t + quiet }),
+            Command::Nothing,
+            "heard speech restarted it"
+        );
+        s.tick_finished(id, heard(16_000), t + quiet);
+        assert!(
+            matches!(
+                s.event(Event::Clock { now: half + quiet }),
+                Command::Decode {
+                    cause: Cause::Silence,
+                    ..
+                }
+            ),
+            "the same speech heard again is not new"
+        );
     }
 
     /// The length limit ends a capture that is still being talked into, and

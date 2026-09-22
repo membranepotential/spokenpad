@@ -1016,16 +1016,17 @@ where
                         elapsed,
                     } => {
                         let preview = match result {
-                            Ok(Some(Preview { text, through })) => {
+                            Ok(Some(preview)) => {
                                 log::debug!(
-                                    "preview {}: {} characters, committed through {through}, decoded in {:.2}s",
+                                    "preview {}: {} characters, committed through {}, decoded in {:.2}s",
                                     id.0,
-                                    text.chars().count(),
+                                    preview.text.chars().count(),
+                                    preview.through,
                                     elapsed.as_secs_f64()
                                 );
                                 Some(Preview {
-                                    text: processor.process(&text),
-                                    through,
+                                    text: processor.process(&preview.text),
+                                    ..preview
                                 })
                             }
                             Ok(None) => {
@@ -1546,17 +1547,15 @@ fn decode_recording<R: Recognizer, S: Segmenter>(
         if reader.read(&mut held, wanted)? < wanted {
             break;
         }
-        let through = worker
-            .tick(&held, start, utterance, TickKind::Commits, &mut commit)?
-            .map_or(start, |tail| tail.through);
-        let mut settled = through.since(start).min(held.len());
-        if settled == 0 {
-            // A window with nothing settled in it: no VAD model, or speech
-            // the detector never breaks. Held on, it would grow to the whole
-            // file; committed whole, it keeps this to a window.
-            worker.commit_whole(&held, start, utterance, &mut commit)?;
-            settled = held.len();
-        }
+        // A full window, as a live tick past `preview.max_seconds` has: one
+        // with nothing settled in it -- no VAD model, or speech the detector
+        // never breaks -- is committed whole, which keeps this to a window.
+        let Some(tail) = worker.tick(&held, start, utterance, TickKind::Commits, &mut commit)?
+        else {
+            break;
+        };
+        let settled = tail.through.since(start).min(held.len());
+        ensure!(settled > 0, "a window of the recording settled nothing");
         held.drain(..settled);
         start += settled;
     }
@@ -1805,10 +1804,16 @@ mod tests {
             Frames::ZERO,
             3_000,
             16_000,
-            |c| commits.push(c.text.parse::<usize>().unwrap()),
+            |c| commits.push((c.text.parse::<usize>().unwrap(), c.through)),
         )
         .unwrap();
-        assert_eq!(commits, vec![1_000; 10], "one commit per block, each once");
+        assert_eq!(
+            commits,
+            (1..=10)
+                .map(|block| (1_000, Frames(block * 1_000)))
+                .collect::<Vec<_>>(),
+            "one commit per block, each once, each reaching as far as its block"
+        );
     }
 
     /// A recording whose text reaches partway already is transcribed from
