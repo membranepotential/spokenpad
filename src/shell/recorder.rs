@@ -170,8 +170,13 @@ impl CaptureRecorder {
     /// Writes the recordings this daemon has not finished transcribing where
     /// the next start reads them from, replacing the list; removes it for
     /// none. No `fsync`: this runs on the event loop, and the list only has
-    /// to survive the process, not the machine.
+    /// to survive the process, not the machine. With recording off it does
+    /// nothing, as [`new`](Self::new) reads nothing: the list belongs to the
+    /// daemons that record, and one that recorded nothing knows nothing of it.
     pub fn save_unfinished(&self, unfinished: &[Unfinished]) -> Result<()> {
+        if !self.config.enabled {
+            return Ok(());
+        }
         let path = self.config.dir.join(WAITING_LIST);
         if unfinished.is_empty() {
             return match fs::remove_file(&path) {
@@ -1039,6 +1044,31 @@ mod tests {
             CaptureRecorder::new(recording, 16_000)
                 .take_unfinished()
                 .is_empty()
+        );
+    }
+
+    /// With recording off the list is neither read nor written: the
+    /// recordings a daemon with recording on left waiting are still there
+    /// when recording is turned on again.
+    #[test]
+    fn a_recorder_that_is_off_leaves_the_waiting_list_alone() {
+        let temporary = tempdir().unwrap();
+        let directory = temporary.path().join("audio");
+        fs::create_dir(&directory).unwrap();
+        let list = directory.join(WAITING_LIST);
+        fs::write(&list, "16\tcapture-2026-09-22-120000.wav\n").unwrap();
+        let off = CaptureRecorder::new(
+            Recording {
+                enabled: false,
+                ..config(directory)
+            },
+            16_000,
+        );
+        assert!(off.take_unfinished().is_empty());
+        off.save_unfinished(&[]).unwrap();
+        assert!(
+            list.exists(),
+            "the stop of a daemon recording nothing removed it"
         );
     }
 
