@@ -7,32 +7,25 @@ Hold a key (or latch with shift), speak, and text appears in an nvim that
 never takes focus. Fully local, CPU-only. Next milestone: public release.
 
 ## Now
-- simplify branch (worktree-agent-a6071f6a0e01869a4): managed mode removed,
-  autosave, close cancels, layout log + 2 review-fix commits; 2nd review
-  found a regression (hit-enter prompt blocks the pane opening) — implementer
-  fixing — then merge, deploy, migrate the user's config.
-- Waiting to merge after it: hover (ad36661, 967aa75: pane opens >= 20 px
-  beside the pointer, hover may focus), screenshot (8bec3a5), walkthrough
-  doc (46569a9). CI green up to tests on 66076b9.
-- Audit done: REPORT.md in scratchpad reviews/2026-09-22-2100 (2 P1, 19 P2,
-  26 P3). User 09-22: fix everything incl. the big splits; remove other ASR
-  families, vad.enabled, preview.enabled (beam search + vocabulary stay);
-  durations in _seconds; never log transcript text. Plus walkthrough fixes.
+- main dee23dc deployed 22:30 (managed mode removed, autosave, close
+  cancels, hover focus + 20 px gap, screenshot, examples cleanup, Gladia
+  script untracked); user config migrated (backup .bak-2026-09-22-managed).
+  WirePlumber restarted 22:30: it had dropped the sound card at 21:52 during
+  the walkthrough's PipeWire rig. User must reload i3 (float rule gone).
+- Audit fixes (REPORT.md in scratchpad reviews/2026-09-22-2100; user 09-22:
+  fix all incl. big splits; remove other ASR families, vad.enabled,
+  preview.enabled; durations in _seconds; never log transcript text; plus
+  walkthrough fixes, xclip dependency, CLI starts the socket) — two lanes
+  starting: core/daemon/config, and edges.
 
 ## Next
-0. After the merges: delete examples/verify_native.rs and decode_probe.rs
-   (user 09-22), fix pane.rs header, add examples/README.md (dev tools);
-   untrack + git-ignore scripts/gladia-references.sh (user 09-22), docs say local;
-   test harness leaks /tmp/.X<n>-lock files (114 found) -> 'no free display'.
-1. User live check: typing elsewhere ok, `Grüße @ € {}` ok; still to try:
-   pane_dimensions edit at the next window, pane_layout = "tiled".
-2. Before public: fresh-user walkthrough (clean account: README only),
-   codebase audit + security review, README screenshot of the pane.
-3. User decides: push (then the first real CI run), make the repo public,
-   tag v0.2.0 (PKGBUILD source sha256 is SKIP until then).
+1. User live check after i3 reload: pane_layout = "tiled"; hover focuses the
+   pane; :q mid-latch cancels; typing is saved.
+2. Audit + walkthrough fixes merged, reviewed, CI green.
+3. User decides: make the repo public, tag v0.2.0 (fill PKGBUILD sha256,
+   .SRCINFO), AUR publish. Pushing is allowed (user 09-22).
 4. Lost chunk: the end-of-slice close is both the one lost chunk and the
-   whole 0.35-point gain. Open: a guard that keeps the gain (see
-   experiments/2026-09-22-empty-chunk-flips.md; dev subset: ~2 min a run).
+   whole 0.35-point gain (experiments/2026-09-22-empty-chunk-flips.md).
 
 ## Done
 - 09-22: pane never focuses by itself on i3, sway (runtime no_focus rule
