@@ -20,6 +20,8 @@ never takes focus. Fully local, CPU-only. Next milestone: public release.
   allowed, release waits for the user's go.
 
 ## Next
+0. After the merges: delete examples/verify_native.rs and decode_probe.rs
+   (user 09-22), fix pane.rs header, add examples/README.md (dev tools).
 1. User live check: typing elsewhere ok, `Grüße @ € {}` ok; still to try:
    pane_dimensions edit at the next window, pane_layout = "tiled".
 2. Before public: fresh-user walkthrough (clean account: README only),
