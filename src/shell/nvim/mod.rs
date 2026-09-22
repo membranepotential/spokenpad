@@ -91,8 +91,9 @@ const MAP_TIMEOUT: Duration = Duration::from_secs(3);
 /// person mid-command: a hit-enter prompt or a plugin's `input()` in an
 /// editor nobody is looking at, which would otherwise hold this one call for
 /// hours while every utterance after it queues behind it. Those then take
-/// the path any silent editor takes; the held call keeps its operation id,
-/// so it is never written twice.
+/// the path any silent editor takes: the held call keeps its operation id,
+/// and if its repeat is not answered either, the text goes to the pending
+/// passage with a notification that it may also be in the window.
 const HELD_AT_MOST: Duration = Duration::from_secs(120);
 /// How often the log repeats that a call is still held.
 const HELD_LOG_EVERY: Duration = Duration::from_secs(10);
@@ -304,16 +305,24 @@ impl NvimSession {
     /// Tells the user, through the desktop's notification service, that
     /// dictation is going to a file no editor shows. Best effort: a desktop
     /// without `notify-send` or a notification daemon only gets the log line.
-    pub fn notify_detached(&self, path: &Path) {
+    pub fn notify_detached(&self, path: &Path, why: Detached) {
         if !self.config.notify {
             return;
         }
-        let (title, body) = match &self.refused {
-            Some(reason) => (
+        let (title, body) = match (why, &self.refused) {
+            (Detached::Unconfirmed, _) => (
+                "spokenpad: text saved outside the window",
+                format!(
+                    "The dictation window did not confirm it received the last text, \
+                     so it is saved to {} as well. If the window shows it too, it is in both.",
+                    path.display()
+                ),
+            ),
+            (Detached::NoEditor, Some(reason)) => (
                 "spokenpad: the dictation window could not open",
                 format!("{reason}.\nSaved to {}.", path.display()),
             ),
-            None => (
+            (Detached::NoEditor, None) => (
                 "spokenpad: no dictation editor is open",
                 format!(
                     "Saved to {}. Run `spokenpad editor` to see it.",
@@ -1059,6 +1068,16 @@ struct Pinned {
     name: String,
 }
 
+/// Why text went to the pending passage, for the notification that says so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Detached {
+    /// No editor could take it: none is open, or it could not be reached.
+    NoEditor,
+    /// The editor was sent it and never confirmed it, so the passage may be
+    /// a second copy.
+    Unconfirmed,
+}
+
 /// Why [`NvimSession::append`] did not confirm the text, split by the one
 /// question the caller must answer next: can the text be in the editor?
 #[derive(Debug)]
@@ -1067,7 +1086,9 @@ pub enum AppendFailure {
     /// not in its buffer and may be written elsewhere without doubling it.
     NotSent(anyhow::Error),
     /// The request was sent and its outcome is unknown: the editor may have
-    /// appended the text. Writing it anywhere else risks writing it twice.
+    /// appended the text. The daemon writes it to the pending passage anyway,
+    /// and says it may be in both: a second copy the user can delete is
+    /// better than text that is only in the log.
     Unconfirmed(anyhow::Error),
 }
 
@@ -1434,7 +1455,8 @@ struct Held<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HeldVerdict {
     Wait,
-    /// The daemon is stopping: give up now, so it can say what is undelivered.
+    /// The daemon is stopping: give up now, so the text reaches a file within
+    /// the shutdown grace.
     Abandon,
     /// Held past [`HELD_AT_MOST`]: treat it like an editor that stopped
     /// answering.

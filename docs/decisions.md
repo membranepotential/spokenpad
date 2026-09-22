@@ -1679,3 +1679,29 @@ the file as a literal ESC, and after `<C-v>u12` it ended the number and
   character under it. The check only looks, so one left queued behind a
   command that is still pending changes nothing when it runs.
 - Rejected: a different cancelling key. After `<C-v>` every key is literal.
+
+## Unconfirmed text goes to the pending passage too (2026-09-22)
+
+An append that stayed unconfirmed after its repeat with the same operation
+id (the two-minute cap, a daemon stop while Neovim held it, a reply lost on
+a live connection) was kept only in the log and the recording WAV. After a
+held append the text is almost never in the window either: Neovim 0.12.5
+drops a request whose connection closed before it ran. So the user lost it
+unless they read the log.
+
+- Chosen: write it to the pending passage, with a desktop notification that
+  names the file and says the text may also be in the window. It is in both
+  only if Neovim ran the request after all, which needs a reply lost on a
+  live connection whose repeat also failed.
+- The operation id still decides first: a repeat that answers means the text
+  is in the window once, and nothing is written elsewhere.
+- Rejected: writing it elsewhere only when it is known not to have landed.
+  No answer can say that, since the editor that could is the one not
+  answering, so the rule would keep losing the text in the usual case to
+  avoid a rare duplicate.
+- Rejected: marking the text itself as possibly duplicated. A marker in a
+  transcript is text the user has to find and delete in every case; the
+  notification says it once.
+- Measured in `tests/e2e.rs`: a stop 4 s into a held append wrote the text to
+  the pending passage and nowhere else, and the daemon stopped 161 ms after
+  it was told to.

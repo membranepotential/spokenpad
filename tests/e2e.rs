@@ -1553,6 +1553,65 @@ fn text_for_an_editor_that_exited_during_the_decode_goes_to_the_pending_passage(
     h.finish();
 }
 
+/// The editor has half a command typed when the daemon stops, so the append
+/// it holds is given up on. Its text is not left only in the log: it goes to
+/// the pending passage, and it is not in the editor as well, because Neovim
+/// drops a request whose connection closed before it ran.
+#[test]
+fn an_append_held_when_the_daemon_stops_goes_to_the_pending_passage() {
+    if !nvim_available() {
+        return;
+    }
+    let mut h = Harness::start(Settings {
+        mode: Mode::Attach,
+        delay: Duration::from_secs(1),
+        ..Settings::default()
+    });
+    h.open_editor();
+    thread::sleep(Duration::from_millis(300));
+    h.press(false);
+    h.say(&tone(1.0));
+    h.release();
+    wait_until("the editor shows the decode", || {
+        h.indicator("phase").trim() == "transcribing"
+    });
+    // A count waiting for its command: Neovim runs no RPC call until it ends.
+    let typed = Command::new("nvim")
+        .args(["--server".as_ref(), h.socket.as_os_str()])
+        .args(["--remote-send", "2"])
+        .status()
+        .expect("type into the editor");
+    assert!(typed.success());
+    // Past the append's own two-second deadline, so it is held.
+    thread::sleep(Duration::from_secs(4));
+    let stopping = Instant::now();
+    h.stop();
+    println!(
+        "the daemon stopped {} ms after it was told to",
+        stopping.elapsed().as_millis()
+    );
+    let pointer = PathBuf::from(format!("{}.pending", h.socket.display()));
+    let passage = fs::read_to_string(&pointer).expect("a pending passage");
+    assert_eq!(
+        fs::read_to_string(passage.trim_end()).expect("read the passage"),
+        "word word\n",
+        "the held text should be in the pending passage"
+    );
+    let cancelled = Command::new("nvim")
+        .args(["--server".as_ref(), h.socket.as_os_str()])
+        .args(["--remote-send", "<Esc>"])
+        .status()
+        .expect("cancel the count");
+    assert!(cancelled.success());
+    let buffer = h.ask("join(getline(1, '$'), '|')");
+    assert!(
+        !buffer.contains("word"),
+        "the editor ran the held append after its connection closed: {buffer:?}"
+    );
+    assert_eq!(h.calls().len(), 1, "decoded once: {:?}", h.calls());
+    h.finish();
+}
+
 /// A latched capture that runs through a pause long enough to settle: the
 /// daemon drops the audio it has committed while it records, and the capture
 /// still reaches the file whole, with every sample decoded exactly once.

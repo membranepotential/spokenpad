@@ -276,8 +276,9 @@ caught up. The log always has the full sentence and paths.
   and everything catches up. Text dictated meanwhile waits and lands once, in
   the window, and the dictation window says "waiting for the editor: finish
   or <Esc> the pending command" in its last row. After two minutes (a prompt
-  nobody sees) spokenpad stops waiting: that piece of text is in the log and
-  the recording, and later ones go on as if no editor were open. Closing the
+  nobody sees) spokenpad stops waiting: that text and what follows it go to
+  a separate dictation file, as if no editor were open, and a desktop
+  notification names the file. Closing the
   window with a command half typed cancels it, and what you typed is written
   as usual.
 - **Recording continues for a quarter second after you let go**

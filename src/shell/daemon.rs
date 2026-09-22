@@ -26,7 +26,7 @@ use crate::{
         control::{ControlServer, Socket, refuse_until},
         inference::{SpeechSegmenter, Transcriber, load_segmenter},
         models::{Repair, ensure_defaults, repair_defaults},
-        nvim::{AppendFailure, CopyOutcome, IndicatorState, NvimSession},
+        nvim::{AppendFailure, CopyOutcome, Detached, IndicatorState, NvimSession},
         recorder::{CaptureReader, Unfinished},
     },
 };
@@ -369,8 +369,8 @@ fn reconfigure(
 ///
 /// The session's [`quitting`](NvimSession::quitting) flag changes only how:
 /// once it is set, a call Neovim holds behind a half-typed command is given
-/// up on (its text is reported as undelivered, and may still land when the
-/// command ends), and an editor that is not connected is not reattached or
+/// up on (its text goes to the pending passage, like any unconfirmed
+/// append), and an editor that is not connected is not reattached or
 /// opened, so what is still queued goes to the pending passage within the
 /// shutdown grace instead of waiting on an editor.
 fn editor_thread(
@@ -426,6 +426,10 @@ fn editor_thread(
                     {
                         log::warn!("could not reattach to the dictation window: {e:#}");
                     }
+                    // Whether the editor may have this text after all, so
+                    // the pending passage is a second copy rather than the
+                    // only one.
+                    let mut maybe_landed = false;
                     if nvim.connected() {
                         let now = Instant::now();
                         let continued = paragraph == Some((utterance, Sink::Editor));
@@ -446,15 +450,18 @@ fn editor_thread(
                             Err(AppendFailure::NotSent(e)) => {
                                 log::warn!("the dictation editor did not receive the text: {e:#}");
                             }
-                            // The editor may hold the text already; writing
-                            // it anywhere else could write it twice.
+                            // Not confirmed even by the repeat with the same
+                            // operation id. Kept only in the log, the text
+                            // would be lost to the user if the editor never
+                            // took it, which is the usual case: Neovim drops
+                            // a request whose connection closed before it ran.
+                            // So it goes to the pending passage as well, and
+                            // the notification says it may be in both.
                             Err(AppendFailure::Unconfirmed(e)) => {
-                                paragraph = None;
                                 log::error!(
-                                    "append failed: {e:#}; transcript retained in diagnostic log; recover from the capture WAV if available"
+                                    "append not confirmed: {e:#}; writing the text to the pending passage too, so if the editor took it after all it is in both"
                                 );
-                                log::debug!("undelivered text: {text:?}");
-                                continue;
+                                maybe_landed = true;
                             }
                         }
                     }
@@ -465,8 +472,10 @@ fn editor_thread(
                         Ok(write) => {
                             paragraph = Some((utterance, Sink::Passage));
                             log::info!("no dictation editor: appended to {}", write.path.display());
-                            if write.started {
-                                nvim.notify_detached(&write.path);
+                            if maybe_landed {
+                                nvim.notify_detached(&write.path, Detached::Unconfirmed);
+                            } else if write.started {
+                                nvim.notify_detached(&write.path, Detached::NoEditor);
                             }
                         }
                         Err(e) => {

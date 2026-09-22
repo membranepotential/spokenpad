@@ -84,8 +84,9 @@ lost:
   `nvim.dictation_dir` is ignored.
 - **An editor that exits mid-dictation loses nothing.** A request that
   could not be sent to the editor certainly did not land, so its text goes to
-  the pending passage. An append whose reply is lost is not redirected,
-  since it may have landed; writing it again elsewhere could write it twice.
+  the pending passage. An append that stays unconfirmed even after its
+  repeat goes there too, with a notification that it may be in both places:
+  see [Reconnection](#reconnection).
 - **Decoding is unchanged.** The file is only a different sink for the same
   commits; each is still decoded exactly once.
 - **You are told.** When a pending passage is started, the daemon sends one
@@ -874,14 +875,14 @@ is held:
   plugin's `input()` in an editor nobody is looking at, which would hold the
   call for hours while every later utterance queued behind it. The call then
   takes the timeout path of an editor that stopped answering: one repeat on a
-  fresh connection with the same operation id, then "append failed", the
-  text in the log and the recording, and the next utterance to a pending
-  passage. Neovim drops what a closed connection had queued, so the held text
-  never lands twice;
+  fresh connection with the same operation id, then "append not
+  confirmed", the text to the pending passage (below), and the next utterance
+  there too until the editor answers again;
 - **a daemon stop ends it at once.** The daemon sets the session's
   `quitting` flag before its last message to the editor thread, the wait sees
-  it within half a second, and the thread reports the text as undelivered
-  instead of spending its shutdown grace on it. Once the flag is set, the
+  it within half a second, and the thread writes the text to the pending
+  passage instead of spending its shutdown grace on it (measured: the daemon
+  stopped 161 ms after it was told to, in `tests/e2e.rs`). Once the flag is set, the
   thread neither reattaches nor opens an editor: what is still queued goes to
   the pending passage. Before, the append gave up after 2 s, the reconnection's
 probe after 2 more, and the utterance was reported as failed while its
@@ -893,9 +894,18 @@ wait for.
 An append that times out is the ambiguous case: the request may have completed
 after its reply was lost. It is retried once, on a fresh connection, with the
 **same operation id** — the Lua side returns its cached result instead of
-appending twice. If that retry fails, the session disconnects, so the next
+appending twice. A retry that answers means the text is in the window
+exactly once. If the retry fails too, the session disconnects, so the next
 utterance reattaches rather than writing into a client whose reply stream is out
-of step.
+of step, and the text goes to the **pending passage**, with a desktop
+notification ("text saved outside the window") that names the file and says
+it may be in the window too. Kept only in the log it would be lost to the
+user in the usual case, since Neovim 0.12.5 drops a request whose connection
+closed before it ran (measured: after `<Esc>` ended the command it was held
+behind, the text was not in the buffer). It is in both places only if the
+editor ran the request after all: one whose reply alone was lost on a live
+connection, or a future Neovim that runs what a closed connection had queued.
+A second copy the user can delete is the price of never losing the text.
 
 When the daemon exits it **detaches without closing nvim**: the user may still
 be editing what they dictated, and killing their editor because a daemon
