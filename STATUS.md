@@ -13,9 +13,8 @@ never takes focus. Fully local, CPU-only. Next milestone: public release.
   models download, config reload per window, PKGBUILD + CI — agent running.
 
 ## Next
-1. User: P4 live check of `nvim.mode = "pane"` on i3 (steps: set the mode,
-   `spokenpad check`, restart; dictate while typing elsewhere; click, type
-   `Grüße @ € { }`; colours/font with tokyonight; close window, dictate again).
+1. User: P4 live check of pane mode on i3 (typing elsewhere, click + type
+   `Grüße @ € { }`, tokyonight, close window and dictate again).
 2. After p3-focus passes: default mode = pane. User decides: push (62 commits unpushed); make the repo public.
 3. Lost chunk: the end-of-slice close is both the one lost chunk and the
    whole 0.35-point gain. Open: a guard that keeps the gain (see
@@ -46,10 +45,7 @@ never takes focus. Fully local, CPU-only. Next milestone: public release.
   worth it on the GTX 1650. Beam bug cause found (blank skips frames for
   free); one-line patch documented, not shipped.
 
-## Known issues / open questions
-- Dying input stream: seen once, root cause unknown; the watchdog recovers it.
-
-## Decided
+## Decided (known issue: dying input stream seen once; watchdog recovers)
 - Hard constraints: docs/constraints.md. No input device is read. No paste.
 - 09-22 (user): Arch PKGBUILD, no install script; daemon starts by socket
   activation only (spokenpad.socket shipped enabled); models stay out of the
