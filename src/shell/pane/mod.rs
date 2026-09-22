@@ -1040,6 +1040,17 @@ impl Pane {
             Ok(mode) if waiting_for_keys(&mode) => mode_name(&mode).to_owned(),
             _ => return,
         };
+        // What Neovim shows at the cursor while it waits, read from the
+        // pane's own grid, which is current: Neovim draws before it waits,
+        // and the answer above came after that. After `<C-v>` it is `^`,
+        // after `<C-r>` a `"`, after `<C-k>` a `?`; after `<C-v>` and digits
+        // it is the cell's own text again.
+        let cursor = self.screen.cursor();
+        let marker = self
+            .screen
+            .cell(cursor.row, cursor.column)
+            .map(|cell| cell.text.clone())
+            .unwrap_or_default();
         log::info!("cancelling a command left half typed in the pane, to write it");
         for _ in 0..CANCEL_ATTEMPTS {
             if self.editor.input("<Esc>").is_err() {
@@ -1055,7 +1066,12 @@ impl Pane {
                 "nvim_exec_lua",
                 vec![
                     Value::from(ESCAPE_TRACE),
-                    Value::Array(vec![Value::from(was.as_str())]),
+                    Value::Array(vec![
+                        Value::from(was.as_str()),
+                        Value::from(marker.as_str()),
+                        Value::from(cursor.row + 1),
+                        Value::from(cursor.column + 1),
+                    ]),
                 ],
                 MODE_TIMEOUT,
             ) {
@@ -1124,25 +1140,40 @@ fn mode_name(mode: &Value) -> &str {
         .unwrap_or("")
 }
 
-/// What a cancelling `<Esc>` typed, given the mode it was sent in: `{
-/// "backspace" }`, `{ "delete", row, column }` (0-based, the character to
-/// delete) or `{ "none" }`. Only looks; see [`Pane::take_back_escape`].
+/// What a cancelling `<Esc>` typed: `{ "backspace" }`, `{ "delete", row,
+/// column }` (0-based, the character to delete) or `{ "none" }`. Only
+/// looks; see [`Pane::take_back_escape`].
+///
+/// Its arguments are what was true before the `<Esc>`: the mode, the text
+/// Neovim showed at the cursor, and where the cursor was on the screen
+/// (1-based). Each answer rests on those facts, never on the text alone,
+/// which may hold an ESC or a control character of the user's own:
+///
+/// - `backspace`: `<C-v>` was pending (its `^` marker was showing), and
+///   Insert mode goes on with an ESC before the cursor. That ESC is the
+///   `<Esc>`.
+/// - `delete`: Insert mode has ended, and the cursor is on a control
+///   character at the very screen cell it was on before. Leaving Insert mode
+///   moves the cursor left, so only a character inserted there by the
+///   `<Esc>` ending a `<C-v>` number puts it back where it was. At the start
+///   of a line the cursor cannot move left, and a control character of the
+///   user's under it would look the same, so there no `^` may have been
+///   showing: a `<C-v>` number typed right before one of the user's own
+///   control characters at the start of a line is left in the file, since
+///   the two cannot be told apart.
 const ESCAPE_TRACE: &str = r#"
-local was = ...
+local was, marker, screen_row, screen_col = ...
 local mode = vim.api.nvim_get_mode().mode
 local row, col = unpack(vim.api.nvim_win_get_cursor(0))
 local line = vim.api.nvim_get_current_line()
 if mode:match("^[iR]") then
-  -- Still inserting: after <C-v>, the <Esc> is the character before the
-  -- cursor.
-  if col > 0 and line:byte(col) == 27 then
+  if marker == "^" and col > 0 and line:byte(col) == 27 then
     return { "backspace" }
   end
-elseif was:match("^[iR]") then
-  -- Back in Normal mode from Insert: the <Esc> ended a <C-v> number, and
-  -- the cursor is on the control character that number made.
+elseif was:match("^[iR]") and (col > 0 or marker ~= "^") then
   local byte = line:byte(col + 1)
-  if byte and byte < 32 and byte ~= 9 then
+  local at = vim.fn.screenpos(0, row, col + 1)
+  if byte and byte < 32 and byte ~= 9 and at.row == screen_row and at.col == screen_col then
     return { "delete", row - 1, col }
   end
 end

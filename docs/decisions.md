@@ -1728,3 +1728,26 @@ write and the text was only in the log.
   before or during the append; 2.6 s without the first change. The frozen
   editor, continued, ran the request as well: the documented case of text in
   both places.
+
+## The teardown `<Esc>` is taken back on facts, not on the text (2026-09-22)
+
+Review of the take-back: it guessed from the text after the `<Esc>`. After a
+pending `<C-r>` or `<C-k>` the `<Esc>` only cancels and Insert mode goes on,
+so an ESC of the user's before the cursor was taken back with `<BS>`
+(reproduced: `ab\x1b`, then `A<C-r>`); and after `<C-x>` Insert mode ends
+with the cursor on the character before it, so a control character of the
+user's there was deleted.
+
+- Chosen: read what Neovim shows at the cursor, from the pane's own grid,
+  before sending the `<Esc>`. Measured on 0.12.5: `^` while `<C-v>` waits,
+  `"` for `<C-r>`, `?` for `<C-k>`, and after `<C-v>` and digits the cell's
+  own text again. `<BS>` only if `^` was showing and Insert mode goes on.
+- Chosen: delete only if Insert mode ended with the cursor on a control
+  character at the screen cell it was on before. Leaving Insert mode moves
+  the cursor left, so only a character the `<Esc>` inserted puts it back.
+- Accepted: at the start of a line, where the cursor cannot move left, a
+  `<C-v>` number typed right before a control character of the user's stays
+  in the file. The alternative there is deleting the user's own character.
+- The test closes 23 panes, each with a pending sequence, 12 of them next
+  to an ESC or a `^L` already in the file; the previous version failed on
+  the first of those.

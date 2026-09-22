@@ -345,7 +345,16 @@ always a cancel: after `<C-v>` it goes into the text as a literal ESC, and
 after `<C-v>` and digits (`<C-v>u12`) it ends the number, whose control
 character goes in. The first is taken back with `<BS>`, which in Replace mode
 also puts back the character it replaced, and the second is deleted, so
-neither reaches the file (`tests/pane_render.rs` checks both, in Insert and
+neither reaches the file. Both rest on facts, not on the text, which may
+hold an ESC or a control character of the user's own: before the `<Esc>`,
+the pane reads from its own grid what Neovim shows at the cursor (`^` while
+`<C-v>` waits, `"` for `<C-r>`, `?` for `<C-k>`) and where the cursor is. An
+ESC is taken back only if `^` was showing and Insert mode goes on; a control
+character is deleted only if Insert mode ended with the cursor on it at the
+very screen cell it was on, which leaving Insert mode never does unless the
+`<Esc>` inserted it. At the start of a line, where the cursor cannot move
+left, a `<C-v>` number typed right before a control character of the user's
+is left in the file: there the two cannot be told apart (`tests/pane_render.rs` checks both, in Insert and
 Replace mode, against a real Neovim). `nvim_get_mode` cannot be that check:
 Neovim answers it on arrival, which can be before the `<Esc>` ahead of it is
 read. The budgets are checked against the grace at compile time, so a change

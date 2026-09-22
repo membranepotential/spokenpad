@@ -716,24 +716,40 @@ fn closing_mid_command_writes_no_trace_of_the_cancelling_escape() {
     let server = XServer::start();
     let directory = tempfile::tempdir().expect("a temporary directory");
     let config = dictation_config(directory.path());
-    // Keys typed into a buffer holding "abcd", with the cursor at its start,
-    // and what the file must say after the pane closes.
+    // The file's text, the keys typed into it with the cursor at its start,
+    // and what the file must say after the pane closes. The ESC and the ^L
+    // already in a file are the user's, next to the cursor where an <Esc>
+    // or a <C-v> number would have put one: they must stay.
     let cases = [
-        ("Aef<C-v>", "abcdef"),
-        ("Aef<C-v>u12", "abcdef"),
-        ("Aef<C-v>1", "abcdef"),
-        ("Rxy<C-v>", "xycd"),
-        ("Aef<C-k>", "abcdef"),
-        ("Aef<C-r>", "abcdef"),
-        ("Aef<Esc>2", "abcdef"),
-        ("Aef<Esc>r", "abcdef"),
-        ("Aef<C-v><Tab>", "abcdef\t"),
+        ("abcd", "Aef<C-v>", "abcdef"),
+        ("abcd", "Aef<C-v>u12", "abcdef"),
+        ("abcd", "Aef<C-v>1", "abcdef"),
+        ("abcd", "Rxy<C-v>", "xycd"),
+        ("abcd", "Aef<C-k>", "abcdef"),
+        ("abcd", "Aef<C-r>", "abcdef"),
+        ("abcd", "Aef<Esc>2", "abcdef"),
+        ("abcd", "Aef<Esc>r", "abcdef"),
+        ("abcd", "Aef<C-v><Tab>", "abcdef\t"),
+        ("ab\x1b", "A<C-r>", "ab\x1b"),
+        ("ab\x1b", "A<C-k>", "ab\x1b"),
+        ("ab\x1b", "A<C-v>", "ab\x1b"),
+        ("ab\x1b", "A<C-v>u1", "ab\x1b"),
+        ("ab\x0c", "A<C-r>", "ab\x0c"),
+        ("ab\x0c", "A<C-k>", "ab\x0c"),
+        ("ab\x0c", "A<C-x>", "ab\x0c"),
+        ("ab\x0c", "A<C-v>", "ab\x0c"),
+        ("ab\x0c", "A<C-v>u12", "ab\x0c"),
+        ("ab\x0c", "A<C-v>1", "ab\x0c"),
+        ("ab\x0ccd", "3|i<C-v>1", "ab\x0ccd"),
+        ("ab\x0ccd", "3|i<C-x>", "ab\x0ccd"),
+        ("\x0cab", "0i<C-x>", "\x0cab"),
+        ("\x0cab", "0i<C-r>", "\x0cab"),
     ];
-    for (index, (keys, expected)) in cases.into_iter().enumerate() {
+    for (index, (text, keys, expected)) in cases.into_iter().enumerate() {
         let file = config
             .dictation_dir
             .join(format!("dictation-2026-09-22-1{index:05}.md"));
-        std::fs::write(&file, "abcd\n").expect("create the dictation file");
+        std::fs::write(&file, format!("{text}\n")).expect("create the dictation file");
         let mut pane = pane_on(&server, &config, &file);
         call(&mut pane, "nvim_input", vec![Value::from(keys)], PATIENCE);
         let _ = pane.step(Duration::from_millis(200));
@@ -742,7 +758,7 @@ fn closing_mid_command_writes_no_trace_of_the_cancelling_escape() {
         assert_eq!(
             written.trim_end_matches('\n'),
             expected,
-            "after {keys:?} the file says {written:?}"
+            "after {keys:?} in {text:?} the file says {written:?}"
         );
     }
 }
