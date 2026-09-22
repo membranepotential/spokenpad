@@ -2295,3 +2295,23 @@ already ends in whitespace (Lua's `%s`). Test: the shared paragraph cases
 gained two seams; `paragraphs_follow_the_editors_rule` failed on them
 before, and `the_detached_paragraph_rule_matches_the_editors` holds the Lua
 to the same result.
+
+## An editor no pane shows is stopped, not dictated into (2026-09-22)
+
+Left open by the `:restart` entry above: after `:restart` in the pane, the
+old Neovim exits and a new server with the same arguments waits on the
+pane's socket for a UI that never comes. It carries spokenpad's marker, so
+the next press adopted it, and the dictation went into an editor nobody
+could see.
+
+- Chosen: in pane mode, an editor of spokenpad's on the socket with no UI
+  attached (`nvim_list_uis()` empty) is told to `qall!`, its socket is
+  cleared, and a new pane opens. Every editor spokenpad starts in pane mode
+  is drawn by a pane, and one the user opened with `spokenpad editor` has
+  its terminal as a UI, so only an invisible one matches; it has had no
+  window to be typed into, so it holds nothing to lose.
+- Rejected: handling the `restart` UI event, which would re-attach the pane
+  to the new server: more protocol for a command the dictation window does
+  not need.
+- Test: `a_pane_mode_editor_with_no_window_is_stopped_not_adopted`; before
+  the change the session adopted the headless editor and returned its file.

@@ -29,6 +29,37 @@ fn a_pane_without_a_display_says_to_use_attach_mode() {
     assert_eq!(session.refused.as_deref(), Some(error.as_str()));
 }
 
+/// In pane mode an editor of spokenpad's that no UI shows — what `:restart`
+/// leaves on the socket, waiting for a UI the pane never gives it — is not
+/// adopted, which would send the dictation where nobody sees it: it is
+/// stopped, and a pane is opened instead (here none can, for want of a
+/// display).
+#[test]
+fn a_pane_mode_editor_with_no_window_is_stopped_not_adopted() {
+    if !nvim_or_skip() {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let config = Nvim {
+        mode: Mode::Pane,
+        display: None,
+        ..headless(directory.path())
+    };
+    let (_, mut invisible) = open_user_editor(&config);
+    let mut session = NvimSession::new(config.clone());
+    let error = format!("{:#}", session.ensure(Want::Press).unwrap_err());
+    assert!(error.contains("needs an X display"), "{error}");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while invisible.0.try_wait().unwrap().is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "the editor no window shows is still running"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!config.socket_path.exists(), "its socket is cleared");
+}
+
 /// Only a path that resolves into the dictation directory is trusted with a
 /// transcript: not one that climbs out with `..`, not a symlink inside that
 /// points out, and nothing while the directory does not exist.

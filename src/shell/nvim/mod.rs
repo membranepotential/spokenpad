@@ -738,6 +738,10 @@ impl NvimSession {
             "refusing unrelated nvim socket {}",
             self.config.socket_path.display()
         );
+        if self.config.mode == Mode::Pane && !has_ui(&mut client)? {
+            self.stop_invisible(client)?;
+            return Ok(false);
+        }
         // An editor spokenpad started that nothing has pinned yet — one the
         // user opened with `spokenpad editor` — is adopted on the file it was
         // started on, when that is a dictation file.
@@ -770,6 +774,48 @@ impl NvimSession {
             path,
         });
         Ok(true)
+    }
+
+    /// Ends an editor of spokenpad's that no window shows, and clears its
+    /// socket, so that the next pane opens rather than text going where
+    /// nobody sees it. In pane mode every editor spokenpad started is drawn
+    /// by a pane, so one with no UI is invisible: what `:restart` leaves
+    /// behind (Neovim 0.12 starts a new server with the same arguments,
+    /// which waits for a UI the pane never gives it), or the editor of a pane
+    /// a crashed daemon took with it. It has had no window to be typed into,
+    /// so it holds nothing to lose.
+    fn stop_invisible(&self, mut client: RpcClient) -> Result<()> {
+        log::info!(
+            "stopping the editor on {}: no window shows it (left behind by `:restart`?)",
+            self.config.socket_path.display()
+        );
+        // Scheduled, so the call is answered before the editor goes.
+        client.request(
+            "nvim_exec_lua",
+            vec![
+                Value::from("vim.schedule(function() vim.cmd('qall!') end)"),
+                Value::Array(Vec::new()),
+            ],
+            deadline(PROBE_TIMEOUT),
+            Patience::Deadline,
+        )?;
+        drop(client);
+        let gone_by = deadline(PROBE_TIMEOUT);
+        while Instant::now() < gone_by {
+            match RpcClient::connect(&self.config.socket_path, gone_by) {
+                Err(error) if error.is_stale_socket() => {
+                    if self.config.socket_path.exists() {
+                        remove_stale_socket(&self.config.socket_path)?;
+                    }
+                    return Ok(());
+                }
+                _ => std::thread::sleep(CONNECT_POLL),
+            }
+        }
+        bail!(
+            "an editor no window shows is still listening on {} after it was told to quit",
+            self.config.socket_path.display()
+        )
     }
 
     fn adoptable_buffer(&self, pinned: Option<&Pinned>) -> Result<Option<(i64, PathBuf)>> {
@@ -1515,6 +1561,20 @@ fn remove_stale_socket(path: &Path) -> Result<()> {
         path.display()
     );
     fs::remove_file(path).with_context(|| format!("remove stale socket {}", path.display()))
+}
+
+/// Whether any UI is attached to the editor: a pane, or a terminal.
+fn has_ui(client: &mut RpcClient) -> Result<bool> {
+    let uis = client.request(
+        "nvim_list_uis",
+        Vec::new(),
+        deadline(PROBE_TIMEOUT),
+        Patience::Deadline,
+    )?;
+    Ok(!uis
+        .as_array()
+        .context("nvim_list_uis returned something other than a list")?
+        .is_empty())
 }
 
 /// Loads `spokenpad.lua` into the editor, which defines the `Spokenpad`
