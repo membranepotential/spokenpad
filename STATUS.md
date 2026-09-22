@@ -7,9 +7,10 @@ Hold a key (or latch with shift), speak, and text appears in an nvim that
 never takes focus. Fully local, CPU-only. Next milestone: public release.
 
 ## Now
-- Nothing running. main a13f7bb deployed 16:21: pane keeps dictating while
-  the user types a half command (patient wait, capped at 120 s; unconfirmed
-  text also goes to the pending passage), winbar gap fixed, 4 px margin.
+- simplify (worktree, implementer) — remove managed mode (+ terminal,
+  window_* keys), autosave so `:q` always writes, closing the window
+  mid-capture cancels it, log the pane layout — running — review, merge,
+  deploy, then migrate the user's config.
 
 ## Next
 1. User live check: typing elsewhere ok, `Grüße @ € {}` ok; still to try:
