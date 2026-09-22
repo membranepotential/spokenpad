@@ -109,6 +109,10 @@ pub struct CaptureRecorder {
     sample_rate: u32,
     lifecycle: Mutex<Lifecycle>,
     open_paths: Arc<Mutex<HashSet<PathBuf>>>,
+    /// Finished recordings the daemon still has to transcribe: a capture
+    /// made before the speech model was ready exists only here, so pruning
+    /// passes over these as over the ones still being written.
+    kept: Arc<Mutex<HashSet<PathBuf>>>,
     writer_join: Duration,
 }
 
@@ -119,6 +123,7 @@ impl CaptureRecorder {
             sample_rate,
             lifecycle: Mutex::new(Lifecycle::default()),
             open_paths: Arc::new(Mutex::new(HashSet::new())),
+            kept: Arc::new(Mutex::new(HashSet::new())),
             writer_join: WRITER_JOIN,
         };
         if recorder.config.enabled {
@@ -129,6 +134,16 @@ impl CaptureRecorder {
             );
         }
         recorder
+    }
+
+    /// Keeps `path` from being pruned until [`release`](Self::release).
+    pub fn keep(&self, path: &Path) {
+        lock(&self.kept).insert(path.to_owned());
+    }
+
+    /// Lets `path` be pruned again, once it is transcribed.
+    pub fn release(&self, path: &Path) {
+        lock(&self.kept).remove(path);
     }
 
     pub fn status(&self) -> RecordingStatus {
@@ -210,6 +225,7 @@ impl CaptureRecorder {
 
         let writer_state = Arc::clone(&state);
         let open_paths = Arc::clone(&self.open_paths);
+        let kept = Arc::clone(&self.kept);
         let directory = self.config.dir.clone();
         let max_total_bytes = self.config.max_total_bytes;
         let writer = thread::Builder::new()
@@ -222,6 +238,7 @@ impl CaptureRecorder {
                     &directory,
                     max_total_bytes,
                     open_paths,
+                    &kept,
                 );
             });
         let writer = match writer {
@@ -354,9 +371,10 @@ fn drain(
     directory: &Path,
     max_total_bytes: u64,
     open_paths: Arc<Mutex<HashSet<PathBuf>>>,
+    kept: &Mutex<HashSet<PathBuf>>,
 ) {
     prune_recordings(directory, max_total_bytes, |path| {
-        lock(&open_paths).contains(path)
+        lock(&open_paths).contains(path) || lock(kept).contains(path)
     });
     secure_recordings(directory);
 
@@ -891,6 +909,40 @@ mod tests {
         recorder.stop();
         assert_eq!(recorder.status(), RecordingStatus::NotRecorded);
         assert!(!temporary.path().join("absent").exists());
+    }
+
+    /// A recording still waiting to be transcribed is the only copy of its
+    /// capture: the pruning the next capture starts passes over it, however
+    /// old, until it is released.
+    #[test]
+    fn a_kept_recording_survives_pruning_until_released() {
+        let temporary = tempdir().unwrap();
+        let directory = temporary.path().join("audio");
+        let recorder = CaptureRecorder::new(
+            Recording {
+                enabled: true,
+                dir: directory.clone(),
+                max_total_bytes: 1,
+            },
+            16_000,
+        );
+        let record = || {
+            recorder.start();
+            recorder.write(&[0.5; 64]);
+            recorder.stop();
+            let RecordingStatus::Recorded(path) = recorder.status() else {
+                panic!("not recorded")
+            };
+            path
+        };
+        let waiting = record();
+        recorder.keep(&waiting);
+        record();
+        record();
+        assert!(waiting.exists(), "pruned while waiting");
+        recorder.release(&waiting);
+        record();
+        assert!(!waiting.exists(), "released, it is pruned like any other");
     }
 
     #[test]

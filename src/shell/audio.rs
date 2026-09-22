@@ -634,6 +634,16 @@ impl<B: InputBackend> AudioCapture<B> {
         self.core.recorder.status()
     }
 
+    /// Keeps a finished recording from being pruned while it waits to be
+    /// transcribed; see [`CaptureRecorder::keep`](crate::shell::recorder::CaptureRecorder::keep).
+    pub fn keep_recording(&self, path: &std::path::Path) {
+        self.core.recorder.keep(path);
+    }
+
+    pub fn release_recording(&self, path: &std::path::Path) {
+        self.core.recorder.release(path);
+    }
+
     /// Repairs the stream if it died and reports every device condition
     /// observed since the previous call. Each event is delivered once.
     pub fn poll(&mut self) -> Vec<CaptureEvent> {

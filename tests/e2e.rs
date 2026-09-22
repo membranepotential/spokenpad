@@ -1634,6 +1634,34 @@ fn a_capture_made_before_the_model_is_ready_is_transcribed_once_it_is() {
     h.finish();
 }
 
+/// A recording that is gone by the time the model is ready is not counted as
+/// transcribed: the window says it was lost.
+#[test]
+fn a_waiting_recording_that_vanished_is_reported_lost() {
+    if !nvim_available() {
+        return;
+    }
+    let h = Harness::start(Settings {
+        loading: true,
+        ..Settings::default()
+    });
+    h.press(false);
+    h.say(&tone(1.0));
+    h.release_for_good();
+    wait_until("the recording waits", || {
+        h.indicator("notice_detail").contains("1 recording waiting")
+    });
+    for entry in fs::read_dir(&h.recordings).unwrap() {
+        fs::remove_file(entry.unwrap().path()).unwrap();
+    }
+    h.load(Ok(()));
+    wait_until("the window says the recording was lost", || {
+        h.indicator("notice").contains("recording lost")
+    });
+    assert!(h.text().is_empty(), "{:?}", h.text());
+    h.finish();
+}
+
 /// A model that cannot be had (offline, a failed download, a broken file)
 /// does not stop the daemon: the window says why, what is recorded is kept,
 /// and the next press tries again. Every recording is transcribed once it

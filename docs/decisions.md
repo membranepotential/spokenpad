@@ -1165,12 +1165,28 @@ presses. This reverses "the socket is bound last" from
   [Model download moves into the binary](#model-download-moves-into-the-binary-2026-09-21),
   and now runs in the background. Whether anything is missing is decided by
   file size alone: hashing the set took seconds at every start. A file of the
-  right size with the wrong bytes fails to load and says so; `spokenpad
-  fetch-models` hashes every file and replaces it.
+  right size with the wrong bytes fails to load; then, and only then, the
+  loader hashes the default set and downloads again what does not match its
+  pin, and tries once more. Files that verify and still do not load are
+  reported as such; a configured model is never touched, and its error says
+  to check `asr.model_dir`.
 - **With `recording.enabled = false`** a capture made before the model is
   ready has nowhere to go and is lost, with "capture not kept" in the winbar.
+- **The same bounds as a live capture.** A capture kept on disk holds
+  nothing in memory, so the in-memory ceiling cannot end it; its length
+  does, at the same 60 minutes ("reached the time limit", `KeptTooLong`).
+  Its transcription holds a `preview.max_seconds` window: when a whole
+  window settles nothing (no VAD model, or speech the detector never
+  breaks), it is committed whole (`Worker::commit_whole`) rather than held
+  on, at the cost of a cut that may fall inside a word.
+- **A waiting recording is the only copy of its capture.** The recorder's
+  pruning passes over it until it is transcribed. One that cannot be read
+  back all the same is reported in the window ("recording lost") and not
+  counted as transcribed.
 - **Recordings still waiting when the daemon stops** are named in the log for
-  `spokenpad transcribe`.
+  `spokenpad transcribe`; one that was partly transcribed is named with the
+  offset its text reaches, for `spokenpad transcribe --from SECONDS`, so the
+  text already in the file is not written twice.
 - Rejected: holding captures made before the model is ready in memory and
   queueing their decode behind the load. A first-run download takes minutes,
   and memory would grow with every word for that long.

@@ -42,6 +42,14 @@ pub enum Notice {
     /// The speech model was not ready, so the capture was to be kept on disk
     /// until it is, and no recording was written.
     NotKept,
+    /// A recording kept until the model was ready could not be read back to
+    /// transcribe it: deleted, or damaged.
+    RecordingLost(PathBuf),
+    /// A capture kept on disk while the model was not ready ran to the
+    /// in-memory ceiling a live capture has, `minutes` long, and ended.
+    KeptTooLong {
+        minutes: u64,
+    },
     /// The config file did not load when this window opened, for this
     /// reason; the window has the settings that were in use.
     ConfigInvalid(String),
@@ -162,26 +170,30 @@ impl Notice {
     /// 2. `CaptureIncomplete` — most of what was said never arrived.
     /// 3. `MicrophoneUnavailable` — audio is missing and did not come back.
     /// 4. `NotKept` — the whole capture is gone: no model, no recording.
-    /// 5. `ModelUnavailable` — nothing is transcribed until it loads.
-    /// 6. `MicrophoneGap` — audio came back, with a hole in the recording.
-    /// 7. `LengthLimit` — the capture ran to the length limit and ended.
-    /// 8. `SilenceTimeout` — a latch was quiet long enough to end.
-    /// 9. `ConfigInvalid` — an edit to the config did not take.
-    /// 10. `NearlySilent` — everything arrived and may still be worth nothing.
-    /// 11. `HeldTooBriefly` — nothing was recorded, and nothing was lost.
-    /// 12. `ModelDownloading` — transcription waits, and nothing is lost.
-    /// 13. `ModelLoading` — the same, for seconds.
-    /// 14. `TranscribingRecordings` — the wait is over; text is on its way.
-    /// 15. `PreviewPaused` — cosmetic: only the live tail stopped.
+    /// 5. `RecordingLost` — a whole capture is gone after all.
+    /// 6. `ModelUnavailable` — nothing is transcribed until it loads.
+    /// 7. `MicrophoneGap` — audio came back, with a hole in the recording.
+    /// 8. `LengthLimit` — the capture ran to the length limit and ended.
+    /// 9. `KeptTooLong` — the same, at the ceiling of a capture kept on disk.
+    /// 10. `SilenceTimeout` — a latch was quiet long enough to end.
+    /// 11. `ConfigInvalid` — an edit to the config did not take.
+    /// 12. `NearlySilent` — everything arrived and may still be worth nothing.
+    /// 13. `HeldTooBriefly` — nothing was recorded, and nothing was lost.
+    /// 14. `ModelDownloading` — transcription waits, and nothing is lost.
+    /// 15. `ModelLoading` — the same, for seconds.
+    /// 16. `TranscribingRecordings` — the wait is over; text is on its way.
+    /// 17. `PreviewPaused` — cosmetic: only the live tail stopped.
     pub fn priority(&self) -> u8 {
         match self {
-            Self::MemoryCap(_) => 14,
-            Self::CaptureIncomplete => 13,
-            Self::MicrophoneUnavailable => 12,
-            Self::NotKept => 11,
-            Self::ModelUnavailable { .. } => 10,
-            Self::MicrophoneGap => 9,
-            Self::LengthLimit => 8,
+            Self::MemoryCap(_) => 16,
+            Self::CaptureIncomplete => 15,
+            Self::MicrophoneUnavailable => 14,
+            Self::NotKept => 13,
+            Self::RecordingLost(_) => 12,
+            Self::ModelUnavailable { .. } => 11,
+            Self::MicrophoneGap => 10,
+            Self::LengthLimit => 9,
+            Self::KeptTooLong { .. } => 8,
             Self::SilenceTimeout => 7,
             Self::ConfigInvalid(_) => 6,
             Self::NearlySilent => 5,
@@ -206,6 +218,8 @@ impl Notice {
             Self::SilenceTimeout => "stopped after silence",
             Self::LengthLimit => "reached the time limit",
             Self::NotKept => "capture not kept",
+            Self::RecordingLost(_) => "recording lost",
+            Self::KeptTooLong { .. } => "reached the time limit",
             Self::ConfigInvalid(_) => "config not reloaded",
             Self::ModelDownloading { .. } => "downloading the speech model",
             Self::ModelLoading { .. } => "loading the speech model",
@@ -254,6 +268,15 @@ impl Notice {
                 "the speech model was not ready and no recording was written (recording.enabled is off, or the disk failed)"
                     .into()
             }
+            Self::RecordingLost(path) => format!(
+                "{} could not be read back to transcribe it",
+                file_name(path)
+            )
+            .into(),
+            Self::KeptTooLong { minutes } => format!(
+                "a capture made before the speech model is ready ends after {minutes} minutes; it is transcribed once the model is; press the key to dictate again"
+            )
+            .into(),
             Self::ConfigInvalid(reason) => {
                 format!("{reason}; this window keeps the settings in use").into()
             }
@@ -362,6 +385,15 @@ impl Session {
             self.enabled = enabled;
             self.silence = silence;
         }
+    }
+    /// Ends a capture that is kept on disk only, because the speech model is
+    /// not ready, at the in-memory ceiling a live capture has: it is the
+    /// same bound on one capture, applied by length because such a capture
+    /// holds nothing in memory. It is transcribed from its recording.
+    pub fn cap_kept(&mut self, minutes: u64, now: Instant) -> Command {
+        let command = self.event(Event::Exhausted { at: now });
+        self.notify(Notice::KeptTooLong { minutes });
+        command
     }
     /// The notice the window shows: this capture's own, unless `status`, the
     /// speech model's ([`Recognition::notice`]), outranks it.
@@ -785,12 +817,14 @@ mod tests {
             Notice::CaptureIncomplete,
             Notice::MicrophoneUnavailable,
             Notice::NotKept,
+            Notice::RecordingLost(PathBuf::new()),
             Notice::ModelUnavailable {
                 reason: String::new(),
                 waiting: 0,
             },
             Notice::MicrophoneGap,
             Notice::LengthLimit,
+            Notice::KeptTooLong { minutes: 60 },
             Notice::SilenceTimeout,
             Notice::ConfigInvalid(String::new()),
             Notice::NearlySilent,
@@ -852,6 +886,28 @@ mod tests {
             .notice(0)
             .unwrap();
         assert_eq!(unavailable.detail(), "offline; press the key to try again");
+    }
+
+    /// A capture kept on disk ends at the ceiling like a live one: decoded
+    /// (from its recording), with a notice saying why, and never twice.
+    #[test]
+    fn a_kept_capture_ends_at_the_ceiling_with_its_own_notice() {
+        let mut s = Session::new(false, Duration::from_millis(200), None);
+        let begun = Instant::now();
+        latch(&mut s, begun);
+        let command = s.cap_kept(60, begun + Duration::from_secs(3600));
+        assert!(
+            matches!(
+                command,
+                Command::Decode {
+                    cause: Cause::Memory,
+                    ..
+                }
+            ),
+            "{command:?}"
+        );
+        assert_eq!(s.notice(), Some(&Notice::KeptTooLong { minutes: 60 }));
+        assert!(!s.state.recording());
     }
 
     /// A capture made before the model loaded has no ticks, so it must not

@@ -70,6 +70,10 @@ enum Action {
         wav: PathBuf,
         #[arg(long)]
         out: Option<PathBuf>,
+        /// Start this many seconds into the recording: where the daemon's own
+        /// transcription of it stopped, as its log says.
+        #[arg(long, value_name = "SECONDS", default_value_t = 0.0)]
+        from: f64,
     },
     /// Validate settings and load/warm the CPU models, without opening devices/windows.
     Check,
@@ -155,8 +159,12 @@ fn run(args: Args) -> Result<u8> {
                 .collect();
             fetch_models(&dest, &files, report_fetch_event_stderr)?;
         }
-        Some(Action::Transcribe { wav, out }) => {
-            let (samples, rate) = match spokenpad::shell::recorder::read_capture(&wav) {
+        Some(Action::Transcribe { wav, out, from }) => {
+            ensure!(
+                from.is_finite() && from >= 0.0,
+                "--from must be a number of seconds, 0 or more"
+            );
+            let (mut samples, rate) = match spokenpad::shell::recorder::read_capture(&wav) {
                 Ok(audio) => audio,
                 Err(e) => {
                     log::error!("{e:#}");
@@ -170,6 +178,7 @@ fn run(args: Args) -> Result<u8> {
                 );
                 return Ok(4);
             }
+            samples.drain(..((from * f64::from(rate)) as usize).min(samples.len()));
             ensure_default_models(&config);
             if let Err(e) = model_config(&config.asr) {
                 log::error!("{e:#}");

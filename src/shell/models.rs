@@ -71,26 +71,69 @@ pub fn fetch_models(
 /// takes seconds. A file of the pinned size with the wrong bytes then fails
 /// to load, and `spokenpad fetch-models`, which hashes every file, replaces
 /// it.
-pub fn ensure_defaults(asr: &Asr, vad: &Vad, mut on_bytes: impl FnMut(u64, u64)) -> Result<()> {
+pub fn ensure_defaults(asr: &Asr, vad: &Vad, on_bytes: impl FnMut(u64, u64)) -> Result<()> {
     let files = files_to_ensure(asr, vad);
     let dest = models_dir();
     if all_sized(&dest, &files)? {
         return Ok(());
     }
     log::info!("downloading missing default models into {}", dest.display());
+    fetch_counting(&dest, &files, on_bytes).map(|_| ())
+}
+
+/// What to do about a speech model that is in place and did not load.
+pub enum Repair {
+    /// Files of the default set did not match their pinned sha256, and were
+    /// downloaded again: loading is worth another try.
+    Replaced,
+    /// Every default file matches its pin: loading again cannot help.
+    Verified,
+    /// The model is a configured one, which spokenpad never downloads.
+    NotOurs,
+}
+
+/// Hashes the default files this configuration loads against their pins,
+/// and downloads again any that do not match: for a model that
+/// [`ensure_defaults`] found at the right size and that did not load.
+pub fn repair_defaults(asr: &Asr, vad: &Vad, on_bytes: impl FnMut(u64, u64)) -> Result<Repair> {
+    let files = files_to_ensure(asr, vad);
+    if !files
+        .iter()
+        .any(|f| f.kind == crate::core::models::ModelKind::Asr)
+    {
+        return Ok(Repair::NotOurs);
+    }
+    log::warn!("verifying the default models against their pinned sha256");
+    Ok(if fetch_counting(&models_dir(), &files, on_bytes)? {
+        Repair::Replaced
+    } else {
+        Repair::Verified
+    })
+}
+
+/// [`fetch_models`] with its progress summed over the whole set. Returns
+/// whether anything was downloaded.
+fn fetch_counting(
+    dest: &Path,
+    files: &[&ModelFile],
+    mut on_bytes: impl FnMut(u64, u64),
+) -> Result<bool> {
+    let mut downloaded_any = false;
     let total = files.iter().map(|f| f.size).sum();
     let mut done = 0;
-    fetch_models(&dest, &files, |event| match event {
+    fetch_models(dest, files, |event| match event {
         FetchEvent::Present(file) | FetchEvent::Verified(file) => {
             log::info!("model {} is in place", file.relative_path);
             done += file.size;
             on_bytes(done, total);
         }
         FetchEvent::Downloading(file) => {
+            downloaded_any = true;
             log::info!("downloading {} ({} bytes)", file.relative_path, file.size);
         }
         FetchEvent::Progress { downloaded, .. } => on_bytes(done + downloaded, total),
-    })
+    })?;
+    Ok(downloaded_any)
 }
 
 /// Whether every one of `files` sits under `dest_dir` at its pinned size.

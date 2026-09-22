@@ -20,10 +20,12 @@ use crate::{
         text::Processor,
     },
     shell::{
-        audio::{AudioCapture, CaptureEvent, Captured, InputBackend, PostRoll},
+        audio::{
+            AudioCapture, CaptureEvent, Captured, InputBackend, MAX_UTTERANCE_SECONDS, PostRoll,
+        },
         control::{ControlServer, Socket, refuse_pending},
         inference::{SpeechSegmenter, Transcriber, load_segmenter},
-        models::ensure_defaults,
+        models::{Repair, ensure_defaults, repair_defaults},
         nvim::{AppendFailure, CopyOutcome, IndicatorState, NvimSession},
         recorder::CaptureReader,
     },
@@ -84,11 +86,13 @@ pub enum PipelineSource<R, S> {
     Load(Loader<R, S>),
 }
 
-/// A capture made before the speech model was ready: its recovery WAV, and
-/// the utterance it was.
+/// A capture made before the speech model was ready: its recovery WAV, the
+/// utterance it was, and how far into the WAV its transcription has
+/// committed text.
 struct Waiting {
     path: PathBuf,
     id: UtteranceId,
+    through: Frames,
 }
 
 /// Control requests in arrival order, each preceded by the clock at its own
@@ -573,14 +577,24 @@ pub fn run(
         ensure_defaults(&asr, &vad, |done, total| {
             step(Preparing::Downloading { done, total });
         })?;
-        step(Preparing::Loading);
-        log::info!("loading CPU recognizer");
-        let mut recognizer = Transcriber::new(&asr, rate)?;
-        recognizer.warm_up()?;
-        Ok(Pipeline {
-            recognizer,
-            segmenter: load_segmenter(&vad, rate),
-        })
+        let build = || -> Result<Pipeline<Transcriber, SpeechSegmenter>> {
+            log::info!("loading CPU recognizer");
+            let mut recognizer = Transcriber::new(&asr, rate)?;
+            recognizer.warm_up()?;
+            Ok(Pipeline {
+                recognizer,
+                segmenter: load_segmenter(&vad, rate),
+            })
+        };
+        load_with_repair(
+            build,
+            |step| {
+                repair_defaults(&asr, &vad, |done, total| {
+                    step(Preparing::Downloading { done, total });
+                })
+            },
+            step,
+        )
     });
     serve(
         &config,
@@ -593,6 +607,38 @@ pub fn run(
         stopping,
         dump_dir,
     )
+}
+
+/// Builds the pipeline, and when a model that is in place does not load,
+/// repairs it once and builds again. Whether the files are all there is
+/// decided by size before this, without reading them; a file of the right
+/// size with the wrong bytes is only found here, by `repair` hashing it.
+fn load_with_repair<P>(
+    mut build: impl FnMut() -> Result<P>,
+    repair: impl FnOnce(&mut dyn FnMut(Preparing)) -> Result<Repair>,
+    step: &mut dyn FnMut(Preparing),
+) -> Result<P> {
+    step(Preparing::Loading);
+    let failure = match build() {
+        Ok(pipeline) => return Ok(pipeline),
+        Err(failure) => failure,
+    };
+    log::warn!("the speech model did not load: {failure:#}");
+    let repaired = repair(step).with_context(|| {
+        format!(
+            "{failure:#}; downloading it again failed too (`spokenpad fetch-models` verifies and repairs the files)"
+        )
+    })?;
+    match repaired {
+        Repair::Replaced => {
+            step(Preparing::Loading);
+            build().context("the speech model was downloaded again and still does not load")
+        }
+        Repair::Verified => Err(failure.context(
+            "the speech model's files match their pinned sha256, so this machine cannot load it",
+        )),
+        Repair::NotOurs => Err(failure.context("check asr.model_dir and asr.family")),
+    }
 }
 
 /// Turns previews and the silence timeout on as far as the pipeline that
@@ -693,6 +739,20 @@ where
                         ceiling = command;
                     }
                 }
+                // A capture kept on disk holds nothing in memory, so the
+                // in-memory ceiling cannot end it: its length does, at the
+                // same bound.
+                if !live
+                    && ceiling == Command::Nothing
+                    && session.state.recording()
+                    && capture.captured_frames().seconds(rate) >= MAX_UTTERANCE_SECONDS as f64
+                {
+                    log::warn!(
+                        "a capture kept on disk reached {} minutes and ends here",
+                        MAX_UTTERANCE_SECONDS / 60
+                    );
+                    ceiling = session.cap_kept((MAX_UTTERANCE_SECONDS / 60) as u64, at);
+                }
             }
             // Then requests and the clock, which have priority over delivery
             // of inference results. The clock is also what ends a capture
@@ -769,12 +829,7 @@ where
                         if live {
                             send(&work_tx, Work::Finish(tail))?;
                         } else {
-                            keep(
-                                &mut session,
-                                tail.utterance.id,
-                                capture.recording_status(),
-                                &mut waiting,
-                            );
+                            keep(&mut session, tail.utterance.id, &capture, &mut waiting);
                         }
                     }
                     Command::Discard(reason) => {
@@ -811,7 +866,10 @@ where
                         );
                         recognition = Recognition::Unavailable(reason);
                     }
-                    ResultEvent::Commit(c) => commit(c, &mut session, &processor, &editor_tx)?,
+                    ResultEvent::Commit(c) => {
+                        advance(&mut transcribing, &c);
+                        commit(c, &mut session, &processor, &editor_tx)?;
+                    }
                     ResultEvent::Tick {
                         id,
                         result,
@@ -852,6 +910,7 @@ where
                         result,
                         elapsed,
                     } => {
+                        let result_failed = result.is_err();
                         match result {
                             Ok((text, frames)) => {
                                 log::info!(
@@ -865,12 +924,21 @@ where
                             Err(e) => log::error!("decode failed for utterance {}: {e:#}", id.0),
                         }
                         if let Some(at) = transcribing.iter().position(|t| t.id == id) {
-                            transcribing.remove(at);
-                            log::info!(
-                                "transcribed the recording of utterance {}; {} to go",
-                                id.0,
-                                waiting.len() + transcribing.len()
-                            );
+                            let recording = transcribing.remove(at);
+                            capture.release_recording(&recording.path);
+                            let to_go = waiting.len() + transcribing.len();
+                            if result_failed {
+                                log::error!(
+                                    "{} was not transcribed; {to_go} to go",
+                                    recording.path.display()
+                                );
+                                session.notify(Notice::RecordingLost(recording.path));
+                            } else {
+                                log::info!(
+                                    "transcribed {}; {to_go} to go",
+                                    recording.path.display()
+                                );
+                            }
                         }
                         session.finish(id);
                         // Every `Commit` of this utterance was sent on this
@@ -944,6 +1012,7 @@ where
             }
             if recognition == Recognition::Ready {
                 for recording in waiting.drain(..) {
+                    // Kept since its release; see `keep`.
                     send(
                         &work_tx,
                         Work::Recording {
@@ -1000,6 +1069,7 @@ where
     for event in results.try_iter() {
         match event {
             ResultEvent::Commit(c) => {
+                advance(&mut transcribing, &c);
                 if let Err(e) = commit(c, &mut session, &processor, &editor_tx) {
                     log::error!("could not queue a commit made during shutdown: {e:#}");
                 }
@@ -1020,11 +1090,24 @@ where
             | ResultEvent::ConfigInvalid(_) => {}
         }
     }
-    for Waiting { path, .. } in waiting.into_iter().chain(transcribing) {
-        log::warn!(
-            "{} was recorded before the speech model was ready and is not transcribed; recover it with `spokenpad transcribe`",
-            path.display()
-        );
+    for Waiting { path, through, .. } in waiting.into_iter().chain(transcribing) {
+        if through == Frames::ZERO {
+            log::warn!(
+                "{} was recorded before the speech model was ready and is not transcribed; recover it with `spokenpad transcribe {}`",
+                path.display(),
+                path.display()
+            );
+        } else {
+            // What was committed is in the dictation file already; the
+            // rest is recovered from where it stopped, or it is written
+            // twice.
+            let seconds = through.seconds(rate);
+            log::warn!(
+                "{} was transcribed through {seconds:.2}s only; recover the rest with `spokenpad transcribe --from {seconds:.2} {}`",
+                path.display(),
+                path.display()
+            );
+        }
     }
     // Sent last: everything the editor still has to write is already queued
     // ahead of it, and the bounded join gives it time to land.
@@ -1194,12 +1277,13 @@ fn decode_recording<R: Recognizer, S: Segmenter>(
         let through = worker
             .tick(&held, start, utterance, TickKind::Commits, &mut commit)?
             .map_or(start, |tail| tail.through);
-        let settled = through.since(start).min(held.len());
+        let mut settled = through.since(start).min(held.len());
         if settled == 0 {
-            // A window of unbroken speech: like a live capture's open tail,
-            // the rest is decoded at the end, as a whole.
-            reader.read(&mut held, usize::MAX)?;
-            break;
+            // A window with nothing settled in it: no VAD model, or speech
+            // the detector never breaks. Held on, it would grow to the whole
+            // file; committed whole, it keeps this to a window.
+            worker.commit_whole(&held, start, utterance, &mut commit)?;
+            settled = held.len();
         }
         held.drain(..settled);
         start += settled;
@@ -1278,20 +1362,27 @@ fn release<B: InputBackend>(
 /// Releases a capture made before the speech model was ready. There is
 /// nothing to decode now, so the session goes back to idle; the recording is
 /// the capture from here on, transcribed once the model is ready.
-fn keep(
+fn keep<B: InputBackend>(
     session: &mut Session,
     id: UtteranceId,
-    recording: RecordingStatus,
+    capture: &AudioCapture<B>,
     waiting: &mut VecDeque<Waiting>,
 ) {
     session.finish(id);
-    match recording {
+    match capture.recording_status() {
         RecordingStatus::Recorded(path) | RecordingStatus::Truncated(path) => {
             log::info!(
                 "the speech model is not ready; {} is transcribed once it is",
                 path.display()
             );
-            waiting.push_back(Waiting { path, id });
+            // The only copy of this capture: pruning must pass it by until
+            // it is transcribed.
+            capture.keep_recording(&path);
+            waiting.push_back(Waiting {
+                path,
+                id,
+                through: Frames::ZERO,
+            });
         }
         RecordingStatus::NotRecorded => {
             log::error!(
@@ -1299,6 +1390,17 @@ fn keep(
             );
             session.notify(Notice::NotKept);
         }
+    }
+}
+
+/// Notes how far a recording being transcribed has committed text, for the
+/// warning a shutdown gives about the rest.
+fn advance(transcribing: &mut [Waiting], commit: &Commit) {
+    if let Some(recording) = transcribing
+        .iter_mut()
+        .find(|recording| recording.id == commit.utterance.id)
+    {
+        recording.through = recording.through.max(commit.through);
     }
 }
 
@@ -1435,6 +1537,91 @@ mod tests {
 
     /// Every request is preceded by the clock at its own stamp, and a drain
     /// ends with the clock at the current time, once.
+    /// With nothing ever settling -- no VAD model, or speech the detector
+    /// never breaks -- a recording is still read and decoded a window at a
+    /// time, never whole, and every sample is still decoded once.
+    #[test]
+    fn a_recording_with_nothing_settled_is_held_a_window_at_a_time() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("capture.wav");
+        crate::shell::recorder::dump_capture(&path, &[0.5; 10_000], 16_000).unwrap();
+        let mut worker = Worker::new(Pipeline {
+            recognizer: Count,
+            segmenter: None::<Blocks>,
+        });
+        let mut commits = Vec::new();
+        decode_recording(&mut worker, &path, &Utterance::new(1), 3_000, 16_000, |c| {
+            commits.push(c.text.parse::<usize>().unwrap())
+        })
+        .unwrap();
+        assert!(
+            commits.iter().all(|&decoded| decoded <= 3_000),
+            "a decode larger than the window: {commits:?}"
+        );
+        assert_eq!(commits.iter().sum::<usize>(), 10_000, "{commits:?}");
+    }
+
+    /// A model in place that does not load is checked and downloaded again
+    /// once; one whose files verify is reported as such, and a configured
+    /// one is never touched.
+    #[test]
+    fn a_model_that_does_not_load_is_repaired_once() {
+        let mut steps = Vec::new();
+        let mut builds = 0;
+        let loaded = load_with_repair(
+            || {
+                builds += 1;
+                if builds == 1 {
+                    anyhow::bail!("bad weights")
+                } else {
+                    Ok("pipeline")
+                }
+            },
+            |step| {
+                step(Preparing::Downloading { done: 1, total: 2 });
+                Ok(Repair::Replaced)
+            },
+            &mut |step| steps.push(step),
+        );
+        assert_eq!(loaded.unwrap(), "pipeline");
+        assert_eq!(builds, 2);
+        assert_eq!(
+            steps,
+            [
+                Preparing::Loading,
+                Preparing::Downloading { done: 1, total: 2 },
+                Preparing::Loading
+            ]
+        );
+
+        for (repair, says) in [
+            (Repair::Verified, "match their pinned sha256"),
+            (Repair::NotOurs, "check asr.model_dir"),
+        ] {
+            let error = load_with_repair(
+                || -> Result<()> { anyhow::bail!("bad weights") },
+                |_| Ok(repair),
+                &mut |_| {},
+            )
+            .unwrap_err();
+            let error = format!("{error:#}");
+            assert!(
+                error.contains(says) && error.contains("bad weights"),
+                "{error}"
+            );
+        }
+        let error = load_with_repair(
+            || -> Result<()> { anyhow::bail!("bad weights") },
+            |_| anyhow::bail!("offline"),
+            &mut |_| {},
+        )
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("spokenpad fetch-models"),
+            "{error:#}"
+        );
+    }
+
     #[test]
     fn requests_are_clocked_at_their_stamps() {
         let (sender, receiver) = mpsc::channel();

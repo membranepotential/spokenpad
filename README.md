@@ -230,10 +230,11 @@ a sentence explaining it, added only when the window is wide enough for all of
 it. A narrow window gives up the level meter first, then the explanation, but
 never the phase label or the headline. When two things happen to the same
 capture, the more serious one is shown: memory limit reached > capture
-incomplete > microphone unavailable > capture not kept > no speech
-model > microphone gap > reached the time limit > stopped after silence >
-config not reloaded > nearly silent > held too briefly > downloading the speech model > loading the
-speech model > transcribing recordings > preview paused. The speech model's
+incomplete > microphone unavailable > capture not kept > recording lost >
+no speech model > microphone gap > reached the time limit > stopped after
+silence > config not reloaded > nearly silent > held too briefly >
+downloading the speech model > loading the speech model > transcribing
+recordings > preview paused. The speech model's
 notices are not about one capture: they stay until the model is ready and has
 caught up. The log always has the full sentence and paths.
 
@@ -245,12 +246,18 @@ caught up. The log always has the full sentence and paths.
   model" with the percentage and how many recordings wait. Once the model is
   ready, each recording is transcribed into the window in order, as it would
   have been live ("transcribing recordings"), just without a preview while
-  you speak.
+  you speak. Such a capture ends by itself after 60 minutes, the most a live
+  one can hold, and no recording waiting to be transcribed is pruned. One
+  that is gone anyway is reported as "recording lost". If the daemon stops
+  before it has transcribed them all, the log names each recording and how
+  far it got, for `spokenpad transcribe --from SECONDS`.
 - **A model that cannot be had does not stop dictation.** Offline on the
-  first run, a failed download, a broken file, or a missing configured
-  `asr.model_dir`: the winbar says "no speech model" and why, the recordings
-  are kept, and the next press tries again. Only the default models are ever
-  downloaded; for a model you configured, fix the path and press again.
+  first run, a failed download, or a missing configured `asr.model_dir`: the
+  winbar says "no speech model" and why, the recordings are kept, and the
+  next press tries again. A default model that is there but does not load is
+  checked against its pinned sha256 and downloaded again once. Only the
+  default models are ever downloaded; for a model you configured, fix the
+  path and press again.
 
 - **Recording continues for a quarter second after you let go**
   (`audio.postroll_ms`), so a word still sounding at key-up is not cut off.
@@ -411,8 +418,8 @@ spokenpad start | stop            begin or end a push-to-talk capture
 spokenpad toggle                  begin a latched capture, or end the running one
 spokenpad cancel                  discard the capture being recorded
 spokenpad editor                  open the dictation editor in this terminal
-spokenpad transcribe WAV [--out PATH]
-                                  decode a recording
+spokenpad transcribe WAV [--out PATH] [--from SECONDS]
+                                  decode a recording, from SECONDS in
 spokenpad check                   validate the config and load the models
 spokenpad fetch-models [--dir DIR]
                                   download the default models ahead of time

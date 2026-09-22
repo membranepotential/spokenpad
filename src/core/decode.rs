@@ -339,6 +339,41 @@ impl<R: Recognizer, S: Segmenter> Worker<R, S> {
             through: self.progress.through,
         }
     }
+    /// Commits `samples` whole, as far as it reaches, and keeps the
+    /// utterance going from its end: decoded as [`finish`](Self::finish)
+    /// decodes a tail, but without ending anything. For a recording being
+    /// transcribed a window at a time whose open tail filled a window with no
+    /// chunk settling in it -- no VAD model, or speech the detector never
+    /// breaks -- so that no more than a window of it is ever held. The cut
+    /// may fall inside a word: the price of the bound, paid only there.
+    pub fn commit_whole(
+        &mut self,
+        samples: &[f32],
+        start: Frames,
+        utterance: &Arc<Utterance>,
+        mut commit: impl FnMut(Commit),
+    ) -> Result<()> {
+        self.begin(utterance);
+        ensure!(
+            start <= self.progress.through,
+            "the held audio begins after the worker's offset"
+        );
+        let end = start + samples.len();
+        let remainder = &samples[self.progress.through.since(start).min(samples.len())..];
+        self.pipeline.decode(
+            remainder,
+            || utterance.cancelled(),
+            |text| {
+                commit(Commit {
+                    utterance: Arc::clone(utterance),
+                    text,
+                    through: end,
+                })
+            },
+        )?;
+        self.progress.through = self.progress.through.max(end);
+        Ok(())
+    }
     /// Decodes what is left of the capture. `samples` is the audio still held,
     /// beginning at `start`; everything before it has been committed and is
     /// gone.
