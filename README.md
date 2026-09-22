@@ -231,7 +231,7 @@ it. A narrow window gives up the level meter first, then the explanation, but
 never the phase label or the headline. When two things happen to the same
 capture, the more serious one is shown: memory limit reached > capture
 incomplete > microphone unavailable > capture not kept > recording lost >
-no speech model > microphone gap > reached the time limit > stopped after
+recording partly transcribed > no speech model > microphone gap > reached the time limit > stopped after
 silence > config not reloaded > nearly silent > held too briefly >
 downloading the speech model > loading the speech model > transcribing
 recordings > preview paused. The speech model's
@@ -249,8 +249,10 @@ caught up. The log always has the full sentence and paths.
   you speak. Such a capture ends by itself after 60 minutes, the most a live
   one can hold, and no recording waiting to be transcribed is pruned. One
   that is gone anyway is reported as "recording lost". If the daemon stops
-  before it has transcribed them all, the log names each recording and how
-  far it got, for `spokenpad transcribe --from SECONDS`.
+  before it has transcribed them all, the next start transcribes the rest,
+  from where each one's text reached. One that fails partway says
+  "recording partly transcribed", with the `spokenpad transcribe --from
+  SECONDS` that recovers the rest.
 - **A model that cannot be had does not stop dictation.** Offline on the
   first run, a failed download, or a missing configured `asr.model_dir`: the
   winbar says "no speech model" and why, the recordings are kept, and the
@@ -271,7 +273,8 @@ caught up. The log always has the full sentence and paths.
   quietly, so the pre-roll is ready at the next press. A microphone that is
   not there when the daemon starts (unplugged, or a sound server not up yet
   at login) is looked for the same way; a press meanwhile says "microphone
-  unavailable".
+  unavailable". It is looked for again after a wait that doubles up to a
+  minute; a press always tries at once.
 - **A capture much shorter than the hold, or nearly silent,** says so in the
   winbar.
 - **A capture with no speech in it is not transcribed.** A recogniser given

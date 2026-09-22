@@ -397,14 +397,19 @@ window-manager rule keys on, and it is restricted to `[A-Za-z][A-Za-z0-9_-]*`
 because it is interpolated into criteria strings — a config value must not be
 able to become window-manager syntax.
 
-The daemon runs as a systemd user service, so the terminal it spawns sees the
+The daemon runs as a systemd user service, started by its socket
+(`spokenpad.socket`) on the first press, so the terminal it spawns sees the
 user manager's environment, not your session's. Import what the terminal and
-the IPC socket need from your window manager's startup: `DISPLAY` (and
-`XAUTHORITY`) on i3; `SWAYSOCK`, `WAYLAND_DISPLAY` and `DISPLAY` on sway:
+the IPC socket need from your window manager's startup — `DISPLAY` (and
+`XAUTHORITY`) on i3; `SWAYSOCK`, `WAYLAND_DISPLAY` and `DISPLAY` on sway —
+before the first press:
 
 ```
-exec "systemctl --user import-environment DISPLAY XAUTHORITY; systemctl --user start spokenpad"
+exec systemctl --user import-environment DISPLAY XAUTHORITY
 ```
+
+A daemon already running keeps the environment it started with; after
+changing the import, `systemctl --user restart spokenpad`.
 
 The window is opened lazily, on the **first key-down**, not at daemon start:
 until you dictate there is no reason for a terminal to be sitting on your
