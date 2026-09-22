@@ -22,7 +22,8 @@ never takes focus. Fully local, CPU-only. Next milestone: public release.
 ## Next
 0. After the merges: delete examples/verify_native.rs and decode_probe.rs
    (user 09-22), fix pane.rs header, add examples/README.md (dev tools);
-   untrack + git-ignore scripts/gladia-references.sh (user 09-22), docs say local.
+   untrack + git-ignore scripts/gladia-references.sh (user 09-22), docs say local;
+   test harness leaks /tmp/.X<n>-lock files (114 found) -> 'no free display'.
 1. User live check: typing elsewhere ok, `Grüße @ € {}` ok; still to try:
    pane_dimensions edit at the next window, pane_layout = "tiled".
 2. Before public: fresh-user walkthrough (clean account: README only),
