@@ -39,6 +39,13 @@ use x11rb::{
     rust_connection::RustConnection,
 };
 
+/// How long one map of a test's own window is given to be handled before
+/// [`Desktop::map_until_managed`] sends it again.
+const MAP_PATIENCE: Duration = Duration::from_secs(2);
+/// How long [`Desktop::map_until_managed`] tries in all: a loaded machine
+/// running several window managers at once is slow, not broken.
+const MANAGE_TIMEOUT: Duration = Duration::from_secs(40);
+
 /// The size every desktop here gives its one screen.
 pub const SCREEN: (u16, u16) = (1280, 800);
 
@@ -158,6 +165,34 @@ pub trait Desktop {
     /// its socket; `None` on every desktop but sway.
     fn runtime_dir(&self) -> Option<PathBuf> {
         None
+    }
+
+    /// Map `window`, a window of the test's own, until the window manager
+    /// takes it on. A map a window manager dropped — Openbox drops one that
+    /// arrives while it is still starting — is sent again, but only after
+    /// the last one had [`MAP_PATIENCE`] to be handled: sending it again
+    /// sooner would undo a map that was only slow, and under load could
+    /// never let one through.
+    fn map_until_managed(&self, window: Window) {
+        let connection = &self.server().connection;
+        wait_for(
+            MANAGE_TIMEOUT,
+            "the window manager to manage a window of the test's",
+            || {
+                connection.map_window(window).ok()?;
+                connection.flush().ok()?;
+                let sent = std::time::Instant::now();
+                while sent.elapsed() < MAP_PATIENCE {
+                    if self.manages(window) {
+                        return Some(());
+                    }
+                    sleep(Duration::from_millis(50));
+                }
+                connection.unmap_window(window).ok()?;
+                connection.flush().ok()?;
+                None
+            },
+        );
     }
 
     fn wait_until_managed(&self, window: Window) {
@@ -393,31 +428,24 @@ impl Openbox {
                 .expect("start openbox"),
         );
         wait_for_ewmh_wm(&server, "Openbox");
-        // Openbox publishes its check window before it handles map requests,
-        // and a window mapped in between stays unmapped and unmanaged: seen
-        // in about one parallel run in three. A throwaway window, mapped
-        // again until Openbox takes it, proves it is past that.
-        let probe = server.plain_window();
-        wait_for(START_TIMEOUT, "Openbox to manage a window", || {
-            if client_list(&server, "_NET_CLIENT_LIST").contains(&probe) {
-                return Some(());
-            }
-            server.connection.unmap_window(probe).ok()?;
-            server.connection.map_window(probe).ok()?;
-            server.connection.flush().ok()?;
-            sleep(Duration::from_millis(200));
-            None
-        });
-        server
-            .connection
-            .destroy_window(probe)
-            .expect("destroy the probe");
-        server.sync();
-        Self {
+        let openbox = Self {
             _openbox: openbox,
             server,
             _private: private,
-        }
+        };
+        // Openbox publishes its check window before it handles map requests,
+        // and a window mapped in between stays unmapped and unmanaged: seen
+        // in about one parallel run in three. A throwaway window, mapped
+        // until Openbox takes it, proves it is past that.
+        let probe = openbox.server.unmapped_window();
+        openbox.map_until_managed(probe);
+        openbox
+            .server
+            .connection
+            .destroy_window(probe)
+            .expect("destroy the probe");
+        openbox.server.sync();
+        openbox
     }
 }
 

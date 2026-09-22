@@ -628,9 +628,8 @@ fn focus_holder(desktop: &mut dyn Desktop) -> Window {
     }
     .set(&server.connection, id)
     .expect("write WM_HINTS");
-    server.connection.map_window(id).expect("map it");
     server.connection.flush().expect("flush");
-    desktop.wait_until_managed(id);
+    desktop.map_until_managed(id);
     sleep(SETTLE);
     make_focused(desktop, id);
     id

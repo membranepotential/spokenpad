@@ -302,9 +302,8 @@ impl XServer {
             .atom
     }
 
-    /// A plain, focusable window, so the workspace under test is not empty.
-    /// It carries none of the pane's properties.
-    pub fn plain_window(&self) -> Window {
+    /// A plain window of the test's own, not mapped yet.
+    pub fn unmapped_window(&self) -> Window {
         let id = self.connection.generate_id().expect("a window id");
         self.connection
             .create_window(
@@ -321,6 +320,13 @@ impl XServer {
                 &CreateWindowAux::new(),
             )
             .expect("create a plain window");
+        id
+    }
+
+    /// A plain, focusable window, so the workspace under test is not empty.
+    /// It carries none of the pane's properties.
+    pub fn plain_window(&self) -> Window {
+        let id = self.unmapped_window();
         self.connection.map_window(id).expect("map it");
         self.connection.flush().expect("flush");
         id
