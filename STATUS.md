@@ -7,11 +7,10 @@ Hold a key (or latch with shift), speak, and text appears in an nvim that
 never takes focus. Fully local, CPU-only. Next milestone: public release.
 
 ## Now (2026-09-22: polish for the public release)
-- pane-wm — _NET_WM_STATE_ABOVE, sway runtime no_focus rule over IPC
-  (else refuse -> attach), kwin-x11 headless test, click-may-focus rule
-  wording — agent running.
-- packaging — socket activation, accept before model load, record while
-  models download, config reload per window, PKGBUILD + CI — agent running.
+- pane-wm — rebase (ABOVE + sway IPC no_focus + kwin-x11 done), then
+  pane size cols x lines, floating/tiled, default mode pane, docs — running.
+- daemon-followups — mic retry backoff, lock-failure exits vs socket start
+  limit, protect waiting WAVs at startup, partial-decode notice — running.
 
 ## Next
 1. User: P4 live check of pane mode on i3 (typing elsewhere, click + type
@@ -20,14 +19,14 @@ never takes focus. Fully local, CPU-only. Next milestone: public release.
 3. Lost chunk: the end-of-slice close is both the one lost chunk and the
    whole 0.35-point gain. Open: a guard that keeps the gain (see
    experiments/2026-09-22-empty-chunk-flips.md).
-3b. After packaging merges (pane-wm agent): pane size as columns x lines (like
-   Alacritty window.dimensions, clamped to the screen) and floating/tiled
-   option (tiled never takes focus, per WM); then default mode = pane.
 4. Before public: fresh-user walkthrough, audit + security review, README
    screenshot. History scan done: clean (user checked the old Handy file).
 
 ## Done
-- 09-22: pane focus proven on i3, Openbox, KWin Wayland; sway steals it
+- 09-22: packaging merged (f6912cf): socket activation, presses taken
+  before model ready, config reload per window, PKGBUILD, CI (never run);
+  this machine migrated 13:09 (old unit in ~/.cache/spokenpad-dev/).
+  Pane focus proven on i3, Openbox, KWin Wayland; sway steals it
   (pinned by a test). Pane font in points x Xft.dpi = Alacritty cells (19x41 here),
   deployed 11:54, user font set to SauceCodePro 12; dev subset `--subset dev` (28 captures, ~2 min run, holds every
   failure main shows; beam loss caught); `spoken` flag: 15 mixed captures,
