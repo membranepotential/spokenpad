@@ -2172,3 +2172,24 @@ also panic the daemon's editor thread at its next question.
   every critical section on its `Shared` is one assignment, `take` or read
   of an `Option`, so a panic inside one cannot leave the value half written.
 - Test: `a_poisoned_close_record_is_still_read`.
+
+## The control socket bounds a whole request and survives a failed accept (2026-09-22)
+
+The 2026-09-22 audit found three weak spots in `shell/control.rs`:
+
+- P3-014: the 500 ms limit on a client's request was a read timeout, which
+  restarts with every byte, so a client sending one byte every 499 ms held
+  the one-at-a-time server for about 32 s. Chosen: one deadline for the
+  whole line, from the accept (and for the client, one for the whole reply).
+  Test: a client that trickles a byte every 200 ms no longer delays the next
+  press past the 500 ms limit; on the old code that press timed out.
+- P3-023: any `accept` error other than `EAGAIN`/`EINTR` ended the control
+  thread, and with it the daemon, under `spokenpad.socket`. Chosen: only an
+  error that means the listening socket is broken (`EBADF`, `EINVAL`,
+  `ENOTSOCK`, `EOPNOTSUPP`, `EFAULT`) ends it; anything else (`EMFILE`,
+  `ENFILE`, `ENOBUFS`, `ECONNABORTED`, …) is logged once while it lasts and
+  retried every 100 ms. The same holds while the daemon refuses presses
+  before it can serve.
+- P3-019: a daemon that does not know a request is almost always one left
+  running across a package upgrade; the CLI now says so and names
+  `systemctl --user restart spokenpad`.

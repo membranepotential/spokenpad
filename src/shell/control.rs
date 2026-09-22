@@ -38,10 +38,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// How long the daemon waits for a client's request line. A client is a
-/// process that writes its request right after connecting, so anything
-/// slower is stuck, and the daemon must not wait on it: requests are served
-/// one at a time, in arrival order.
+/// How long the daemon waits for a client's whole request line, from the
+/// moment it accepts the connection. A client is a process that writes its
+/// request right after connecting, so anything slower is stuck, and the
+/// daemon must not wait on it: requests are served one at a time, in arrival
+/// order.
 const REQUEST_TIMEOUT: Duration = Duration::from_millis(500);
 /// How long a client waits for the daemon's reply. Under socket activation
 /// the first press of a session connects before the daemon runs, and is
@@ -274,21 +275,43 @@ fn remove_stale(path: &Path) -> Result<()> {
 }
 
 fn serve(listener: &UnixListener, sender: &Sender<Received>, stop: &AtomicBool) {
+    // Whether the last accept failed, so a failure that lasts is logged once.
+    let mut failing = false;
     while !stop.load(Ordering::Acquire) {
         match listener.accept() {
             Ok((stream, _)) => {
+                failing = false;
                 if let Err(e) = answer(stream, sender) {
                     log::warn!("control request failed: {e:#}");
                 }
             }
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => wait_readable(listener),
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-            Err(e) => {
+            Err(e) if listener_unusable(&e) => {
                 log::error!("control socket failed: {e}");
                 return;
             }
+            Err(e) => {
+                if !failing {
+                    log::warn!("could not accept a press on the control socket: {e}; retrying");
+                }
+                failing = true;
+                thread::sleep(STOP_POLL);
+            }
         }
     }
+}
+
+/// Whether an `accept` error means the listening socket itself is broken.
+/// Everything else — too many open files, no buffer space, a connection
+/// aborted before it was accepted — passes, and the next press may well be
+/// served: the daemon must not end over it, since ending under
+/// `spokenpad.socket` only has systemd start it again.
+fn listener_unusable(error: &io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(libc::EBADF | libc::EINVAL | libc::ENOTSOCK | libc::EOPNOTSUPP | libc::EFAULT)
+    )
 }
 
 /// Tries `ready` until it succeeds, and returns what it gave; meanwhile
@@ -317,9 +340,8 @@ pub fn refuse_until<T>(
             Ok((mut stream, _)) => {
                 let answered = (|| -> io::Result<()> {
                     stream.set_nonblocking(false)?;
-                    stream.set_read_timeout(Some(REQUEST_TIMEOUT))?;
                     stream.set_write_timeout(Some(REQUEST_TIMEOUT))?;
-                    read_line(&mut stream)?;
+                    read_line(&mut stream, Instant::now() + REQUEST_TIMEOUT)?;
                     stream.write_all(reply.encode().as_bytes())
                 })();
                 if let Err(e) = answered {
@@ -333,7 +355,13 @@ pub fn refuse_until<T>(
                 wait_readable(listener);
             }
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-            Err(e) => return Err(e).context("accept on the control socket"),
+            Err(e) if listener_unusable(&e) => {
+                return Err(e).context("accept on the control socket");
+            }
+            Err(e) => {
+                log::debug!("could not accept a press on the control socket: {e}");
+                thread::sleep(STOP_POLL);
+            }
         }
     }
 }
@@ -357,9 +385,8 @@ fn wait_readable(listener: &UnixListener) {
 /// Serves one connection: read the request, stamp it, queue it, reply.
 fn answer(mut stream: UnixStream, sender: &Sender<Received>) -> Result<()> {
     stream.set_nonblocking(false)?;
-    stream.set_read_timeout(Some(REQUEST_TIMEOUT))?;
     stream.set_write_timeout(Some(REQUEST_TIMEOUT))?;
-    let line = read_line(&mut stream)?;
+    let line = read_line(&mut stream, Instant::now() + REQUEST_TIMEOUT)?;
     let at = Instant::now();
     let reply = match Request::decode(&line) {
         Ok(request) => match sender.send(Received { request, at }) {
@@ -381,12 +408,19 @@ fn answer(mut stream: UnixStream, sender: &Sender<Received>) -> Result<()> {
     Ok(())
 }
 
-/// Reads up to and including the first newline, at most [`MAX_LINE`] bytes.
+/// Reads up to and including the first newline, at most [`MAX_LINE`] bytes,
+/// by `deadline`: the whole line, not each byte, so a peer that sends one
+/// byte at a time cannot hold the other end any longer than a silent one.
 /// Returns what arrived when the peer stops early; the decoder rejects it.
-fn read_line(stream: &mut UnixStream) -> io::Result<Vec<u8>> {
+fn read_line(stream: &mut UnixStream, deadline: Instant) -> io::Result<Vec<u8>> {
     let mut line = Vec::with_capacity(MAX_LINE);
     let mut byte = [0_u8];
     while line.len() < MAX_LINE && !line.ends_with(b"\n") {
+        let left = deadline
+            .checked_duration_since(Instant::now())
+            .filter(|left| !left.is_zero())
+            .ok_or_else(|| io::Error::from(io::ErrorKind::TimedOut))?;
+        stream.set_read_timeout(Some(left))?;
         match stream.read(&mut byte) {
             Ok(0) => break,
             Ok(_) => line.push(byte[0]),
@@ -422,6 +456,12 @@ impl std::fmt::Display for SendError {
                 f,
                 "the daemon refused the request: {reply}; `journalctl --user -u spokenpad` says why"
             ),
+            Self::Refused(reply @ Reply::UnknownRequest) => write!(
+                f,
+                "the daemon refused the request: {reply}; it is likely older than this command, \
+                 left running across an upgrade: `systemctl --user restart spokenpad` starts \
+                 the new one"
+            ),
             Self::Refused(reply) => write!(f, "the daemon refused the request: {reply}"),
             Self::Failed(e) => write!(f, "{e:#}"),
         }
@@ -444,10 +484,10 @@ pub fn send(path: &Path, request: Request) -> Result<(), SendError> {
 }
 
 fn exchange(stream: &mut UnixStream, request: Request) -> Result<Reply> {
-    stream.set_read_timeout(Some(REPLY_TIMEOUT))?;
+    let deadline = Instant::now() + REPLY_TIMEOUT;
     stream.set_write_timeout(Some(REPLY_TIMEOUT))?;
     stream.write_all(request.encode().as_bytes())?;
-    let line = read_line(stream).context("read the daemon's reply")?;
+    let line = read_line(stream, deadline).context("read the daemon's reply")?;
     Reply::decode(&line).with_context(|| {
         format!(
             "unexpected reply {:?}; is the daemon the same version as this command?",
@@ -619,6 +659,63 @@ mod tests {
         assert!(passed_to_us(os("7"), os("2"), 7).is_err(), "two sockets");
         assert!(passed_to_us(os("7"), os("0"), 7).is_err(), "no socket");
         assert!(passed_to_us(os("7"), None, 7).is_err(), "no count");
+    }
+
+    /// A client that sends its request a byte at a time holds the server no
+    /// longer than one that sends nothing: a real press behind it is served
+    /// well within the client's own patience.
+    #[test]
+    fn a_trickling_client_does_not_hold_up_the_next_press() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("control.sock");
+        let (sender, receiver) = mpsc::channel();
+        let _server = ControlServer::start(Socket::bind(&path).unwrap(), sender).unwrap();
+        let mut slow = UnixStream::connect(&path).unwrap();
+        let trickle = thread::spawn(move || {
+            // Every byte well inside the per-request limit; the whole line
+            // far outside it. Each write fails once the server hangs up.
+            for _ in 0..20 {
+                if slow.write_all(b"s").is_err() {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(200));
+            }
+        });
+        thread::sleep(Duration::from_millis(50));
+        let pressed = Instant::now();
+        send(&path, Request::Start).expect("served after the trickling client");
+        assert!(
+            pressed.elapsed() < REQUEST_TIMEOUT + Duration::from_millis(400),
+            "{:?}",
+            pressed.elapsed()
+        );
+        assert_eq!(receiver.recv().unwrap().request, Request::Start);
+        trickle.join().unwrap();
+    }
+
+    #[test]
+    fn only_a_broken_listener_ends_the_control_thread() {
+        for fatal in [libc::EBADF, libc::EINVAL, libc::ENOTSOCK] {
+            assert!(listener_unusable(&io::Error::from_raw_os_error(fatal)));
+        }
+        for passing in [
+            libc::EMFILE,
+            libc::ENFILE,
+            libc::ENOBUFS,
+            libc::ECONNABORTED,
+        ] {
+            assert!(!listener_unusable(&io::Error::from_raw_os_error(passing)));
+        }
+    }
+
+    /// A daemon that does not know a request is one from before an upgrade.
+    #[test]
+    fn an_unknown_request_points_at_a_restart() {
+        let message = SendError::Refused(Reply::UnknownRequest).to_string();
+        assert!(
+            message.contains("systemctl --user restart spokenpad"),
+            "{message}"
+        );
     }
 
     #[test]
