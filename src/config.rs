@@ -41,7 +41,7 @@ impl Decoding {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Audio {
     pub sample_rate: u32,
@@ -77,7 +77,7 @@ impl Audio {
 /// When a capture nobody is ending ends by itself. The absolute limit that
 /// bounds every capture is `core::state::MAX_CAPTURE`, which is not a
 /// setting: it is what keeps a recovery WAV readable.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Capture {
     /// Seconds a latched capture may hear no speech before it ends itself,
@@ -120,7 +120,7 @@ pub enum Model {
     SenseVoice { language: Option<String> },
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(try_from = "RawAsr")]
 pub struct Asr {
     /// A configured relative path is resolved against the config file's own
@@ -271,7 +271,7 @@ impl TryFrom<RawAsr> for Asr {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Vad {
     pub enabled: bool,
@@ -301,7 +301,7 @@ impl Default for Vad {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Text {
     pub strip_fillers: bool,
@@ -346,7 +346,7 @@ pub fn control_socket() -> PathBuf {
         .join("spokenpad.sock")
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Recording {
     pub enabled: bool,
@@ -505,7 +505,7 @@ impl Default for Nvim {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Preview {
     pub enabled: bool,
@@ -534,7 +534,45 @@ pub struct Config {
     pub nvim: Nvim,
     pub preview: Preview,
 }
+/// Where the configuration comes from, kept so that the daemon can read it
+/// again: `-c/--config` if given, else the default location, and
+/// `--model-dir` on top.
+#[derive(Debug, Clone)]
+pub struct Source {
+    pub path: Option<PathBuf>,
+    pub model_dir: Option<PathBuf>,
+}
+
+impl Source {
+    /// Reads the file, applies `--model-dir` and validates the result.
+    pub fn load(&self) -> Result<Config> {
+        let mut config = Config::load(self.path.as_deref())?;
+        if let Some(dir) = &self.model_dir {
+            config.asr.model_dir = expand_path(dir)?;
+        }
+        config.validate()?;
+        Ok(config)
+    }
+}
+
 impl Config {
+    /// The sections that differ in `fresh` and take effect only when the
+    /// daemon restarts: all but `[nvim]`, which applies to the next window.
+    pub fn restart_needed(&self, fresh: &Self) -> Vec<&'static str> {
+        [
+            ("audio", self.audio == fresh.audio),
+            ("capture", self.capture == fresh.capture),
+            ("recording", self.recording == fresh.recording),
+            ("asr", self.asr == fresh.asr),
+            ("vad", self.vad == fresh.vad),
+            ("text", self.text == fresh.text),
+            ("preview", self.preview == fresh.preview),
+        ]
+        .into_iter()
+        .filter_map(|(section, same)| (!same).then_some(section))
+        .collect()
+    }
+
     /// An explicit path must exist: silently running on defaults because a
     /// `--config` typo pointed nowhere is how a user loses their settings.
     /// Only the default location may be absent.
@@ -808,6 +846,39 @@ pub fn expand_path(path: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `[nvim]` applies to the next window; every other section is named as
+    /// needing a restart, and only when it changed.
+    #[test]
+    fn only_sections_other_than_nvim_need_a_restart() {
+        let running = Config::default();
+        let fresh = Config::parse(
+            "[nvim]\nfont_size = 14.0\ncopy_to_clipboard = true\n[vad]\nthreshold = 0.6\n[asr]\nnum_threads = 2\n",
+            None,
+        )
+        .unwrap();
+        assert_eq!(running.restart_needed(&fresh), vec!["asr", "vad"]);
+        assert!(running.restart_needed(&running.clone()).is_empty());
+    }
+
+    #[test]
+    fn a_source_reads_its_file_again_and_applies_the_model_dir_on_top() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let source = Source {
+            path: Some(path.clone()),
+            model_dir: Some(directory.path().join("models")),
+        };
+        std::fs::write(&path, "[nvim]\ncopy_to_clipboard = false\n").unwrap();
+        let first = source.load().unwrap();
+        assert!(!first.nvim.copy_to_clipboard);
+        assert_eq!(first.asr.model_dir, directory.path().join("models"));
+        std::fs::write(&path, "[nvim]\ncopy_to_clipboard = true\n").unwrap();
+        assert!(source.load().unwrap().nvim.copy_to_clipboard);
+        std::fs::write(&path, "[nvim]\ncopy_to_clipboard = 3\n").unwrap();
+        assert!(source.load().is_err());
+    }
+
     #[test]
     fn defaults_and_example() {
         Config::default().validate().unwrap();

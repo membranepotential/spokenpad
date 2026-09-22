@@ -232,7 +232,7 @@ never the phase label or the headline. When two things happen to the same
 capture, the more serious one is shown: memory limit reached > capture
 incomplete > microphone unavailable > capture not kept > no speech
 model > microphone gap > reached the time limit > stopped after silence >
-nearly silent > held too briefly > downloading the speech model > loading the
+config not reloaded > nearly silent > held too briefly > downloading the speech model > loading the
 speech model > transcribing recordings > preview paused. The speech model's
 notices are not about one capture: they stay until the model is ready and has
 caught up. The log always has the full sentence and paths.
@@ -379,7 +379,12 @@ cannot pass silently. Keys are not configured here; see
 | `nvim.init` | your Neovim config | `"bundled"` opens the window about 3× faster; pair it with `nvim.colorscheme` |
 | `nvim.copy_to_clipboard` | `false` | copy the whole buffer to `+` after every release |
 
-Restart the service after a change: `systemctl --user restart spokenpad`.
+The running daemon reads the file again each time it opens a dictation
+window, or attaches to one you opened: `[nvim]` changes apply to that
+window. Every other section takes effect after
+`systemctl --user restart spokenpad`, which the log says when it sees one
+changed. A file that no longer loads leaves the settings in use, and the
+window says "config not reloaded" and why.
 
 ## Recovering a dictation
 

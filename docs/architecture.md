@@ -105,7 +105,13 @@ as `Work::Recording` and is decoded a `preview.max_seconds` window at a time
 through the same `Worker::tick` and `Worker::finish` a live capture uses. The
 speech model's state (`core::session::Recognition`) becomes a winbar notice
 that shows when it outranks the capture's own. A failed load is reported and
-retried at the next press; the daemon does not exit over it. That is the seam `tests/e2e.rs` drives
+retried at the next press; the daemon does not exit over it.
+
+`serve` is also handed a `Reload`, which reads the config file again. The
+editor thread calls it before each window it opens or editor it attaches,
+and gives that window the file's `[nvim]`; every other section is fixed at
+start, and a change to one is logged as needing a restart. A file that does
+not load keeps the settings in use and raises a notice. That is the seam `tests/e2e.rs` drives
 headlessly, directly and through a real control socket.
 
 ## Event and data flow

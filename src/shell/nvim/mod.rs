@@ -189,6 +189,32 @@ impl NvimSession {
         self.connection.is_some()
     }
 
+    /// Whether an editor is attached and still pinned to its dictation file.
+    /// A connection to one that is not, or that has gone, is dropped here, so
+    /// `false` means the next [`ensure`](Self::ensure) opens or attaches a
+    /// window afresh.
+    pub fn attached(&mut self) -> bool {
+        let Some(open) = self.connection.as_mut() else {
+            return false;
+        };
+        let pinned = still_pinned(open);
+        if !pinned {
+            self.drop_connection();
+        }
+        pinned
+    }
+
+    pub fn config(&self) -> &Nvim {
+        &self.config
+    }
+
+    /// Replaces the settings the next window opens with, as re-read from the
+    /// config file. The window that is open, if any, keeps what it opened
+    /// with; so do the pane thread, whose windows each take their own.
+    pub fn reconfigure(&mut self, config: Nvim) {
+        self.config = config;
+    }
+
     pub fn path(&self) -> Option<&Path> {
         self.connection.as_ref().map(|open| open.path.as_path())
     }
@@ -198,11 +224,10 @@ impl NvimSession {
     /// the user has not run `spokenpad editor`, and text goes to the pending
     /// passage through [`append_detached`](Self::append_detached) instead.
     pub fn ensure(&mut self) -> Result<Option<PathBuf>> {
-        if let Some(open) = self.connection.as_mut() {
-            if still_pinned(open) {
-                return Ok(Some(open.path.clone()));
-            }
-            self.drop_connection();
+        if self.attached()
+            && let Some(open) = &self.connection
+        {
+            return Ok(Some(open.path.clone()));
         }
 
         let attached = self.attach_existing()?

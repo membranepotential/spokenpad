@@ -1219,3 +1219,29 @@ script and as few setup steps as possible.
   that opens by itself needs `DISPLAY`, which GNOME, KDE Plasma and most
   display managers import, and which a plain i3 or sway config imports with
   `systemctl --user import-environment`.
+
+## `[nvim]` reloads with each new window (2026-09-22)
+
+The daemon read its config once, at start, so an edit to `nvim.font_size`
+did nothing until a restart. Now the editor thread reads the file again
+(`config::Source`, with `--model-dir` applied on top, as at start) whenever
+a window is about to open or an editor to be attached, and that window
+takes the file's `[nvim]`: mode, font, colorscheme, init,
+`copy_to_clipboard`, and the rest. A window already open keeps what it
+opened with.
+
+- **Everything else needs a restart**, because it is built into running
+  state: the microphone (`[audio]`, `[recording]`), the loaded model
+  (`[asr]`, `[vad]`), the text processor (`[text]`), and the session's tick
+  and silence timeout (`[preview]`, `[capture]`). `Config::restart_needed`
+  names the sections that differ, and the log says so once per distinct set.
+  `spokenpad check` says the same.
+- **A file that no longer loads** leaves the settings in use: the window
+  shows the "config not reloaded" notice with the parse error, ranked just
+  below "stopped after silence", until the next press.
+- `nvim.copy_to_clipboard` is decided by the editor thread for the window it
+  copies from, instead of by the event loop from the start-up config.
+- Rejected: watching the file (inotify) and applying changes at once. A
+  window open on the old font would have to be redrawn or reopened under the
+  user, and a half-saved file would be read; the next window is a moment the
+  user chose.

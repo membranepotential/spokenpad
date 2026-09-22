@@ -42,6 +42,9 @@ pub enum Notice {
     /// The speech model was not ready, so the capture was to be kept on disk
     /// until it is, and no recording was written.
     NotKept,
+    /// The config file did not load when this window opened, for this
+    /// reason; the window has the settings that were in use.
+    ConfigInvalid(String),
     /// The rest are not about a capture but about the speech model, and come
     /// from [`Recognition::notice`]; `waiting` counts the recordings made
     /// while it was not ready, which it transcribes once it is.
@@ -163,22 +166,24 @@ impl Notice {
     /// 6. `MicrophoneGap` — audio came back, with a hole in the recording.
     /// 7. `LengthLimit` — the capture ran to the length limit and ended.
     /// 8. `SilenceTimeout` — a latch was quiet long enough to end.
-    /// 9. `NearlySilent` — everything arrived and may still be worth nothing.
-    /// 10. `HeldTooBriefly` — nothing was recorded, and nothing was lost.
-    /// 11. `ModelDownloading` — transcription waits, and nothing is lost.
-    /// 12. `ModelLoading` — the same, for seconds.
-    /// 13. `TranscribingRecordings` — the wait is over; text is on its way.
-    /// 14. `PreviewPaused` — cosmetic: only the live tail stopped.
+    /// 9. `ConfigInvalid` — an edit to the config did not take.
+    /// 10. `NearlySilent` — everything arrived and may still be worth nothing.
+    /// 11. `HeldTooBriefly` — nothing was recorded, and nothing was lost.
+    /// 12. `ModelDownloading` — transcription waits, and nothing is lost.
+    /// 13. `ModelLoading` — the same, for seconds.
+    /// 14. `TranscribingRecordings` — the wait is over; text is on its way.
+    /// 15. `PreviewPaused` — cosmetic: only the live tail stopped.
     pub fn priority(&self) -> u8 {
         match self {
-            Self::MemoryCap(_) => 13,
-            Self::CaptureIncomplete => 12,
-            Self::MicrophoneUnavailable => 11,
-            Self::NotKept => 10,
-            Self::ModelUnavailable { .. } => 9,
-            Self::MicrophoneGap => 8,
-            Self::LengthLimit => 7,
-            Self::SilenceTimeout => 6,
+            Self::MemoryCap(_) => 14,
+            Self::CaptureIncomplete => 13,
+            Self::MicrophoneUnavailable => 12,
+            Self::NotKept => 11,
+            Self::ModelUnavailable { .. } => 10,
+            Self::MicrophoneGap => 9,
+            Self::LengthLimit => 8,
+            Self::SilenceTimeout => 7,
+            Self::ConfigInvalid(_) => 6,
             Self::NearlySilent => 5,
             Self::HeldTooBriefly => 4,
             Self::ModelDownloading { .. } => 3,
@@ -201,6 +206,7 @@ impl Notice {
             Self::SilenceTimeout => "stopped after silence",
             Self::LengthLimit => "reached the time limit",
             Self::NotKept => "capture not kept",
+            Self::ConfigInvalid(_) => "config not reloaded",
             Self::ModelDownloading { .. } => "downloading the speech model",
             Self::ModelLoading { .. } => "loading the speech model",
             Self::ModelUnavailable { .. } => "no speech model",
@@ -247,6 +253,9 @@ impl Notice {
             Self::NotKept => {
                 "the speech model was not ready and no recording was written (recording.enabled is off, or the disk failed)"
                     .into()
+            }
+            Self::ConfigInvalid(reason) => {
+                format!("{reason}; this window keeps the settings in use").into()
             }
             Self::ModelDownloading { percent, waiting } => {
                 format!("{percent}%; {}", kept(*waiting)).into()
@@ -783,6 +792,7 @@ mod tests {
             Notice::MicrophoneGap,
             Notice::LengthLimit,
             Notice::SilenceTimeout,
+            Notice::ConfigInvalid(String::new()),
             Notice::NearlySilent,
             Notice::HeldTooBriefly,
             Notice::ModelDownloading {

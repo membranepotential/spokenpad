@@ -453,6 +453,10 @@ impl Daemon {
                     capture,
                     requests: received,
                     pipeline,
+                    reload: Box::new({
+                        let config = config.clone();
+                        move || Ok(config.clone())
+                    }),
                 },
                 stop,
                 None,

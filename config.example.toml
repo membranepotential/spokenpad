@@ -5,6 +5,10 @@
 # change -- an absent section or key falls back to its default, but an
 # *unknown* section or key is a hard error (config.rs rejects typos loudly
 # rather than silently ignoring them).
+#
+# A running daemon reads this file again whenever it opens a dictation window
+# or attaches to one: [nvim] changes apply to that window. Every other
+# section takes effect after `systemctl --user restart spokenpad`.
 
 # There is no [hotkey] section: spokenpad reads no keyboard. Bind keys in
 # your window manager or desktop to `spokenpad start`, `stop`, `toggle` and

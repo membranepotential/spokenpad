@@ -7,7 +7,7 @@
 //! presses are already accepted. [`serve`] is the event loop over whatever
 //! devices it is handed, which is what the headless end-to-end tests drive.
 use crate::{
-    config::Config,
+    config::{Config, Source},
     core::{
         control::{Received, Request},
         decode::{
@@ -66,6 +66,8 @@ pub struct Devices<B: InputBackend, R, S> {
     /// Control requests. The sender being dropped means the socket closed.
     pub requests: Receiver<Received>,
     pub pipeline: PipelineSource<R, S>,
+    /// The config file, read again for each new dictation window.
+    pub reload: Reload,
 }
 
 /// Builds the recognizer and the segmenter on the inference thread, telling
@@ -218,6 +220,9 @@ enum ResultEvent {
         elapsed: Duration,
     },
     Unavailable(String),
+    /// The config file did not load when a window opened, for this reason.
+    /// Sent by the editor thread.
+    ConfigInvalid(String),
     Commit(Commit),
     Tick {
         id: UtteranceId,
@@ -282,9 +287,6 @@ fn join_bounded(handle: JoinHandle<()>, name: &str) {
     }
 }
 
-/// Owns the editor connection. It runs until its channel says to stop, never
-/// on a shared flag: text already queued must reach the file even while the
-/// daemon is shutting down or the capture it came from was cancelled.
 /// Where an utterance's last commit went. A later commit of the same
 /// utterance continues its line only in the same place: joined onto another
 /// file's last line, it would run into unrelated text.
@@ -294,8 +296,56 @@ enum Sink {
     Passage,
 }
 
-fn editor_thread(config: crate::config::Nvim, rx: Receiver<EditorWork>) {
-    let mut nvim = NvimSession::new(config);
+/// Reads the configuration again. The editor thread calls it before each
+/// new dictation window, so that `[nvim]` changes apply to that window
+/// without a restart.
+pub type Reload = Box<dyn FnMut() -> Result<Config> + Send>;
+
+/// The `[nvim]` settings the next window opens with: what the file says now.
+/// A file that no longer loads keeps the settings in use, and the window
+/// says why. Changes to any other section only take effect at a restart,
+/// which is logged once per distinct set of them.
+fn reconfigure(
+    nvim: &mut NvimSession,
+    running: &Config,
+    reload: &mut Reload,
+    reported: &mut Vec<&'static str>,
+    events: &Sender<ResultEvent>,
+) {
+    match reload() {
+        Ok(fresh) => {
+            let restart = running.restart_needed(&fresh);
+            if restart != *reported && !restart.is_empty() {
+                log::warn!(
+                    "config changes to [{}] take effect after `systemctl --user restart spokenpad`; [nvim] applies to this window",
+                    restart.join("], [")
+                );
+            }
+            *reported = restart;
+            nvim.reconfigure(fresh.nvim);
+        }
+        Err(e) => {
+            let reason = format!("{e:#}")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            log::error!("config not reloaded: {reason}; the window keeps the settings in use");
+            let _ = events.send(ResultEvent::ConfigInvalid(reason));
+        }
+    }
+}
+
+/// Owns the editor connection. It runs until its channel says to stop, never
+/// on a shared flag: text already queued must reach the file even while the
+/// daemon is shutting down or the capture it came from was cancelled.
+fn editor_thread(
+    running: Config,
+    mut reload: Reload,
+    rx: Receiver<EditorWork>,
+    events: Sender<ResultEvent>,
+) {
+    let mut nvim = NvimSession::new(running.nvim.clone());
+    let mut reported = Vec::new();
     let mut paragraph: Option<(UtteranceId, Sink)> = None;
     let mut shown: Option<IndicatorState> = None;
     let mut quit = false;
@@ -311,16 +361,23 @@ fn editor_thread(config: crate::config::Nvim, rx: Receiver<EditorWork>) {
         for work in first.into_iter().chain(rx.try_iter()) {
             match work {
                 EditorWork::Indicator(next) => indicator = Some(next),
-                EditorWork::Ensure => match nvim.ensure() {
-                    Ok(Some(path)) => {
-                        log::info!("dictating into {}", path.display());
-                        shown = None;
+                EditorWork::Ensure => {
+                    // A window about to open, or an editor about to be
+                    // attached, takes the settings the file has now.
+                    if !nvim.attached() {
+                        reconfigure(&mut nvim, &running, &mut reload, &mut reported, &events);
                     }
-                    Ok(None) => log::info!(
-                        "no dictation editor is open; text goes to the dictation file until `spokenpad editor` opens it"
-                    ),
-                    Err(e) => log::error!("could not open dictation window: {e:#}"),
-                },
+                    match nvim.ensure() {
+                        Ok(Some(path)) => {
+                            log::info!("dictating into {}", path.display());
+                            shown = None;
+                        }
+                        Ok(None) => log::info!(
+                            "no dictation editor is open; text goes to the dictation file until `spokenpad editor` opens it"
+                        ),
+                        Err(e) => log::error!("could not open dictation window: {e:#}"),
+                    }
+                }
                 EditorWork::Append { utterance, text } => {
                     // A failed request elsewhere (a clipboard copy that timed
                     // out, an indicator push) drops the connection; text that
@@ -384,10 +441,11 @@ fn editor_thread(config: crate::config::Nvim, rx: Receiver<EditorWork>) {
                     }
                 }
                 EditorWork::Copy => {
-                    // Never on a session with no editor: nothing has been
-                    // spoken into a window that was never opened, and there
-                    // is nothing to copy.
-                    if nvim.connected() {
+                    // Off by default: with `nvim.copy_to_clipboard` false
+                    // nothing is copied. Never on a session with no editor
+                    // either: nothing has been spoken into a window that was
+                    // never opened, and there is nothing to copy.
+                    if nvim.config().copy_to_clipboard && nvim.connected() {
                         match nvim.copy_buffer() {
                             Ok(CopyOutcome::Copied) => {
                                 log::debug!("copied the dictation buffer to the clipboard")
@@ -455,9 +513,15 @@ fn daemon_lock() -> Result<File> {
 }
 
 /// The imperative shell: acquire the machine's resources, then serve.
-/// `inherited` is the control socket systemd passed in, if it passed one;
-/// otherwise the daemon binds its own.
-pub fn run(config: Config, inherited: Option<Socket>, dump_dir: Option<&Path>) -> Result<()> {
+/// `config` was read from `source`, which each new dictation window reads
+/// again. `inherited` is the control socket systemd passed in, if it passed
+/// one; otherwise the daemon binds its own.
+pub fn run(
+    config: Config,
+    source: Source,
+    inherited: Option<Socket>,
+    dump_dir: Option<&Path>,
+) -> Result<()> {
     let _lock = daemon_lock()?;
     // Served first, before anything slow: under socket activation the press
     // that started this daemon is waiting on the socket, and a request is
@@ -499,6 +563,7 @@ pub fn run(config: Config, inherited: Option<Socket>, dump_dir: Option<&Path>) -
             capture,
             requests,
             pipeline: PipelineSource::Load(load),
+            reload: Box::new(move || source.load()),
         },
         stopping,
         dump_dir,
@@ -547,6 +612,7 @@ where
         mut capture,
         requests,
         pipeline,
+        reload,
     } = devices;
     let mut requests = Requests::new(requests);
     let rate = config.audio.sample_rate;
@@ -575,14 +641,15 @@ where
 
     let (work_tx, work_rx) = mpsc::channel();
     let (result_tx, results) = mpsc::channel();
+    let editor_events = result_tx.clone();
     let engine = thread::Builder::new()
         .name("spokenpad-asr".into())
         .spawn(move || engine_thread(pipeline, window, rate, &work_rx, &result_tx))?;
     let (editor_tx, editor_rx) = mpsc::channel();
-    let editor_config = config.nvim.clone();
+    let running = config.clone();
     let editor = thread::Builder::new()
         .name("spokenpad-nvim".into())
-        .spawn(move || editor_thread(editor_config, editor_rx))?;
+        .spawn(move || editor_thread(running, reload, editor_rx, editor_events))?;
 
     let mut next_device_poll = Instant::now();
     let result = (|| -> Result<()> {
@@ -710,6 +777,9 @@ where
                         configure(&mut session, config, segmenter);
                         recognition = Recognition::Ready;
                     }
+                    ResultEvent::ConfigInvalid(reason) => {
+                        session.notify(Notice::ConfigInvalid(reason));
+                    }
                     ResultEvent::Unavailable(reason) => {
                         log::error!(
                             "no speech model: {reason}; captures are kept, and the next press tries again"
@@ -788,12 +858,10 @@ where
                         // editor always writes the append before it reads
                         // the buffer to copy. Sent on every `Finished`,
                         // whatever the release decode did: progressively
-                        // committed text is in the buffer either way. Off by
-                        // default: with `nvim.copy_to_clipboard` false, no
-                        // copy request is ever sent.
-                        if config.nvim.copy_to_clipboard {
-                            send(&editor_tx, EditorWork::Copy)?;
-                        }
+                        // committed text is in the buffer either way. The
+                        // editor thread copies only when the window's
+                        // `nvim.copy_to_clipboard` says to, off by default.
+                        send(&editor_tx, EditorWork::Copy)?;
                     }
                 }
             }
@@ -916,16 +984,15 @@ where
             // arm above, on an earlier pass of this same `for`.
             ResultEvent::Finished { id, .. } => {
                 transcribing.retain(|t| t.id != id);
-                if config.nvim.copy_to_clipboard
-                    && let Err(e) = send(&editor_tx, EditorWork::Copy)
-                {
+                if let Err(e) = send(&editor_tx, EditorWork::Copy) {
                     log::error!("could not queue a shutdown clipboard copy: {e:#}");
                 }
             }
             ResultEvent::Tick { .. }
             | ResultEvent::Preparing(_)
             | ResultEvent::Ready { .. }
-            | ResultEvent::Unavailable(_) => {}
+            | ResultEvent::Unavailable(_)
+            | ResultEvent::ConfigInvalid(_) => {}
         }
     }
     for Waiting { path, .. } in waiting.into_iter().chain(transcribing) {

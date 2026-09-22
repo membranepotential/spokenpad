@@ -39,7 +39,7 @@ use spokenpad::{
     shell::{
         audio::{AudioCapture, CallbackCore, InputBackend, InputStream, Teardown},
         control::{ControlServer, Socket},
-        daemon::{Devices, Loader, PipelineSource, serve},
+        daemon::{Devices, Loader, PipelineSource, Reload, serve},
         inference::{Transcriber, load_segmenter},
         recorder::read_capture,
     },
@@ -324,6 +324,10 @@ struct Settings {
     /// Mirrors `preview.max_seconds`: also the window a recording made
     /// before the model was ready is transcribed in.
     max_seconds: f64,
+    /// A config file the daemon reads again for each new window. Only its
+    /// `nvim.copy_to_clipboard` is taken; everything else stays the
+    /// harness's, which no file could express as tersely.
+    config_file: Option<PathBuf>,
 }
 
 impl Default for Settings {
@@ -342,6 +346,7 @@ impl Default for Settings {
             silence_timeout_s: 0.,
             loading: false,
             max_seconds: 30.,
+            config_file: None,
         }
     }
 }
@@ -417,6 +422,17 @@ impl Harness {
         } else {
             (PipelineSource::Ready(build()), None)
         };
+        let reload: Reload = {
+            let harness = config.clone();
+            let file = settings.config_file.clone();
+            Box::new(move || {
+                let mut fresh = harness.clone();
+                if let Some(file) = &file {
+                    fresh.nvim.copy_to_clipboard = Config::load(Some(file))?.nvim.copy_to_clipboard;
+                }
+                Ok(fresh)
+            })
+        };
         let (requests, received) = mpsc::channel();
         // Where `spokenpad start` looks, given the harness's runtime dir.
         let control = settings.socket.then(|| {
@@ -436,6 +452,7 @@ impl Harness {
                     capture,
                     requests: received,
                     pipeline,
+                    reload,
                 },
                 stop,
                 None,
@@ -825,6 +842,63 @@ fn release_copies_the_whole_buffer_to_the_clipboard() {
         h.text().trim_end(),
         "the clipboard must hold the whole buffer, including the earlier utterance's paragraph"
     );
+    h.finish();
+}
+
+/// The config file is read again for each new dictation window. An edit
+/// between two windows applies to the second without a restart; a file that
+/// no longer loads leaves the settings in use and says so in the window.
+#[test]
+fn each_new_window_reads_the_config_file_again() {
+    if !nvim_available() {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("config.toml");
+    fs::write(&file, "[nvim]\ncopy_to_clipboard = false\n").unwrap();
+    let h = Harness::start(Settings {
+        config_file: Some(file.clone()),
+        ..Settings::default()
+    });
+    let dictate = |words: usize| {
+        h.press(false);
+        h.say(&tone(1.0));
+        h.release_for_good();
+        wait_until("the utterance reaches the file", || {
+            h.text().matches("word").count() == words
+        });
+    };
+    dictate(2);
+    assert_eq!(h.clipboard(), "", "the first window was told not to copy");
+
+    fs::write(&file, "[nvim]\ncopy_to_clipboard = true\n").unwrap();
+    dictate(4);
+    assert_eq!(
+        h.clipboard(),
+        "",
+        "the edit waits for the next window: this one keeps its settings"
+    );
+
+    kill_editor(&h.socket);
+    dictate(2);
+    wait_until("the second window copies", || h.clipboard() == "word word");
+
+    kill_editor(&h.socket);
+    fs::write(&file, "[nvim]\ncopy_to_clipboard = 3\n").unwrap();
+    h.press(false);
+    wait_until("the window says the file did not load", || {
+        h.indicator("notice").contains("config not reloaded")
+    });
+    assert!(
+        h.indicator("notice_detail").contains("copy_to_clipboard"),
+        "{}",
+        h.indicator("notice_detail")
+    );
+    h.say(&tone(1.0));
+    h.release();
+    wait_until("the settings in use still copy", || {
+        h.clipboard() == "word word"
+    });
     h.finish();
 }
 
@@ -2007,6 +2081,10 @@ fn real_models_transcribe_the_kennedy_sample() {
                 capture,
                 requests: received,
                 pipeline,
+                reload: Box::new({
+                    let config = config.clone();
+                    move || Ok(config.clone())
+                }),
             },
             stop,
             None,

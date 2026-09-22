@@ -129,11 +129,11 @@ fn run(args: Args) -> Result<u8> {
         Some(_) => None,
     };
     spokenpad::shell::logging::init(args.verbose, args.log_file.as_deref())?;
-    let mut config = Config::load(args.config.as_deref())?;
-    if let Some(p) = args.model_dir {
-        config.asr.model_dir = spokenpad::config::expand_path(&p)?;
-    }
-    config.validate()?;
+    let source = config::Source {
+        path: args.config,
+        model_dir: args.model_dir,
+    };
+    let config = source.load()?;
     match command {
         Some(Action::Editor) => match spokenpad::shell::nvim::open_editor(&config.nvim)? {},
         Some(Action::FetchModels { dir }) => {
@@ -204,6 +204,10 @@ fn run(args: Args) -> Result<u8> {
                     "disabled"
                 }
             );
+            println!(
+                "A running daemon applies [nvim] changes to the next dictation window it opens; \
+                 every other section takes effect after `systemctl --user restart spokenpad`."
+            );
             if config.nvim.mode == config::Mode::Pane {
                 // The pane needs three things this machine may not have, and
                 // finding that out at the first dictation — when the text
@@ -232,7 +236,7 @@ fn run(args: Args) -> Result<u8> {
             if let Some(p) = &args.dump_audio {
                 std::fs::create_dir_all(p)?;
             }
-            spokenpad::shell::daemon::run(config, inherited, args.dump_audio.as_deref())?;
+            spokenpad::shell::daemon::run(config, source, inherited, args.dump_audio.as_deref())?;
         }
     }
     Ok(0)
