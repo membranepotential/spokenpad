@@ -22,7 +22,7 @@ pub use passage::DetachedWrite;
 
 use crate::{
     config::{self, Mode, Nvim, PaneLayout},
-    core::{session::NoticeText, state::IndicatorPhase, wm::Criterion},
+    core::{session::NoticeText, state::IndicatorPhase},
     shell::{
         pane::{host::PaneHost, place, x11},
         wm::{self, Wm},
@@ -1968,7 +1968,7 @@ fn apply_manager_session(nvim: &mut Nvim, listing: &str) {
 /// is not sway: its focus behaviour is not verified. A display that does not
 /// name its window manager's process is refused too.
 fn refuse_pane_focus_on_sway(config: &Nvim, manager: &x11::Manager) -> Result<()> {
-    use crate::core::wm::{Property, WmKind};
+    use crate::core::wm::WmKind;
     use std::os::unix::fs::MetadataExt as _;
 
     if manager.name.as_deref() != Some(x11::WLROOTS_WM) {
@@ -2023,11 +2023,7 @@ fn refuse_pane_focus_on_sway(config: &Nvim, manager: &x11::Manager) -> Result<()
              import-environment SWAYSOCK` in the sway config), or set nvim.mode = \"attach\""
         );
     };
-    let criteria = [
-        Criterion::new(Property::Instance, x11::INSTANCE)?,
-        Criterion::new(Property::Class, x11::CLASS)?,
-    ];
-    sway.refuse_focus(&criteria).context(
+    sway.refuse_pane_focus().context(
         "the pane cannot open without taking the focus under sway; \
          nvim.mode = \"attach\" works everywhere",
     )

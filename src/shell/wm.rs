@@ -6,7 +6,7 @@
 //! properties that keep the pane unfocused elsewhere, adds its own
 //! `no_focus` rule here first. It also runs short-lived helpers, such as
 //! `systemctl --user`, bounded in time and output.
-use crate::core::wm::{self, Criterion, Message, WmKind};
+use crate::core::wm::{self, Message, WmKind};
 use anyhow::{Context, Result, bail, ensure};
 use std::{
     io::{ErrorKind, Read, Write},
@@ -58,8 +58,8 @@ impl Wm {
         self.kind
     }
 
-    /// Makes sway refuse focus to a window matching all of `criteria`, opened
-    /// now, or says why it cannot.
+    /// Makes sway refuse focus to the pane, opened now, or says why it
+    /// cannot.
     ///
     /// sway focuses every window it maps on the focused workspace unless a
     /// `no_focus` rule matches it (`should_focus` in `sway/tree/view.c`), and
@@ -72,13 +72,13 @@ impl Wm {
     ///
     /// i3 accepts `no_focus` only in its configuration, so this is sway's
     /// alone.
-    pub fn refuse_focus(&self, criteria: &[Criterion]) -> Result<()> {
+    pub fn refuse_pane_focus(&self) -> Result<()> {
         ensure!(
             self.kind == WmKind::Sway,
             "{} cannot add a `no_focus` rule while it runs",
             self.kind
         );
-        let command = wm::no_focus_command(criteria)?;
+        let command = wm::pane_no_focus_command();
         wm::check_command_reply(&request(&self.socket, Message::RunCommand, &command)?)
             .with_context(|| format!("sway refused `{command}`"))?;
         self.ensure_workspace_holds_a_window()
@@ -353,7 +353,6 @@ fn terminate_group(child: &mut Child) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::wm::Property;
     use serde_json::json;
     use std::{
         os::unix::net::UnixListener,
@@ -412,10 +411,6 @@ mod tests {
         }
     }
 
-    fn criterion(property: Property, value: &str) -> Criterion {
-        Criterion::new(property, value).unwrap()
-    }
-
     /// The pane's rule goes to sway over IPC, anchored, and counts only when
     /// sway says it took it and the window would not be the first on its
     /// workspace. i3 cannot take a rule at runtime, so it is refused there.
@@ -431,10 +426,6 @@ mod tests {
         ]});
         let unfocused = json!({"id": 1, "type": "root", "nodes": []});
         let sway = json!({"variant": "sway", "major": 1}).to_string();
-        let criteria = [
-            criterion(Property::Instance, "spokenpad-pane"),
-            criterion(Property::Class, "spokenpad-pane"),
-        ];
         let rule = r#"no_focus [instance="^spokenpad-pane$" class="^spokenpad-pane$"]"#;
         for (tree, accepted, expected) in [
             (&occupied, true, None),
@@ -452,7 +443,7 @@ mod tests {
                 (Message::GetTree, tree.to_string()),
                 (Message::RunCommand, reply.to_string()),
             ]);
-            let result = Wm::at(fake.socket.clone()).unwrap().refuse_focus(&criteria);
+            let result = Wm::at(fake.socket.clone()).unwrap().refuse_pane_focus();
             match expected {
                 None => result.unwrap(),
                 Some(expected) => {
@@ -469,7 +460,7 @@ mod tests {
         ]);
         let error = Wm::at(fake.socket.clone())
             .unwrap()
-            .refuse_focus(&criteria)
+            .refuse_pane_focus()
             .unwrap_err()
             .to_string();
         assert!(error.contains("i3 cannot add"), "{error}");

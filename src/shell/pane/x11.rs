@@ -10,7 +10,7 @@
 //! | `_NET_WM_WINDOW_TYPE_UTILITY` | floats the window on tiling window managers, and blocks focus on the ones that ignore user time (bspwm, Hyprland's Xwayland). With `nvim.pane_layout = "tiled"` it is `_NET_WM_WINDOW_TYPE_NORMAL` instead, which tiling window managers tile; that is allowed only under [`TILED_PROVEN`], where the user time and the sway rule hold it unfocused, as `tests/pane_focus_wms.rs` proves per window manager. |
 //! | `_NET_WM_STATE_ABOVE` | stacks the window above the one the user is typing in. KWin stacks a window it refused focus *below* the active one otherwise. It gives no focus anywhere measured. |
 //! | `WM_HINTS input = True` | the ICCCM "passive input" model: the window manager may give the window the focus *later*, when the user clicks it or, under focus-follows-mouse, moves the pointer into it, so they can type into it. |
-//! | `WM_CLASS = spokenpad-pane` | the name the `no_focus` rule matches that spokenpad adds to sway before the map (`shell::wm::Wm::refuse_focus`): sway reads none of the properties above. |
+//! | `WM_CLASS = spokenpad-pane` | the name the `no_focus` rule matches that spokenpad adds to sway before the map (`shell::wm::Wm::refuse_pane_focus`): sway reads none of the properties above. |
 //!
 //! **`_NET_WM_USER_TIME` is written once, as 0, and never again.** The EWMH
 //! contract is that a toolkit updates it to the timestamp of the last user
@@ -26,6 +26,7 @@ use crate::config::PaneLayout;
 use crate::core::{
     font::{Dpi, XftDpi},
     geometry::{Extents, Rect},
+    wm::PANE_WM_CLASS,
 };
 use anyhow::{Context, Result, ensure};
 use std::{
@@ -50,12 +51,6 @@ use x11rb::{
     wrapper::ConnectionExt as _,
     xcb_ffi::XCBConnection,
 };
-
-/// `WM_CLASS`: what the pane's own `no_focus` rule on sway matches, anchored,
-/// and what a user's window rule would have to name.
-pub const INSTANCE: &str = "spokenpad-pane";
-/// `WM_CLASS` class name; see [`INSTANCE`].
-pub const CLASS: &str = "spokenpad-pane";
 
 x11rb::atom_manager! {
     pub Atoms: AtomsCookie {
@@ -357,12 +352,12 @@ impl Window {
         }
         .set_normal_hints(connection, self.id)?;
         // ICCCM wants instance and class as two NUL-terminated strings in one
-        // property.
-        let mut class = Vec::with_capacity(INSTANCE.len() + CLASS.len() + 2);
-        class.extend_from_slice(INSTANCE.as_bytes());
-        class.push(0);
-        class.extend_from_slice(CLASS.as_bytes());
-        class.push(0);
+        // property; the pane's are the same name, which a user's window rule
+        // would have to name too.
+        let class = [PANE_WM_CLASS, PANE_WM_CLASS]
+            .into_iter()
+            .flat_map(|name| name.bytes().chain([0]))
+            .collect::<Vec<u8>>();
         connection.change_property8(
             PropMode::REPLACE,
             self.id,

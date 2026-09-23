@@ -53,10 +53,10 @@ use harness::{
 };
 use spokenpad::{
     config::{Mode, Nvim, PaneLayout},
-    core::{font::Points, geometry::Rect},
+    core::{font::Points, geometry::Rect, wm::PANE_WM_CLASS},
     shell::{
         nvim::{NvimSession, Want},
-        pane::x11::{self, Display, INSTANCE, Window as PaneWindow},
+        pane::x11::{self, Display, Window as PaneWindow},
     },
 };
 use std::{
@@ -198,7 +198,7 @@ fn the_pane_refuses_a_sway_it_cannot_reach() {
         assert!(error.contains(expected), "{error}");
         assert!(error.contains("SWAYSOCK"), "{error}");
         assert!(
-            find_by_instance(sway.server(), INSTANCE).is_none(),
+            find_by_instance(sway.server(), PANE_WM_CLASS).is_none(),
             "a refused pane left a window"
         );
     }
@@ -247,7 +247,7 @@ fn a_tiled_pane_opens_floating_where_it_is_not_proven() {
         .expect("open the pane")
         .expect("the pane attached");
     let pane = wait_for(PATIENCE, "the pane window", || {
-        find_by_instance(&server, INSTANCE)
+        find_by_instance(&server, PANE_WM_CLASS)
     });
     let types = server
         .connection
@@ -551,7 +551,7 @@ fn story(desktop: &mut dyn Desktop, layout: PaneLayout) -> Report {
     // opens another.
     close_window(desktop.server(), pane);
     wait_for(PATIENCE, "the pane to close", || {
-        find_by_instance(desktop.server(), INSTANCE)
+        find_by_instance(desktop.server(), PANE_WM_CLASS)
             .is_none()
             .then_some(())
     });
@@ -577,7 +577,7 @@ fn story(desktop: &mut dyn Desktop, layout: PaneLayout) -> Report {
     placed.assert_shown(desktop, layout, "the next passage's pane");
     session.close();
     wait_for(PATIENCE, "the pane to close", || {
-        find_by_instance(desktop.server(), INSTANCE)
+        find_by_instance(desktop.server(), PANE_WM_CLASS)
             .is_none()
             .then_some(())
     });
@@ -638,7 +638,7 @@ fn story(desktop: &mut dyn Desktop, layout: PaneLayout) -> Report {
         report.row(format!(
             "a pane on an empty workspace: refused ({error}); a pane window exists: {}; \
              {} samples, X input focus seen on {:?}",
-            find_by_instance(desktop.server(), INSTANCE).is_some(),
+            find_by_instance(desktop.server(), PANE_WM_CLASS).is_some(),
             samples.count,
             samples.input.keys().collect::<Vec<_>>()
         ));
@@ -647,7 +647,7 @@ fn story(desktop: &mut dyn Desktop, layout: PaneLayout) -> Report {
             "refused for another reason: {error}"
         );
         assert!(
-            find_by_instance(desktop.server(), INSTANCE).is_none(),
+            find_by_instance(desktop.server(), PANE_WM_CLASS).is_none(),
             "a refused pane left a window behind"
         );
         return report;
@@ -851,7 +851,7 @@ fn pane_config(
 
 fn pane_window(desktop: &dyn Desktop) -> Window {
     wait_for(PATIENCE, "the pane window", || {
-        find_by_instance(desktop.server(), INSTANCE)
+        find_by_instance(desktop.server(), PANE_WM_CLASS)
     })
 }
 

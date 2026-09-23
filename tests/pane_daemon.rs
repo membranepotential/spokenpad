@@ -563,7 +563,7 @@ fn pane_window(i3: &I3) -> Option<x11rb::protocol::xproto::Window> {
             .get("window_properties")
             .and_then(|properties| properties.get("instance"))
             .and_then(serde_json::Value::as_str);
-        if class == Some(spokenpad::shell::pane::x11::INSTANCE)
+        if class == Some(spokenpad::core::wm::PANE_WM_CLASS)
             && let Some(id) = node.get("window").and_then(serde_json::Value::as_u64)
         {
             *found = Some(id as u32);

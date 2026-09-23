@@ -3033,3 +3033,20 @@ preview.
   `shell/daemon/editor.rs`), as the Lua append clears its own copy. The rest
   of that indicator is still pushed; the next one brings the new preview.
 - Test: `an_append_blanks_the_preview_queued_before_it`.
+
+## The pane's sway rule is one fixed command (2026-09-23)
+
+- Problem: `core/wm.rs` built `no_focus` rules from any list of
+  `Criterion`s (a `Property` and a value checked against
+  `[A-Za-z0-9_.-]+`, a dot escaped as `[.]`, an empty list refused). Its
+  one caller always passed the pane's instance and class, which are the
+  same name.
+- Changed: `core::wm::pane_no_focus_command()` returns the one rule,
+  anchored on `PANE_WM_CLASS`, and `Wm::refuse_pane_focus` sends it. The
+  pane's window sets both halves of its `WM_CLASS` from that constant, so
+  the rule and the window cannot name different classes. What decides
+  whether the pane may open is unchanged: the process check, sway's reply,
+  and the empty-workspace refusal.
+- Tests: `the_pane_rule_is_anchored_on_both_halves_of_its_wm_class`,
+  `sway_is_given_a_runtime_no_focus_rule_and_i3_is_not_asked`, and the sway
+  cases of `tests/pane_focus_wms.rs`.

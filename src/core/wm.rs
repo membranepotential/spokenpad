@@ -84,48 +84,10 @@ pub fn parse_version(reply: &str) -> Result<WmKind> {
     }
 }
 
-/// The window property a rule or a command selects on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Property {
-    /// The instance half of X11 `WM_CLASS` (i3, and Xwayland under sway).
-    Instance,
-    /// The class half of X11 `WM_CLASS` (i3, and Xwayland under sway).
-    Class,
-}
-
-impl Property {
-    fn key(self) -> &'static str {
-        match self {
-            Self::Instance => "instance",
-            Self::Class => "class",
-        }
-    }
-}
-
-/// One criterion, `instance="spokenpad-pane"`. The value is restricted to
-/// `[A-Za-z0-9_.-]` when constructed, so interpolating it into a criteria
-/// string can never produce window-manager syntax.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Criterion {
-    property: Property,
-    value: String,
-}
-
-impl Criterion {
-    pub fn new(property: Property, value: &str) -> Result<Self> {
-        ensure!(
-            !value.is_empty()
-                && value
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b)),
-            "window criterion value must match [A-Za-z0-9_.-]+, got {value:?}"
-        );
-        Ok(Self {
-            property,
-            value: value.to_owned(),
-        })
-    }
-}
+/// The pane's X11 `WM_CLASS`, instance and class alike: what the pane's
+/// window carries ([`shell::pane::x11`](crate::shell::pane::x11)) and what
+/// its `no_focus` rule on sway matches.
+pub const PANE_WM_CLASS: &str = "spokenpad-pane";
 
 /// Every node of a `GET_TREE` reply, tiled and floating alike.
 fn nodes(tree: &Value) -> Box<dyn Iterator<Item = &Value> + '_> {
@@ -162,7 +124,8 @@ pub fn focused_workspace_is_empty(tree: &str) -> Result<bool> {
 }
 
 /// The sway command that adds a `no_focus` rule, while sway runs, for exactly
-/// the windows all of `criteria` select.
+/// the pane: the windows whose instance and class are both
+/// [`PANE_WM_CLASS`].
 ///
 /// sway accepts `no_focus` at runtime (it is in the table of commands valid
 /// both in the configuration and over IPC, `sway/commands.c`) and ignores a
@@ -171,26 +134,11 @@ pub fn focused_workspace_is_empty(tree: &str) -> Result<bool> {
 /// rather than once.
 ///
 /// sway reads every criteria value as a PCRE pattern that may match anywhere
-/// in the name, so each is anchored with `^` and `$`. The value is already
-/// `[A-Za-z0-9_.-]+`, and a dot is written `[.]`, so the pattern needs no
-/// backslash, which sway's criteria parser would strip.
-pub fn no_focus_command(criteria: &[Criterion]) -> Result<String> {
-    ensure!(
-        !criteria.is_empty(),
-        "a no_focus rule without criteria would match every window"
-    );
-    let criteria = criteria
-        .iter()
-        .map(|criterion| {
-            format!(
-                r#"{}="^{}$""#,
-                criterion.property.key(),
-                criterion.value.replace('.', "[.]")
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
-    Ok(format!("no_focus [{criteria}]"))
+/// in the name, so each is anchored with `^` and `$`. [`PANE_WM_CLASS`] holds
+/// no other pattern syntax, and no backslash, which sway's criteria parser
+/// would strip.
+pub fn pane_no_focus_command() -> String {
+    format!(r#"no_focus [instance="^{PANE_WM_CLASS}$" class="^{PANE_WM_CLASS}$"]"#)
 }
 
 /// `RUN_COMMAND`: one result per command, each of which must have succeeded.
@@ -219,10 +167,6 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn instance(value: &str) -> Criterion {
-        Criterion::new(Property::Instance, value).unwrap()
-    }
-
     #[test]
     fn frames_round_trip_and_replies_are_checked_for_their_type() {
         let frame = encode(Message::GetTree, "{}").unwrap();
@@ -250,16 +194,6 @@ mod tests {
         assert_eq!(sway, WmKind::Sway);
         assert!(parse_version(r#"{"variant":"hyprland"}"#).is_err());
         assert!(parse_version("[]").is_err());
-    }
-
-    #[test]
-    fn a_criterion_value_cannot_become_window_manager_syntax() {
-        for hostile in ["", "x\" ]", "a b", "x]; exec rm", "é"] {
-            assert!(
-                Criterion::new(Property::Instance, hostile).is_err(),
-                "{hostile:?}"
-            );
-        }
     }
 
     #[test]
@@ -309,17 +243,11 @@ mod tests {
     }
 
     #[test]
-    fn a_runtime_no_focus_rule_is_anchored_and_needs_criteria() {
-        let class = Criterion::new(Property::Class, "spokenpad-pane").unwrap();
+    fn the_pane_rule_is_anchored_on_both_halves_of_its_wm_class() {
         assert_eq!(
-            no_focus_command(&[instance("spokenpad-pane"), class]).unwrap(),
+            pane_no_focus_command(),
             r#"no_focus [instance="^spokenpad-pane$" class="^spokenpad-pane$"]"#
         );
-        assert_eq!(
-            no_focus_command(&[Criterion::new(Property::Class, "org.spokenpad").unwrap()]).unwrap(),
-            r#"no_focus [class="^org[.]spokenpad$"]"#
-        );
-        assert!(no_focus_command(&[]).is_err());
     }
 
     #[test]
