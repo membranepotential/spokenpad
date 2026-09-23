@@ -7,9 +7,11 @@ Hold a key (or latch with shift), speak, and text appears in an nvim that
 never takes focus. Fully local, CPU-only. 1.0.0 public since 2026-09-23.
 
 ## Now
-- Nothing running. v1.0.0 released (repo public 09-23); main deployed.
+- Nothing running. User runs the v1.0.0 package. main c3e5c31 (pushed)
+  fixes a pane hang (clipboard owner not answering); not released yet.
 
 ## Next
+0. User decides: release v1.0.1 with the clipboard fix.
 1. User live check still open: pane_layout "tiled", hover focus.
 2. Open: main is 0.5 WER points better at a forced 10 s preview window
    (trailing pad?); corpus replay with the silence timeout; the lost-chunk
