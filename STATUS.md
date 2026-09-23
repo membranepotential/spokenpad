@@ -1,26 +1,31 @@
 # spokenpad — local push-to-talk dictation for Linux
 
-_reconciled: 2026-09-23 @ ef94b9e (all agent worktrees merged and removed)_
+_reconciled: 2026-09-23 @ b10f24f (review-round worktrees merged)_
 
 ## Goal
 Hold a key (or latch with shift), speak, and text appears in an nvim that
 never takes focus. Fully local, CPU-only. Next milestone: public release.
 
 ## Now
-- Nothing running. main ef94b9e pushed, CI green, deployed 03:54; user
-  config migrated to `_seconds` keys (backup .bak-2026-09-23-seconds).
+- Nothing running. main b10f24f (not pushed), deployed 10:40; user config
+  migrated (backup .bak-2026-09-23-review), units now run `spokenpad daemon`.
 
 ## Next
-1. User live check: reload i3 (old float rule gone), then pane_layout
-   "tiled", hover focus, :q mid-latch cancels, typing autosaved, check's
-   microphone list.
-2. User decides: make the repo public, tag v0.2.0 (then updpkgsums,
+1. User live check: inline preview + scroll, Ctrl+V in Insert, reload i3
+   (xset -r 194 added), pane_layout "tiled", hover focus.
+2. Maybe: a cleanup pass for modularity/idiom (user: "decent enough").
+3. User decides: make the repo public, tag v0.2.0 (then updpkgsums,
    .SRCINFO, AUR publish). Pushing is allowed (user 09-22).
-3. Open: main is 0.5 WER points better at a forced 10 s preview window
+4. Open: main is 0.5 WER points better at a forced 10 s preview window
    (trailing pad?); corpus replay with the silence timeout; the lost-chunk
    guard (experiments/2026-09-22-empty-chunk-flips.md).
 
 ## Done
+- 09-23 review round: preview drawn where its text lands (inline; two
+  scroll bugs fixed); `spokenpad daemon`, bare prints help; Ctrl+V pastes
+  in Insert; no desktop notifications; recording.max_total_size "5 GB";
+  font 12, tick 1.0 s; startup timeout a constant; one model manifest;
+  README shortened, details in docs/usage.md; vad.pad_seconds stays 0.5.
 - 09-22/23 pre-release: managed mode removed; autosave, :q writes; closing
   the pane cancels its capture; pane opens >= 20 px beside the pointer,
   hover may focus (user); audit (47 findings) all fixed incl. two P1 speech
@@ -35,8 +40,7 @@ never takes focus. Fully local, CPU-only. Next milestone: public release.
   Xft.dpi = Alacritty cells. Packaging: socket activation, presses taken
   before model ready, config reload per window, PKGBUILD, CI;
   daemon never exits under the socket; waiting recordings survive restarts.
-  Machine migrated 13:09 (old unit in ~/.cache/spokenpad-dev/). Corpus: dev
-  subset (28 captures, ~2 min), 15 mixed-language captures flagged.
+  Corpus: dev subset (28 captures, ~2 min), 15 mixed-language flagged.
 - 09-21: constant RAM while recording, auto-stop of forgotten latches,
   sherpa 1.13.8, corpus harness with Gladia references: greedy stays (beam
   loses speech), 1 s padding, no model switch (21% German words); beam bug
