@@ -7,13 +7,13 @@ Hold a key (or latch with shift), speak, and text appears in an nvim that
 never takes focus. Fully local, CPU-only. Next milestone: public release.
 
 ## Now
-- Nothing running. main b10f24f (not pushed), deployed 10:40; user config
-  migrated (backup .bak-2026-09-23-review), units now run `spokenpad daemon`.
+- Nothing running. main 22f98d0 deployed; not pushed.
 
 ## Next
-1. User live check: inline preview + scroll, Ctrl+V in Insert, reload i3
-   (xset -r 194 added), pane_layout "tiled", hover focus.
-2. Maybe: a cleanup pass for modularity/idiom (user: "decent enough").
+1. User live check passed 09-23 (preview, Ctrl+V). Still open: "tiled",
+   hover focus.
+2. Follow-ups from the simplification pass: CLI connect has no deadline
+   (a hung daemon blocks `spokenpad start`); run/run_bounded out of wm.rs.
 3. User decides: make the repo public, tag v0.2.0 (then updpkgsums,
    .SRCINFO, AUR publish). Pushing is allowed (user 09-22).
 4. Open: main is 0.5 WER points better at a forced 10 s preview window
@@ -25,7 +25,8 @@ never takes focus. Fully local, CPU-only. Next milestone: public release.
   scroll bugs fixed); `spokenpad daemon`, bare prints help; Ctrl+V pastes
   in Insert; no desktop notifications; recording.max_total_size "5 GB";
   font 12, tick 1.0 s; startup timeout a constant; one model manifest;
-  README shortened, details in docs/usage.md; vad.pad_seconds stays 0.5.
+  README shortened, details in docs/usage.md; vad.pad_seconds stays 0.5;
+  stale-preview race fixed; Astra's 5 simplifications (-140 code lines).
 - 09-22/23 pre-release: managed mode removed; autosave, :q writes; closing
   the pane cancels its capture; pane opens >= 20 px beside the pointer,
   hover may focus (user); audit (47 findings) all fixed incl. two P1 speech
@@ -42,9 +43,8 @@ never takes focus. Fully local, CPU-only. Next milestone: public release.
   daemon never exits under the socket; waiting recordings survive restarts.
   Corpus: dev subset (28 captures, ~2 min), 15 mixed-language flagged.
 - 09-21: constant RAM while recording, auto-stop of forgotten latches,
-  sherpa 1.13.8, corpus harness with Gladia references: greedy stays (beam
-  loses speech), 1 s padding, no model switch (21% German words); beam bug
-  cause found, patch documented, not shipped.
+  sherpa 1.13.8, corpus harness (Gladia refs): greedy stays, 1 s padding,
+  no model switch; beam bug cause found, patch documented, not shipped.
 
 ## Decided (known issue: dying input stream seen once; watchdog recovers)
 - Hard constraints: docs/constraints.md. No input device is read. No paste.
