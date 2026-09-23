@@ -60,6 +60,107 @@ fn a_pane_mode_editor_with_no_window_is_stopped_not_adopted() {
     assert!(!config.socket_path.exists(), "its socket is cleared");
 }
 
+/// What `:restart` leaves on the socket: a server started with spokenpad's
+/// `--cmd` that waits for a UI and so has not run it. It carries no marker
+/// yet, and is stopped all the same once it has had `UI_GRACE` to show a
+/// UI and has not. `tests/pane_render.rs` runs a real `:restart`.
+#[test]
+fn a_server_waiting_for_its_first_ui_is_stopped_in_pane_mode() {
+    if !nvim_or_skip() {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let config = Nvim {
+        mode: Mode::Pane,
+        display: None,
+        ..headless(directory.path())
+    };
+    let (mut waiting, _ui) = waiting_for_a_ui(&config);
+    let mut session = NvimSession::new(config.clone());
+    let error = format!("{:#}", session.ensure(Want::Press).unwrap_err());
+    assert!(error.contains("needs an X display"), "{error}");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while waiting.0.try_wait().unwrap().is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "the server waiting for a UI is still running"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!config.socket_path.exists(), "its socket is cleared");
+}
+
+/// The same server whose UI attaches within `UI_GRACE`, as the terminal of
+/// `spokenpad editor` does right after it starts, is not stopped: the press
+/// is refused as it was before the grace existed, and the editor runs on.
+#[test]
+fn a_starting_editor_that_gains_a_ui_is_not_stopped() {
+    if !nvim_or_skip() {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let config = Nvim {
+        mode: Mode::Pane,
+        display: None,
+        ..headless(directory.path())
+    };
+    let (mut starting, mut ui) = waiting_for_a_ui(&config);
+    let attaching = std::thread::spawn(move || {
+        std::thread::sleep(UI_GRACE / 5);
+        let attach = Value::Array(vec![
+            Value::from(0),
+            Value::from(1),
+            Value::from("nvim_ui_attach"),
+            Value::Array(vec![
+                Value::from(40),
+                Value::from(10),
+                Value::Map(Vec::new()),
+            ]),
+        ]);
+        rmpv::encode::write_value(&mut ui, &attach).unwrap();
+        ui
+    });
+    let mut session = NvimSession::new(config.clone());
+    let error = format!("{:#}", session.ensure(Want::Press).unwrap_err());
+    assert!(error.contains("refusing unrelated nvim socket"), "{error}");
+    let _ui = attaching.join().unwrap();
+    assert!(
+        starting.0.try_wait().unwrap().is_none(),
+        "the editor that gained a UI was stopped"
+    );
+}
+
+/// A server started as a pane's editor is, with the socket's marker, that
+/// waits for its first UI: what `:restart` leaves behind, and what
+/// `spokenpad editor` runs until its terminal attaches. Returns the editor
+/// and its UI channel, whose output a thread drains.
+fn waiting_for_a_ui(config: &Nvim) -> (UserEditor, std::process::ChildStdin) {
+    let marker = new_marker().unwrap();
+    write_marker(&marker_path(&config.socket_path), &marker).unwrap();
+    let mut child = in_a_session_of_its_own(
+        Command::new("nvim")
+            .args(["--clean", "--embed", "--cmd"])
+            .arg(owner_command(&marker))
+            .arg("--listen")
+            .arg(&config.socket_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    )
+    .spawn()
+    .unwrap();
+    let ui = child.stdin.take().unwrap();
+    let mut output = child.stdout.take().unwrap();
+    std::thread::spawn(move || std::io::copy(&mut output, &mut std::io::sink()));
+    let editor = UserEditor(child);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while RpcClient::connect(&config.socket_path, deadline).is_err() {
+        assert!(Instant::now() < deadline, "the server never listened");
+        std::thread::sleep(CONNECT_POLL);
+    }
+    (editor, ui)
+}
+
 /// The user manager's display and sockets replace the ones the daemon
 /// started with; what the manager does not have, or had to quote, does not.
 #[test]
@@ -1645,6 +1746,7 @@ fn ownership_is_parsed_from_exactly_the_six_documented_fields() {
         Value::from("/home/u/dictation/today.md"),
         Value::from(2),
         Value::from("/home/u/dictation/started.md"),
+        Value::Array(vec![Value::from("nvim"), Value::from("--embed")]),
     ]);
     assert_eq!(
         parse_ownership(&pinned).unwrap(),
@@ -1659,10 +1761,12 @@ fn ownership_is_parsed_from_exactly_the_six_documented_fields() {
                 buffer: 2,
                 name: "/home/u/dictation/started.md".to_owned(),
             }),
+            argv: vec!["nvim".to_owned(), "--embed".to_owned()],
         }
     );
 
-    let bare = Value::Array(vec![nil(), nil(), nil(), nil(), nil(), nil()]);
+    let argv = || Value::Array(Vec::new());
+    let bare = Value::Array(vec![nil(), nil(), nil(), nil(), nil(), nil(), argv()]);
     assert_eq!(
         parse_ownership(&bare).unwrap(),
         Ownership {
@@ -1670,23 +1774,90 @@ fn ownership_is_parsed_from_exactly_the_six_documented_fields() {
             ready: None,
             pinned: None,
             startup: None,
+            argv: Vec::new(),
         }
     );
 
     for malformed in [
         Value::from(1),
         Value::Array(vec![nil(), nil()]),
-        Value::Array(vec![nil(), nil(), nil(), nil()]),
+        Value::Array(vec![nil(), nil(), nil(), nil(), nil(), nil()]),
         // A buffer with no name is not an adoptable buffer.
-        Value::Array(vec![nil(), nil(), Value::from(3), nil(), nil(), nil()]),
-        Value::Array(vec![nil(), nil(), nil(), nil(), Value::from(3), nil()]),
-        Value::Array(vec![Value::from(1), nil(), nil(), nil(), nil(), nil()]),
+        Value::Array(vec![
+            nil(),
+            nil(),
+            Value::from(3),
+            nil(),
+            nil(),
+            nil(),
+            argv(),
+        ]),
+        Value::Array(vec![
+            nil(),
+            nil(),
+            nil(),
+            nil(),
+            Value::from(3),
+            nil(),
+            argv(),
+        ]),
+        Value::Array(vec![
+            Value::from(1),
+            nil(),
+            nil(),
+            nil(),
+            nil(),
+            nil(),
+            argv(),
+        ]),
+        Value::Array(vec![nil(), nil(), nil(), nil(), nil(), nil(), nil()]),
+        Value::Array(vec![
+            nil(),
+            nil(),
+            nil(),
+            nil(),
+            nil(),
+            nil(),
+            Value::Array(vec![Value::from(1)]),
+        ]),
     ] {
         assert!(
             parse_ownership(&malformed).is_err(),
             "accepted {malformed:?}"
         );
     }
+}
+
+/// An editor is spokenpad's by its command line as soon as it runs: the
+/// `--cmd` spokenpad started it with, carrying this socket's marker.
+#[test]
+fn an_editor_is_started_with_the_marker_its_command_line_carries() {
+    let config = Nvim {
+        socket_path: PathBuf::from("/run/spokenpad.sock"),
+        ..Nvim::default()
+    };
+    let marker = "f".repeat(64);
+    let started = |argv: Vec<String>| Ownership {
+        marker: None,
+        ready: None,
+        pinned: None,
+        startup: None,
+        argv,
+    };
+    let argv = editor_argv(&config, Path::new("/t.md"), &marker, None).unwrap();
+    assert!(started(argv.clone()).started_with(&marker));
+    assert!(!started(argv.clone()).started_with(&"e".repeat(64)));
+    let as_file: Vec<String> = argv
+        .into_iter()
+        .map(|argument| match argument.as_str() {
+            "--cmd" => "-c".to_owned(),
+            _ => argument,
+        })
+        .collect();
+    assert!(
+        !started(as_file).started_with(&marker),
+        "only a `--cmd` sets the marker before startup"
+    );
 }
 
 #[test]

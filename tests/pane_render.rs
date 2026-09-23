@@ -857,6 +857,12 @@ fn a_prompt_at_startup_does_not_keep_the_pane_from_opening() {
 /// `:restart` (Neovim 0.12) runs `VimLeavePre` as a quit does, and then the
 /// process exits. It is not the user closing the pane: the pane ends as when
 /// the editor dies, so the daemon does not cancel the capture.
+///
+/// It also leaves a new server with the pane's arguments on the pane's
+/// socket, waiting for a UI that handles its `restart` event, which the pane
+/// does not. That server has not run its `--cmd` yet, so it does not carry
+/// `g:spokenpad_owner`. The next press in pane mode must still stop it and
+/// open a new pane, not refuse the socket as another program's.
 #[test]
 fn a_restart_is_not_the_users_close() {
     let _one_at_a_time = one_at_a_time();
@@ -901,6 +907,38 @@ fn a_restart_is_not_the_users_close() {
         Ending::EditorDied,
         "an editor that `:restart` ended was read as the user's close"
     );
+    drop(pane);
+
+    let left = wait_for(PATIENCE, "the server `:restart` starts", || {
+        ask_server(
+            &config.socket_path,
+            r#"exists("g:spokenpad_owner") . "/" . len(nvim_list_uis())"#,
+        )
+    });
+    assert_eq!(
+        left, "0/0",
+        "the server `:restart` left: marker set / UIs attached"
+    );
+    let restarted = processes_naming(&config.socket_path);
+    assert!(
+        !restarted.is_empty(),
+        "no process names the pane's socket after `:restart`"
+    );
+
+    let mut session = NvimSession::new(Nvim {
+        mode: Mode::Pane,
+        display: Some(server.display.clone()),
+        ..config.clone()
+    });
+    let opened = session
+        .ensure(Want::Press)
+        .expect("the next press after `:restart`")
+        .expect("a new pane for the next press");
+    assert_ne!(opened, file, "the new pane opened a fresh dictation file");
+    wait_for(PATIENCE, "the server `:restart` left to exit", || {
+        restarted.iter().all(|pid| !running(*pid)).then_some(())
+    });
+    session.close();
 }
 
 // ------------------------------------------------------------------ helpers
@@ -935,30 +973,59 @@ fn finished(pane: &mut Pane) -> Option<Ending> {
 
 /// Kills, when dropped, every process that names the socket on its command
 /// line: the server a `:restart` starts and leaves waiting for a UI that
-/// handles its `restart` event. The socket is in the test's own directory, so
-/// nothing else names it.
+/// handles its `restart` event, and the editor of any pane opened after it.
+/// The socket is in the test's own directory, so nothing else names it.
 struct KillNaming(PathBuf);
 
 impl Drop for KillNaming {
     fn drop(&mut self) {
-        let needle = self.0.as_os_str().as_encoded_bytes();
-        for entry in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
-            let Some(pid) = entry
-                .file_name()
-                .to_str()
-                .and_then(|name| name.parse::<libc::pid_t>().ok())
-            else {
-                continue;
-            };
-            let named = std::fs::read(entry.path().join("cmdline"))
-                .is_ok_and(|cmdline| cmdline.split(|byte| *byte == 0).any(|arg| arg == needle));
-            if named {
-                // SAFETY: `kill` takes no pointers; it signals one process
-                // found by this test's own socket path.
-                unsafe { libc::kill(pid, libc::SIGKILL) };
-            }
+        for pid in processes_naming(&self.0) {
+            // SAFETY: `kill` takes no pointers; it signals one process
+            // found by this test's own socket path.
+            unsafe { libc::kill(pid, libc::SIGKILL) };
         }
     }
+}
+
+/// Every running process with `path` as one of its arguments.
+fn processes_naming(path: &Path) -> Vec<libc::pid_t> {
+    let needle = path.as_os_str().as_encoded_bytes();
+    std::fs::read_dir("/proc")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let pid = entry.file_name().to_str()?.parse::<libc::pid_t>().ok()?;
+            let cmdline = std::fs::read(entry.path().join("cmdline")).ok()?;
+            cmdline
+                .split(|byte| *byte == 0)
+                .any(|arg| arg == needle)
+                .then_some(pid)
+        })
+        .filter(|pid| running(*pid))
+        .collect()
+}
+
+/// Whether `pid` is a process that has not exited: not gone, and not a
+/// zombie waiting for its parent.
+fn running(pid: libc::pid_t) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+        stat.rsplit_once(')')
+            .is_some_and(|(_, rest)| !rest.trim_start().starts_with('Z'))
+    })
+}
+
+/// `expr` evaluated by the Neovim listening on `socket`, through Neovim's
+/// own client, or `None` while nothing answers there.
+fn ask_server(socket: &Path, expr: &str) -> Option<String> {
+    let output = std::process::Command::new("nvim")
+        .args(["--clean", "--headless", "--server"])
+        .arg(socket)
+        .args(["--remote-expr", expr])
+        .output()
+        .ok()?;
+    let answer = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    (output.status.success() && !answer.is_empty()).then_some(answer)
 }
 
 /// The editor configuration these panes run with: a socket and a dictation

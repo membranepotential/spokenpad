@@ -370,7 +370,10 @@ that is not a gap; for CJK input it is, and `attach` is the answer there.
   `VimLeavePre` with `v:exitreason` at `restart`, and then the process
   exits. Neovim starts a new server for a UI that handles its `restart`
   event, which the pane does not, so that server is left running without a
-  window, on the pane's `--listen` socket. Before 0.12 there is no
+  window, on the pane's `--listen` socket. It has not run its `--cmd`, so it
+  does not carry the marker yet; the next key-down finds spokenpad's `--cmd`
+  on its command line (`v:argv`), gives it a second to show a UI, stops it
+  and opens a new pane. Before 0.12 there is no
   `v:exitreason` and no `:restart`, and the notice needs `v:dying` alone. In attach mode the daemon cannot tell `:q` in an editor it did not
   start from that editor dying, so there quitting the editor never cancels
   a recording.

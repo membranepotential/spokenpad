@@ -78,6 +78,11 @@ const SETUP_TIMEOUT: Duration = Duration::from_secs(5);
 /// state at `close`, which a detaching daemon waits this long for.
 const INDICATOR_TIMEOUT: Duration = Duration::from_millis(250);
 const CONNECT_POLL: Duration = Duration::from_millis(25);
+/// How long an editor that is spokenpad's by its command line alone is given
+/// to show a UI before it counts as invisible. A terminal attaches to the
+/// editor `spokenpad editor` starts within milliseconds; what `:restart`
+/// leaves behind in a pane never gets one.
+const UI_GRACE: Duration = Duration::from_secs(1);
 /// Ownership probes retried when the peer closes the connection unanswered.
 const PROBE_ATTEMPTS: usize = 3;
 /// How long a call on an attached editor is waited for while Neovim holds it
@@ -102,9 +107,10 @@ const BUNDLED_INIT: &str = include_str!("../../lua/dictation_init.lua");
 
 /// Everything an attaching session needs to know about an editor answering on
 /// the dictation socket: who owns it, whether its startup has finished, which
-/// buffer — if any — a previous session pinned in it, and the buffer of the
+/// buffer — if any — a previous session pinned in it, the buffer of the
 /// file it was started on, which is what an editor opened with
-/// `spokenpad editor` holds before any daemon has pinned anything.
+/// `spokenpad editor` holds before any daemon has pinned anything, and the
+/// command line it was started with, which it has before it runs any of it.
 const OWNERSHIP_QUERY: &str = r#"
 local marker = vim.g.spokenpad_owner
 local ready = vim.g.spokenpad_startup_ready
@@ -129,6 +135,7 @@ return {
   buf and vim.api.nvim_buf_get_name(buf) or vim.NIL,
   startup or vim.NIL,
   startup_name or vim.NIL,
+  vim.v.argv,
 }
 "#;
 
@@ -738,14 +745,31 @@ impl NvimSession {
         // other side, for a marker file that was lost or replaced.
         let owned = expected_marker.is_some() && expected_marker == ownership.marker;
         let adoptable = self.adoptable_buffer(ownership.pinned.as_ref())?;
-        ensure!(
-            owned || adoptable.is_some(),
-            "refusing unrelated nvim socket {}",
-            self.config.socket_path.display()
-        );
+        let unrelated = || {
+            anyhow!(
+                "refusing unrelated nvim socket {}",
+                self.config.socket_path.display()
+            )
+        };
         if self.config.mode == Mode::Pane && !has_ui(&mut client)? {
+            // What `:restart` leaves on the socket waits for a UI before it
+            // runs its `--cmd`, so it is spokenpad's by its command line
+            // only. So is `spokenpad editor` for the moment before its
+            // terminal attaches, which it then does within milliseconds.
+            let invisible = owned
+                || adoptable.is_some()
+                || (expected_marker
+                    .as_deref()
+                    .is_some_and(|marker| ownership.started_with(marker))
+                    && !gains_ui(&mut client, deadline(UI_GRACE))?);
+            if !invisible {
+                return Err(unrelated());
+            }
             self.stop_invisible(client)?;
             return Ok(false);
+        }
+        if !(owned || adoptable.is_some()) {
+            return Err(unrelated());
         }
         // An editor spokenpad started that nothing has pinned yet — one the
         // user opened with `spokenpad editor` — is adopted on the file it was
@@ -786,12 +810,13 @@ impl NvimSession {
     /// nobody sees it. In pane mode every editor spokenpad started is drawn
     /// by a pane, so one with no UI is invisible: what `:restart` leaves
     /// behind (Neovim 0.12 starts a new server with the same arguments,
-    /// which waits for a UI the pane never gives it), or the editor of a pane
-    /// a crashed daemon took with it. It has had no window to be typed into,
-    /// so it holds nothing to lose. An editor the user is starting with
-    /// `spokenpad editor` is never one: its terminal UI attaches before the
-    /// `--cmd` that makes it spokenpad's runs
-    /// (docs/experiments/2026-09-23-editor-marker-before-ui.md).
+    /// which waits for a UI the pane never gives it, and has not run its
+    /// `--cmd` meanwhile), or the editor of a pane a crashed daemon took
+    /// with it. It has had no window to be typed into, so it holds nothing
+    /// to lose. An editor the user is starting with `spokenpad editor` is
+    /// never one: its terminal UI attaches before it runs the `--cmd`
+    /// (docs/experiments/2026-09-23-editor-marker-before-ui.md), and within
+    /// `UI_GRACE` of when it listens.
     fn stop_invisible(&self, mut client: RpcClient) -> Result<()> {
         log::info!(
             "stopping the editor on {}: no window shows it (left behind by `:restart`?)",
@@ -1107,6 +1132,20 @@ struct Ownership {
     pinned: Option<Pinned>,
     /// The buffer of the file the editor was started on, if still loaded.
     startup: Option<Pinned>,
+    /// `v:argv`: the editor's command line, set before it runs any of it.
+    argv: Vec<String>,
+}
+
+impl Ownership {
+    /// Whether the editor was started with the `--cmd` that sets `marker`,
+    /// whether or not it has run it yet. A server waiting for its first UI
+    /// has not: what `:restart` leaves behind in a pane.
+    fn started_with(&self, marker: &str) -> bool {
+        let owner = owner_command(marker);
+        self.argv
+            .windows(2)
+            .any(|pair| pair[0] == "--cmd" && pair[1] == owner)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1165,7 +1204,7 @@ pub enum CopyOutcome {
 fn parse_ownership(value: &Value) -> Result<Ownership> {
     let fields = value
         .as_array()
-        .filter(|fields| fields.len() == 6)
+        .filter(|fields| fields.len() == 7)
         .context("nvim ownership query returned malformed data")?;
     let text = |field: &Value| -> Result<Option<String>> {
         if field.is_nil() {
@@ -1190,11 +1229,23 @@ fn parse_ownership(value: &Value) -> Result<Ownership> {
             }),
         })
     };
+    let argv = fields[6]
+        .as_array()
+        .context("nvim ownership query returned no command line")?
+        .iter()
+        .map(|argument| {
+            argument
+                .as_str()
+                .map(str::to_owned)
+                .context("nvim ownership query returned a non-string argument")
+        })
+        .collect::<Result<_>>()?;
     Ok(Ownership {
         marker: text(&fields[0])?,
         ready: text(&fields[1])?,
         pinned: buffer(&fields[2], &fields[3])?,
         startup: buffer(&fields[4], &fields[5])?,
+        argv,
     })
 }
 
@@ -1243,7 +1294,7 @@ pub(crate) fn editor_argv(
     }
     argv.extend([
         "--cmd".to_owned(),
-        format!("let g:spokenpad_owner = '{marker}'"),
+        owner_command(marker),
         "--listen".to_owned(),
         utf8_path(&config.socket_path)?.to_owned(),
         "-c".to_owned(),
@@ -1253,6 +1304,11 @@ pub(crate) fn editor_argv(
         utf8_path(target)?.to_owned(),
     ]);
     Ok(argv)
+}
+
+/// The `--cmd` that makes an editor spokenpad's.
+fn owner_command(marker: &str) -> String {
+    format!("let g:spokenpad_owner = '{marker}'")
 }
 
 /// A colourscheme name as a Lua string literal.
@@ -1575,6 +1631,17 @@ fn remove_stale_socket(path: &Path) -> Result<()> {
         path.display()
     );
     fs::remove_file(path).with_context(|| format!("remove stale socket {}", path.display()))
+}
+
+/// Whether a UI attaches to the editor before `deadline`.
+fn gains_ui(client: &mut RpcClient, deadline: Instant) -> Result<bool> {
+    while Instant::now() < deadline {
+        std::thread::sleep(CONNECT_POLL);
+        if has_ui(client)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Whether any UI is attached to the editor: a pane, or a terminal.

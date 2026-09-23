@@ -2715,3 +2715,27 @@ made sure.
 - Tests: `a_window_tick_that_is_not_the_workers_window_is_refused`,
   `only_a_tail_longer_than_a_window_is_read_a_window_at_a_time`,
   `the_replay_ticks_as_the_daemon_does`.
+
+## What `:restart` leaves is spokenpad's by its command line (2026-09-23)
+
+The open question of the entry above, probed with a real `:restart` in an
+embedded pane on Neovim 0.12.5 (`a_restart_is_not_the_users_close` in
+`tests/pane_render.rs`): the server `:restart` leaves on the pane's socket
+has no UI and no `g:spokenpad_owner`, because it waits for its first UI
+before it runs `--cmd`. The next press refused it as an unrelated editor
+("refusing unrelated nvim socket"), so no pane opened, and the server ran
+until the user killed it. "An editor no pane shows is stopped" held
+only for editors that had run their `--cmd`.
+
+- Chosen: the ownership query also returns `v:argv`, which Neovim sets
+  before it runs any of it. In pane mode an editor with no UI whose command
+  line carries `--cmd` with this socket's marker is stopped as an invisible
+  editor of spokenpad's, once it has shown no UI for `UI_GRACE` (1 s).
+- Why the grace: `spokenpad editor` runs the same `--cmd`, and its server
+  listens a moment before its terminal attaches. One that gains a UI within
+  the grace is refused as before and keeps running.
+- Rejected: telling the two apart by their command line. Both carry
+  `--embed`: the terminal UI starts its server with it.
+- Tests: the extended `a_restart_is_not_the_users_close` (the server is
+  stopped and a new pane opens), `a_server_waiting_for_its_first_ui_is_stopped_in_pane_mode`,
+  `a_starting_editor_that_gains_a_ui_is_not_stopped`.
