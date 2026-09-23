@@ -32,7 +32,7 @@ source=("$pkgname-$pkgver.tar.gz::https://github.com/membranepotential/spokenpad
         "https://github.com/k2-fsa/sherpa-onnx/releases/download/v$_sherpa/sherpa-onnx-v$_sherpa-linux-x64-static-lib.tar.bz2")
 noextract=("sherpa-onnx-v$_sherpa-linux-x64-static-lib.tar.bz2")
 # The first sum is the tag tarball's, set with `updpkgsums` after tagging.
-sha256sums=('SKIP'
+sha256sums=('3a6e5da4eb1397532e0663036f102c6b956474448af59061c90eec1e2f9482a1'
             'e1fdc5b67530e15741ef897fa5ffff297056f3bf0c6d829a27af9225a4c4b5a6')
 
 prepare() {

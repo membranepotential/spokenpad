@@ -7,11 +7,10 @@ Hold a key (or latch with shift), speak, and text appears in an nvim that
 never takes focus. Fully local, CPU-only. 1.0.0 public since 2026-09-23.
 
 ## Now
-- Nothing running. User runs the v1.0.0 package. main c3e5c31 (pushed)
-  fixes a pane hang (clipboard owner not answering); not released yet.
+- Nothing running. v1.0.1 released (clipboard hang fix); user to upgrade
+  with `git pull && makepkg -si` in packaging/aur.
 
 ## Next
-0. User decides: release v1.0.1 with the clipboard fix.
 1. User live check still open: pane_layout "tiled", hover focus.
 2. Open: main is 0.5 WER points better at a forced 10 s preview window
    (trailing pad?); corpus replay with the silence timeout; the lost-chunk
@@ -21,6 +20,8 @@ never takes focus. Fully local, CPU-only. 1.0.0 public since 2026-09-23.
 - 09-23 release: CLI connect under a deadline, shell/process.rs; history
   audited (no audio/corpus/key ever committed); repo public; v1.0.0 tagged,
   package built from the tag tarball, sha256 pinned; GitHub release.
+  v1.0.1: bounded clipboard provider (a hung owner, likely greenclip,
+  froze the pane).
 - 09-23 review round: preview drawn where its text lands (inline; two
   scroll bugs fixed); `spokenpad daemon`, bare prints help; Ctrl+V pastes
   in Insert; no desktop notifications; recording.max_total_size "5 GB";
