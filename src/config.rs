@@ -1426,12 +1426,12 @@ mod tests {
 
     #[test]
     fn the_panes_font_is_a_family_name_and_a_point_size() {
-        // Alacritty's default, so an unconfigured pane matches an
-        // unconfigured Alacritty.
-        assert_eq!(Config::default().nvim.font_size.get(), 11.25);
+        assert_eq!(Config::default().nvim.font_size.get(), 12.0);
         // A whole number is a size too, as it is in Alacritty's `font.size`.
-        let whole = Config::parse("[nvim]\nfont_size = 12", None).unwrap();
-        assert_eq!(whole.nvim.font_size.get(), 12.0);
+        let whole = Config::parse("[nvim]\nfont_size = 14", None).unwrap();
+        assert_eq!(whole.nvim.font_size.get(), 14.0);
+        let fraction = Config::parse("[nvim]\nfont_size = 11.25", None).unwrap();
+        assert_eq!(fraction.nvim.font_size.get(), 11.25);
         for bad in [
             "font_family = ''",
             "font_family = 'monospace:bold'",

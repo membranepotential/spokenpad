@@ -172,8 +172,8 @@ and no keystrokes are synthesised ([nvim-window.md](nvim-window.md)).
 - `colorscheme` and `transparent`: with `init = "bundled"` a theme is loaded
   from its own plugin directory, at its defaults; `transparent` lets the
   background show through as a configured theme usually does.
-- `pane_dimensions`, `pane_layout`, `font_family`, `font_size`: the pane's
-  size in cells, its layout, and its font, sized in points exactly as
+- `pane_dimensions`, `pane_layout`, `font_family`, `font_size` (12): the
+  pane's size in cells, its layout, and its font, sized in points exactly as
   Alacritty's `font.size` and scaled by the X resource `Xft.dpi` (96 dpi
   when unset). A tiled pane is allowed only where it is proven never to take
   the focus: i3, sway, Openbox and KWin. The pane opens beside the pointer,

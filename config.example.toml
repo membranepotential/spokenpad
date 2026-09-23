@@ -137,7 +137,7 @@ pane_layout = "floating"
 # Pane mode: the font, as a fontconfig family name, and its size in points,
 # as Alacritty's font.size (scaled by the X resource Xft.dpi).
 font_family = "monospace"
-font_size = 11.25
+font_size = 12.0
 
 # Where Neovim listens for the daemon.
 # socket_path = "$XDG_RUNTIME_DIR/spokenpad-nvim.sock"

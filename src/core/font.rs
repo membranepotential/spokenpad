@@ -33,9 +33,9 @@ use std::fmt;
 pub struct Points(f32);
 
 impl Points {
-    /// Alacritty's own default, so an unconfigured pane matches an
-    /// unconfigured Alacritty.
-    pub const DEFAULT: Self = Self(11.25);
+    /// 12 pt, a little larger than Alacritty's own default of 11.25: the
+    /// pane is read at a glance beside the window the user types in.
+    pub const DEFAULT: Self = Self(12.0);
     /// Anything smaller cannot be read and anything larger does not fit a
     /// usable number of cells on any screen.
     const MIN: f32 = 1.0;
@@ -685,7 +685,7 @@ mod tests {
 
     #[test]
     fn a_point_size_is_one_alacritty_would_accept_and_a_person_could_read() {
-        assert_eq!(Points::DEFAULT.get(), 11.25);
+        assert_eq!(Points::DEFAULT.get(), 12.0);
         for good in [1.0, 11.25, 12.0, 200.0] {
             assert!(Points::try_from(good).is_ok(), "{good}");
         }

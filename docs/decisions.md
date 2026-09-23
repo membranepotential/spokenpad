@@ -2860,3 +2860,16 @@ pastes; in Normal mode it stays Visual block.
   `ctrl_v_pastes_where_a_terminal_would_and_is_visual_block_elsewhere`
   (`tests/pane_render.rs`: a real pane on Xvfb and i3, XTEST keys, a stub
   clipboard provider).
+
+## The pane's font is 12 pt by default (2026-09-23)
+
+`nvim.font_size` defaulted to Alacritty's own 11.25 pt, so that an
+unconfigured pane matched an unconfigured Alacritty. The user asked for 12.
+
+- Chosen: `Points::DEFAULT` is 12 pt. Matching Alacritty's default bought
+  nothing in practice: a user who changed Alacritty's size writes the same
+  number here, and one who did not reads the pane at a glance beside the
+  window they type in, where a slightly larger face helps.
+- The default 72x20 cells grow with the font, to about 730x410 pixels at
+  96 dpi instead of about 656x368; the arithmetic that turns points into
+  cells is unchanged.

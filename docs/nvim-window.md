@@ -548,9 +548,10 @@ cramped, and this is the small margin that was asked for.
 `tests/pane_hidpi.rs` checks the window against Alacritty's with
 `padding = { x = 4, y = 4 }` at 96, 144 and 192 dpi.
 
-The default is 656x368 pixels at the default 11.25 pt and 96 dpi, about a
-third of a 1920x1080 screen each way, what the pane was before it was sized
-in cells; at 192 dpi it is the same third of a 3840x2160 screen. Pure
+The default, 72x20 cells at 12 pt and 96 dpi, is about 730x410 pixels with
+a monospace font's cells of about 10x20, a little over a third of a
+1920x1080 screen each way; at 192 dpi it is the same share of a 3840x2160
+screen. Pure
 functions in `core/geometry.rs` decide the monitor and the corner:
 `pick_output` takes the monitor under the pointer, else the primary, else the
 first, and `placement` puts the frame beside the pointer on it, as above. The monitors come from RandR and the

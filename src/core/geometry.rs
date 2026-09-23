@@ -57,9 +57,9 @@ pub struct Dimensions {
 }
 
 impl Dimensions {
-    /// 72 by 20: at the default 11.25 pt, 648x360 pixels at 96 dpi, which is
-    /// about a third of a 1920x1080 screen each way, as the pane used to be;
-    /// and the same third of a 3840x2160 screen at 192 dpi.
+    /// 72 by 20: at the default 12 pt and 96 dpi, with cells of about 10x20
+    /// pixels, about 720x400, a little over a third of a 1920x1080 screen
+    /// each way; and the same share of a 3840x2160 screen at 192 dpi.
     pub const DEFAULT: Self = Self {
         columns: NonZeroU16::new(72).expect("not zero"),
         lines: NonZeroU16::new(20).expect("not zero"),
