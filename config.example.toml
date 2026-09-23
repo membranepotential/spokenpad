@@ -108,9 +108,11 @@ replacements = {}
 trailing_space = false
 
 [nvim]
-# "pane": spokenpad opens its own window, which never takes the focus (X11,
-# or Wayland through Xwayland). "attach": you run `spokenpad editor` in a
-# terminal, on any desktop.
+# "pane": spokenpad opens and draws its own window with Neovim in it, and
+# that window never takes the focus. Needs X11, or Xwayland on Wayland.
+# "attach": spokenpad opens no window. You run `spokenpad editor` in a
+# terminal of your choice, and the daemon writes into that Neovim. Use it on
+# Wayland without Xwayland, or to keep the editor in your own terminal.
 mode = "pane"
 
 # The Neovim command.
@@ -123,7 +125,8 @@ editor = ["nvim"]
 # A colourscheme to load, for example with init = "bundled".
 # colorscheme = "tokyonight-moon"
 
-# Let the terminal's background show through the colourscheme's.
+# With init = "bundled" and a colorscheme: keep the background the window
+# already has instead of the colourscheme's, as a transparent theme does.
 transparent = true
 
 # Pane mode: the window's size in character cells, as Alacritty's
