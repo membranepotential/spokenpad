@@ -12,11 +12,13 @@ never takes focus. Fully local, CPU-only. Next milestone: public release.
   reload i3 (float rule gone). WirePlumber restarted (walkthrough rig had
   made it drop the card).
 - Audit fixes integrated on branch worktree-agent-a9b96c4bbc0b525ee
-  (fb45b3c: lanes 1+2, wiring, both reviews' findings fixed; CI fixes:
-  CAP_SYS_NICE for sway/kwin, pane_render serialized). CI on ci/integration
-  running. Corpus agent: core guard for full Commits windows, corpus.rs =
-  daemon ticks, dev subset main vs branch, :restart leftover server.
-  Then: merge, deploy, migrate the user's config (_seconds keys).
+  (cbca2c0; both reviews fixed; CI fixes: CAP_SYS_NICE, pane_render
+  serialized + root-proof). CI on ci/integration running.
+- Corpus check (experiments/2026-09-23-decode-fixes-corpus.md): defaults
+  unchanged on 181 captures, but the P1-001 window-commit path loses speech
+  when it fires (forced 10 s: 57 lost words vs 4). Agent redesigning: VAD
+  over the whole tail, normal chunk settling, no window cuts; measured at
+  default, 20 s, 10 s. Then merge, deploy, migrate the user's config.
 - User 09-23: licence A (declare eSpeak NG GPL-3.0+ from sherpa's TTS).
 
 ## Next
