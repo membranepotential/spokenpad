@@ -357,8 +357,9 @@ fn transcribe(config: &Config, wav: &Path, out: Option<&Path>, from: f64) -> Res
         samples.len() as f64 / f64::from(rate),
         wav.display()
     );
-    let raw = pipeline.decode(&samples, || false, |_, _| {})?;
-    let text = Processor::new(&config.text)?.process(&raw);
+    let mut segments = Vec::new();
+    pipeline.decode(&samples, || false, |text, _| segments.push(text))?;
+    let text = Processor::new(&config.text)?.process(&segments.join(" "));
     if text.trim().is_empty() {
         log::warn!("recording decoded to no text");
     }

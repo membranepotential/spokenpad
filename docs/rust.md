@@ -60,7 +60,9 @@ the root because both sides read it. Nothing under `core/` may import
   `Released` for its final decode or `Cancelled` — so a later capture cannot
   revive an earlier one and no pair of booleans can disagree. Preview output
   never enters the commit path, and a cancel stops decoding without unwriting
-  text the recognizer already produced.
+  text the recognizer already produced. Committed text leaves it only through
+  the commit callback, one `Commit` per segment; `spokenpad transcribe` and
+  `examples/eval.rs` join those texts with a space themselves.
 - `shell/inference.rs` wraps the official sherpa Rust API. The safe wrapper,
   FFI bindings, and native runtime are pinned together; startup checks the
   native version. Both models explicitly use the CPU provider. The merge,

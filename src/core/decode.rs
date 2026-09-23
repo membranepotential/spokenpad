@@ -146,17 +146,18 @@ impl<R: Recognizer, S: Segmenter> Pipeline<R, S> {
     }
     /// Decodes `samples` whole, segment by segment, handing each segment's
     /// text to `on_segment` with where its speech ends in `samples`: what
-    /// that text covers, and so how far a commit of it reaches. `abandoned`
-    /// is asked before each decode, and once it says so nothing more is
-    /// decoded; a decode that ends while it says so is thrown away.
+    /// that text covers, and so how far a commit of it reaches. That is the
+    /// only output; a caller that wants one transcript joins the texts.
+    /// `abandoned` is asked before each decode, and once it says so nothing
+    /// more is decoded; a decode that ends while it says so is thrown away.
     pub fn decode(
         &mut self,
         samples: &[f32],
         abandoned: impl Fn() -> bool,
         mut on_segment: impl FnMut(String, usize),
-    ) -> Result<String> {
+    ) -> Result<()> {
         if samples.is_empty() || abandoned() {
-            return Ok(String::new());
+            return Ok(());
         }
         let segments = self.split(samples)?.segments;
         // Silence is not decoded: `split` only returns nothing when the VAD
@@ -167,25 +168,25 @@ impl<R: Recognizer, S: Segmenter> Pipeline<R, S> {
                 "VAD found no speech in {:.1}s; nothing to decode",
                 Frames(samples.len()).seconds(crate::config::REQUIRED_SAMPLE_RATE)
             );
-            return Ok(String::new());
+            return Ok(());
         }
-        let mut texts = vec![];
+        let mut any_text = false;
         for s in &segments {
             if abandoned() {
-                return Ok(texts.join(" "));
+                return Ok(());
             }
             let text = self.transcribe_speech(&samples[s.window.clone()])?;
             log::debug!("chunk {:?}: {} characters", s.window, text.chars().count());
             if abandoned() {
-                return Ok(texts.join(" "));
+                return Ok(());
             }
             if !text.trim().is_empty() {
-                texts.push(text.clone());
+                any_text = true;
                 on_segment(text, s.speech_end);
             }
         }
         // Explicit failure recovery exception: don't let segmentation erase speech.
-        if texts.is_empty() && segments.len() > 1 && !abandoned() {
+        if !any_text && segments.len() > 1 && !abandoned() {
             log::warn!(
                 "all {} chunks empty; retrying the complete remainder",
                 segments.len()
@@ -194,11 +195,10 @@ impl<R: Recognizer, S: Segmenter> Pipeline<R, S> {
                 .recognizer
                 .transcribe(samples, TrailingSilence::Padded)?;
             if !text.trim().is_empty() && !abandoned() {
-                texts.push(text.clone());
                 on_segment(text, samples.len());
             }
         }
-        Ok(texts.join(" "))
+        Ok(())
     }
 }
 
@@ -391,16 +391,16 @@ impl<R: Recognizer, S: Segmenter> Worker<R, S> {
             heard,
         }
     }
-    /// Decodes what is left of the capture. `samples` is the audio still held,
-    /// beginning at `start`; everything before it has been committed and is
-    /// gone.
+    /// Decodes what is left of the capture, and returns how many samples that
+    /// was. `samples` is the audio still held, beginning at `start`;
+    /// everything before it has been committed and is gone.
     pub fn finish(
         &mut self,
         samples: &[f32],
         start: Frames,
         utterance: &Arc<Utterance>,
         mut commit: impl FnMut(Commit),
-    ) -> Result<(String, usize)> {
+    ) -> Result<usize> {
         self.begin(utterance);
         ensure!(
             start <= self.progress.through,
@@ -425,7 +425,7 @@ impl<R: Recognizer, S: Segmenter> Worker<R, S> {
             },
         );
         self.progress = Progress::default();
-        Ok((result?, remainder.len()))
+        result.map(|()| remainder.len())
     }
 }
 
@@ -497,7 +497,7 @@ mod tests {
             vec![Frames(4), Frames(8)]
         );
         u.release();
-        let (_, tail) = w
+        let tail = w
             .finish(&samples, Frames::ZERO, &u, |c| commits.push(c))
             .unwrap();
         assert_eq!(tail, 2);
@@ -571,13 +571,11 @@ mod tests {
             "recovered".into(),
         ];
         let mut commits = vec![];
-        let (text, _) = w
-            .finish(&[1.; 8], Frames::ZERO, &Utterance::new(1), |c| {
-                commits.push(c)
-            })
-            .unwrap();
-        assert_eq!(text, "recovered");
-        assert_eq!(commits.len(), 1);
+        w.finish(&[1.; 8], Frames::ZERO, &Utterance::new(1), |c| {
+            commits.push((c.text, c.through))
+        })
+        .unwrap();
+        assert_eq!(commits, [("recovered".to_owned(), Frames(8))]);
         assert_eq!(w.pipeline.recognizer.calls.len(), 5);
     }
     /// Parakeet's failure mode: nothing with the trailing silence, `bare`
@@ -635,15 +633,16 @@ mod tests {
             [Padded, Bare, Padded, Bare, Padded]
         );
         u.release();
-        let (text, tail) = w
+        let tail = w
             .finish(&samples, Frames::ZERO, &u, |c| commits.push(c))
             .unwrap();
+        assert_eq!(tail, 2);
+        assert_eq!(commits.len(), 3);
         assert_eq!(
-            (text.as_str(), tail),
-            ("words", 2),
+            (commits[2].text.as_str(), commits[2].through),
+            ("words", Frames(10)),
             "the release path retries"
         );
-        assert_eq!(commits.len(), 3);
     }
     #[test]
     fn speech_empty_either_way_commits_nothing_and_still_advances() {
@@ -658,10 +657,10 @@ mod tests {
         assert!(commits.iter().all(|c| c.text.is_empty()));
         assert_eq!(w.progress.through, Frames(8));
         let fresh = Utterance::new(2);
-        let (text, _) = w
-            .finish(&[1.; 8], Frames::ZERO, &fresh, |_| panic!())
-            .unwrap();
-        assert_eq!(text, "");
+        w.finish(&[1.; 8], Frames::ZERO, &fresh, |_| {
+            panic!("committed nothing")
+        })
+        .unwrap();
         assert_eq!(
             w.pipeline.recognizer.calls[5..],
             [Padded, Bare, Padded, Bare, Padded],
@@ -698,10 +697,10 @@ mod tests {
             "an empty preview, and the committed offset stays where it was"
         );
         u.release();
-        let (text, tail) = w
+        let tail = w
             .finish(&[0.; 10], Frames::ZERO, &u, |_| panic!("committed silence"))
             .unwrap();
-        assert_eq!((text.as_str(), tail), ("", 10));
+        assert_eq!(tail, 10);
         assert!(
             w.pipeline.recognizer.calls.is_empty(),
             "no chunk decode and no whole-buffer retry: {:?}",
@@ -931,11 +930,10 @@ mod tests {
             recognizer: Cancel(u.clone()),
             segmenter: Quarters,
         };
-        assert_eq!(
-            p.decode(&[1.; 8], || u.cancelled(), |_, _| panic!("late commit"))
-                .unwrap(),
-            ""
-        );
+        p.decode(&[1.; 8], || u.cancelled(), |_, _| panic!("late commit"))
+            .unwrap();
+        // The recognizer ran, and the cancel arrived during its decode.
+        assert_eq!(p.recognizer.0.lifecycle(), Lifecycle::Cancelled);
     }
 }
 

@@ -124,9 +124,11 @@ enum ResultEvent {
         result: Result<Option<Preview>>,
         elapsed: Duration,
     },
+    /// A capture's last decode is over; its text went out as `Commit`s.
     Finished {
         id: UtteranceId,
-        result: Result<(String, usize)>,
+        /// How many samples the last decode had.
+        result: Result<usize>,
         elapsed: Duration,
     },
 }
@@ -677,13 +679,12 @@ impl<B: InputBackend> Loop<'_, B> {
                 elapsed,
             } => {
                 match &result {
-                    Ok((text, frames)) => {
+                    Ok(frames) => {
                         log::info!(
-                            "decoded the last {:.1}s in {:.2}s (utterance {}, {} characters)",
+                            "decoded the last {:.1}s in {:.2}s (utterance {})",
                             Frames(*frames).seconds(self.rate),
                             elapsed.as_secs_f64(),
-                            id.0,
-                            text.chars().count()
+                            id.0
                         );
                     }
                     Err(e) => log::error!("decode failed for utterance {}: {e:#}", id.0),

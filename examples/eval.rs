@@ -246,7 +246,9 @@ fn main() -> Result<()> {
                 .recognizer
                 .transcribe(&samples, TrailingSilence::Padded)?
         } else {
-            pipeline.decode(&samples, || false, |_, _| {})?
+            let mut segments = Vec::new();
+            pipeline.decode(&samples, || false, |text, _| segments.push(text))?;
+            segments.join(" ")
         };
         let decode_seconds = started.elapsed().as_secs_f64();
         let hypothesis = processor.process(&raw);

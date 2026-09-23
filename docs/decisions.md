@@ -3094,3 +3094,24 @@ preview.
   `a_socket_file_with_no_listener_is_reported_as_stale`,
   `socket_path_must_be_nul_free_and_short_enough` (moved), and the
   same-user and same-process tests.
+
+## Committed text has one way out of the decoder (2026-09-23)
+
+- Problem: `Pipeline::decode` handed each segment's text to its callback
+  and also collected a copy of every one into a joined transcript it
+  returned. The daemon sent that transcript in `ResultEvent::Finished`
+  only to log its length; the text had already reached the editor as
+  `Commit`s.
+- Changed: `Pipeline::decode` returns nothing and `Worker::finish` returns
+  only how many samples it decoded; the all-chunks-empty retry keys on
+  whether any segment had text. `Finished` carries that count, and its log
+  line no longer counts characters. `spokenpad transcribe` and
+  `examples/eval.rs` collect the callback's texts and join them with a
+  space, as `decode` did. The empty-chunk retry, the whole-remainder
+  retry and cancellation are unchanged.
+- Tests: `progressive_release_never_redecodes_committed_speech`,
+  `empty_chunks_retry_whole_buffer` and
+  `empty_speech_is_decoded_again_without_trailing_silence` (now reading
+  the commits), `a_final_decode_commits_each_segment_at_its_own_end`,
+  `cancel_during_decode_suppresses_result`, the recovery tests in
+  `engine.rs`, and `tests/e2e.rs`. The eval WER is unchanged (13.7%).

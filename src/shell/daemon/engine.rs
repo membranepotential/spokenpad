@@ -196,7 +196,7 @@ fn decode_recording<R: Recognizer, S: Segmenter>(
     window: usize,
     rate: u32,
     mut commit: impl FnMut(Commit),
-) -> Result<(String, usize)> {
+) -> Result<usize> {
     let mut reader = CaptureReader::open(path, rate)?;
     let skipped = reader.skip(from.get());
     if skipped < from.get() {
