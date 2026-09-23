@@ -1,6 +1,6 @@
 [package]
 name = "spokenpad"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2024"
 # The newest of the dependencies' own minimums (icu, libloading, time), and
 # what the code needs itself: let chains in edition 2024, `as_chunks`.

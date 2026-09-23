@@ -1,6 +1,6 @@
 pkgbase = spokenpad
 	pkgdesc = Local push-to-talk dictation into a Neovim window that never takes focus
-	pkgver = 1.0.0
+	pkgver = 1.0.1
 	pkgrel = 1
 	url = https://github.com/membranepotential/spokenpad
 	install = spokenpad.install
@@ -23,9 +23,9 @@ pkgbase = spokenpad
 	depends = xclip
 	optdepends = wl-clipboard: copying out of `spokenpad editor` in a Wayland terminal (nvim.mode = "attach")
 	noextract = sherpa-onnx-v1.13.8-linux-x64-static-lib.tar.bz2
-	source = spokenpad-1.0.0.tar.gz::https://github.com/membranepotential/spokenpad/archive/refs/tags/v1.0.0.tar.gz
+	source = spokenpad-1.0.1.tar.gz::https://github.com/membranepotential/spokenpad/archive/refs/tags/v1.0.1.tar.gz
 	source = https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.8/sherpa-onnx-v1.13.8-linux-x64-static-lib.tar.bz2
-	sha256sums = 7ad4c49692c8d1576377c8b18e353fdf288398e020e6aac0fee0117112a96b02
+	sha256sums = SKIP
 	sha256sums = e1fdc5b67530e15741ef897fa5ffff297056f3bf0c6d829a27af9225a4c4b5a6
 
 pkgname = spokenpad

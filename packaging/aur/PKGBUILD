@@ -1,6 +1,6 @@
 # Maintainer: membranepotential
 pkgname=spokenpad
-pkgver=1.0.0
+pkgver=1.0.1
 pkgrel=1
 _sherpa=1.13.8
 pkgdesc="Local push-to-talk dictation into a Neovim window that never takes focus"
@@ -32,7 +32,7 @@ source=("$pkgname-$pkgver.tar.gz::https://github.com/membranepotential/spokenpad
         "https://github.com/k2-fsa/sherpa-onnx/releases/download/v$_sherpa/sherpa-onnx-v$_sherpa-linux-x64-static-lib.tar.bz2")
 noextract=("sherpa-onnx-v$_sherpa-linux-x64-static-lib.tar.bz2")
 # The first sum is the tag tarball's, set with `updpkgsums` after tagging.
-sha256sums=('7ad4c49692c8d1576377c8b18e353fdf288398e020e6aac0fee0117112a96b02'
+sha256sums=('SKIP'
             'e1fdc5b67530e15741ef897fa5ffff297056f3bf0c6d829a27af9225a4c4b5a6')
 
 prepare() {
