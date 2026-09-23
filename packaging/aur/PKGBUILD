@@ -31,8 +31,8 @@ install=spokenpad.install
 source=("$pkgname-$pkgver.tar.gz::https://github.com/membranepotential/spokenpad/archive/refs/tags/v$pkgver.tar.gz"
         "https://github.com/k2-fsa/sherpa-onnx/releases/download/v$_sherpa/sherpa-onnx-v$_sherpa-linux-x64-static-lib.tar.bz2")
 noextract=("sherpa-onnx-v$_sherpa-linux-x64-static-lib.tar.bz2")
-# The first sum is set with `updpkgsums` once v$pkgver is tagged.
-sha256sums=('SKIP'
+# The first sum is the tag tarball's, set with `updpkgsums` after tagging.
+sha256sums=('7ad4c49692c8d1576377c8b18e353fdf288398e020e6aac0fee0117112a96b02'
             'e1fdc5b67530e15741ef897fa5ffff297056f3bf0c6d829a27af9225a4c4b5a6')
 
 prepare() {

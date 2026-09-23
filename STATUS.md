@@ -1,26 +1,24 @@
 # spokenpad — local push-to-talk dictation for Linux
 
-_reconciled: 2026-09-23 @ b10f24f (review-round worktrees merged)_
+_reconciled: 2026-09-23 @ v1.0.0_
 
 ## Goal
 Hold a key (or latch with shift), speak, and text appears in an nvim that
-never takes focus. Fully local, CPU-only. Next milestone: public release.
+never takes focus. Fully local, CPU-only. 1.0.0 public since 2026-09-23.
 
 ## Now
-- Nothing running. main 22f98d0 deployed; not pushed.
+- Nothing running. v1.0.0 released (repo public 09-23); main deployed.
 
 ## Next
-1. User live check passed 09-23 (preview, Ctrl+V). Still open: "tiled",
-   hover focus.
-2. Follow-ups from the simplification pass: CLI connect has no deadline
-   (a hung daemon blocks `spokenpad start`); run/run_bounded out of wm.rs.
-3. User decides: make the repo public, tag v0.2.0 (then updpkgsums,
-   .SRCINFO, AUR publish). Pushing is allowed (user 09-22).
-4. Open: main is 0.5 WER points better at a forced 10 s preview window
+1. User live check still open: pane_layout "tiled", hover focus.
+2. Open: main is 0.5 WER points better at a forced 10 s preview window
    (trailing pad?); corpus replay with the silence timeout; the lost-chunk
    guard (experiments/2026-09-22-empty-chunk-flips.md).
 
 ## Done
+- 09-23 release: CLI connect under a deadline, shell/process.rs; history
+  audited (no audio/corpus/key ever committed); repo public; v1.0.0 tagged,
+  package built from the tag tarball, sha256 pinned; GitHub release.
 - 09-23 review round: preview drawn where its text lands (inline; two
   scroll bugs fixed); `spokenpad daemon`, bare prints help; Ctrl+V pastes
   in Insert; no desktop notifications; recording.max_total_size "5 GB";
