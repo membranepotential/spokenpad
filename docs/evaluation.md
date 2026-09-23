@@ -214,7 +214,7 @@ It is frozen on purpose: `samples[].path` is relative to the dataset and each
 sample carries the wav's `sha256`, which the harness verifies before it
 decodes. The recordings are **copied** out of the daemon's recovery directory,
 never referenced in place — that directory is pruned by
-`recording.max_total_bytes`, so an index pointing at it would shrink without
+`recording.max_total_size`, so an index pointing at it would shrink without
 warning and the benchmark would quietly change under you. An absolute `path`
 still works, for an index that deliberately points at recordings where they
 were made.

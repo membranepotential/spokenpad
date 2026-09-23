@@ -162,7 +162,7 @@ impl CaptureRecorder {
         let kept = unfinished.iter().map(|u| u.path.clone()).collect();
         let pruning = Pruning {
             directory: config.dir.clone(),
-            max_total_bytes: config.max_total_bytes,
+            max_total_bytes: config.max_total_size.bytes(),
             open: Arc::new(Mutex::new(HashSet::new())),
             kept: Arc::new(Mutex::new(kept)),
         };
@@ -814,6 +814,7 @@ fn open_capture(directory: &Path) -> Result<(PathBuf, File)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ByteSize;
     use std::{
         os::unix::fs::symlink,
         sync::{Condvar, mpsc as test_mpsc},
@@ -825,7 +826,7 @@ mod tests {
         Recording {
             enabled: true,
             dir: directory,
-            max_total_bytes: 1024 * 1024,
+            max_total_size: ByteSize::try_from(1024 * 1024).unwrap(),
         }
     }
 
@@ -973,7 +974,7 @@ mod tests {
         let recording = Recording {
             enabled: true,
             dir: directory.clone(),
-            max_total_bytes: 1,
+            max_total_size: ByteSize::try_from(1).unwrap(),
         };
         let first = CaptureRecorder::new(recording.clone(), 16_000);
         let record = |recorder: &CaptureRecorder| {
@@ -1174,7 +1175,7 @@ mod tests {
             Recording {
                 enabled: false,
                 dir: temporary.path().join("absent"),
-                max_total_bytes: 1,
+                max_total_size: ByteSize::try_from(1).unwrap(),
             },
             16_000,
         );
@@ -1196,7 +1197,7 @@ mod tests {
             Recording {
                 enabled: true,
                 dir: directory.clone(),
-                max_total_bytes: 1,
+                max_total_size: ByteSize::try_from(1).unwrap(),
             },
             16_000,
         );

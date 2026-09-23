@@ -2927,3 +2927,23 @@ The user does not want them, "even as a fallback".
   CLI's `Recovery` pair, which is now the one closure that starts the
   socket.
 
+## The recordings' budget is a size with a unit (2026-09-23)
+
+`recording.max_total_bytes = 5368709120` asked the user to count bytes.
+They wanted to write `"5 GB"`.
+
+- Chosen: the key is `recording.max_total_size`, and it takes a
+  `config::ByteSize`: a string of a number and a unit (B, kB, MB, GB, TB in
+  powers of 1000; KiB, MiB, GiB, TiB in powers of 1024; any case, a space
+  optional, decimals allowed) or a whole number of bytes. The type holds a
+  `NonZeroU64`, so the "must be positive" check is gone; a fraction of a
+  byte is dropped. A string without a unit is refused, so `"5"` is not
+  taken for five bytes when five gigabytes were meant.
+- Renamed rather than widened: `max_total_bytes = "5 GB"` names the wrong
+  unit. The old key is refused with what to write, the same byte count
+  included, as the durations renamed to seconds are.
+- The default is 5 GB, 5,000,000,000 bytes, instead of 5 GiB: the unit
+  most people read. At 32,000 bytes a second (16 kHz mono, 16-bit, as
+  `shell::recorder` writes it) that is about 43 hours of speech, against
+  46 before.
+

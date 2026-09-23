@@ -43,8 +43,10 @@ enabled = true
 # of its own: spokenpad prunes it.
 # dir = "~/.local/state/spokenpad/audio"
 
-# Space the WAVs may take before the oldest are pruned: 5 GiB, about 46 hours.
-max_total_bytes = 5368709120
+# Space the WAVs may take before the oldest are pruned: 5 GB is about 43
+# hours of speech. A number with a unit (kB, MB, GB, TB, or KiB, MiB, GiB,
+# TiB), or a plain number of bytes.
+max_total_size = "5 GB"
 
 [asr]
 # The speech model: a NeMo transducer. The default is Parakeet TDT 0.6B v3,

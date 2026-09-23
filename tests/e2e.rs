@@ -22,7 +22,7 @@
 
 use anyhow::Result;
 use spokenpad::{
-    config::{Audio, Config, Mode, Recording, Vad},
+    config::{Audio, ByteSize, Config, Mode, Recording, Vad},
     core::{
         control::{Received, Request},
         decode::{
@@ -2357,7 +2357,7 @@ fn replay_into_capture(minutes: usize, dropping: bool) -> usize {
         Recording {
             enabled: false,
             dir: "/unused".into(),
-            max_total_bytes: 1,
+            max_total_size: ByteSize::try_from(1).unwrap(),
         },
     );
     let mut worker = Worker::new(Pipeline {

@@ -1,10 +1,12 @@
 //! TOML is validated once, before starting threads or loading native code.
 use crate::core::{font::Points, geometry::Dimensions};
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use serde::Deserialize;
 use std::{
     env,
+    num::NonZeroU64,
     path::{Path, PathBuf},
+    str::FromStr,
     time::Duration,
 };
 
@@ -290,15 +292,126 @@ pub fn control_socket() -> PathBuf {
 pub struct Recording {
     pub enabled: bool,
     pub dir: PathBuf,
-    pub max_total_bytes: u64,
+    /// The space the recordings may take before the oldest are pruned.
+    pub max_total_size: ByteSize,
 }
 impl Default for Recording {
     fn default() -> Self {
         Self {
             enabled: true,
             dir: state_dir().join("audio"),
-            max_total_bytes: 5 * 1024_u64.pow(3),
+            max_total_size: ByteSize(NonZeroU64::new(5_000_000_000).expect("not zero")),
         }
+    }
+}
+
+/// A number of bytes above zero, as a size setting holds it.
+///
+/// Written as a whole number of bytes, or as a string of a number and a
+/// unit: `B`, `kB`, `MB`, `GB`, `TB` in powers of 1000 and `KiB`, `MiB`,
+/// `GiB`, `TiB` in powers of 1024, the unit in any case, a space before it
+/// optional, the number with or without decimals (`"5 GB"`, `"1.5GiB"`). A
+/// fraction of a byte is dropped. A string without a unit is refused, so
+/// `"5"` cannot be taken for five bytes when five gigabytes were meant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ByteSize(NonZeroU64);
+
+impl ByteSize {
+    pub fn bytes(self) -> u64 {
+        self.0.get()
+    }
+}
+
+/// What a [`ByteSize`] may be written as, for the error that refuses one.
+const SIZE_FORMS: &str = "a size such as \"5 GB\" or \"500 MiB\" (units B, kB, MB, GB, TB in powers of 1000, KiB, MiB, GiB, TiB in powers of 1024), or a whole number of bytes, above 0";
+
+impl TryFrom<u64> for ByteSize {
+    type Error = anyhow::Error;
+
+    fn try_from(bytes: u64) -> Result<Self> {
+        NonZeroU64::new(bytes)
+            .map(Self)
+            .with_context(|| format!("0 bytes is not {SIZE_FORMS}"))
+    }
+}
+
+impl FromStr for ByteSize {
+    type Err = anyhow::Error;
+
+    fn from_str(written: &str) -> Result<Self> {
+        let invalid = || anyhow!("{written:?} is not {SIZE_FORMS}");
+        let text = written.trim();
+        let end = text
+            .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+            .ok_or_else(invalid)?;
+        let (number, unit) = text.split_at(end);
+        let multiplier: u128 = match unit.trim_start().to_ascii_lowercase().as_str() {
+            "b" => 1,
+            "kb" => 1000,
+            "mb" => 1000_u128.pow(2),
+            "gb" => 1000_u128.pow(3),
+            "tb" => 1000_u128.pow(4),
+            "kib" => 1 << 10,
+            "mib" => 1 << 20,
+            "gib" => 1 << 30,
+            "tib" => 1 << 40,
+            _ => return Err(invalid()),
+        };
+        let (whole, fraction) = number.split_once('.').unwrap_or((number, ""));
+        // At most 20 digits before the point and 18 after keeps every
+        // product below in a u128: anything longer is past u64 anyway, or
+        // finer than a byte.
+        if (whole.is_empty() && fraction.is_empty())
+            || whole.len() > 20
+            || fraction.len() > 18
+            || !fraction.bytes().all(|b| b.is_ascii_digit())
+        {
+            return Err(invalid());
+        }
+        let digits: u128 = format!("{whole}{fraction}")
+            .parse()
+            .map_err(|_| invalid())?;
+        let bytes = digits * multiplier / 10_u128.pow(fraction.len() as u32);
+        u64::try_from(bytes)
+            .ok()
+            .and_then(NonZeroU64::new)
+            .map(Self)
+            .ok_or_else(invalid)
+    }
+}
+
+impl<'de> Deserialize<'de> for ByteSize {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::{Error, Unexpected, Visitor};
+
+        struct Written;
+        impl Visitor<'_> for Written {
+            type Value = ByteSize;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str(SIZE_FORMS)
+            }
+
+            fn visit_i64<E: Error>(self, bytes: i64) -> Result<ByteSize, E> {
+                u64::try_from(bytes)
+                    .ok()
+                    .and_then(|bytes| ByteSize::try_from(bytes).ok())
+                    .ok_or_else(|| E::invalid_value(Unexpected::Signed(bytes), &self))
+            }
+
+            fn visit_u64<E: Error>(self, bytes: u64) -> Result<ByteSize, E> {
+                ByteSize::try_from(bytes)
+                    .map_err(|_| E::invalid_value(Unexpected::Unsigned(bytes), &self))
+            }
+
+            fn visit_str<E: Error>(self, written: &str) -> Result<ByteSize, E> {
+                written
+                    .parse()
+                    .map_err(|_| E::invalid_value(Unexpected::Str(written), &self))
+            }
+        }
+
+        deserializer.deserialize_any(Written)
     }
 }
 
@@ -692,10 +805,6 @@ impl Config {
         ] {
             seconds(name, value, 0.0..=LONGEST_SECONDS)?;
         }
-        ensure!(
-            self.recording.max_total_bytes > 0,
-            "recording.max_total_bytes must be positive"
-        );
         // The editor's argv starts with the program; a first word starting
         // with `-` would be an option with no program to take it.
         ensure!(
@@ -899,6 +1008,9 @@ enum Gone {
     /// Renamed to the key `to` in the same section, which is in seconds;
     /// the old one was in `unit`.
     Renamed { to: &'static str, unit: Unit },
+    /// Renamed to the key `to` in the same section, which takes a
+    /// [`ByteSize`]; the old one was a number of bytes.
+    Resized { to: &'static str },
 }
 
 /// The unit a renamed key was in.
@@ -936,6 +1048,13 @@ const GONE: &[(&str, &str, Gone)] = &[
         Gone::Renamed {
             to: "postroll_seconds",
             unit: Unit::Milliseconds,
+        },
+    ),
+    (
+        "recording",
+        "max_total_bytes",
+        Gone::Resized {
+            to: "max_total_size",
         },
     ),
     (
@@ -1041,6 +1160,15 @@ fn removed(table: &toml::Table) -> Option<String> {
                 };
                 format!(
                     "{name}.{key} is now {name}.{to}: every duration is in seconds; {instead} under [{name}]"
+                )
+            }
+            Gone::Resized { to } => {
+                let same = old
+                    .as_integer()
+                    .map(|bytes| format!(", or the same number of bytes, `{to} = {bytes}`"))
+                    .unwrap_or_default();
+                format!(
+                    "{name}.{key} is now {name}.{to}, which takes a unit: write `{to} = \"5 GB\"`{same} under [{name}]"
                 )
             }
         })
@@ -1182,7 +1310,12 @@ mod tests {
             "[nvim]\neditor=['--headless']",
             "[nvim]\nmode='spawn'",
             "[nvim]\nmode=true",
-            "[recording]\nmax_total_bytes=0",
+            "[recording]\nmax_total_size=0",
+            "[recording]\nmax_total_size=-1",
+            "[recording]\nmax_total_size=5.5",
+            "[recording]\nmax_total_size='0 GB'",
+            "[recording]\nmax_total_size='5'",
+            "[recording]\nmax_total_size='5 XB'",
             "[capture]\nsilence_timeout_seconds=0.5",
             // Shorter than two preview ticks: it would end a capture the
             // user is talking into, before any tick could say so.
@@ -1314,6 +1447,10 @@ mod tests {
             ("[asr]\nlanguage='de'", "asr.language was removed"),
             ("[vad]\nenabled=false", "vad.enabled was removed"),
             ("[preview]\nenabled=true", "preview.enabled was removed"),
+            (
+                "[recording]\nmax_total_bytes=5368709120",
+                "recording.max_total_bytes is now recording.max_total_size, which takes a unit: write `max_total_size = \"5 GB\"`, or the same number of bytes, `max_total_size = 5368709120` under [recording]",
+            ),
             (
                 "[nvim]\nnotify=false",
                 "nvim.notify was removed: spokenpad sends no desktop notifications",
@@ -1465,6 +1602,62 @@ mod tests {
             assert_eq!(config.nvim.font_family.as_str(), good);
         }
     }
+    #[test]
+    fn a_size_is_bytes_or_a_number_with_a_unit() {
+        let size = |written: &str| written.parse::<ByteSize>().map(ByteSize::bytes).ok();
+        assert_eq!(size("5 GB"), Some(5_000_000_000));
+        assert_eq!(size("5GB"), Some(5_000_000_000));
+        assert_eq!(size(" 5 gb "), Some(5_000_000_000));
+        assert_eq!(size("1.5 GB"), Some(1_500_000_000));
+        assert_eq!(size("500 MiB"), Some(500 << 20));
+        assert_eq!(size("1.5 KiB"), Some(1536));
+        assert_eq!(size("2 TiB"), Some(2 << 40));
+        assert_eq!(size("3 kB"), Some(3000));
+        assert_eq!(size("3 KB"), Some(3000));
+        assert_eq!(size("7 B"), Some(7));
+        assert_eq!(size(".5 kB"), Some(500));
+        assert_eq!(
+            size("1.0001 kB"),
+            Some(1000),
+            "a fraction of a byte is dropped"
+        );
+        for bad in [
+            "",
+            "5",
+            "GB",
+            "5 XB",
+            "5 G",
+            "5 GBs",
+            "-5 GB",
+            "1.2.3 GB",
+            "0 GB",
+            "0.1 B",
+            "5 G B",
+            "20000000 TB",
+        ] {
+            assert_eq!(size(bad), None, "{bad:?}");
+        }
+
+        let configured = |toml: &str| {
+            Config::parse(&format!("[recording]\n{toml}"), None)
+                .map(|config| config.recording.max_total_size.bytes())
+        };
+        assert_eq!(
+            Config::default().recording.max_total_size.bytes(),
+            5_000_000_000
+        );
+        assert_eq!(
+            configured("max_total_size = \"5 GB\"").unwrap(),
+            5_000_000_000
+        );
+        assert_eq!(configured("max_total_size = 1048576").unwrap(), 1 << 20);
+        let error = format!("{:#}", configured("max_total_size = \"5 XB\"").unwrap_err());
+        assert!(
+            error.contains("max_total_size") && error.contains("\"5 GB\"") && error.contains("GiB"),
+            "the error names the key and the forms it takes: {error}"
+        );
+    }
+
     #[test]
     fn unset_environment_rejected() {
         assert!(expand_path(Path::new("$SPOKENPAD_UNSET_TEST_VARIABLE/foo")).is_err());

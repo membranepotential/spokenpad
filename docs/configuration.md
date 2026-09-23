@@ -16,7 +16,8 @@ it is [`config.rs`](../src/config.rs).
   `asr.family` and `asr.language` (Parakeet only), `vad.enabled` and
   `preview.enabled` (always on), `nvim.startup_timeout_seconds` (a fixed
   30 s, below), `nvim.notify` (no desktop notifications; the log says it),
-  and the durations renamed to seconds
+  `recording.max_total_bytes` (now `max_total_size`, with a unit), and the
+  durations renamed to seconds
   (`audio.preroll_ms` is now `audio.preroll_seconds`, and so on; the message
   gives the value converted). See
   [decisions.md](decisions.md#every-duration-is-in-seconds-and-its-key-says-so-2026-09-22).
@@ -76,8 +77,12 @@ it is [`config.rs`](../src/config.rs).
 - `dir` should be a directory of its own: spokenpad prunes it, deleting only
   the `capture-*.wav` files it wrote. It is created 0700; one that exists
   keeps its permissions, and the daemon warns when others can list it.
-- `max_total_bytes` (5 GiB, about 46 hours of speech) is enforced oldest
-  first, at the start and at each capture. Age is not a criterion: a
+- `max_total_size` (5 GB, about 43 hours of speech) is enforced oldest
+  first, at the start and at each capture. It takes a number with a unit,
+  `"5 GB"` or `"500 MiB"` (kB, MB, GB and TB are powers of 1000; KiB, MiB,
+  GiB and TiB powers of 1024; any case, a space optional, decimals
+  allowed), or a whole number of bytes. It was `max_total_bytes` until
+  2026-09-23; that key is refused with the value to write instead. Age is not a criterion: a
   recording is pruned because something newer needs the space. The capture
   being written, and every recording still to be transcribed, is never
   pruned.

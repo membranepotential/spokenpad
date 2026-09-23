@@ -1111,6 +1111,7 @@ fn match_device_query<I: Copy>(query: &str, devices: &[DeviceCandidate<I>]) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ByteSize;
     use std::sync::atomic::AtomicBool;
 
     fn device(index: usize, name: &str, host_api: &str) -> DeviceCandidate<usize> {
@@ -1288,7 +1289,7 @@ mod tests {
             Recording {
                 enabled: false,
                 dir: "/unused".into(),
-                max_total_bytes: 1,
+                max_total_size: ByteSize::try_from(1).unwrap(),
             },
             maximum_frames,
         );
@@ -1314,7 +1315,7 @@ mod tests {
             Recording {
                 enabled: false,
                 dir: "/unused".into(),
-                max_total_bytes: 1,
+                max_total_size: ByteSize::try_from(1).unwrap(),
             },
             10_000,
         );
@@ -1516,7 +1517,7 @@ mod tests {
             Recording {
                 enabled: true,
                 dir: temporary.path().join("audio"),
-                max_total_bytes: 1024 * 1024,
+                max_total_size: ByteSize::try_from(1024 * 1024).unwrap(),
             },
             5,
         );
