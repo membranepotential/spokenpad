@@ -3150,3 +3150,14 @@ preview.
   `shell/wm.rs` although nothing about it concerns the window manager. It
   moved to `shell/process.rs` with its tests; `shell/wm.rs` now only speaks
   the i3/sway IPC protocol. No behaviour change.
+
+## Version 1.0.0 and a public repository (2026-09-23)
+
+- The user released spokenpad as 1.0.0 (not 0.2.0, the version the
+  package was prepared for) and made the repository public. The history was
+  checked first: no recording, corpus file, `.env` or API key was ever
+  committed; the only transcripts in it are those of the five evaluation
+  clips whose references are published on purpose (eval-samples/README.md).
+- The package still builds from the tag's tarball; the tarball's sha256 is
+  pinned in the PKGBUILD in the commit after the tag, since the tag cannot
+  contain its own checksum.

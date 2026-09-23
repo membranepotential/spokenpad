@@ -1,6 +1,6 @@
 # Maintainer: membranepotential
 pkgname=spokenpad
-pkgver=0.2.0
+pkgver=1.0.0
 pkgrel=1
 _sherpa=1.13.8
 pkgdesc="Local push-to-talk dictation into a Neovim window that never takes focus"
