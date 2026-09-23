@@ -1,41 +1,39 @@
 # spokenpad — local push-to-talk dictation for Linux
 
-_reconciled: 2026-09-22 @ fd36708 (merged worktrees removed; beam-fix/ kept)_
+_reconciled: 2026-09-23 @ ef94b9e (all agent worktrees merged and removed)_
 
 ## Goal
 Hold a key (or latch with shift), speak, and text appears in an nvim that
 never takes focus. Fully local, CPU-only. Next milestone: public release.
 
 ## Now
-- main a1d4b0e+STATUS deployed 22:30 (managed mode removed, autosave, close
-  cancels, hover focus + gap, screenshot); user config migrated. User must
-  reload i3 (float rule gone). WirePlumber restarted (walkthrough rig had
-  made it drop the card).
-- Audit fixes integrated on branch worktree-agent-a9b96c4bbc0b525ee
-  (cbca2c0; both reviews fixed; CI fixes: CAP_SYS_NICE, pane_render
-  serialized + root-proof). CI on ci/integration running.
-- Corpus check (experiments/2026-09-23-decode-fixes-corpus.md): defaults
-  unchanged on 181 captures, but the P1-001 window-commit path loses speech
-  when it fires (forced 10 s: 57 lost words vs 4). Agent redesigning: VAD
-  over the whole tail, normal chunk settling, no window cuts; measured at
-  default, 20 s, 10 s. Then merge, deploy, migrate the user's config.
-- User 09-23: licence A (declare eSpeak NG GPL-3.0+ from sherpa's TTS).
+- Nothing running. main ef94b9e pushed, CI green, deployed 03:54; user
+  config migrated to `_seconds` keys (backup .bak-2026-09-23-seconds).
 
 ## Next
-1. User live check after i3 reload: pane_layout = "tiled"; hover focuses the
-   pane; :q mid-latch cancels; typing is saved.
-2. Audit + walkthrough fixes merged, reviewed, CI green.
-3. User decides: make the repo public, tag v0.2.0 (fill PKGBUILD sha256,
-   .SRCINFO), AUR publish. Pushing is allowed (user 09-22).
-4. Lost chunk: the end-of-slice close is both the one lost chunk and the
-   whole 0.35-point gain (experiments/2026-09-22-empty-chunk-flips.md).
+1. User live check: reload i3 (old float rule gone), then pane_layout
+   "tiled", hover focus, :q mid-latch cancels, typing autosaved, check's
+   microphone list.
+2. User decides: make the repo public, tag v0.2.0 (then updpkgsums,
+   .SRCINFO, AUR publish). Pushing is allowed (user 09-22).
+3. Open: main is 0.5 WER points better at a forced 10 s preview window
+   (trailing pad?); corpus replay with the silence timeout; the lost-chunk
+   guard (experiments/2026-09-22-empty-chunk-flips.md).
 
 ## Done
+- 09-22/23 pre-release: managed mode removed; autosave, :q writes; closing
+  the pane cancels its capture; pane opens >= 20 px beside the pointer,
+  hover may focus (user); audit (47 findings) all fixed incl. two P1 speech
+  losses and the daemon split; other ASR families, vad/preview.enabled
+  removed; durations in _seconds; no transcript text in logs; private dirs;
+  bounded download; CI pinned + green; package deps/licences (eSpeak NG
+  GPL declared, user choice A); README setup rewritten; screenshot; live
+  path reads the whole tail (no window cuts; corpus unchanged at default).
 - 09-22: pane never focuses by itself on i3, sway (runtime no_focus rule
   over IPC, sway found from the display), Openbox, KWin Wayland + X11; on
   top; size in cells; tiled where proven; default mode = pane; font in pt x
   Xft.dpi = Alacritty cells. Packaging: socket activation, presses taken
-  before model ready, config reload per window, PKGBUILD, CI (never run);
+  before model ready, config reload per window, PKGBUILD, CI;
   daemon never exits under the socket; waiting recordings survive restarts.
   Machine migrated 13:09 (old unit in ~/.cache/spokenpad-dev/). Corpus: dev
   subset (28 captures, ~2 min), 15 mixed-language captures flagged.
