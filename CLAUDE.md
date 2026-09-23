@@ -193,7 +193,8 @@ the daemon lock.
   imperative shell, no derived state stored, no wrapper with one caller. Every
   `unsafe` carries an accurate `SAFETY:` comment (lint is deny).
 - Docs describe the system as implemented. When you change behaviour, update
-  `README.md` ("While you dictate"), the relevant `docs/*.md`, and
+  `docs/usage.md` (and `README.md` when the short version changes), the
+  relevant `docs/*.md`, and
   `config.example.toml` comments in the same change.
 - Commits: signed, on `main`, message written to a file and passed with `-F`.
   Commit each finished unit of work without being asked, once the checks

@@ -6,6 +6,10 @@ reference behind the [project README](../README.md) and the live dashboard in
 
 ## Reading order
 
+Using spokenpad rather than working on it: **[usage.md](usage.md)** — every
+notice in the winbar, the limits, the window modes, restarts, exit codes.
+
+
 Start with **[rust.md](rust.md)** for the runtime, thread ownership, build,
 and verification. Historical measurements are labelled where retained.
 

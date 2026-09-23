@@ -825,8 +825,8 @@ declaration order of `session::Priority`, and applied in exactly one place,
 `Session::notify`: memory cap > capture incomplete > microphone unavailable >
 microphone gap > reached the time limit > stopped after silence > nearly
 silent > held too briefly > recording cancelled > preview paused, ties going
-to the newer report (README.md has the whole list, the speech model's notices
-included). The two auto-stops sit there because nothing is lost
+to the newer report ([usage.md](usage.md#the-winbar-and-its-notices) has the
+whole list, the speech model's notices included). The two auto-stops sit there because nothing is lost
 when a capture ends by itself; what the user reads instead is the microphone
 trouble that may have caused the silence. A paused preview can
 therefore never take the winbar from a microphone that dropped audio, and the
