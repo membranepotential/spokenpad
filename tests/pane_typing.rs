@@ -38,7 +38,7 @@ use spokenpad::{
     config::{Mode, Nvim},
     core::{font::Points, geometry::Dimensions, state::IndicatorPhase},
     shell::{
-        nvim::{IndicatorState, NvimSession, Want, pane_launch},
+        nvim::{IndicatorState, NvimSession, PreviewPlacement, Want, pane_launch},
         pane::{Options, Pane, Status},
     },
 };
@@ -330,7 +330,7 @@ impl Dictation {
                         ..IndicatorState::default()
                     };
                     session
-                        .set_indicator(&state)
+                        .set_indicator(&state, PreviewPlacement::NewParagraph)
                         .expect("an indicator push is only a socket write");
                     if last_append.elapsed() >= Duration::from_secs(1) {
                         pieces += 1;

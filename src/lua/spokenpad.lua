@@ -29,8 +29,6 @@ local M = {}
 local BARS = { "\u{2581}", "\u{2582}", "\u{2583}", "\u{2584}", "\u{2585}", "\u{2586}", "\u{2587}", "\u{2588}" }
 local METER_CELLS = 24
 local PREVIEW_EXTMARK = 1
-local PREVIEW_MAX_LINES = 8
-local PREVIEW_GUTTER = 2  -- breathing room so wrapped text never touches the edge
 -- Only for a winbar built before any window shows the buffer; every real one
 -- is measured against the window it is about to be set on.
 local DEFAULT_WINBAR_WIDTH = 80
@@ -53,6 +51,10 @@ M.state = {
   phase = "idle",
   level = 0.0,
   preview = "",
+  -- Where the preview's text will land, as the daemon knows it:
+  -- "continuation" when this capture already wrote text into the buffer and
+  -- the next text extends that paragraph, "new_paragraph" otherwise.
+  preview_placement = "new_paragraph",
   notice = "",
   notice_detail = "",
   latched = false,
@@ -290,57 +292,9 @@ local function render()
   M.winbar_windows = shown
 end
 
---- Word-wrap `text` to `width` display columns, keeping the last `max_lines`.
----
---- Virtual text does **not** wrap -- nvim truncates a `virt_lines` chunk at
---- the window edge -- so a preview of a long passage showed only its first
---- line and looked like it had stopped updating. Wrapping has to be done
---- here, by hand.
----
---- Measured in display columns via `strdisplaywidth`, not bytes: dictation is
---- routinely German here, and counting bytes would wrap "längeren" several
---- columns early and a CJK character several columns late.
----
---- The *tail* is kept when there is too much, for the same reason the meter
---- shows recent levels: the newest words are the ones being checked against
---- what was just said. Since progressive commit (docs/progressive-commit.md)
---- the preview is only the open tail -- at most one chunk -- so this rarely
---- has anything to cut; everything before it is already in the buffer above.
-local function wrap(text, width, max_lines)
-  if width < 8 then
-    return { text }
-  end
-  local lines, current = {}, ""
-  for word in text:gmatch("%S+") do
-    local candidate = current == "" and word or (current .. " " .. word)
-    if vim.fn.strdisplaywidth(candidate) <= width then
-      current = candidate
-    else
-      if current ~= "" then
-        lines[#lines + 1] = current
-      end
-      -- A single word wider than the window is left long rather than split
-      -- mid-word; nvim truncates it, which is the lesser evil for a preview.
-      current = word
-    end
-  end
-  if current ~= "" then
-    lines[#lines + 1] = current
-  end
-  if #lines <= max_lines then
-    return lines
-  end
-  local tail = {}
-  for i = #lines - max_lines + 1, #lines do
-    tail[#tail + 1] = lines[i]
-  end
-  tail[1] = "\u{2026} " .. tail[1]
-  return tail
-end
-
 --- Index of the last line with text on it, ignoring trailing blanks; 0 when
---- the buffer holds nothing. Both the preview and the append use this, and
---- they must agree about which paragraph the provisional text follows.
+--- the buffer holds nothing. Both the preview and the append use this, through
+--- `landing`, and they must agree about which paragraph the text follows.
 local function last_text_line(lines)
   local n = #lines
   while n > 0 and lines[n]:match("^%s*$") do
@@ -349,9 +303,157 @@ local function last_text_line(lines)
   return n
 end
 
---- The parts of a view that change when a person moves or scrolls it. Keeping
---- this snapshot lets preview updates follow a passive reader without pulling
---- the window back down after they deliberately moved away.
+--- Where text appended to `lines` now lands: the one answer the append and
+--- the preview share, so the preview is drawn exactly where its text will be.
+---
+--- `continued` is the daemon's word, never guessed from the buffer: whether
+--- this capture already wrote text into it. Trailing blank lines are ignored,
+--- so the gap between paragraphs is always exactly one blank line however the
+--- buffer got into its current shape -- an editing session in the window, a
+--- plugin adding a final newline.
+---
+--- Returns `{ line = n, kept = text }` when the text goes on line `n`, after
+--- `kept` (the line's text, which stays): a continued paragraph, or line 1 of
+--- a buffer with nothing in it, which the text replaces whole. Returns
+--- `{ below = n }` when it opens a new paragraph after line `n`, one blank
+--- line between.
+local function landing(lines, continued)
+  local last_text = last_text_line(lines)
+  if last_text == 0 then
+    return { line = 1, kept = "" }
+  elseif continued then
+    return { line = last_text, kept = lines[last_text] }
+  end
+  return { below = last_text }
+end
+
+--- What joins `first` onto `kept` on one line: a space, unless either side is
+--- empty or the line already ends in whitespace (`text.trailing_space`).
+local function separator(kept, first)
+  return (kept == "" or first == "" or kept:find("%s$")) and "" or " "
+end
+
+--- Cells `char` takes when it starts at display column `vcol`: only a tab
+--- depends on where it starts. Not `strdisplaywidth(char, vcol)` for the
+--- rest: it adds the filler cell of a double-width character at the edge of
+--- the *current* window, which need not be the one the preview is laid out
+--- for.
+local function cells(char, vcol)
+  if char == "\t" then
+    return vim.fn.strdisplaywidth(char, vcol)
+  end
+  local byte = char:byte()
+  if #char == 1 and byte >= 0x20 and byte < 0x7f then
+    return 1
+  end
+  return vim.api.nvim_strwidth(char)
+end
+
+--- Whether `char` is one of the 'breakat' characters 'linebreak' wraps after.
+--- Tested byte-wise, as nvim tests it, so no multibyte character is one.
+local function is_break(char, breakat)
+  return char ~= nil and #char == 1 and breakat:find(char, 1, true) ~= nil
+end
+
+--- `text` laid out as nvim draws the rest of a line with 'wrap' and
+--- 'linebreak' in a window `width` cells wide, when the line's text before it
+--- ends at display column `vcol` (and was all 'breakat' characters, such as
+--- blanks, when `leading`).
+---
+--- Returns `text` with every wrap 'linebreak' makes written out as spaces to
+--- the end of the row, the display column after it, and whether the line is
+--- still all 'breakat' characters there. Virtual text wraps
+--- per cell, 'linebreak' or not: a preview drawn as it is would split words
+--- where the committed text will not, and they would jump rows when it lands.
+--- Written out this way, every word of it sits where the same text in the
+--- buffer will.
+---
+--- The rules are nvim's own (`charsize_regular` in charsize.c): at a
+--- 'breakat' character followed by one that is not, outside leading blanks,
+--- the word that follows and the 'breakat' characters after it must fit on
+--- the row, or the break character is widened to the row's end. A
+--- double-width character that would start in a row's last cell starts on
+--- the next row, after a filler cell nvim draws in virtual text as it does
+--- in the buffer. 'showbreak' is off in the dictation window
+--- (`apply_chrome`), and dictated lines have no indent for 'breakindent' to
+--- repeat, so every row is `width` cells.
+local function lay_out(text, vcol, width, leading)
+  local breakat = vim.o.breakat
+  local chars = vim.fn.split(text, [[\zs]])
+  local out = {}
+  for i, char in ipairs(chars) do
+    local size = cells(char, vcol)
+    if size == 2 and vcol % width == width - 1 then
+      vcol = vcol + 1
+    end
+    local breaks = is_break(char, breakat)
+    leading = leading and breaks
+    local padding = 0
+    if breaks and not leading and chars[i + 1] and not is_break(chars[i + 1], breakat) then
+      local row_end = (math.floor(vcol / width) + 1) * width
+      local reach = vcol
+      local j = i + 1
+      while chars[j] and (j == i + 1 or is_break(chars[j], breakat) or not is_break(chars[j - 1], breakat)) do
+        reach = reach + cells(chars[j], reach)
+        if reach >= row_end then
+          padding = row_end - vcol - size
+          break
+        end
+        j = j + 1
+      end
+    end
+    out[#out + 1] = char .. string.rep(" ", padding)
+    vcol = vcol + size + padding
+  end
+  return table.concat(out), vcol, leading
+end
+
+--- The preview as it will land: the line its inline virtual text hangs on,
+--- the byte column there, and the text to draw, laid out for a window
+--- `width` cells wide and at most `height` rows high.
+---
+--- Continuing a paragraph, it follows the line's text after the separator the
+--- append will use. Opening one, it pads the line's last row, draws one row of
+--- blanks for the blank line the append puts between paragraphs, and starts
+--- the preview at the next row's first cell -- where the new line will start.
+--- Either way it is part of the last text line on screen, so nvim wraps it,
+--- counts it in `nvim_win_text_height`, and scrolls with it.
+---
+--- The cursor of a reader rests on the text's last character, before the
+--- preview, and nvim scrolls back to a cursor it cannot show. So the rows from
+--- the cursor's to the preview's last must fit in the window: a longer preview
+--- gives up its oldest words, marked by an ellipsis, and only then stops being
+--- exactly where its text will land -- that text could not be shown whole
+--- anyway.
+local function preview_layout(lines, continued, text, width, height)
+  local where = landing(lines, continued)
+  local line = where.line or where.below
+  local kept = where.kept or lines[line]
+  local _, text_end, blank = lay_out(kept, 0, width, true)
+  local function laid(words)
+    if where.below then
+      local rest = text_end % width
+      local gap = (rest == 0 and 0 or width - rest) + width
+      local drawn, drawn_end = lay_out(words, 0, width, true)
+      return string.rep(" ", gap) .. drawn, text_end + gap + drawn_end
+    end
+    return lay_out(separator(kept, words) .. words, text_end, width, blank)
+  end
+  local cursor_row = math.floor(math.max(text_end - 1, 0) / width)
+  local drawn, drawn_end = laid(text)
+  local words = vim.split(text, " ", { trimempty = true })
+  local dropped = 0
+  while math.ceil(drawn_end / width) - cursor_row > height and dropped < #words - 1 do
+    dropped = dropped + 1
+    drawn, drawn_end = laid("\u{2026} " .. table.concat(words, " ", dropped + 1))
+  end
+  return line, #kept, drawn
+end
+
+--- The parts of a view that change when a person moves or scrolls it, and the
+--- window's size. Keeping this snapshot lets preview updates follow a passive
+--- reader without pulling the window back down after they deliberately moved
+--- away.
 local function view_signature(win)
   local view
   vim.api.nvim_win_call(win, function()
@@ -364,12 +466,26 @@ local function view_signature(win)
     topfill = view.topfill,
     leftcol = view.leftcol,
     skipcol = view.skipcol,
+    height = vim.api.nvim_win_get_height(win),
+    width = vim.api.nvim_win_get_width(win),
   }
 end
 
+--- Whether the reader of a window left as `left` is still where it is now,
+--- `right`.
+---
+--- A window whose size changed has had its view moved by nvim, not by the
+--- reader: it re-fits `topline` and `skipcol` to the new height. Taking that
+--- for a reader who scrolled away stopped the preview following for good,
+--- since the end of the text was then off the screen -- a tiled pane resized
+--- because another window opened beside it lost its live preview. So across a
+--- resize only the cursor counts, which nvim leaves where it was.
 local function same_view(left, right)
-  return left.lnum == right.lnum
-    and left.col == right.col
+  local cursor = left.lnum == right.lnum and left.col == right.col
+  if left.height ~= right.height or left.width ~= right.width then
+    return cursor
+  end
+  return cursor
     and left.topline == right.topline
     and left.topfill == right.topfill
     and left.leftcol == right.leftcol
@@ -383,7 +499,7 @@ local function text_end_is_visible(win, lines, last_text)
     return false
   end
   local text = lines[row] or ""
-  return vim.fn.screenpos(win, row, #text + 1).row > 0
+  return vim.fn.screenpos(win, row, math.max(#text, 1)).row > 0
 end
 
 local function follows_preview(win, lines, last_text)
@@ -396,22 +512,19 @@ local function follows_preview(win, lines, last_text)
   return text_end_is_visible(win, lines, last_text)
 end
 
---- Scroll `win` so the end of the text, and the `rows_below` preview rows
---- hanging under it, end at the bottom of the window.
+--- Scroll `win` so that line `row`, with the preview drawn inline after its
+--- text, ends at the bottom of the window.
 ---
---- Neovim will not scroll past EOF merely because virtual lines hang below
---- it: `zb`, `zz` and CTRL-E all stop with the real final row at the bottom,
---- and `nvim_win_text_height()` does not count virtual lines below the last
---- buffer line. So the view is computed here: walk up from the last line until
---- the text and the preview fill the window, then let smoothscroll's `skipcol`
---- hide the surplus rows of that top line.
+--- Walk up from that line until the text fills the window, then let
+--- smoothscroll's `skipcol` hide the surplus rows of the top line.
+--- `nvim_win_text_height` counts inline virtual text, so the preview is part
+--- of that arithmetic like any text.
 ---
 --- The cursor goes to the end of the text for a reader, and stays where it is
 --- for someone typing in this window: in Insert or Replace mode it is where
 --- the next key lands, and moving it there onto the last character put what
 --- they typed into the middle of the last dictated word.
-local function position_at_end(win, last_text, rows_below)
-  local row = math.max(last_text, 1)
+local function position_at_end(win, row)
   local typing = win == vim.api.nvim_get_current_win()
     and vim.api.nvim_get_mode().mode:match("^[iR]") ~= nil
   local cursor = vim.api.nvim_win_get_cursor(win)
@@ -421,14 +534,13 @@ local function position_at_end(win, last_text, rows_below)
     -- when one buffer line is taller than the window, even with smoothscroll.
     vim.api.nvim_win_set_cursor(win, { row, 0 })
     vim.cmd("normal! $")
-    -- Leave one real screen row below a preview. Neovim reserves the final
-    -- window row at EOF instead of drawing the last virtual line in it, even
-    -- though the arithmetic says it fits.
-    local below = rows_below > 0 and rows_below + 1 or 0
-    local height = vim.api.nvim_win_get_height(win)
+    -- The rows text is drawn in: `nvim_win_get_height` counts the winbar as
+    -- well, and a view computed for one row more than the window shows was
+    -- scrolled by nvim at the next redraw -- which then read as a reader
+    -- who had moved away, and the preview stopped following.
+    local height = vim.fn.winheight(win)
     local function rows_from(top)
       return vim.api.nvim_win_text_height(win, { start_row = top - 1, end_row = row - 1 }).all
-        + below
     end
     local top = row
     while top > 1 and rows_from(top) < height do
@@ -445,9 +557,10 @@ local function position_at_end(win, last_text, rows_below)
   end)
 end
 
---- The preview hangs directly below the transcript with no virtual spacer, so
---- the user reads it in place rather than in a second widget. The real blank
---- line between utterances is added only when a new paragraph commits.
+--- The preview is inline virtual text on the last text line, drawn exactly
+--- where its text will be once it lands (`preview_layout`), so landing only
+--- changes its highlight. Being an extmark, it is never buffer content: it
+--- cannot be written, yanked or undone into the file.
 local function render_preview()
   if not M.buf or not vim.api.nvim_buf_is_valid(M.buf) then
     return
@@ -466,50 +579,37 @@ local function render_preview()
   end
 
   local wins = windows()
-  local width, height = 80, PREVIEW_MAX_LINES * 2 + 1
-  if wins[1] then
-    width = vim.api.nvim_win_get_width(wins[1])
-    height = vim.api.nvim_win_get_height(wins[1])
-  end
   local lines = vim.api.nvim_buf_get_lines(M.buf, 0, -1, false)
   local last_text = last_text_line(lines)
   local followers = {}
   for _, win in ipairs(wins) do
     followers[win] = follows_preview(win, lines, last_text)
   end
-  pcall(vim.api.nvim_buf_del_extmark, M.buf, M.ns, PREVIEW_EXTMARK)
 
-  -- Bound the preview to at most half the window so both its context and its
-  -- newest word remain visible after one very long wrapped paragraph.
-  local max_lines = math.max(1, math.min(PREVIEW_MAX_LINES, math.floor((height - 1) / 2)))
-  local wrapped = wrap(text, width - PREVIEW_GUTTER, max_lines)
-  local virt_lines = {}
-  local first_virtual = last_text == 0 and 2 or 1
-  for index = first_virtual, #wrapped do
-    local line = wrapped[index]
-    virt_lines[#virt_lines + 1] = { { line, "SpokenpadPreview" } }
+  -- An extmark belongs to the buffer, not to a window, so the first window
+  -- showing it decides the layout; a second one of another width shows the
+  -- same words, wrapped for the first.
+  local width, height = 80, math.huge
+  if wins[1] then
+    width = vim.api.nvim_win_get_width(wins[1]) - vim.fn.getwininfo(wins[1])[1].textoff
+    height = vim.fn.winheight(wins[1])
   end
-
-  -- On an empty buffer a virtual line above line 1 is clipped by a viewport
-  -- whose topline is already line 1. Put the first preview row over the empty
-  -- buffer line instead; it is still an extmark decoration and therefore can
-  -- never enter the file, a yank, or undo history. Remaining rows hang below.
-  local anchor = math.max(last_text - 1, 0)
-  local options = {
+  local line, col, drawn = preview_layout(
+    lines, M.state.preview_placement == "continuation", text, math.max(width, 1), height
+  )
+  pcall(vim.api.nvim_buf_set_extmark, M.buf, M.ns, line - 1, col, {
     id = PREVIEW_EXTMARK,
-    virt_lines = virt_lines,
-    virt_lines_above = false,
-  }
-  if last_text == 0 then
-    options.virt_text = { { wrapped[1], "SpokenpadPreview" } }
-    options.virt_text_pos = "overlay"
-  end
-  pcall(vim.api.nvim_buf_set_extmark, M.buf, M.ns, anchor, 0, options)
+    virt_text = { { drawn, "SpokenpadPreview" } },
+    virt_text_pos = "inline",
+    -- Typing at the end of that line puts the typed text before the preview,
+    -- which is where it is when the append adds the dictated text after it.
+    right_gravity = true,
+  })
 
   M.preview_views = {}
   for _, win in ipairs(wins) do
     if followers[win] then
-      position_at_end(win, last_text, last_text == 0 and 0 or #wrapped)
+      position_at_end(win, line)
       M.preview_views[win] = view_signature(win)
     else
       -- A deliberate move remains sticky for the rest of this preview. The
@@ -546,8 +646,11 @@ local function apply_chrome()
     vim.api.nvim_set_option_value("wrap", true, opts)
     vim.api.nvim_set_option_value("linebreak", true, opts)
     vim.api.nvim_set_option_value("smoothscroll", true, opts)
+    -- The preview is laid out for rows as wide as the window (`lay_out`);
+    -- "NONE" empties the window's own value of this global-local option.
+    vim.api.nvim_set_option_value("showbreak", "NONE", opts)
     -- `position_at_end` scrolls the text's last line up to make room for the
-    -- preview hanging below it; a `scrolloff` would scroll it straight back.
+    -- preview drawn after it; a `scrolloff` would scroll it straight back.
     vim.api.nvim_set_option_value("scrolloff", 0, opts)
     vim.api.nvim_set_option_value("number", false, opts)
     vim.api.nvim_set_option_value("relativenumber", false, opts)
@@ -638,6 +741,20 @@ function M.setup(buf, dedicated)
       render()
     end,
   })
+  -- The preview is laid out for its window's width and height, and the
+  -- daemon sends it again only when it changes: a resized window, such as a
+  -- tiled pane beside a window that just opened, lays it out again now.
+  vim.api.nvim_create_autocmd("WinResized", {
+    group = group,
+    callback = function()
+      for _, win in ipairs(vim.v.event.windows) do
+        if vim.api.nvim_win_is_valid(win) and vim.api.nvim_win_get_buf(win) == M.buf then
+          render_preview()
+          return
+        end
+      end
+    end,
+  })
   -- The dictation file is a scratch pad the user never has to save: a
   -- change in Normal mode is written at once, one in Insert mode once the
   -- typing pauses, and leaving Insert mode writes at once too, so an editor
@@ -714,10 +831,6 @@ local function transactional_append(text, continued)
 
   local old_lines = vim.api.nvim_buf_get_lines(M.buf, 0, -1, false)
   local old_modified = vim.bo[M.buf].modified
-  -- Trailing blank lines are ignored when appending, so the gap between
-  -- utterances is always exactly one blank line however the buffer got into
-  -- its current shape -- an editing session in the window, a plugin adding a
-  -- final newline. Without this the separation drifts and never recovers.
   local last_text = last_text_line(old_lines)
   local followers = {}
   for _, win in ipairs(windows()) do
@@ -726,18 +839,16 @@ local function transactional_append(text, continued)
   -- Paragraph separation, not a running wall of text: one blank line between
   -- utterances, and none at the very top of a fresh file. `continued` instead
   -- extends the last line, so the segments of one utterance read as the one
-  -- sentence-stream they are.
+  -- sentence-stream they are. `landing` decides it, for the preview as well.
+  local where = landing(old_lines, continued)
   local addition = literal_lines(text)
-  local from = last_text
-  if continued and last_text > 0 then
-    from = last_text - 1
-    -- No second space after one the last commit already ends in
-    -- (`text.trailing_space`).
-    local previous = old_lines[last_text]
-    local separator = (addition[1] == "" or previous:find("%s$")) and "" or " "
-    addition[1] = previous .. separator .. addition[1]
-  elseif last_text > 0 then
+  local from
+  if where.below then
+    from = where.below
     table.insert(addition, 1, "")
+  else
+    from = where.line - 1
+    addition[1] = where.kept .. separator(where.kept, addition[1]) .. addition[1]
   end
 
   vim.api.nvim_buf_set_lines(M.buf, from, -1, false, addition)
@@ -758,15 +869,16 @@ local function transactional_append(text, continued)
   -- Follow the text only for a reader who was already at the end. Someone who
   -- scrolled up to re-read or edit an earlier passage keeps their place --
   -- yanking the cursor away mid-edit is exactly the kind of interruption this
-  -- window exists to avoid.
+  -- window exists to avoid. The preview goes first: it is the text that just
+  -- landed, and the view is measured without it.
+  M.state.preview = ""
+  render_preview()
   local last = vim.api.nvim_buf_line_count(M.buf)
   for _, win in ipairs(windows()) do
     if followers[win] then
-      position_at_end(win, last, 0)
+      position_at_end(win, last)
     end
   end
-  M.state.preview = ""
-  render_preview()
   return last
 end
 
@@ -796,6 +908,7 @@ end
 function M.set_state(update)
   local phase_changed = update.phase ~= nil and update.phase ~= M.state.phase
   local preview_before = M.state.preview
+  local placement_before = M.state.preview_placement
   if update.phase ~= nil then
     M.state.phase = update.phase
   end
@@ -812,6 +925,9 @@ function M.set_state(update)
   end
   if update.preview ~= nil then
     M.state.preview = update.preview
+  end
+  if update.preview_placement ~= nil then
+    M.state.preview_placement = update.preview_placement
   end
   -- The empty string is how the daemon says "no notice"; it sends one on every
   -- push, and clears it on the next key press. Nothing here expires it.
@@ -842,7 +958,10 @@ function M.set_state(update)
   -- Compared, not merely present: the daemon pushes the whole indicator state
   -- ten times a second, and rebuilding the preview extmark on every level
   -- sample would scroll the window under a reader for nothing.
-  if phase_changed or M.state.preview ~= preview_before then
+  if phase_changed
+    or M.state.preview ~= preview_before
+    or M.state.preview_placement ~= placement_before
+  then
     render_preview()
   end
 end

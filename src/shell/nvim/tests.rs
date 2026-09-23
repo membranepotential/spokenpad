@@ -778,17 +778,20 @@ fn headless_preview_is_inline_virtual_and_buffer_local() {
     let (mut session, path, _editor) = dictating(&config);
     attach_ui(&mut session);
 
-    session.set_indicator(&recording("draft words")).unwrap();
+    session
+        .set_indicator(&recording("draft words"), PreviewPlacement::NewParagraph)
+        .unwrap();
     lua(
         &mut session,
         r#"
 local buf = Spokenpad.buf
 local marks = vim.api.nvim_buf_get_extmarks(buf, Spokenpad.ns, 0, -1, { details = true })
 assert(#marks == 1, "preview must use exactly one extmark")
-local details = marks[1][4]
-assert(details.virt_lines == nil, "short empty-buffer preview added a virtual spacer")
-assert(details.virt_text[1][1] == "draft words", "preview must overlay the empty buffer row")
-assert(details.virt_text_pos == "overlay", "empty-buffer preview is not inline")
+local row, col, details = marks[1][2], marks[1][3], marks[1][4]
+assert(row == 0 and col == 0, "an empty buffer's preview is not at the start of line 1")
+assert(details.virt_lines == nil, "the preview hangs virtual lines")
+assert(details.virt_text[1][1] == "draft words", "an empty buffer's preview has no blank row")
+assert(details.virt_text_pos == "inline", "the preview is not inline")
 assert(vim.deep_equal(vim.api.nvim_buf_get_lines(buf, 0, -1, false), { "" }))
 
 vim.cmd("redraw!")
@@ -849,7 +852,9 @@ return true
         "return vim.api.nvim_exec2('messages', { output = true }).output",
     );
     assert_eq!(messages.as_str(), Some(""), "successful write was noisy");
-    reloaded.set_indicator(&recording("next draft")).unwrap();
+    reloaded
+        .set_indicator(&recording("next draft"), PreviewPlacement::NewParagraph)
+        .unwrap();
     lua(
         &mut reloaded,
         r#"
@@ -857,10 +862,12 @@ local marks = vim.api.nvim_buf_get_extmarks(
   Spokenpad.buf, Spokenpad.ns, 0, -1, { details = true }
 )
 assert(#marks == 1, "preview after committed text must use exactly one extmark")
-local details = marks[1][4]
-assert(#details.virt_lines == 1, "preview after committed text has a virtual spacer")
-assert(details.virt_lines[1][1][1] == "next draft", "preview text must be first")
-assert(details.virt_lines_above == false, "non-empty preview must follow committed text")
+local row, col, details = marks[1][2], marks[1][3], marks[1][4]
+assert(row == 0 and col == #"committed", "a new paragraph's preview is not after the text")
+assert(details.virt_text_pos == "inline", "the preview is not inline")
+-- The rest of the row "committed" is on, a blank row, then the preview.
+local drawn = details.virt_text[1][1]
+assert(drawn == string.rep(" ", 40 - #"committed" + 40) .. "next draft", vim.inspect(drawn))
 assert(vim.deep_equal(
   vim.api.nvim_buf_get_lines(Spokenpad.buf, 0, -1, false), { "committed" }
 ))
@@ -891,9 +898,10 @@ return true
 "#,
     );
     reloaded
-        .set_indicator(&recording(
-            "growing preview keeps its newest tailmarker visible",
-        ))
+        .set_indicator(
+            &recording("growing preview keeps its newest tailmarker visible"),
+            PreviewPlacement::Continuation,
+        )
         .unwrap();
     lua(
         &mut reloaded,
@@ -942,6 +950,192 @@ return true
     );
 }
 
+/// Every cell of the 40x10 screen, one line per row.
+fn screen(session: &mut NvimSession) -> String {
+    let rows = lua(
+        session,
+        r#"
+vim.cmd("redraw!")
+local rows = {}
+for row = 1, vim.o.lines do
+  local line = ""
+  for col = 1, vim.o.columns do
+    line = line .. vim.fn.screenstring(row, col)
+  end
+  rows[#rows + 1] = line
+end
+return table.concat(rows, "\n")
+"#,
+    );
+    rows.as_str().expect("the screen as text").to_owned()
+}
+
+/// The preview is drawn exactly where its text lands: a preview, then the
+/// append of the same text, leaves every cell of the screen as it was, and
+/// only the highlight changes. Cases: an empty buffer (no blank row), a new
+/// paragraph (one blank row), a continued line with the space the append
+/// adds and without one where the line already ends in a space, and the
+/// wrapping 'linebreak' does that virtual text does not do by itself: a word
+/// that would end in the last column followed by a blank, breaks after
+/// punctuation, a word longer than a row, and double-width characters.
+#[test]
+fn the_preview_is_drawn_exactly_where_its_text_lands() {
+    if !nvim_or_skip() {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let (mut session, path, _editor) = dictating(&headless(directory.path()));
+    attach_ui(&mut session);
+    use PreviewPlacement::{Continuation, NewParagraph};
+    let cases: &[(&[&str], &str, PreviewPlacement)] = &[
+        (&[], "first words of a fresh file", NewParagraph),
+        (&["committed text"], "a new paragraph", NewParagraph),
+        (&["committed text"], "continues it", Continuation),
+        (&["ends in a space "], "and goes on", Continuation),
+        (
+            &["0123456789"],
+            "the-word-that-ends-in-column-40 and more after it",
+            Continuation,
+        ),
+        (
+            &["a line of thirty-three cells, ok."],
+            "then well-known words, e.g. co-op/and/or, wrap after punctuation too",
+            Continuation,
+        ),
+        (
+            &[],
+            "a supercalifragilisticexpialidocious-and-still-more-letters-than-a-row word",
+            NewParagraph,
+        ),
+        (
+            &["東京"],
+            "大阪 名古屋 京都 札幌 福岡 神戸 横浜 仙台 広島 金沢 長崎 那覇",
+            Continuation,
+        ),
+        // "広" would start in the last cell, so it starts the next row after
+        // a filler cell; the 35 x's then end one cell short of the edge only
+        // when that cell is counted, and move to the row after.
+        (
+            &["committed"],
+            "a東京大阪名古屋京都札幌福岡神戸横浜仙台広島 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx end",
+            NewParagraph,
+        ),
+    ];
+    for (committed, text, placement) in cases {
+        let label = format!("{committed:?} then {text:?} ({placement:?})");
+        lua(
+            &mut session,
+            "vim.api.nvim_buf_set_lines(Spokenpad.buf, 0, -1, false, {}) return true",
+        );
+        for line in *committed {
+            session.append(line, false).unwrap();
+        }
+        let bare = screen(&mut session);
+        session.set_indicator(&recording(text), *placement).unwrap();
+        let previewed = screen(&mut session);
+        let file = fs::read_to_string(&path).unwrap();
+        assert!(
+            !file.contains(text),
+            "{label}: the preview reached the file"
+        );
+        session
+            .append(text, *placement == PreviewPlacement::Continuation)
+            .unwrap();
+        let landed = screen(&mut session);
+        assert_ne!(bare, previewed, "{label}: no preview drawn\n{bare}");
+        assert_eq!(
+            previewed, landed,
+            "{label}: the text did not land where its preview was"
+        );
+        let marks = lua(
+            &mut session,
+            "return #vim.api.nvim_buf_get_extmarks(Spokenpad.buf, Spokenpad.ns, 0, -1, {})",
+        );
+        assert_eq!(
+            marks.as_u64(),
+            Some(0),
+            "{label}: the landed preview stayed"
+        );
+    }
+}
+
+/// A window resized under a preview -- a tiled pane when a window opens
+/// beside it -- has its view moved by nvim, not by the reader, and the
+/// preview keeps following. Taken for a reader who scrolled away, the resize
+/// stopped the preview following, with the end of the text off the screen.
+#[test]
+fn a_resized_window_keeps_following_the_preview() {
+    if !nvim_or_skip() {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let (mut session, _, _editor) = dictating(&headless(directory.path()));
+    attach_ui(&mut session);
+    let words = |prefix: &str, count: usize| {
+        (0..count)
+            .map(|index| format!("{prefix}{index}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    session.append(&words("said", 40), false).unwrap();
+    lua(&mut session, "vim.o.cmdheight = 3 return true");
+    session
+        .set_indicator(
+            &recording(&(words("tail", 12) + " first")),
+            PreviewPlacement::Continuation,
+        )
+        .unwrap();
+    let moved = lua(
+        &mut session,
+        r#"
+vim.cmd("redraw!")
+local before = vim.fn.winsaveview()
+vim.o.cmdheight = 1
+vim.cmd("redraw!")
+local after = vim.fn.winsaveview()
+return before.topline ~= after.topline or before.skipcol ~= after.skipcol
+"#,
+    );
+    assert_eq!(
+        moved.as_bool(),
+        Some(true),
+        "the resize left the view alone"
+    );
+    session
+        .set_indicator(
+            &recording(&(words("tail", 14) + " second")),
+            PreviewPlacement::Continuation,
+        )
+        .unwrap();
+    let shown = screen(&mut session);
+    assert!(
+        shown.contains("second"),
+        "the preview stopped following:\n{shown}"
+    );
+}
+
+/// The daemon sends a preview again only when it changes, and the
+/// transcribing phase holds one for a second or more: a window resized under
+/// it lays it out again itself, for its new width.
+#[test]
+fn a_resized_window_lays_the_preview_out_again() {
+    if !nvim_or_skip() {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let (mut session, _, _editor) = dictating(&headless(directory.path()));
+    set_columns(&mut session, 40);
+    session.append("committed text", false).unwrap();
+    let text = "a preview that wraps at other words in thirty columns than in forty";
+    session
+        .set_indicator(&recording(text), PreviewPlacement::Continuation)
+        .unwrap();
+    set_columns(&mut session, 30);
+    let previewed = screen(&mut session);
+    session.append(text, true).unwrap();
+    assert_eq!(previewed, screen(&mut session));
+}
+
 #[test]
 fn an_idle_phase_deletes_the_preview_and_a_level_push_leaves_the_buffer_alone() {
     if !nvim_or_skip() {
@@ -951,7 +1145,10 @@ fn an_idle_phase_deletes_the_preview_and_a_level_push_leaves_the_buffer_alone() 
     let (mut session, _, _editor) = dictating(&headless(directory.path()));
     session.append("committed", false).unwrap();
     session
-        .set_indicator(&recording("provisional tail"))
+        .set_indicator(
+            &recording("provisional tail"),
+            PreviewPlacement::NewParagraph,
+        )
         .unwrap();
     let marks = lua(
         &mut session,
@@ -968,7 +1165,9 @@ fn an_idle_phase_deletes_the_preview_and_a_level_push_leaves_the_buffer_alone() 
     for step in 0..5 {
         let mut state = recording("provisional tail");
         state.level = f64::from(step) / 10.0;
-        session.set_indicator(&state).unwrap();
+        session
+            .set_indicator(&state, PreviewPlacement::NewParagraph)
+            .unwrap();
     }
     let after = lua(
         &mut session,
@@ -979,7 +1178,9 @@ fn an_idle_phase_deletes_the_preview_and_a_level_push_leaves_the_buffer_alone() 
         "a level-only push changed the buffer or the view"
     );
 
-    session.set_indicator(&IndicatorState::default()).unwrap();
+    session
+        .set_indicator(&IndicatorState::default(), PreviewPlacement::NewParagraph)
+        .unwrap();
     let marks = lua(
         &mut session,
         "return #vim.api.nvim_buf_get_extmarks(Spokenpad.buf, Spokenpad.ns, 0, -1, {})",
@@ -1003,7 +1204,10 @@ fn re_pinning_mid_recording_moves_the_preview_to_the_new_buffer() {
     let directory = tempfile::tempdir().unwrap();
     let (mut session, _, _editor) = dictating(&headless(directory.path()));
     session
-        .set_indicator(&recording("half a sentence"))
+        .set_indicator(
+            &recording("half a sentence"),
+            PreviewPlacement::NewParagraph,
+        )
         .unwrap();
 
     let marks = lua(
@@ -1027,7 +1231,10 @@ return {
 
     // And an unchanged push after the re-pin leaves it exactly there.
     session
-        .set_indicator(&recording("half a sentence"))
+        .set_indicator(
+            &recording("half a sentence"),
+            PreviewPlacement::NewParagraph,
+        )
         .unwrap();
     let after = lua(
         &mut session,
@@ -1066,7 +1273,9 @@ fn a_notice_is_winbar_text_in_every_phase_and_never_the_preview() {
     // narrow window fits one is
     // `a_long_notice_keeps_the_phase_label_and_its_headline_in_a_narrow_window`.
     set_columns(&mut session, 120);
-    session.set_indicator(&idle).unwrap();
+    session
+        .set_indicator(&idle, PreviewPlacement::NewParagraph)
+        .unwrap();
     let bar = rendered_winbar(&mut session);
     assert!(
         bar.contains(held.headline.as_ref()) && bar.contains(held.detail.as_ref()),
@@ -1074,7 +1283,9 @@ fn a_notice_is_winbar_text_in_every_phase_and_never_the_preview() {
     );
 
     idle.notice = None;
-    session.set_indicator(&idle).unwrap();
+    session
+        .set_indicator(&idle, PreviewPlacement::NewParagraph)
+        .unwrap();
     let bar = rendered_winbar(&mut session);
     assert!(bar.contains("spokenpad"), "the idle winbar is gone: {bar}");
     assert!(
@@ -1084,7 +1295,9 @@ fn a_notice_is_winbar_text_in_every_phase_and_never_the_preview() {
 
     let mut live = recording("provisional tail");
     live.notice = Some(gap.clone());
-    session.set_indicator(&live).unwrap();
+    session
+        .set_indicator(&live, PreviewPlacement::NewParagraph)
+        .unwrap();
     let bar = winbar(&mut session);
     assert!(
         bar.contains("REC") && bar.contains(gap.headline.as_ref()),
@@ -1150,7 +1363,9 @@ fn a_long_notice_keeps_the_phase_label_and_its_headline_in_a_narrow_window() {
 
     set_columns(&mut session, 40);
     for state in [&capped, &idle] {
-        session.set_indicator(state).unwrap();
+        session
+            .set_indicator(state, PreviewPlacement::NewParagraph)
+            .unwrap();
         let bar = rendered_winbar(&mut session);
         let phase = if state.phase == IndicatorPhase::Recording {
             "REC"
@@ -1174,7 +1389,9 @@ fn a_long_notice_keeps_the_phase_label_and_its_headline_in_a_narrow_window() {
     // Given the room, the detail joins the headline -- naming the recovery WAV
     // by file name, because the winbar has a window's width, not a path's.
     set_columns(&mut session, 200);
-    session.set_indicator(&capped).unwrap();
+    session
+        .set_indicator(&capped, PreviewPlacement::NewParagraph)
+        .unwrap();
     let bar = rendered_winbar(&mut session);
     assert!(
         bar.contains(notice.headline.as_ref()) && bar.contains(notice.detail.as_ref()),
@@ -1193,7 +1410,9 @@ fn a_window_that_stops_showing_the_buffer_gets_its_winbar_back() {
     }
     let directory = tempfile::tempdir().unwrap();
     let (mut session, _, _editor) = dictating(&headless(directory.path()));
-    session.set_indicator(&recording("")).unwrap();
+    session
+        .set_indicator(&recording(""), PreviewPlacement::NewParagraph)
+        .unwrap();
     let bar = lua(
         &mut session,
         "return vim.api.nvim_get_option_value('winbar', { win = 0 })",
@@ -2107,7 +2326,10 @@ fn a_disconnected_session_accepts_indicator_pushes_silently() {
     let mut session = NvimSession::new(headless(directory.path()));
     assert!(!session.connected());
     session
-        .set_indicator(&recording("nobody is listening"))
+        .set_indicator(
+            &recording("nobody is listening"),
+            PreviewPlacement::NewParagraph,
+        )
         .unwrap();
     session.close();
     assert!(!session.connected());
@@ -2115,10 +2337,13 @@ fn a_disconnected_session_accepts_indicator_pushes_silently() {
 
 /// Replays a dictation of several paragraphs, each committed in progressive
 /// chunks under a growing preview, and checks after every step that the newest
-/// word is on screen. The preview hangs below EOF, where neovim will not
-/// scroll by itself; a view that missed it once also stopped following for
-/// the rest of the preview. Runs under the bundled init and a global
-/// `scrolloff`, which would otherwise pull the view back.
+/// word is on screen, and that nvim's next redraw keeps the view the preview
+/// set: a view nvim corrects reads as a reader who moved away, and the preview
+/// stopped following for the rest of it. That happened for a view computed
+/// with the winbar counted as a text row, and for every resize, which the
+/// replay does every fifth step, as a tiled pane is resized when a window
+/// opens beside it. Runs under the bundled init and a global `scrolloff`,
+/// which would otherwise pull the view back.
 #[test]
 fn the_newest_text_stays_visible_across_paragraphs() {
     if !nvim_or_skip() {
@@ -2139,6 +2364,12 @@ fn the_newest_text_stays_visible_across_paragraphs() {
 vim.go.scrolloff = 3
 _G.check = function(needle, step) -- "" when visible, else a report
   vim.cmd("redraw!")
+  local win = vim.api.nvim_get_current_win()
+  local left, view = Spokenpad.preview_views[win], vim.fn.winsaveview()
+  if type(left) == "table" and (left.topline ~= view.topline or left.skipcol ~= view.skipcol) then
+    return step .. ": the redraw moved the view the preview set, from " .. vim.inspect(left)
+      .. " to " .. vim.inspect(view) .. "\n"
+  end
   local rows = {}
   for row = 1, 10 do
     local line = ""
@@ -2155,14 +2386,27 @@ return true"#,
     for utterance in 0..6 {
         let mut continued = false;
         for chunk in 0..3 {
+            let placement = if continued {
+                PreviewPlacement::Continuation
+            } else {
+                PreviewPlacement::NewParagraph
+            };
             for grow in 1..5 {
                 step += 1;
+                if step % 5 == 0 {
+                    lua(
+                        &mut session,
+                        "vim.o.cmdheight = 4 - vim.o.cmdheight return true",
+                    );
+                }
                 let preview = (0..grow * 3)
                     .map(|i| format!("p{utterance}c{chunk}w{i}"))
                     .collect::<Vec<_>>()
                     .join(" ")
                     + &format!(" mark{step}");
-                session.set_indicator(&recording(&preview)).unwrap();
+                session
+                    .set_indicator(&recording(&preview), placement)
+                    .unwrap();
                 lua(
                     &mut session,
                     &format!(
@@ -2185,7 +2429,9 @@ return true"#,
         }
         let mut idle = recording("");
         idle.phase = IndicatorPhase::Idle;
-        session.set_indicator(&idle).unwrap();
+        session
+            .set_indicator(&idle, PreviewPlacement::NewParagraph)
+            .unwrap();
     }
     let failures = lua(&mut session, "return _G.failures");
     assert_eq!(

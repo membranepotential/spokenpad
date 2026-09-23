@@ -61,7 +61,7 @@ The Neovim presentation code is embedded from `src/lua/spokenpad.lua` (one
 file: the buffer, the winbar indicator, the level meter, the preview extmark,
 and the transactional append) and `src/lua/dictation_init.lua` (the optional
 bundled editor configuration). Preview text is extmark virtual text, never
-buffer content.
+buffer content, drawn where its text will land.
 
 ## Functional core, imperative shell
 

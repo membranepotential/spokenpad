@@ -185,6 +185,29 @@ impl Default for IndicatorState {
     }
 }
 
+/// Where the live preview's text will land in the dictation buffer, which is
+/// where the editor draws the preview: the rule of the `continued` of
+/// [`NvimSession::append`], decided by whoever knows where the capture's
+/// earlier text went.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreviewPlacement {
+    /// The capture has no text in the buffer yet: its next text opens a
+    /// paragraph of its own.
+    NewParagraph,
+    /// The capture's earlier text ends the buffer's last paragraph, and its
+    /// next text extends that paragraph's last line.
+    Continuation,
+}
+
+impl PreviewPlacement {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NewParagraph => "new_paragraph",
+            Self::Continuation => "continuation",
+        }
+    }
+}
+
 /// A live connection and the buffer it pins. These three are meaningless
 /// apart: an editor this session has not pinned a buffer in cannot be
 /// appended to, and a path with no buffer behind it cannot be returned as the
@@ -535,9 +558,14 @@ impl NvimSession {
         usize::try_from(count).context("nvim line count does not fit usize")
     }
 
-    /// Pushes the whole indicator as a notification; transport failures surface.
-    pub fn set_indicator(&mut self, state: &IndicatorState) -> Result<()> {
-        self.push(indicator_fields(state))
+    /// Pushes the whole indicator as a notification, with where its preview
+    /// will land; transport failures surface.
+    pub fn set_indicator(
+        &mut self,
+        state: &IndicatorState,
+        placement: PreviewPlacement,
+    ) -> Result<()> {
+        self.push(indicator_fields(state, placement))
     }
 
     /// Asks the editor to copy its whole dictation buffer to `+`.
@@ -588,7 +616,10 @@ impl NvimSession {
             // detaching daemon waits a quarter of a second for cosmetics.
             let _ = open.client.request(
                 "nvim_exec_lua",
-                indicator_call(indicator_fields(&IndicatorState::default())),
+                indicator_call(indicator_fields(
+                    &IndicatorState::default(),
+                    PreviewPlacement::NewParagraph,
+                )),
                 deadline(INDICATOR_TIMEOUT),
                 Patience::Deadline,
             );
@@ -1273,11 +1304,15 @@ fn lua_colorscheme_literal(name: &str) -> Result<String> {
     Ok(format!("'{name}'"))
 }
 
-fn indicator_fields(state: &IndicatorState) -> Vec<(Value, Value)> {
+fn indicator_fields(state: &IndicatorState, placement: PreviewPlacement) -> Vec<(Value, Value)> {
     vec![
         (Value::from("phase"), Value::from(state.phase.as_str())),
         (Value::from("level"), Value::F64(clamp_level(state.level))),
         (Value::from("preview"), Value::from(state.preview.as_str())),
+        (
+            Value::from("preview_placement"),
+            Value::from(placement.as_str()),
+        ),
         // Absence travels as the empty string rather than as nil: nvim turns a
         // msgpack nil inside a map into `vim.NIL`, which Lua cannot tell from
         // a field the daemon meant to set. The two halves travel as two fields

@@ -44,7 +44,7 @@ use spokenpad::{
     shell::{
         daemon::SHUTDOWN_GRACE,
         nvim::pane_launch,
-        nvim::{IndicatorState, NvimSession, Want},
+        nvim::{IndicatorState, NvimSession, PreviewPlacement, Want},
         pane::{Ending, Options, Pane, Status, place::Target},
     },
 };
@@ -230,11 +230,14 @@ fn the_pane_draws_what_neovim_draws() {
     // *while* the user is dictating somewhere else.
     const PREVIEW: &str = "und der offene Rest der Äußerung";
     session
-        .set_indicator(&IndicatorState {
-            phase: IndicatorPhase::Recording,
-            preview: PREVIEW.to_owned(),
-            ..IndicatorState::default()
-        })
+        .set_indicator(
+            &IndicatorState {
+                phase: IndicatorPhase::Recording,
+                preview: PREVIEW.to_owned(),
+                ..IndicatorState::default()
+            },
+            PreviewPlacement::NewParagraph,
+        )
         .expect("push an indicator state");
     wait_for(PATIENCE, "the preview to be drawn", || {
         let _ = pane.step(Duration::from_millis(50));
@@ -284,7 +287,7 @@ fn the_pane_draws_what_neovim_draws() {
 
     // --------------------------------------------- (c) click, then type
     session
-        .set_indicator(&IndicatorState::default())
+        .set_indicator(&IndicatorState::default(), PreviewPlacement::NewParagraph)
         .expect("clear the indicator");
     call(
         &mut pane,
@@ -545,18 +548,21 @@ fn the_winbar_background_is_continuous_after_a_stop() {
         .expect("attach to the pane's editor")
         .expect("attach mode found the pane's editor");
     session
-        .set_indicator(&IndicatorState {
-            phase: IndicatorPhase::Transcribing,
-            preview: "der offene Rest".to_owned(),
-            ..IndicatorState::default()
-        })
+        .set_indicator(
+            &IndicatorState {
+                phase: IndicatorPhase::Transcribing,
+                preview: "der offene Rest".to_owned(),
+                ..IndicatorState::default()
+            },
+            PreviewPlacement::NewParagraph,
+        )
         .expect("push an indicator state");
     wait_for(PATIENCE, "the transcribing winbar", || {
         let _ = pane.step(Duration::from_millis(50));
         pane.screen().line(0).contains("transcribing").then_some(())
     });
     session
-        .set_indicator(&IndicatorState::default())
+        .set_indicator(&IndicatorState::default(), PreviewPlacement::NewParagraph)
         .expect("push the idle state");
     wait_for(PATIENCE, "the idle winbar", || {
         let _ = pane.step(Duration::from_millis(50));

@@ -188,7 +188,7 @@ dictation.
 ### The one relaxation: a cosmetic preview of the open tail
 
 The audio after the last settled chunk is decoded once per tick and shown as
-virtual text below the committed transcript, then thrown away. That is an
+virtual text where its committed text will land, then thrown away. That is an
 extra decode of audio that is still growing, so the invariants that keep it
 on the safe side of this rule are worth stating, and they are asserted in the
 session, decode and nvim tests:

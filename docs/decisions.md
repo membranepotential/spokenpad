@@ -2968,3 +2968,53 @@ also said "spokenpad runs Parakeet TDT only", though any NeMo transducer in
 - `asr.family` and `asr.language` are refused with a message that says a
   NeMo transducer is loaded, the default or another one.
 
+## The preview is drawn where its text lands (2026-09-23)
+
+The preview hung as virtual lines below the last text line, word-wrapped by
+hand, even when its text would continue that line; a new paragraph's preview
+lacked the blank line the append puts before it. So every commit moved text
+the user had just read. The user also saw the window stop following the
+preview.
+
+- Chosen: the preview is inline virtual text on the last text line, drawn
+  exactly where the append will put its text, so landing changes only the
+  highlight. Whether it continues the paragraph or opens a new one is sent
+  by the daemon as `preview_placement` (`PreviewPlacement`), decided on the
+  editor thread by the test that sets the append's `continued`, from where it
+  wrote the capture's last text. Lua never guesses it from the buffer; its
+  `landing` places the append and the preview alike. A new paragraph's
+  preview draws a row of blanks for the blank line; one on an empty buffer
+  starts on line 1 with none.
+- Chosen: virtual text ignores `linebreak`, so `lay_out` writes the wraps
+  `linebreak` will make out as spaces, by nvim's rule, and counts the filler
+  cell of a double-width character at a row's end. `showbreak` is `NONE` in
+  the dictation window, so every row is as wide as the window. A resized
+  window lays the preview out again (`WinResized`).
+- Fixed, the lost scroll: a resize moves the view, and the follow test took
+  that for a reader who had scrolled away, for the rest of the preview. Across
+  a resize only the cursor counts now. The view is measured with
+  `winheight()`: `nvim_win_get_height()` counts the winbar, a view one row
+  too tall is scrolled by nvim at the next redraw, and that also read as the
+  reader moving away. The old code's "row nvim reserves at the end of the
+  buffer" below its virtual lines was that winbar row.
+- Kept: someone who scrolled away keeps their place; a typing cursor is not
+  moved; the preview is an extmark, never buffer content. Typing at the end
+  of the last line puts the typed text before the preview (`right_gravity`),
+  where it is when the dictated text lands after it.
+- Accepted: a preview taller than the window gives up its oldest words behind
+  `…`, since the cursor before it must stay on the screen. When the last text
+  line's final word ends in the window's last column, `linebreak` moves that
+  word once text follows it; the preview cannot move buffer text, so that
+  word moves when the text lands.
+- Removed: `wrap()`, the eight-line preview cap, the overlay on an empty line
+  1, and the reserved row.
+- Measured: [experiment](experiments/2026-09-23-inline-preview-layout.md).
+- Tests: `the_preview_is_drawn_exactly_where_its_text_lands` (the screen is
+  the same before and after the text lands: empty buffer, new paragraph,
+  continuation with and without the separator, `linebreak` edge cases,
+  double-width characters), `a_resized_window_keeps_following_the_preview`,
+  `a_resized_window_lays_the_preview_out_again`, the extended
+  `the_newest_text_stays_visible_across_paragraphs` (a resize every fifth
+  step, and no redraw may move the view the preview set), and
+  `a_preview_continues_only_the_captures_own_text_in_the_editor` (editor
+  thread).

@@ -699,10 +699,11 @@ chunk keeps the previous module's pinned buffer, indicator state, meter history
 and append de-duplication cache, so restarting the daemon neither blanks the
 indicator nor replays an append whose reply was lost.
 
-The whole indicator is pushed at once — phase, level, preview, notice,
-notice_detail, latched, previewing — so the editor's copy is a function of
-daemon state rather than of the history of updates that reached it. `preview`
-and `notice` are separate fields and are drawn in separate places; an absent
+The whole indicator is pushed at once — phase, level, preview,
+preview_placement, notice, notice_detail, latched, previewing — so the
+editor's copy is a function of daemon state rather than of the history of
+updates that reached it. `preview` and `notice` are separate fields and are
+drawn in separate places; an absent
 notice travels as the empty string, because nvim turns a msgpack nil inside a
 map into `vim.NIL`, which Lua cannot tell from a field the daemon meant to set.
 
@@ -732,10 +733,11 @@ globals are the user's own and are left alone. Levels are sent at ~10 Hz as
 notifications, not requests — a round trip per sample would put nvim's event
 loop on the dictation latency path for something purely cosmetic.
 
-**The live preview** is an extmark's `virt_lines` hanging below the end of the
-buffer, exactly where the committed text will land. Virtual text, not buffer
-content: it cannot be written to the file, yanked, or undone into the buffer
-even deliberately. That makes "a preview is never committed"
+**The live preview** is an extmark's inline virtual text on the last text
+line, drawn exactly where its text will land: when the text is appended, every
+word stays in its cell and only the highlight changes. Virtual text, not
+buffer content: it cannot be written to the file, yanked, or undone into the
+buffer even deliberately. That makes "a preview is never committed"
 ([constraints.md](constraints.md#the-one-relaxation-a-cosmetic-preview-of-the-open-tail))
 a property of the data model rather than a discipline.
 
@@ -745,20 +747,62 @@ committed to the buffer above, so the preview restarts from nothing each time
 a chunk lands and the transcript itself is never cropped
 ([progressive-commit.md](progressive-commit.md)).
 
-Virtual text does **not** wrap — nvim truncates a chunk at the window edge —
-so the preview is word-wrapped here by hand, measured in display columns with
-`strdisplaywidth` rather than bytes, since dictation is routinely German and
-byte counting would break `längeren` several columns early. It keeps the last
-eight lines; the newest words are the ones being checked against what was
-just said.
+Where the text lands depends on whether this capture already wrote text into
+the buffer, which only the daemon knows. It sends that as
+`preview_placement` (`PreviewPlacement` in `shell/nvim/mod.rs`): the editor
+thread decides it by the rule it applies to the append's `continued`, from
+where it wrote the capture's last text, so the two cannot disagree; the Lua
+side never guesses it from the buffer. `landing` in `spokenpad.lua` then
+places both the append and the preview:
 
-The preview hangs below EOF, where nvim will not scroll by itself: `zb`,
-`zz` and CTRL-E all stop with the last real line at the bottom. So a reader
-at the end is kept there by computing the view directly: walk up from the
-last line until the text plus the preview rows fill the window, then hide the
-surplus rows of that top line with smoothscroll's `skipcol`. The window's
-`scrolloff` is set to 0, because a `scrolloff` would scroll the view straight
-back.
+- `continuation`: after the last text line, behind the space the append will
+  put there (none when the line already ends in whitespace).
+- `new_paragraph`: after the last text line, the rest of its last row and one
+  row of blanks — the blank line the append puts between paragraphs — then
+  the preview from the first cell of the next row.
+- An empty buffer (only blank lines): on line 1 from its first cell, with no
+  blank row, since the append replaces the buffer from line 1.
+
+Inline virtual text wraps with its line (nvim ≥ 0.10), but per cell: it
+ignores `linebreak`, so a preview drawn as it is would split words where the
+committed text will not. `lay_out` in `spokenpad.lua` therefore writes every
+wrap `linebreak` would make out as spaces to the end of the row, by nvim's own
+rule (`charsize_regular`): at a `breakat` character, the word after it and the
+blanks after that word must fit on the row, or the row ends there; a
+double-width character that would start in a row's last cell starts on the next
+row after a filler cell, which nvim draws in virtual text as it does in the
+buffer. `apply_chrome` sets `showbreak` to `NONE` in the dictation window, so
+every row is as wide as the window. The layout is for the first window showing
+the buffer, and it is redone when that window is resized (`WinResized`), since
+the daemon sends a preview again only when it changes.
+
+One case cannot match: when the last text line's final word ends in the
+window's last column, `linebreak` moves that word to the next row as soon as
+text follows it, and a preview cannot move buffer text. The preview is then
+drawn from the next row's first cell, behind its separator, and the landing
+text moves the word. The probes behind all of this are in
+[experiments/2026-09-23-inline-preview-layout.md](experiments/2026-09-23-inline-preview-layout.md).
+
+The preview is part of the last text line on screen, and
+`nvim_win_text_height` counts inline virtual text, so following it is plain
+arithmetic. A reader at the end is kept there by computing the view directly:
+walk up from the last line until the text fills the window, then hide the
+surplus rows of that top line with smoothscroll's `skipcol`. The window height
+is `winheight()`, the rows text is drawn in: `nvim_win_get_height` counts the
+winbar too. The window's `scrolloff` is set to 0, because a `scrolloff` would
+scroll the view straight back. A reader's cursor rests on the text's last
+character, before the preview, and nvim scrolls to a cursor it cannot show, so
+a preview taller than the window gives up its oldest words, marked by `…`.
+
+Whether a window still follows is decided by comparing its view with the one
+the preview left there. A reader who scrolled away keeps their place for the
+rest of the preview. A window whose size changed has had its view moved by
+nvim, not by the reader, so across a resize only the cursor counts. Before
+2026-09-23 a resize read as the reader moving away, and the preview stopped
+following with its newest words off the screen. The same happens to a view
+computed for one row more than the window shows, which nvim scrolls at the
+next redraw: the earlier code left a row free below the preview in the belief
+that nvim reserves it at the end of the buffer, and that row was the winbar.
 
 When previews stop, the winbar says so instead of freezing. Past
 `preview.max_seconds` (30 s of uncommitted tail) they **pause and resume by

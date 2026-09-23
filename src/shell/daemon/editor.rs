@@ -8,7 +8,9 @@ use crate::{
         decode::UtteranceId,
         session::{Notice, Session},
     },
-    shell::nvim::{AppendFailure, CopyOutcome, Detached, IndicatorState, NvimSession, Want},
+    shell::nvim::{
+        AppendFailure, CopyOutcome, Detached, IndicatorState, NvimSession, PreviewPlacement, Want,
+    },
 };
 use std::{
     sync::{
@@ -21,18 +23,17 @@ use std::{
 /// Everything the editor's winbar shows, replaced wholesale, never merged.
 /// `status` is the speech model's notice, shown when it outranks the
 /// capture's own.
-pub(super) fn indicator_of(
-    session: &Session,
-    level: f32,
-    status: Option<Notice>,
-) -> IndicatorState {
-    IndicatorState {
-        phase: session.state.indicator_phase(),
-        level: f64::from(level),
-        preview: session.preview().to_owned(),
-        notice: session.shown_notice(status).as_ref().map(Notice::text),
-        latched: session.state.latched(),
-        previewing: session.previewing(),
+pub(super) fn indicator_of(session: &Session, level: f32, status: Option<Notice>) -> EditorWork {
+    EditorWork::Indicator {
+        state: IndicatorState {
+            phase: session.state.indicator_phase(),
+            level: f64::from(level),
+            preview: session.preview().to_owned(),
+            notice: session.shown_notice(status).as_ref().map(Notice::text),
+            latched: session.state.latched(),
+            previewing: session.previewing(),
+        },
+        capture: session.current.as_ref().map(|u| u.id),
     }
 }
 
@@ -42,7 +43,13 @@ pub(super) enum EditorWork {
         utterance: UtteranceId,
         text: String,
     },
-    Indicator(IndicatorState),
+    /// Where its preview goes is not in `state`: only this thread knows
+    /// where it put the earlier text of `capture`, the capture whose tail the
+    /// preview is.
+    Indicator {
+        state: IndicatorState,
+        capture: Option<UtteranceId>,
+    },
     /// Copy the whole dictation buffer to `+`. Sent once per utterance, after
     /// its `Finished` result -- see the comment where it is sent, in
     /// `serve`, for why every `Append` of that utterance is already ahead of
@@ -58,6 +65,26 @@ pub(super) enum EditorWork {
 enum Sink {
     Editor,
     Passage,
+}
+
+/// Whether text of `utterance` written to `sink` continues the paragraph the
+/// last commit, which went where `paragraph` says, left there.
+fn continues(paragraph: Option<(UtteranceId, Sink)>, utterance: UtteranceId, sink: Sink) -> bool {
+    paragraph == Some((utterance, sink))
+}
+
+/// Where the editor draws the preview of `capture`: where its next text will
+/// land, by the rule the append of that text applies.
+fn placement(
+    paragraph: Option<(UtteranceId, Sink)>,
+    capture: Option<UtteranceId>,
+) -> PreviewPlacement {
+    match capture {
+        Some(capture) if continues(paragraph, capture, Sink::Editor) => {
+            PreviewPlacement::Continuation
+        }
+        _ => PreviewPlacement::NewParagraph,
+    }
 }
 
 /// The `[nvim]` settings the next window opens with: what the file says now.
@@ -114,7 +141,7 @@ pub(super) fn editor_thread(
     let quitting = nvim.quitting();
     let mut reported = Vec::new();
     let mut paragraph: Option<(UtteranceId, Sink)> = None;
-    let mut shown: Option<IndicatorState> = None;
+    let mut shown: Option<(IndicatorState, PreviewPlacement)> = None;
     let mut quit = false;
     while !quit {
         let first = match rx.recv_timeout(Duration::from_millis(66)) {
@@ -131,7 +158,7 @@ pub(super) fn editor_thread(
             // the user closed the pane does not open another.
             report_user_close(&mut nvim, &events);
             match work {
-                EditorWork::Indicator(next) => indicator = Some(next),
+                EditorWork::Indicator { state, capture } => indicator = Some((state, capture)),
                 EditorWork::Ensure if quitting.load(Ordering::Acquire) => {}
                 EditorWork::Ensure => {
                     // A window about to open, or an editor about to be
@@ -167,7 +194,7 @@ pub(super) fn editor_thread(
                     let mut maybe_landed = false;
                     if nvim.connected() {
                         let now = Instant::now();
-                        let continued = paragraph == Some((utterance, Sink::Editor));
+                        let continued = continues(paragraph, utterance, Sink::Editor);
                         match nvim.append(&text, continued) {
                             Ok(line) => {
                                 paragraph = Some((utterance, Sink::Editor));
@@ -202,7 +229,7 @@ pub(super) fn editor_thread(
                     }
                     // With no editor at all, the text goes to the file the
                     // next editor will open on, rather than nowhere.
-                    let continued = paragraph == Some((utterance, Sink::Passage));
+                    let continued = continues(paragraph, utterance, Sink::Passage);
                     match nvim.append_detached(&text, continued) {
                         Ok(write) => {
                             paragraph = Some((utterance, Sink::Passage));
@@ -246,14 +273,18 @@ pub(super) fn editor_thread(
                 }
             }
         }
+        // The placement is taken after the appends queued ahead of the
+        // indicator, so a preview drawn after them follows their text.
         if nvim.connected()
-            && let Some(next) = indicator
-            && shown.as_ref() != Some(&next)
+            && let Some((state, capture)) = indicator
         {
-            if let Err(e) = nvim.set_indicator(&next) {
-                log::warn!("editor indicator unavailable: {e:#}");
+            let next = (state, placement(paragraph, capture));
+            if shown.as_ref() != Some(&next) {
+                if let Err(e) = nvim.set_indicator(&next.0, next.1) {
+                    log::warn!("editor indicator unavailable: {e:#}");
+                }
+                shown = Some(next);
             }
-            shown = Some(next);
         }
     }
     // Nothing can be written after this point; say what was lost.
@@ -282,6 +313,49 @@ fn report_user_close(nvim: &mut NvimSession, events: &Sender<ResultEvent>) {
 mod tests {
     use super::*;
     use crate::config::Nvim;
+
+    /// The preview goes where the capture's next text will: after the text
+    /// of it already in the editor, and in a paragraph of its own when there
+    /// is none -- no capture, another capture's text last, or its own text
+    /// written to the pending passage instead, which the editor never saw.
+    #[test]
+    fn a_preview_continues_only_the_captures_own_text_in_the_editor() {
+        let (this, other) = (UtteranceId(2), UtteranceId(1));
+        for (paragraph, capture, expected) in [
+            (
+                Some((this, Sink::Editor)),
+                Some(this),
+                PreviewPlacement::Continuation,
+            ),
+            (None, Some(this), PreviewPlacement::NewParagraph),
+            (
+                Some((other, Sink::Editor)),
+                Some(this),
+                PreviewPlacement::NewParagraph,
+            ),
+            (
+                Some((this, Sink::Passage)),
+                Some(this),
+                PreviewPlacement::NewParagraph,
+            ),
+            (
+                Some((this, Sink::Editor)),
+                None,
+                PreviewPlacement::NewParagraph,
+            ),
+        ] {
+            assert_eq!(
+                placement(paragraph, capture),
+                expected,
+                "{paragraph:?}, {capture:?}"
+            );
+            // The append of that text agrees.
+            assert_eq!(
+                capture.is_some_and(|capture| continues(paragraph, capture, Sink::Editor)),
+                expected == PreviewPlacement::Continuation
+            );
+        }
+    }
 
     /// A config file that no longer loads keeps the settings in use for the
     /// next window, but not their session: a daemon systemd started takes

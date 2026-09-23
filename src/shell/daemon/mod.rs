@@ -809,11 +809,11 @@ impl<B: InputBackend> Loop<'_, B> {
     fn show_level(&self, level: f32) -> Result<()> {
         send(
             &self.editor_tx,
-            EditorWork::Indicator(indicator_of(
+            indicator_of(
                 &self.session,
                 level,
                 self.recognition.notice(self.transcriptions.waiting()),
-            )),
+            ),
         )
     }
 

@@ -29,8 +29,8 @@ the root because both sides read it. Nothing under `core/` may import
   user-visible notice, which the next key press clears — `Notice::priority`
   ranks them and `notify` replaces only upwards, so the worst thing that
   happened to a capture is the thing the user reads. `preview()` and
-  `notice()` are separate: the editor draws the preview below the transcript
-  and the notice in the winbar, in every phase, as a headline plus a detail it
+  `notice()` are separate: the editor draws the preview where its text will
+  land and the notice in the winbar, in every phase, as a headline plus a detail it
   appends only when the window is wide enough.
 - `shell/daemon/mod.rs` holds `run` and `serve`; the two threads `serve`
   starts are `engine.rs` and `editor.rs` beside it, and its bookkeeping is
@@ -51,7 +51,10 @@ the root because both sides read it. Nothing under `core/` may import
   blocking inference and editor RPC to separate threads; the editor thread runs
   until its own channel says to stop, so text queued before a cancel or a
   shutdown is still written (bounded at three seconds, with anything
-  undelivered logged at error level).
+  undelivered logged at error level). The editor thread also knows where it
+  wrote each capture's last text, so it decides both whether an append
+  continues a paragraph and where the editor draws the preview
+  (`PreviewPlacement`), by the same test.
 - `core/decode.rs` owns the committed sample offset on one worker. Each
   capture is an `Utterance` with one monotone lifecycle — `Live`, then either
   `Released` for its final decode or `Cancelled` — so a later capture cannot

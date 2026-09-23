@@ -1,6 +1,6 @@
 //! Composes the screenshot at the top of README.md: the dictation pane
 //! floating above an ordinary editor window, mid-dictation, with committed
-//! text, a live preview below it and the winbar showing a latched recording.
+//! text, a live preview after it and the winbar showing a latched recording.
 //!
 //! Starts its own Xvfb (above `:70`) and i3 -- never the user's display or
 //! window manager -- and opens a background `xterm` running a read-only
@@ -35,7 +35,7 @@ use spokenpad::{
         wm::{HEADER_LEN, Message, encode, reply_length},
     },
     shell::{
-        nvim::{STARTUP_TIMEOUT, pane_launch},
+        nvim::{PreviewPlacement, STARTUP_TIMEOUT, pane_launch},
         pane::{Options, Pane, place::Target},
     },
 };
@@ -276,6 +276,11 @@ fn main() -> Result<()> {
         (Value::from("phase"), Value::from("recording")),
         (Value::from("level"), Value::F64(0.55)),
         (Value::from("preview"), Value::from(PREVIEW)),
+        // The capture already wrote both commits, so its tail continues them.
+        (
+            Value::from("preview_placement"),
+            Value::from(PreviewPlacement::Continuation.as_str()),
+        ),
         (Value::from("notice"), Value::from("")),
         (Value::from("notice_detail"), Value::from("")),
         (Value::from("latched"), Value::from(true)),
