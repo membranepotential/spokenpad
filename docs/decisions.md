@@ -3018,3 +3018,18 @@ preview.
   step, and no redraw may move the view the preview set), and
   `a_preview_continues_only_the_captures_own_text_in_the_editor` (editor
   thread).
+
+## An append blanks the preview queued before it (2026-09-23)
+
+- Problem: the editor thread drains its queue and pushes only the newest
+  indicator, after all the other work. The loop queues each pass's appends
+  and then that pass's indicator, so a drain could hold the previous pass's
+  indicator and a new append, but not the indicator that followed it. That
+  indicator's preview still held the words the append wrote, and, drawn
+  inline since the preview goes where its text lands, it showed them a
+  second time, after themselves, for up to one pass.
+- Fixed: an append blanks the preview of an indicator of its own capture
+  that was drained before it (`forget_committed_preview` in
+  `shell/daemon/editor.rs`), as the Lua append clears its own copy. The rest
+  of that indicator is still pushed; the next one brings the new preview.
+- Test: `an_append_blanks_the_preview_queued_before_it`.

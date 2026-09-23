@@ -87,6 +87,22 @@ fn placement(
     }
 }
 
+/// Blanks the preview of an indicator queued before an append of its own
+/// capture. The loop took that indicator before the text committed, so its
+/// preview may still hold the words the append writes: pushed after the
+/// append, it would draw them a second time, after themselves, until the
+/// next indicator.
+fn forget_committed_preview(
+    indicator: &mut Option<(IndicatorState, Option<UtteranceId>)>,
+    utterance: UtteranceId,
+) {
+    if let Some((state, capture)) = indicator
+        && *capture == Some(utterance)
+    {
+        state.preview.clear();
+    }
+}
+
 /// The `[nvim]` settings the next window opens with: what the file says now.
 /// A file that no longer loads keeps the settings in use, and the window
 /// says why. Either way they take the session the window opens in, such as
@@ -178,6 +194,7 @@ pub(super) fn editor_thread(
                     }
                 }
                 EditorWork::Append { utterance, text } => {
+                    forget_committed_preview(&mut indicator, utterance);
                     // A failed request elsewhere (a clipboard copy that timed
                     // out, an indicator push) drops the connection; text that
                     // is owed to the file reattaches rather than waiting for
@@ -354,6 +371,34 @@ mod tests {
                 capture.is_some_and(|capture| continues(paragraph, capture, Sink::Editor)),
                 expected == PreviewPlacement::Continuation
             );
+        }
+    }
+
+    /// An indicator drained ahead of its own capture's text loses its
+    /// preview; one of another capture keeps it.
+    #[test]
+    fn an_append_blanks_the_preview_queued_before_it() {
+        let (this, other) = (UtteranceId(2), UtteranceId(1));
+        let queued = |capture| {
+            Some((
+                IndicatorState {
+                    preview: "words about to land".into(),
+                    ..IndicatorState::default()
+                },
+                capture,
+            ))
+        };
+        for (capture, appended, kept) in [
+            (Some(this), this, false),
+            (Some(this), other, true),
+            (None, this, true),
+        ] {
+            let mut indicator = queued(capture);
+            forget_committed_preview(&mut indicator, appended);
+            let preview = indicator
+                .map(|(state, _)| state.preview)
+                .unwrap_or_default();
+            assert_eq!(!preview.is_empty(), kept, "{capture:?}, {appended:?}");
         }
     }
 
