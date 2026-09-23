@@ -20,8 +20,7 @@ never takes focus. Fully local, CPU-only. 1.0.0 public since 2026-09-23.
 - 09-23 release: CLI connect under a deadline, shell/process.rs; history
   audited (no audio/corpus/key ever committed); repo public; v1.0.0 tagged,
   package built from the tag tarball, sha256 pinned; GitHub release.
-  v1.0.1: bounded clipboard provider (a hung owner, likely greenclip,
-  froze the pane).
+  v1.0.1: bounded clipboard provider (a hung owner froze the pane).
 - 09-23 review round: preview drawn where its text lands (inline; two
   scroll bugs fixed); `spokenpad daemon`, bare prints help; Ctrl+V pastes
   in Insert; no desktop notifications; recording.max_total_size "5 GB";
