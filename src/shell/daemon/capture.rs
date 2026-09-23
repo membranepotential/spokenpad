@@ -7,7 +7,7 @@ use crate::{
     core::{
         frames::Frames,
         session::{Notice, RecordingStatus, Session},
-        state::{Command, DiscardReason, State},
+        state::{Command, DiscardReason},
     },
     shell::audio::{
         AudioCapture, CaptureEvent, Captured, InputBackend, MAX_UTTERANCE_SECONDS, PostRoll,
@@ -51,19 +51,17 @@ pub(super) fn discard<B: InputBackend>(
 }
 
 /// Everything that happens between the key release and the decode request:
-/// the measurements, the notices they call for, and the dump.
+/// the measurements, the notices they call for, and the dump. `held` is how
+/// long the capture ran until its release ([`Command::Decode`]).
 pub(super) fn release<B: InputBackend>(
     session: &mut Session,
     capture: &AudioCapture<B>,
     taken: Captured,
+    held: Duration,
     config: &Config,
     dump_dir: Option<&Path>,
 ) -> Result<Tail> {
     let rate = config.audio.sample_rate;
-    let held = match session.state {
-        State::Transcribing { started, released } => released.saturating_duration_since(started),
-        _ => Duration::ZERO,
-    };
     let Captured {
         samples,
         start,

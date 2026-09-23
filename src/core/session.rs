@@ -1265,6 +1265,7 @@ mod tests {
             s.event(Event::Clock { now: ended }),
             Command::Decode {
                 released: ended,
+                held: ended - t,
                 cause: Cause::Silence
             }
         );
@@ -1309,6 +1310,7 @@ mod tests {
                         s.event(Event::Clock { now: half + quiet }),
                         Command::Decode {
                             released: half + quiet,
+                            held: half + quiet - t,
                             cause: Cause::Silence
                         },
                         "{label}: the timeout runs from the last text"
@@ -1362,6 +1364,7 @@ mod tests {
             s.event(Event::Clock { now: limit }),
             Command::Decode {
                 released: limit,
+                held: limit - t,
                 cause: Cause::Length
             }
         );

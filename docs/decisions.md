@@ -3115,3 +3115,18 @@ preview.
   the commits), `a_final_decode_commits_each_segment_at_its_own_end`,
   `cancel_during_decode_suppresses_result`, the recovery tests in
   `engine.rs`, and `tests/e2e.rs`. The eval WER is unchanged (13.7%).
+
+## The release's hold time travels with the decode command (2026-09-23)
+
+- Problem: `State::Transcribing` kept the capture's `started` and
+  `released` only so that `capture::release` could read the hold time back
+  out of the session's state, and that reader made up `Duration::ZERO` for
+  any other state, which hid that it only ever runs after a `Decode`.
+- Changed: `end` measures `held` once, uses it for the tap rule, and sends
+  it in `Command::Decode { released, held, cause }`; `Loop::decode` hands
+  it to `capture::release`. `State::Transcribing` carries nothing. The
+  incomplete-capture rule reads the same `held` with the same expression.
+- Tests: the state table tests, now checking `held` in every `Decode`
+  (`taps_are_measured_to_the_release`, `the_memory_ceiling_ends_the_capture`,
+  `all_state_event_pairs`), the session tests, and the release and
+  post-roll tests in `tests/e2e.rs`.

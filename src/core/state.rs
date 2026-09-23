@@ -76,10 +76,9 @@ pub enum State {
         last_speech: Instant,
         hold: Hold,
     },
-    Transcribing {
-        started: Instant,
-        released: Instant,
-    },
+    /// Released, and its tail decoding. What the release measured went out
+    /// with [`Command::Decode`].
+    Transcribing,
 }
 
 /// What is keeping a capture running.
@@ -163,8 +162,10 @@ pub enum Command {
     /// End the capture and decode it. `released` is when the key came up:
     /// the post-roll runs from there, not from when the window closed. A
     /// capture that ended by itself is released at the moment it ended.
+    /// `held` is how long the capture ran, from its start to `released`.
     Decode {
         released: Instant,
+        held: Duration,
         cause: Cause,
     },
     Discard(DiscardReason),
@@ -195,7 +196,7 @@ impl State {
         match self {
             Self::Idle => IndicatorPhase::Idle,
             Self::Recording { .. } => IndicatorPhase::Recording,
-            Self::Transcribing { .. } => IndicatorPhase::Transcribing,
+            Self::Transcribing => IndicatorPhase::Transcribing,
         }
     }
     pub fn recording(self) -> bool {
@@ -230,12 +231,17 @@ fn begin(at: Instant, hold: Hold) -> (State, Command) {
 /// minutes of capture to fire, and throwing away what they end would lose
 /// dictation rather than a slip of the finger.
 fn end(started: Instant, released: Instant, cause: Cause) -> (State, Command) {
-    if cause == Cause::KeyPress && released.saturating_duration_since(started) < MINIMUM_HOLD {
+    let held = released.saturating_duration_since(started);
+    if cause == Cause::KeyPress && held < MINIMUM_HOLD {
         (State::Idle, Command::Discard(DiscardReason::TooShort))
     } else {
         (
-            State::Transcribing { started, released },
-            Command::Decode { released, cause },
+            State::Transcribing,
+            Command::Decode {
+                released,
+                held,
+                cause,
+            },
         )
     }
 }
@@ -252,7 +258,7 @@ pub fn step(state: State, event: Event, silence: Option<Duration>) -> (State, Co
     match (state, event) {
         // A capture that already ended, still decoding, does not stop a new
         // one: a quick re-press is a new paragraph.
-        (Idle | Transcribing { .. }, Event::Request(Received { request, at })) => match request {
+        (Idle | Transcribing, Event::Request(Received { request, at })) => match request {
             Start => begin(at, Held),
             Toggle => begin(at, Latched { last_press: at }),
             // The `stop` of the press that ended a latched capture, or of a
@@ -358,7 +364,7 @@ pub fn step(state: State, event: Event, silence: Option<Duration>) -> (State, Co
         (Recording { started, .. }, Event::WindowClosed { at }) if at >= started => {
             (Idle, Command::Discard(DiscardReason::WindowClosed))
         }
-        (Transcribing { .. }, Event::Finished) => (Idle, Nothing),
+        (Transcribing, Event::Finished) => (Idle, Nothing),
         (
             _,
             Event::Clock { .. }
@@ -385,9 +391,10 @@ mod tests {
     }
 
     /// The command a key release produces, which is most of them.
-    fn decode(released: Instant) -> Command {
+    fn decode(started: Instant, released: Instant) -> Command {
         Command::Decode {
             released,
+            held: released - started,
             cause: Cause::KeyPress,
         }
     }
@@ -467,10 +474,7 @@ mod tests {
             last_speech: later,
             hold,
         };
-        let transcribing = State::Transcribing {
-            started: t,
-            released: later - Duration::from_millis(500),
-        };
+        let transcribing = State::Transcribing;
         let releasing = Hold::Releasing {
             at: later - REPEAT_WINDOW,
         };
@@ -493,20 +497,12 @@ mod tests {
         let latched_now = at(Hold::Latched { last_press: later });
         let cancelled = (State::Idle, Command::Discard(Cancelled));
         let closed = (State::Idle, Command::Discard(WindowClosed));
-        let ended = (
-            State::Transcribing {
-                started: t,
-                released: later,
-            },
-            decode(later),
-        );
+        let ended = (State::Transcribing, decode(t, later));
         let exhausted = (
-            State::Transcribing {
-                started: t,
-                released: later,
-            },
+            State::Transcribing,
             Command::Decode {
                 released: later,
+                held: later - t,
                 cause: Cause::Memory,
             },
         );
@@ -639,8 +635,8 @@ mod tests {
             ]
             .concat(),
         );
-        assert_eq!(commands, [Command::Start, decode(ms(1000))]);
-        assert!(matches!(state, State::Transcribing { .. }));
+        assert_eq!(commands, [Command::Start, decode(t, ms(1000))]);
+        assert_eq!(state, State::Transcribing);
     }
 
     #[test]
@@ -658,14 +654,8 @@ mod tests {
             ]
             .concat(),
         );
-        assert_eq!(commands, [Command::Start, decode(ms(1000))]);
-        assert_eq!(
-            state,
-            State::Transcribing {
-                started: t,
-                released: ms(1000)
-            }
-        );
+        assert_eq!(commands, [Command::Start, decode(t, ms(1000))]);
+        assert_eq!(state, State::Transcribing);
     }
 
     /// X11 auto-repeat without detectable repeat: a stop/start pair every
@@ -713,14 +703,8 @@ mod tests {
                 },
                 Some(QUIET),
             );
-            assert_eq!(commands, decode(released), "{order}");
-            assert_eq!(
-                state,
-                State::Transcribing {
-                    started: t,
-                    released
-                }
-            );
+            assert_eq!(commands, decode(t, released), "{order}");
+            assert_eq!(state, State::Transcribing);
         }
     }
 
@@ -756,7 +740,10 @@ mod tests {
                 (Request::Start, ms(1151)),
             ]),
         );
-        assert_eq!(commands, [Command::Start, decode(ms(1000)), Command::Start]);
+        assert_eq!(
+            commands,
+            [Command::Start, decode(t, ms(1000)), Command::Start]
+        );
         assert_eq!(
             state,
             State::Recording {
@@ -785,14 +772,8 @@ mod tests {
                     (Request::Stop, ms(5080)),
                 ]),
             );
-            assert_eq!(commands, [Command::Start, decode(ms(5000))], "{ending}");
-            assert_eq!(
-                state,
-                State::Transcribing {
-                    started: t,
-                    released: ms(5000)
-                }
-            );
+            assert_eq!(commands, [Command::Start, decode(t, ms(5000))], "{ending}");
+            assert_eq!(state, State::Transcribing);
         }
     }
 
@@ -834,7 +815,7 @@ mod tests {
             state,
             &requests(&[(Request::Start, ms(2000)), (Request::Stop, ms(2100))]),
         );
-        assert_eq!(commands, [decode(ms(2000))]);
+        assert_eq!(commands, [decode(t, ms(2000))]);
     }
 
     #[test]
@@ -885,14 +866,8 @@ mod tests {
                 assert_eq!(commands, [Command::Start, Command::Discard(TooShort)]);
                 assert_eq!(state, State::Idle);
             } else {
-                assert_eq!(commands, [Command::Start, decode(released)]);
-                assert_eq!(
-                    state,
-                    State::Transcribing {
-                        started: t,
-                        released
-                    }
-                );
+                assert_eq!(commands, [Command::Start, decode(t, released)]);
+                assert_eq!(state, State::Transcribing);
             }
         }
     }
@@ -920,16 +895,11 @@ mod tests {
             commands,
             [Command::Decode {
                 released: ended,
+                held: ended - t,
                 cause: Cause::Silence
             }]
         );
-        assert_eq!(
-            after,
-            State::Transcribing {
-                started: t,
-                released: ended
-            }
-        );
+        assert_eq!(after, State::Transcribing);
     }
 
     /// Text from the recognizer is the proof that the user is still there,
@@ -957,6 +927,7 @@ mod tests {
             commands,
             [Command::Decode {
                 released: quiet_from + QUIET,
+                held: quiet_from + QUIET - t,
                 cause: Cause::Silence
             }],
             "the timeout runs from the last speech, not from the press"
@@ -1030,6 +1001,7 @@ mod tests {
             commands,
             [Command::Decode {
                 released: limit,
+                held: limit - t,
                 cause: Cause::Length
             }]
         );
@@ -1066,17 +1038,12 @@ mod tests {
                 commands,
                 [Command::Decode {
                     released: limit,
+                    held: limit - t,
                     cause: Cause::Length
                 }],
                 "{opening}"
             );
-            assert_eq!(
-                state,
-                State::Transcribing {
-                    started: t,
-                    released: limit
-                }
-            );
+            assert_eq!(state, State::Transcribing);
         }
     }
 
@@ -1093,16 +1060,11 @@ mod tests {
                 commands,
                 [Command::Decode {
                     released: at,
+                    held: at - t,
                     cause: Cause::Memory
                 }]
             );
-            assert_eq!(
-                state,
-                State::Transcribing {
-                    started: t,
-                    released: at
-                }
-            );
+            assert_eq!(state, State::Transcribing);
             // Reported again while the tail decodes: nothing more to end.
             let (state, commands) = run(
                 state,
@@ -1134,17 +1096,12 @@ mod tests {
                 commands,
                 [Command::Decode {
                     released: soon,
+                    held: soon - t,
                     cause: Cause::Memory
                 }],
                 "{opening}"
             );
-            assert_eq!(
-                state,
-                State::Transcribing {
-                    started: t,
-                    released: soon
-                }
-            );
+            assert_eq!(state, State::Transcribing);
         }
     }
 
@@ -1197,6 +1154,7 @@ mod tests {
             commands,
             [Command::Decode {
                 released: ended,
+                held: ended - t,
                 cause: Cause::Silence
             }],
             "a latch nobody is pressing any more still ends"

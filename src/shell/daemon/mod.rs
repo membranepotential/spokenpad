@@ -512,7 +512,11 @@ impl<B: InputBackend> Loop<'_, B> {
             };
             match command {
                 Command::Start => self.start()?,
-                Command::Decode { released, cause } => self.decode(released, cause)?,
+                Command::Decode {
+                    released,
+                    held,
+                    cause,
+                } => self.decode(released, held, cause)?,
                 Command::Discard(reason) => discard(
                     &mut self.capture,
                     &self.session,
@@ -550,7 +554,7 @@ impl<B: InputBackend> Loop<'_, B> {
         send(&self.editor_tx, EditorWork::Ensure)
     }
 
-    fn decode(&mut self, released: Instant, cause: Cause) -> Result<()> {
+    fn decode(&mut self, released: Instant, held: Duration, cause: Cause) -> Result<()> {
         if cause != Cause::KeyPress {
             log::warn!(
                 "no key ended this capture; spokenpad did: {}",
@@ -580,6 +584,7 @@ impl<B: InputBackend> Loop<'_, B> {
             &mut self.session,
             &self.capture,
             captured,
+            held,
             self.config,
             self.dump_dir.filter(|_| live),
         )?;
