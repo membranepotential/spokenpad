@@ -783,6 +783,26 @@ pub fn press_with_altgr(server: &mut XServer, unshifted: u32) -> bool {
     true
 }
 
+/// Press the key that types `keysym` unshifted while the keys `held` (named
+/// by keysym, such as `Control_L`) are held down. Returns false if any of
+/// them is not on the loaded layout.
+pub fn press_holding(server: &mut XServer, held: &[u32], keysym: u32) -> bool {
+    let held: Option<Vec<Key>> = held.iter().map(|&sym| find_key(server, sym)).collect();
+    let (Some(held), Some(key)) = (held, find_key(server, keysym)) else {
+        return false;
+    };
+    for modifier in &held {
+        fake(server, KEY_PRESS_EVENT, modifier.keycode, 0, 0);
+    }
+    fake(server, KEY_PRESS_EVENT, key.keycode, 0, 0);
+    fake(server, KEY_RELEASE_EVENT, key.keycode, 0, 0);
+    for modifier in held.iter().rev() {
+        fake(server, KEY_RELEASE_EVENT, modifier.keycode, 0, 0);
+    }
+    server.connection.flush().expect("flush");
+    true
+}
+
 /// Type a run of text on the loaded layout. Returns false if any character is
 /// not on it.
 pub fn type_text(server: &mut XServer, text: &str) -> bool {

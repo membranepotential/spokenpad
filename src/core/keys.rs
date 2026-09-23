@@ -21,6 +21,11 @@
 //! Every name below was checked against the installed Neovim with
 //! `nvim_replace_termcodes`, including the modifier order it prints back.
 //! Nothing here does I/O; the X11 and xkbcommon half is in `shell::pane`.
+//!
+//! One press is not a key at all: the pane plays the terminal's part, and
+//! [`press`] makes Ctrl+V a terminal's paste of the clipboard where it would
+//! type text, and Ctrl+Shift+V one everywhere.
+use crate::core::grid::Mode;
 
 /// An X11 keysym: the number a keyboard layout maps a key to at the level the
 /// held modifiers select. The values are `keysymdef.h`'s and never change.
@@ -61,6 +66,34 @@ impl Modifiers {
         }
         prefix
     }
+}
+
+/// What a key press in the pane does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Press {
+    /// These keys, for `nvim_input`, as [`notation`] spells them.
+    Keys(String),
+    /// Paste the clipboard (`+`) as a terminal pastes: the text as it is,
+    /// through `nvim_paste`, so no mapping or auto-indent touches it.
+    PasteClipboard,
+}
+
+/// What a key press does while Neovim is in `mode`, or `None` when it does
+/// nothing (see [`notation`]).
+///
+/// Ctrl+V pastes the clipboard in Insert mode and on the command line, where
+/// a terminal's Ctrl+V would, and is Neovim's own `<C-v>` everywhere else:
+/// Visual block in Normal mode. Ctrl+Shift+V pastes in every mode, as most
+/// terminals bind it. The key is read by its keysym, so Caps Lock does not
+/// turn Ctrl+V into Ctrl+Shift+V; only a held Shift does.
+pub fn press(keysym: Keysym, text: &str, modifiers: Modifiers, mode: Mode) -> Option<Press> {
+    let v = matches!(keysym.0, 0x56 | 0x76);
+    let control_only = modifiers.control && !modifiers.alt && !modifiers.logo;
+    let types_text = matches!(mode, Mode::Insert | Mode::CommandLine);
+    if v && control_only && (modifiers.shift || types_text) {
+        return Some(Press::PasteClipboard);
+    }
+    notation(keysym, text, modifiers).map(Press::Keys)
 }
 
 /// What to send to `nvim_input` for this key press, or `None` when the press
@@ -350,6 +383,49 @@ mod tests {
         // Something with no text, no name and no character.
         assert_eq!(key(0xff7a, "", NONE), None);
         assert_eq!(key(0xff7a, "", CONTROL), None);
+    }
+
+    #[test]
+    fn ctrl_v_pastes_where_it_would_type_text_and_is_visual_block_elsewhere() {
+        let press = |keysym: u32, text: &str, modifiers: Modifiers, mode: Mode| {
+            super::press(Keysym(keysym), text, modifiers, mode)
+        };
+        let keys = |keys: &str| Some(Press::Keys(keys.to_owned()));
+        let paste = Some(Press::PasteClipboard);
+        // X11 delivers U+0016 as the text of Ctrl+v.
+        assert_eq!(press(0x76, "\u{16}", CONTROL, Mode::Insert), paste);
+        assert_eq!(press(0x76, "\u{16}", CONTROL, Mode::CommandLine), paste);
+        assert_eq!(press(0x76, "\u{16}", CONTROL, Mode::Normal), keys("<C-v>"));
+        // Ctrl+Shift+V pastes in every mode.
+        let control_shift = Modifiers {
+            shift: true,
+            ..CONTROL
+        };
+        for mode in [Mode::Normal, Mode::Insert, Mode::CommandLine] {
+            assert_eq!(
+                press(0x56, "\u{16}", control_shift, mode),
+                paste,
+                "{mode:?}"
+            );
+        }
+        // Caps Lock gives the upper-case keysym without Shift: still Ctrl+V.
+        assert_eq!(press(0x56, "\u{16}", CONTROL, Mode::Insert), paste);
+        // Another modifier makes it another key, which Neovim gets.
+        let control_alt = Modifiers {
+            alt: true,
+            ..CONTROL
+        };
+        assert_eq!(press(0x76, "", control_alt, Mode::Insert), keys("<M-C-v>"));
+        let control_logo = Modifiers {
+            logo: true,
+            ..CONTROL
+        };
+        assert_eq!(press(0x76, "", control_logo, Mode::Insert), keys("<C-D-v>"));
+        // A v without Ctrl is a v, and other keys are what they always were.
+        assert_eq!(press(0x76, "v", NONE, Mode::Insert), keys("v"));
+        assert_eq!(press(0x56, "V", SHIFT, Mode::Normal), keys("V"));
+        assert_eq!(press(0x72, "\u{12}", CONTROL, Mode::Insert), keys("<C-r>"));
+        assert_eq!(press(0xffe3, "", CONTROL, Mode::Insert), None);
     }
 
     #[test]

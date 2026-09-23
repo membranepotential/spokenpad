@@ -19,13 +19,16 @@
 //! - [`font`] rasterises a grapheme, `paint_row` turns cells into pixels, and
 //!   [`x11::Window::present`] copies them into the window.
 //! - [`keyboard`] reads the user's real layout, and
-//!   [`core::keys`](crate::core::keys) spells a press the way Neovim reads it.
+//!   [`core::keys`](crate::core::keys) spells a press the way Neovim reads it,
+//!   or makes it a paste in the mode [`core::grid`](crate::core::grid) last
+//!   saw: Ctrl+V pastes the clipboard where it would type text, as the
+//!   user's terminal does.
 //!
 //! **Committed text does not come through here.** The embedded Neovim also
 //! listens on its own socket, and the daemon appends over that socket exactly
 //! as it does for an editor the user opened. The pane draws; it never writes to the
 //! buffer, and it holds no clipboard code — the editor's own provider does
-//! that, as in every other mode.
+//! that, as in every other mode, including the paste a Ctrl+V asks for.
 //!
 //! The daemon reaches this through `nvim.mode = "pane"`, and drives it from a
 //! thread of its own ([`host`]).
@@ -42,6 +45,7 @@ use crate::core::{
     font::{Dpi, Points},
     geometry::{self, Anchor, Dimensions, Extents, Gap, Rect},
     grid::{Cell, CursorShape, Damage, RedrawEvent, Rgb, Screen, Style, Underline},
+    keys::Press,
 };
 use crate::shell::nvim::rpc::waiting_for_keys;
 use anyhow::{Context, Result, bail, ensure};
@@ -560,9 +564,13 @@ impl Pane {
             X::Expose(_) => self.damage_everything(),
             X::ConfigureNotify(event) => self.resize(event.width, event.height)?,
             X::KeyPress(event) => {
-                if let Some(keys) = self.keyboard.press(event.detail, event.state) {
+                let mode = self.screen.mode();
+                if let Some(press) = self.keyboard.press(event.detail, event.state, mode) {
                     self.last_input = Some(at);
-                    self.editor.input(&keys)?;
+                    match press {
+                        Press::Keys(keys) => self.editor.input(&keys)?,
+                        Press::PasteClipboard => self.editor.paste_clipboard()?,
+                    }
                 }
             }
             X::ButtonPress(event) => {

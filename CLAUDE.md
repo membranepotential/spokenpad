@@ -25,10 +25,13 @@ Design history is `docs/decisions.md`; add an entry when you change behaviour.
 
 - spokenpad reads no input device: nothing opens `/dev/input`, and the
   daemon is controlled only through its control socket. Never `EVIOCGRAB`,
-  uinput, or any input synthesis (`xdotool type`, enigo, XTest). Nothing is
-  ever pasted. The only clipboard write is the dictation nvim setting its own
-  `+` register to the whole buffer after a release, and only when
-  `nvim.copy_to_clipboard` is set (off by default).
+  uinput, or any input synthesis (`xdotool type`, enigo, XTest). No
+  transcript is ever pasted. The only clipboard write is the dictation nvim
+  setting its own `+` register to the whole buffer after a release, and only
+  when `nvim.copy_to_clipboard` is set (off by default). The only clipboard
+  read is the user's own Ctrl+V (Insert mode, command line) or Ctrl+Shift+V
+  in the pane, which pastes `+` into the pane's nvim through that nvim's
+  provider.
 - The only network access anywhere in the program is the pinned default
   model download (`spokenpad fetch-models`, or automatically on first launch;
   `core/models.rs`, `shell/models.rs`): fixed URLs, verified against a pinned
@@ -70,8 +73,9 @@ those belongs in `src/shell/`.
   spans to padded, settled windows), `core/wm.rs` (i3/sway IPC protocol,
   the pane's runtime sway rule), `core/models.rs` (the pinned
   default model manifest), `core/grid.rs` (nvim's `ext_linegrid` redraw
-  events and the screen they fold into), `core/keys.rs` (keysym and modifiers
-  to nvim key notation), `core/font.rs` (the pane's point size and
+  events and the screen they fold into, and the mode), `core/keys.rs`
+  (keysym and modifiers to nvim key notation, or Ctrl+V's clipboard paste
+  where a terminal would paste), `core/font.rs` (the pane's point size and
   `Xft.dpi` to pixels, and cells measured as Alacritty measures them),
   `core/frames.rs`, `core/geometry.rs`, `core/text.rs`; plus the `shell/nvim/rpc.rs` codec, `parse_ownership` and
   `passage::append_paragraph`, still inside their modules.

@@ -108,6 +108,33 @@ impl Default for CursorStyle {
     }
 }
 
+/// What typing does in the mode Neovim is in, from the name `mode_change`
+/// gives it: the one thing about the mode a key press depends on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Mode {
+    /// Normal, Visual, Operator-pending, a `-- More --` prompt, or a mode
+    /// this UI does not know: keys are commands.
+    #[default]
+    Normal,
+    /// Insert or Replace mode, or a terminal buffer: keys type text.
+    Insert,
+    /// The command line (`:`, `/`, `?`): keys type the command.
+    CommandLine,
+}
+
+impl Mode {
+    /// The mode `name` is, as Neovim names it in `mode_info_set` and
+    /// `mode_change` (`:help guicursor` lists them).
+    fn from_name(name: &str) -> Self {
+        match name {
+            // `showmatch` is Insert mode while the cursor visits a match.
+            "insert" | "replace" | "showmatch" | "terminal" => Self::Insert,
+            "cmdline_normal" | "cmdline_insert" | "cmdline_replace" => Self::CommandLine,
+            _ => Self::Normal,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Position {
     pub row: u16,
@@ -220,6 +247,8 @@ pub enum RedrawEvent {
         styles: Vec<CursorStyle>,
     },
     ModeChange {
+        mode: Mode,
+        /// Which of the `mode_info_set` styles the cursor takes.
         index: usize,
     },
     BusyStart,
@@ -323,6 +352,10 @@ impl RedrawEvent {
                     .collect(),
             }),
             "mode_change" => Some(Self::ModeChange {
+                mode: arguments
+                    .first()
+                    .and_then(Value::as_str)
+                    .map_or(Mode::Normal, Mode::from_name),
                 index: usize::try_from(number(1)?).ok()?,
             }),
             "busy_start" => Some(Self::BusyStart),
@@ -441,7 +474,9 @@ pub struct Screen {
     defaults: Defaults,
     cursor: Position,
     styles: Vec<CursorStyle>,
-    mode: usize,
+    mode: Mode,
+    /// The style of `styles` the cursor has in `mode`.
+    style: usize,
     busy: bool,
 }
 
@@ -473,7 +508,8 @@ impl Screen {
             defaults: Defaults::default(),
             cursor: Position::default(),
             styles: Vec::new(),
-            mode: 0,
+            mode: Mode::Normal,
+            style: 0,
             busy: false,
         }
     }
@@ -494,9 +530,14 @@ impl Screen {
         self.defaults
     }
 
+    /// The mode Neovim last said it is in.
+    pub fn mode(&self) -> Mode {
+        self.mode
+    }
+
     /// How the cursor is drawn in the mode Neovim is in.
     pub fn cursor_style(&self) -> CursorStyle {
-        self.styles.get(self.mode).copied().unwrap_or_default()
+        self.styles.get(self.style).copied().unwrap_or_default()
     }
 
     pub fn cell(&self, row: u16, column: u16) -> Option<&Cell> {
@@ -593,8 +634,9 @@ impl Screen {
                 self.styles = styles.clone();
                 Damage::row(self.cursor.row)
             }
-            RedrawEvent::ModeChange { index } => {
-                self.mode = *index;
+            RedrawEvent::ModeChange { mode, index } => {
+                self.mode = *mode;
+                self.style = *index;
                 Damage::row(self.cursor.row)
             }
             RedrawEvent::BusyStart => {
@@ -1011,12 +1053,56 @@ mod tests {
                 },
             ],
         });
-        screen.apply(&RedrawEvent::ModeChange { index: 1 });
+        assert_eq!(screen.mode(), Mode::Normal);
+        screen.apply(&RedrawEvent::ModeChange {
+            mode: Mode::Insert,
+            index: 1,
+        });
+        assert_eq!(screen.mode(), Mode::Insert);
         assert_eq!(screen.cursor_style().shape, CursorShape::Vertical);
         assert_eq!(screen.cursor_style().percentage, 25);
         // A mode Neovim never described falls back rather than panicking.
-        screen.apply(&RedrawEvent::ModeChange { index: 99 });
+        screen.apply(&RedrawEvent::ModeChange {
+            mode: Mode::Normal,
+            index: 99,
+        });
+        assert_eq!(screen.mode(), Mode::Normal);
         assert_eq!(screen.cursor_style(), CursorStyle::default());
+    }
+
+    #[test]
+    fn a_mode_change_says_what_typing_does_by_the_modes_name() {
+        let change = |name: &str| {
+            let payload = vec![Value::Array(vec![
+                value("mode_change"),
+                Value::Array(vec![value(name), Value::from(2)]),
+            ])];
+            match RedrawEvent::parse_batch(&payload).as_slice() {
+                [RedrawEvent::ModeChange { mode, index: 2 }] => *mode,
+                other => panic!("{name}: {other:?}"),
+            }
+        };
+        for name in ["insert", "replace", "showmatch", "terminal"] {
+            assert_eq!(change(name), Mode::Insert, "{name}");
+        }
+        for name in ["cmdline_normal", "cmdline_insert", "cmdline_replace"] {
+            assert_eq!(change(name), Mode::CommandLine, "{name}");
+        }
+        for name in ["normal", "visual", "visual_select", "operator", "more", "?"] {
+            assert_eq!(change(name), Mode::Normal, "{name}");
+        }
+        // No name at all: the style still applies, and keys stay commands.
+        let payload = vec![Value::Array(vec![
+            value("mode_change"),
+            Value::Array(vec![Value::Nil, Value::from(1)]),
+        ])];
+        assert_eq!(
+            RedrawEvent::parse_batch(&payload),
+            vec![RedrawEvent::ModeChange {
+                mode: Mode::Normal,
+                index: 1
+            }]
+        );
     }
 
     #[test]

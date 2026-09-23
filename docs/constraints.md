@@ -69,9 +69,18 @@ is just text. The clipboard round trip is deleted; see
 Since 2026-09-19 the clipboard is written again, but only as a copy, never as
 a delivery path, and since 2026-09-21 only when `nvim.copy_to_clipboard` is
 set (off by default): after every release the dictation nvim sets its own
-`+` register to the whole buffer, through nvim's clipboard provider. Nothing
-is pasted, no key is sent, and no other window is written to, so every
-failure above stays impossible. See
+`+` register to the whole buffer, through nvim's clipboard provider. No
+transcript is pasted, no key is sent, and no other window is written to, so
+every failure above stays impossible.
+
+Since 2026-09-23 the pane reads the clipboard too, and only when the user
+asks: Ctrl+V in Insert mode or on the command line, and Ctrl+Shift+V in any
+mode, paste the `+` register into the pane's own nvim, as the user's
+terminal pastes into an nvim running in it. The read goes through that
+nvim's clipboard provider; spokenpad starts no clipboard program and reads
+no selection itself. The text moves from the clipboard into the dictation
+buffer, never out of spokenpad into another window. See
+[decisions.md](decisions.md#ctrlv-in-the-pane-pastes-as-a-terminal-does-2026-09-23). See
 [decisions.md](decisions.md#the-whole-buffer-is-copied-to-the-clipboard-after-a-release)
 and [decisions.md](decisions.md#the-clipboard-copy-becomes-opt-in-off-by-default-2026-09-21).
 
@@ -279,7 +288,7 @@ over that editor's own socket. In pane mode the daemon starts that neovim
 itself, inside a window it draws; in attach mode the user opens it with
 `spokenpad editor`, which runs nvim on the dictation socket and marks it as
 spokenpad's. No other window is
-ever written to, and nothing is pasted anywhere. With no such editor open,
+ever written to, and no transcript is pasted anywhere. With no such editor open,
 the transcript goes to a dictation file on disk — never to a window — and the
 next editor opens on that file (see
 [nvim-window.md](nvim-window.md#dictating-with-no-editor-open)).

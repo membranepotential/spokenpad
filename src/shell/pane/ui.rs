@@ -117,6 +117,22 @@ impl Editor {
         self.notify("nvim_input", vec![Value::from(keys)])
     }
 
+    /// Paste the clipboard as a terminal pastes, for Ctrl+V
+    /// ([`Press::PasteClipboard`](crate::core::keys::Press::PasteClipboard)).
+    ///
+    /// A request, not a notification, so a failure comes back and is
+    /// logged; nothing waits for the answer. Neovim runs it after every key
+    /// already sent with [`Self::input`]: those keys are queued the moment
+    /// they arrive, a request waits in the event queue, and Neovim reads
+    /// pending keys before it runs a queued event.
+    pub fn paste_clipboard(&mut self) -> Result<()> {
+        self.request(
+            "nvim_exec_lua",
+            vec![Value::from(PASTE_CLIPBOARD), Value::Array(Vec::new())],
+        )
+        .map(drop)
+    }
+
     /// A mouse button or a wheel step at a grid position.
     ///
     /// `button` is `"left"`, `"right"`, `"middle"` or `"wheel"`; `action` is
@@ -229,6 +245,15 @@ impl Drop for Editor {
         }
     }
 }
+
+/// The clipboard, read through the editor's own provider and pasted as a
+/// terminal's bracketed paste is: `nvim_paste` in one piece, which takes no
+/// mapping, no auto-indent and no abbreviation, and is one undo step and
+/// one `.`. `getreg` returns a linewise register with its final newline, as
+/// the clipboard holds it; `crlf` splits lines at CR too, as the TUI does.
+/// spokenpad starts no clipboard program: an editor with no provider says
+/// so itself.
+const PASTE_CLIPBOARD: &str = "vim.api.nvim_paste(vim.fn.getreg('+'), true, -1)";
 
 /// Decode Neovim's side of the channel until it ends.
 ///

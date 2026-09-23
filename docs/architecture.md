@@ -32,13 +32,13 @@ imperative shell, and `config.rs` sits at the root because both sides read it.
 | `shell/control.rs` | Bind the control socket, or take over the one systemd passed (socket activation); stamp and forward each request, each line under one deadline; the client the CLI uses, which starts `spokenpad.socket` once when its socket is missing and says through `notify-send` why a press failed | Unix socket, `systemctl`, `notify-send` |
 | `shell/audio.rs` | Pre-roll, immutable capture chunks, dropping committed audio, the memory ceiling, stream repair (backed off while the microphone stays missing) | PortAudio (behind `InputBackend`) |
 | `shell/recorder.rs` | Persist every capture independently of decode, prune the directory, and keep the list of recordings not transcribed yet for the next start (`waiting.tsv`) | filesystem |
-| `core/grid.rs` | Neovim's `ext_linegrid` redraw events, typed, and the screen they fold into; which rows each one changed | none |
-| `core/keys.rs` | A keysym, its modifiers and the text a layout produced, as the notation `nvim_input` reads | none |
+| `core/grid.rs` | Neovim's `ext_linegrid` redraw events, typed, and the screen they fold into; which rows each one changed; the mode `mode_change` last named | none |
+| `core/keys.rs` | A keysym, its modifiers and the text a layout produced, as the notation `nvim_input` reads, or, for Ctrl+V where a terminal would paste, a paste of the clipboard | none |
 | `shell/nvim/mod.rs` | Editor lifecycle in both modes (pane, attach), ownership proof (a listener of this user only, `SO_PEERCRED`), transactional appends, indicator, `spokenpad editor`; in pane mode, stops an editor no UI shows (what `:restart` leaves); the display from the user manager (`with_manager_session`) | Unix socket, `systemctl` |
 | `shell/pane/mod.rs` | The pane: its loop, the renderer, and what `spokenpad check` looks for | X11 |
 | `shell/pane/host.rs` | The pane's thread: the two things the daemon tells it, whether a pane is open, whether the user closed the last one, and restarting after a panic | internal channels |
 | `shell/pane/x11.rs` | The window, the properties that keep a window manager from focusing it, `PutImage`, and `Xft.dpi` from x11rb's resource database, as winit reads it | X11, `~/.Xresources` |
-| `shell/pane/ui.rs` | `nvim --embed` over stdio, `nvim_ui_attach`, and the thread that decodes its redraw stream | a child process |
+| `shell/pane/ui.rs` | `nvim --embed` over stdio, `nvim_ui_attach`, the paste a Ctrl+V asks for, and the thread that decodes its redraw stream | a child process |
 | `shell/pane/font.rs` | `fc-match` for the face, swash for hinted glyphs, per-grapheme caching, and a character fallback kept off the drawing path: loaded faces first, one answer per Unicode page, a budget per frame and a timeout per process | fontconfig, filesystem |
 | `shell/pane/keyboard.rs` | The layout the X server has loaded, dead keys and Compose | X11, libxkbcommon |
 | `shell/pane/place.rs` | The monitors from RandR and the pointer from X, fed to `core/geometry.rs` | X11 |

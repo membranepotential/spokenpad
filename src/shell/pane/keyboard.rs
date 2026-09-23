@@ -12,11 +12,15 @@
 //! leave the state wrong. The layout itself is re-read on `MappingNotify`, so
 //! a `setxkbmap` while the pane is open takes effect.
 //!
-//! What this hands on is [`core::keys::notation`](crate::core::keys::notation)
-//! — the decision about how to spell a key is a pure function, and it is over
-//! there. The library itself is opened at run time; see [`xkb`](super::xkb).
+//! What this hands on is [`core::keys::press`](crate::core::keys::press)
+//! — the decision about what a key does and how to spell it is a pure
+//! function, and it is over there. The library itself is opened at run
+//! time; see [`xkb`](super::xkb).
 use super::xkb;
-use crate::core::keys::{self, Keysym, Modifiers};
+use crate::core::{
+    grid::Mode,
+    keys::{self, Keysym, Modifiers, Press},
+};
 use anyhow::Result;
 use x11rb::{protocol::xproto::KeyButMask, xcb_ffi::XCBConnection};
 
@@ -72,9 +76,9 @@ impl Keyboard {
         Ok(())
     }
 
-    /// What to send Neovim for this key press, or `None` when the press types
-    /// nothing: a modifier, a dead key, or a key still mid-compose.
-    pub fn press(&mut self, keycode: u8, mask: KeyButMask) -> Option<String> {
+    /// What this key press does while Neovim is in `mode`, or `None` when it
+    /// does nothing: a modifier, a dead key, or a key still mid-compose.
+    pub fn press(&mut self, keycode: u8, mask: KeyButMask, mode: Mode) -> Option<Press> {
         let raw = u32::from(u16::from(mask));
         self.state.update_mask(
             raw & REAL_MODIFIERS,
@@ -94,7 +98,7 @@ impl Keyboard {
         // answer for every press that is not part of a sequence.
         let typed = self.state.text(keycode);
         let (keysym, text) = self.compose(keysym, typed)?;
-        keys::notation(Keysym(keysym), &text, modifiers)
+        keys::press(Keysym(keysym), &text, modifiers, mode)
     }
 
     /// Feed the keysym to the Compose machine, if there is one.

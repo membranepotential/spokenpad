@@ -29,8 +29,8 @@
 mod harness;
 
 use harness::{
-    I3, SETTLE, XServer, click, close_window, find_key, press_key, press_keysym, press_with_altgr,
-    screenshot_dir, type_text, wait_for, write_png,
+    I3, SETTLE, XServer, click, close_window, find_key, press_holding, press_key, press_keysym,
+    press_with_altgr, screenshot_dir, type_text, wait_for, write_png,
 };
 use rmpv::Value;
 use spokenpad::{
@@ -38,6 +38,7 @@ use spokenpad::{
     core::{
         font::Points,
         geometry::{Dimensions, Rect},
+        grid::Mode as GridMode,
         state::IndicatorPhase,
     },
     shell::{
@@ -1036,6 +1037,145 @@ fn ask_server(socket: &Path, expr: &str) -> Option<String> {
 /// cells as fit, and lies wholly on the monitor, beside the pointer where
 /// there is room and around it where there is none. Neovim is told the grid
 /// the window has.
+/// Ctrl+V in the pane does what it does in a terminal set up to paste with
+/// it: in Insert mode and on the command line it pastes the clipboard, as
+/// one piece that auto-indent does not touch, after the keys typed before
+/// it; in Normal mode it is Neovim's own Visual block. Ctrl+Shift+V pastes
+/// in Normal mode too. The clipboard is a provider stub inside the
+/// embedded nvim, so no real selection is read or written.
+#[test]
+fn ctrl_v_pastes_where_a_terminal_would_and_is_visual_block_elsewhere() {
+    let _one_at_a_time = one_at_a_time();
+    if !harness::tools_or_skip(&["Xvfb", "i3", "nvim", "fc-match"]) {
+        return;
+    }
+    let mut server = XServer::start();
+    let i3 = I3::start(&server);
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let config = Nvim {
+        editor: vec![
+            "nvim".to_owned(),
+            "--cmd".to_owned(),
+            STUB_CLIPBOARD.to_owned(),
+        ],
+        display: Some(server.display.clone()),
+        ..dictation_config(directory.path())
+    };
+    let file = config.dictation_dir.join("dictation-2026-09-23-000000.md");
+    std::fs::write(&file, "    first\n").expect("create the dictation file");
+    let mut pane = pane_on(&server, &config, &file);
+    i3.wait_until_managed(pane.window().id());
+    sleep(SETTLE);
+    let rect = pane.window().geometry().expect("the pane's geometry");
+    click(
+        &mut server,
+        i16::try_from(rect.x + rect.width as i32 / 2).expect("on screen"),
+        i16::try_from(rect.y + rect.height as i32 / 2).expect("on screen"),
+    );
+    wait_for(PATIENCE, "the click to focus the pane", || {
+        let _ = pane.step(Duration::from_millis(50));
+        i3.node(pane.window().id())
+            .filter(|node| node.focused)
+            .map(drop)
+    });
+    // Two lines, the first indented: typed with 'autoindent' on, the second
+    // would take the indent of the line it follows.
+    call(
+        &mut pane,
+        "nvim_exec_lua",
+        vec![
+            Value::from(
+                "vim.fn.setreg('+', { '  one', 'two' }, 'v')\n\
+                 vim.bo.autoindent = true\n\
+                 vim.cmd('normal! gg0')",
+            ),
+            Value::Array(Vec::new()),
+        ],
+        PATIENCE,
+    );
+    let press = |server: &mut XServer, keysym: u32| {
+        assert!(press_keysym(server, keysym), "the layout has {keysym:#x}");
+    };
+    let press_v = |server: &mut XServer, held: &[u32]| {
+        assert!(
+            press_holding(server, held, u32::from(b'v')),
+            "the layout has v and the modifiers {held:x?}"
+        );
+    };
+    let mode_is = |pane: &mut Pane, mode: GridMode| {
+        wait_for(PATIENCE, &format!("{mode:?} mode"), || {
+            let _ = pane.step(Duration::from_millis(20));
+            (pane.screen().mode() == mode).then_some(())
+        });
+    };
+
+    // Insert mode: the keys before the paste land first, and the pasted
+    // lines are not indented.
+    press(&mut server, u32::from(b'A'));
+    mode_is(&mut pane, GridMode::Insert);
+    assert!(type_text(&mut server, "ab"));
+    press_v(&mut server, &[CONTROL]);
+    let pasted = wait_for(PATIENCE, "the paste in Insert mode", || {
+        let _ = pane.step(Duration::from_millis(20));
+        Some(buffer_text(&mut pane)).filter(|text| text.ends_with("two"))
+    });
+    assert_eq!(pasted, "    firstab  one\ntwo");
+    press(&mut server, ESCAPE);
+    mode_is(&mut pane, GridMode::Normal);
+
+    // Normal mode: Visual block, and the buffer is untouched.
+    press_v(&mut server, &[CONTROL]);
+    wait_for(PATIENCE, "Visual block mode", || {
+        let _ = pane.step(Duration::from_millis(20));
+        (nvim_mode(&mut pane) == "\u{16}").then_some(())
+    });
+    assert_eq!(buffer_text(&mut pane), pasted);
+    press(&mut server, ESCAPE);
+    mode_is(&mut pane, GridMode::Normal);
+
+    // Ctrl+Shift+V pastes in Normal mode as well.
+    press_v(&mut server, &[CONTROL, SHIFT]);
+    wait_for(PATIENCE, "the paste in Normal mode", || {
+        let _ = pane.step(Duration::from_millis(20));
+        (buffer_text(&mut pane).matches("one").count() == 2).then_some(())
+    });
+    assert_eq!(nvim_mode(&mut pane), "n");
+
+    // The command line takes the first line, as a terminal's paste into
+    // it does.
+    press(&mut server, u32::from(b':'));
+    mode_is(&mut pane, GridMode::CommandLine);
+    press_v(&mut server, &[CONTROL]);
+    wait_for(PATIENCE, "the paste on the command line", || {
+        let _ = pane.step(Duration::from_millis(20));
+        let last = pane.screen().line(pane.size().1 - 1);
+        last.starts_with(":  one").then_some(())
+    });
+    press(&mut server, ESCAPE);
+    mode_is(&mut pane, GridMode::Normal);
+}
+
+/// `vim.g.clipboard` as a Lua table: `+` is a plain Lua global.
+const STUB_CLIPBOARD: &str = r#"lua vim.g.clipboard = { name = "spokenpad-test", copy = { ["+"] = function(lines) _G.spokenpad_test_clipboard = lines end, ["*"] = function(lines) end }, paste = { ["+"] = function() return { _G.spokenpad_test_clipboard or {}, "v" } end, ["*"] = function() return { {}, "v" } end } }"#;
+const CONTROL: u32 = 0xffe3;
+const SHIFT: u32 = 0xffe1;
+const ESCAPE: u32 = 0xff1b;
+
+/// The `mode` of `nvim_get_mode`.
+fn nvim_mode(pane: &mut Pane) -> String {
+    let answer = call(pane, "nvim_get_mode", Vec::new(), PATIENCE);
+    answer
+        .as_map()
+        .and_then(|fields| {
+            fields
+                .iter()
+                .find(|(key, _)| key.as_str() == Some("mode"))
+                .and_then(|(_, value)| value.as_str())
+        })
+        .unwrap_or_default()
+        .to_owned()
+}
+
 #[test]
 fn the_pane_is_sized_in_cells_and_cut_to_the_monitor() {
     let _one_at_a_time = one_at_a_time();

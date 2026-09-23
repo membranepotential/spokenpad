@@ -9,8 +9,8 @@ using nvim at all is in
 it must not break are in [constraints.md](constraints.md).
 
 The transcript goes to a dedicated neovim, over its msgpack-RPC socket.
-Nothing is pasted anywhere, and no window that was not opened for this
-purpose is ever written to.
+No transcript is pasted anywhere, and no window that was not opened for
+this purpose is ever written to.
 
 ## Two modes: who opens the editor
 
@@ -321,6 +321,32 @@ path's 250 ms made the pane fail to open.
 
 Two hundred ideographs the family does not cover take one frame and one
 `fc-match`; the same page drawn again costs no lookup at all.
+
+The pane plays the terminal's part, so Ctrl+V does what it does in a
+terminal set up to paste with it. In Insert mode (and Replace mode) and on
+the command line it pastes the clipboard (`+`); in Normal, Visual and
+Operator-pending mode it is Neovim's own `<C-v>`, Visual block.
+Ctrl+Shift+V pastes in every mode, as most terminals bind it. Which of the
+two a Ctrl+V is follows the mode Neovim last named in a `mode_change`
+redraw event (`core::grid::Mode`); `core::keys::press` decides. The paste
+is a terminal's bracketed paste: one `nvim_paste` of `getreg('+')`, run
+inside the embedded nvim, so its own clipboard provider reads the
+clipboard, and no mapping, abbreviation or auto-indent touches the text. It
+is one undo step and repeats with `.`. On the command line only the first
+line goes in, as `vim.paste` does it. Attach mode is unaffected: there the
+terminal decides.
+
+The paste is a queued request, as Neovim's own TUI sends a paste
+(`nvim_paste`) beside keys (`nvim_input`). Neovim queues a key the moment
+it arrives and reads every queued key before it runs a queued request, so
+the paste lands after every key typed before it. Two limits follow from the
+same rule. A key typed after Ctrl+V can still go first, if it reaches
+Neovim before the paste has started, which takes a key within milliseconds
+of it. And a paste into a command that waits for a key (`<C-r>` in Insert
+mode, a count or `"` in Normal mode) runs once that command has its key; it
+is never read as that key. The mode is the one Neovim last drew, so a
+Ctrl+V pressed before Neovim has redrawn after `i` or `<Esc>` goes by the
+mode before it.
 
 There is no input method: dead keys and Compose work, because they are
 xkbcommon's and spokenpad reads the layout the X server has loaded, but IBus

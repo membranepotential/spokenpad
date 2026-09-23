@@ -2822,3 +2822,41 @@ systemd runs, or took the microphone when none ran.
 - Test: `no_command_prints_the_help_and_starts_nothing`,
   `each_command_lists_only_the_options_it_reads`, and the socket-activation
   tests in `tests/cli.rs`, which start `spokenpad daemon` as the unit does.
+
+## Ctrl+V in the pane pastes as a terminal does (2026-09-23)
+
+In the user's terminal, Ctrl+V in Insert mode pastes the clipboard. In the
+pane it was Neovim's `<C-v>`, which inserts the next key literally, so the
+habit did nothing useful there. The user's decision: Ctrl+V in Insert mode
+pastes; in Normal mode it stays Visual block.
+
+- Chosen: the pane, which plays the terminal's part, decides. `mode_change`
+  redraw events now carry the mode's name, folded into `core::grid::Mode`
+  (`Normal`, `Insert`, `CommandLine`), and `core::keys::press` makes Ctrl+V
+  a paste in `Insert` and `CommandLine`, Ctrl+Shift+V one in every mode,
+  and every other key what `notation` spells. The paste runs
+  `nvim_paste(getreg('+'), true, -1)` inside the embedded nvim through
+  `nvim_exec_lua`, as a request nothing waits for: the clipboard is read by
+  nvim's own provider, spokenpad starts no clipboard program, and the text
+  arrives as a bracketed paste, untouched by mappings and auto-indent.
+- Ordering: Neovim queues an `nvim_input` key as it arrives and reads
+  queued keys before it runs a queued request, so keys typed before Ctrl+V
+  land first. This is how Neovim's own TUI sends a paste beside keys.
+- Rejected: sending the paste as `<Cmd>lua ...<CR>` through `nvim_input`.
+  It keeps even the keys after the paste in order, but a command waiting
+  for a key takes `<Cmd>` as that key: after `<C-r>`, `<C-k>` or `<C-q>` in
+  Insert mode, or `r` in Normal mode, the Lua text went into the buffer
+  (tried on nvim 0.12.5, headless).
+- Rejected: reading the mode with `nvim_get_mode` at the press. It is
+  answered before queued keys are read, so it is no fresher than the last
+  `mode_change`, and the press would wait on a round trip.
+- Not handled: a Ctrl+V within one redraw of a mode change goes by the mode
+  before it, and a key typed within milliseconds after Ctrl+V can land
+  before the paste.
+- `docs/constraints.md` now says that the clipboard is read, only on the
+  user's key, and only into the pane's own nvim.
+- Tests: `ctrl_v_pastes_where_it_would_type_text_and_is_visual_block_elsewhere`,
+  `a_mode_change_says_what_typing_does_by_the_modes_name` (core), and
+  `ctrl_v_pastes_where_a_terminal_would_and_is_visual_block_elsewhere`
+  (`tests/pane_render.rs`: a real pane on Xvfb and i3, XTEST keys, a stub
+  clipboard provider).
