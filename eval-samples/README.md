@@ -131,6 +131,7 @@ used it:
 - [the live path against whole-file decoding](../docs/experiments/2026-09-21-live-path-against-whole-file.md)
 - [the lead-padding clamp](../docs/experiments/2026-09-21-lead-padding-clamp-corpus.md)
 - [parakeet-unified-en](../docs/experiments/2026-09-21-parakeet-unified-en-corpus.md)
+- [the decode fixes of 2026-09-22](../docs/experiments/2026-09-23-decode-fixes-corpus.md)
 
 ## Rules for this data
 

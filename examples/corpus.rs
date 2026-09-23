@@ -466,8 +466,12 @@ fn engine(config: &Config, padding: Option<usize>) -> Result<Engine> {
 /// [`TickKind::Settled`]: it commits exactly what the preview tick commits,
 /// without the cosmetic decode, which saves the replay about nine decodes in
 /// ten.
-fn replay_live(worker: &mut Engine, samples: &[f32], plan: Plan) -> Result<Vec<String>> {
+///
+/// Also returns how many ticks read a window of a longer tail: only those
+/// can commit a window in which nothing settled.
+fn replay_live(worker: &mut Engine, samples: &[f32], plan: Plan) -> Result<(Vec<String>, usize)> {
     let utterance = Utterance::new(1);
+    let mut windows = 0;
     let window = worker.window();
     // `session.committed_hint`. Here it never lags: the replay is one thread,
     // so it is the worker's own offset.
@@ -479,6 +483,7 @@ fn replay_live(worker: &mut Engine, samples: &[f32], plan: Plan) -> Result<Vec<S
         // Past preview.max_seconds of uncommitted audio the daemon stops the
         // cosmetic decode but keeps ticking, a window at a time.
         let kind = tick_kind(available - hint.get(), window, plan.previews);
+        windows += usize::from(kind == TickKind::Window);
         // `snapshot_capture(committed_hint)`, truncated to one tick's work.
         let end = available.min(hint.get() + window);
         worker.tick(&samples[hint.get()..end], hint, &utterance, kind, |c| {
@@ -496,7 +501,7 @@ fn replay_live(worker: &mut Engine, samples: &[f32], plan: Plan) -> Result<Vec<S
     worker.finish(&samples[hint.get()..], hint, &utterance, |c| {
         texts.push(c.text)
     })?;
-    Ok(texts)
+    Ok((texts, windows))
 }
 
 /// The kind of tick the daemon issues for a tail of `tail` samples, with a
@@ -542,6 +547,9 @@ struct Row {
     lost_tail: usize,
     yeah: usize,
     seams: Seams,
+    /// Live ticks that read a window of a tail longer than
+    /// `preview.max_seconds`.
+    windows: usize,
     /// The committed chunk texts, in order. Private speech: written out only
     /// with `--with-text`.
     commits: Vec<String>,
@@ -590,9 +598,9 @@ fn run_pass(
                     );
                     worker.pipeline.recognizer.take();
                     let started = Instant::now();
-                    let texts = match plan.path {
+                    let (texts, windows) = match plan.path {
                         DecodePath::Live => replay_live(&mut worker, &samples, plan)?,
-                        DecodePath::Whole => decode_whole(&mut worker, &samples)?,
+                        DecodePath::Whole => (decode_whole(&mut worker, &samples)?, 0),
                     };
                     let decode_seconds = started.elapsed().as_secs_f64();
                     let yeah = texts.iter().filter(|t| is_yeah(t)).count();
@@ -620,6 +628,7 @@ fn run_pass(
                             lost_tail: alignment.lost_tail,
                             yeah,
                             seams,
+                            windows,
                             commits,
                             tally: worker.pipeline.recognizer.take(),
                             decode_seconds,
@@ -657,6 +666,9 @@ struct Summary {
     lost_tail_words: usize,
     yeah: usize,
     seams: Seams,
+    windows: usize,
+    /// Captures with at least one window tick.
+    windowed: usize,
     tally: Tally,
     audio_seconds: f64,
     decode_seconds: f64,
@@ -676,6 +688,8 @@ fn summarize(rows: &[Row], lost_tail: usize) -> Summary {
         lost_tail_words: 0,
         yeah: 0,
         seams: Seams::default(),
+        windows: 0,
+        windowed: 0,
         tally: Tally::default(),
         audio_seconds: 0.0,
         decode_seconds: 0.0,
@@ -687,6 +701,8 @@ fn summarize(rows: &[Row], lost_tail: usize) -> Summary {
         s.yeah += row.yeah;
         s.seams.repeated += row.seams.repeated;
         s.seams.words += row.seams.words;
+        s.windows += row.windows;
+        s.windowed += usize::from(row.windows > 0);
         s.tally += row.tally;
         if row.ref_words == 0 {
             s.empty_reference += 1;
@@ -819,6 +835,12 @@ fn print_report(rows: &[Row], summary: &Summary, args: &Args, plan: Plan, wall: 
         summary.seams.words,
         rows.iter().map(|r| r.commits.len()).sum::<usize>()
     );
+    if plan.path == DecodePath::Live {
+        println!(
+            "ticks over a tail longer than preview.max_seconds: {} in {} captures",
+            summary.windows, summary.windowed
+        );
+    }
     println!(
         "captures with an empty reference: {}  ({} of them decoded to words anyway)",
         summary.empty_reference, summary.invented
@@ -911,7 +933,7 @@ fn write_jsonl(
             "empty_after_retry": row.tally.empty_after_retry,
             "decodes": row.tally.decodes, "yeah": row.yeah,
             "seam_repeats": row.seams.repeated, "seam_words": row.seams.words,
-            "chunks": row.commits.len(),
+            "chunks": row.commits.len(), "window_ticks": row.windows,
             "decode_seconds": row.decode_seconds,
         });
         if args.with_text {
@@ -940,6 +962,7 @@ fn write_jsonl(
             "empty_after_retry": summary.tally.empty_after_retry,
             "decodes": summary.tally.decodes, "yeah": summary.yeah,
             "seam_repeats": summary.seams.repeated, "seam_words": summary.seams.words,
+            "window_ticks": summary.windows, "windowed_files": summary.windowed,
             "lost_tail_threshold": args.lost_tail,
             "lost_tail_files": summary.lost_tail_files,
             "lost_tail_words": summary.lost_tail_words,
@@ -1268,6 +1291,7 @@ mod tests {
             lost_tail,
             yeah: 0,
             seams: Seams::default(),
+            windows: 0,
             commits: vec![],
             tally: Tally::default(),
             decode_seconds: 0.1,

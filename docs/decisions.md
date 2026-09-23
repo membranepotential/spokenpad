@@ -2619,6 +2619,12 @@ up to 30 s of audio.
   sample decoded once, the short word included),
   `a_release_during_a_window_committed_whole_keeps_the_decoded_segment`,
   and `the_last_pause_follows_the_last_span_with_silence_after_it`.
+- Measured ([experiment](experiments/2026-09-23-decode-fixes-corpus.md)):
+  at the default 30 s no capture of the corpus reaches this path, and no
+  committed word changes. Forced with `preview.max_seconds = 10`, the cuts
+  cost 2.2 WER points, five chunks lost after the retry and 53 words lost
+  at the ends, mostly because the audio right after a cut decodes to
+  nothing. Open: lead-in silence for the decode after a cut.
 
 ## Exit code 6 for a missing model; 2 is clap's (2026-09-23)
 

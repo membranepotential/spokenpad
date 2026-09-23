@@ -193,7 +193,12 @@ with `TickKind::Settled`, which commits exactly what a preview tick commits
 and decodes nothing else (`a_settled_tick_commits_what_a_preview_tick_commits`
 in `core/decode.rs`), so the replay does about a tenth of the decodes. With
 `--previews` the wall time is the daemon's real workload; without it, only
-the decodes that produce text.
+the decodes that produce text. The report counts the window ticks and the
+captures that had one: only those can commit a window in which nothing
+settled. Before 2026-09-23 the replay ticked every tail as a window without
+`--previews`, which the daemon never does. That mattered only once a window
+could commit what did not settle, and no recorded experiment ran on such a
+build before [the check](experiments/2026-09-23-decode-fixes-corpus.md).
 
 ### Where the corpus comes from
 
@@ -269,6 +274,7 @@ the words.
 | [the lead-padding clamp](experiments/2026-09-21-lead-padding-clamp-corpus.md) | keep the clamp, and is the constant-RAM main safe to deploy? | keep it — it costs nothing at all here; and yes, main is 0.35 points better |
 | [parakeet-unified-en](experiments/2026-09-21-parakeet-unified-en-corpus.md) | what would an English-only user gain from the candidate model? | about 1.5 WER points and half the decode time, but no German |
 | [the references](experiments/2026-09-21-gladia-reference-transcripts.md) | what is an ASR reference worth? | enough to compare, not enough to quote |
+| [the decode fixes](experiments/2026-09-23-decode-fixes-corpus.md) | do the window cut and per-segment commits change the corpus? | not at the default 30 s window, which no capture reaches; at 10 s the cuts cost 2.2 points and lose speech |
 
 The runs behind those files are kept beside the corpus, in the git-ignored
 `eval-samples/local/`: `results-2026-09-21.jsonl` (one JSON line per capture
