@@ -111,8 +111,9 @@ process-global state.
 Until the pipeline is built, a capture is recorded to its recovery WAV only:
 the loop drops its in-memory audio as it arrives, and at the release queues
 the WAV. Once the inference thread reports `Ready`, each queued WAV goes to it
-as `Work::Recording` and is decoded a `preview.max_seconds` window at a time
-through the same `Worker::tick` and `Worker::finish` a live capture uses; a
+as `Work::Recording` and is read `preview.max_seconds` at a time, each read
+followed by a tick over the whole open tail, through the same `Worker::tick`
+and `Worker::finish` a live capture uses; a
 recording's way through that is one value, `Transcription { stage: Stage }`
 in `shell/daemon/transcriptions.rs`. The
 speech model's state (`core::session::Recognition`) becomes a winbar notice

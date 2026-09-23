@@ -11,9 +11,9 @@
 //! Two paths, because they fail differently:
 //!
 //! * `live` drives [`Worker`] as `shell/daemon` does -- a tick every
-//!   `preview.interval_seconds` of audio over the audio since the committed offset,
-//!   bounded by `preview.max_seconds`, every settled chunk committed once, then
-//!   the release decoding only what is still held.
+//!   `preview.interval_seconds` of audio over all the audio since the committed
+//!   offset, every settled chunk committed once, then the release decoding only
+//!   what is still held.
 //! * `whole` decodes each capture in one pass with no detector, like
 //!   `eval --whole`.
 //!
@@ -34,7 +34,9 @@ use sha2::{Digest, Sha256};
 use spokenpad::{
     config::{Config, Decoding},
     core::{
-        decode::{Pipeline, Recognizer, TickKind, TrailingSilence, Utterance, Worker},
+        decode::{
+            Pipeline, Recognizer, Segmenter, Split, TickKind, TrailingSilence, Utterance, Worker,
+        },
         frames::Frames,
         text::Processor,
     },
@@ -143,6 +145,8 @@ struct Plan {
     padding: Option<usize>,
     /// Audio between preview ticks, in samples.
     tick: usize,
+    /// `preview.max_seconds`, in samples: a longer tail is not previewed.
+    window: usize,
     previews: bool,
     rate: u32,
 }
@@ -433,28 +437,73 @@ impl<R: Recognizer> Recognizer for Probe<R> {
     }
 }
 
-type Engine = Worker<Probe<Transcriber>, SpeechSegmenter>;
+/// The detector as the harness needs to see it: how long a tail each pass
+/// read, and how long the pass took. A tick reads the whole open tail, so
+/// this is what a tick, and a release queued behind it, waits for.
+struct Timed<S> {
+    inner: S,
+    scans: Scans,
+}
+#[derive(Default, Clone, Copy)]
+struct Scans {
+    passes: usize,
+    /// The longest slice one pass read, in samples.
+    longest: usize,
+    /// The slowest pass, and all of them, in seconds.
+    slowest: f64,
+    seconds: f64,
+}
+impl std::ops::AddAssign for Scans {
+    fn add_assign(&mut self, other: Self) {
+        self.passes += other.passes;
+        self.longest = self.longest.max(other.longest);
+        self.slowest = self.slowest.max(other.slowest);
+        self.seconds += other.seconds;
+    }
+}
+impl<S> Timed<S> {
+    /// The passes since the last call, and starts counting again.
+    fn take(&mut self) -> Scans {
+        std::mem::take(&mut self.scans)
+    }
+}
+impl<S: Segmenter> Segmenter for Timed<S> {
+    fn split(&mut self, samples: &[f32]) -> Result<Split> {
+        let started = Instant::now();
+        let split = self.inner.split(samples);
+        let seconds = started.elapsed().as_secs_f64();
+        self.scans += Scans {
+            passes: 1,
+            longest: samples.len(),
+            slowest: seconds,
+            seconds,
+        };
+        split
+    }
+}
+
+type Engine = Worker<Probe<Transcriber>, Timed<SpeechSegmenter>>;
 
 fn engine(config: &Config, padding: Option<usize>) -> Result<Engine> {
     let rate = config.audio.sample_rate;
     let mut recognizer = Transcriber::new(&config.asr, rate)?;
     // Warm up before the probe, so lazy native initialisation is not counted.
     recognizer.warm_up()?;
-    Ok(Worker::new(
-        Pipeline {
-            recognizer: Probe::new(recognizer, padding),
-            segmenter: SpeechSegmenter::new(&config.vad, rate)?,
+    Ok(Worker::new(Pipeline {
+        recognizer: Probe::new(recognizer, padding),
+        segmenter: Timed {
+            inner: SpeechSegmenter::new(&config.vad, rate)?,
+            scans: Scans::default(),
         },
-        config.preview.window(rate),
-    ))
+    }))
 }
 
 // -- the two paths ----------------------------------------------------------------
 
 /// Replays one capture through `shell/daemon`'s own loop: a tick every
-/// `tick` samples over the audio since the committed offset, bounded by
-/// `preview.max_seconds`, each settled chunk committed once, then the release
-/// decoding only the audio still held. Returns the committed texts in order.
+/// `tick` samples over all the audio since the committed offset, each settled
+/// chunk committed once, then the release decoding only the audio still held.
+/// Returns the committed texts in order.
 ///
 /// The clock is the capture's own, not the wall clock. The daemon ticks on wall
 /// time, so a loaded machine ticks over a longer stretch of audio and lands on
@@ -467,12 +516,11 @@ fn engine(config: &Config, padding: Option<usize>) -> Result<Engine> {
 /// without the cosmetic decode, which saves the replay about nine decodes in
 /// ten.
 ///
-/// Also returns how many ticks read a window of a longer tail: only those
-/// can commit a window in which nothing settled.
+/// Also returns how many ticks read a tail longer than `preview.max_seconds`,
+/// which the daemon does not preview.
 fn replay_live(worker: &mut Engine, samples: &[f32], plan: Plan) -> Result<(Vec<String>, usize)> {
     let utterance = Utterance::new(1);
-    let mut windows = 0;
-    let window = worker.window();
+    let mut long_ticks = 0;
     // `session.committed_hint`. Here it never lags: the replay is one thread,
     // so it is the worker's own offset.
     let mut hint = Frames::ZERO;
@@ -480,15 +528,17 @@ fn replay_live(worker: &mut Engine, samples: &[f32], plan: Plan) -> Result<(Vec<
     let mut texts = vec![];
     let mut available = plan.tick;
     while available < samples.len() {
-        // Past preview.max_seconds of uncommitted audio the daemon stops the
-        // cosmetic decode but keeps ticking, a window at a time.
-        let kind = tick_kind(available - hint.get(), window, plan.previews);
-        windows += usize::from(kind == TickKind::Window);
-        // `snapshot_capture(committed_hint)`, truncated to one tick's work.
-        let end = available.min(hint.get() + window);
-        worker.tick(&samples[hint.get()..end], hint, &utterance, kind, |c| {
-            landed.push((c.text, c.through))
-        })?;
+        let tail = available - hint.get();
+        long_ticks += usize::from(tail > plan.window);
+        let kind = tick_kind(tail, plan.window, plan.previews);
+        // `snapshot_capture(committed_hint)`: the whole tail.
+        worker.tick(
+            &samples[hint.get()..available],
+            hint,
+            &utterance,
+            kind,
+            |c| landed.push((c.text, c.through)),
+        )?;
         for (text, through) in landed.drain(..) {
             hint = hint.max(through);
             texts.push(text);
@@ -501,7 +551,7 @@ fn replay_live(worker: &mut Engine, samples: &[f32], plan: Plan) -> Result<(Vec<
     worker.finish(&samples[hint.get()..], hint, &utterance, |c| {
         texts.push(c.text)
     })?;
-    Ok((texts, windows))
+    Ok((texts, long_ticks))
 }
 
 /// The kind of tick the daemon issues for a tail of `tail` samples, with a
@@ -547,9 +597,9 @@ struct Row {
     lost_tail: usize,
     yeah: usize,
     seams: Seams,
-    /// Live ticks that read a window of a tail longer than
-    /// `preview.max_seconds`.
-    windows: usize,
+    /// Live ticks over a tail longer than `preview.max_seconds`.
+    long_ticks: usize,
+    scans: Scans,
     /// The committed chunk texts, in order. Private speech: written out only
     /// with `--with-text`.
     commits: Vec<String>,
@@ -598,7 +648,7 @@ fn run_pass(
                     );
                     worker.pipeline.recognizer.take();
                     let started = Instant::now();
-                    let (texts, windows) = match plan.path {
+                    let (texts, long_ticks) = match plan.path {
                         DecodePath::Live => replay_live(&mut worker, &samples, plan)?,
                         DecodePath::Whole => (decode_whole(&mut worker, &samples)?, 0),
                     };
@@ -628,7 +678,8 @@ fn run_pass(
                             lost_tail: alignment.lost_tail,
                             yeah,
                             seams,
-                            windows,
+                            long_ticks,
+                            scans: worker.pipeline.segmenter.take(),
                             commits,
                             tally: worker.pipeline.recognizer.take(),
                             decode_seconds,
@@ -666,9 +717,11 @@ struct Summary {
     lost_tail_words: usize,
     yeah: usize,
     seams: Seams,
-    windows: usize,
-    /// Captures with at least one window tick.
-    windowed: usize,
+    long_ticks: usize,
+    /// Captures with at least one tick over a tail longer than
+    /// `preview.max_seconds`.
+    long_files: usize,
+    scans: Scans,
     tally: Tally,
     audio_seconds: f64,
     decode_seconds: f64,
@@ -688,8 +741,9 @@ fn summarize(rows: &[Row], lost_tail: usize) -> Summary {
         lost_tail_words: 0,
         yeah: 0,
         seams: Seams::default(),
-        windows: 0,
-        windowed: 0,
+        long_ticks: 0,
+        long_files: 0,
+        scans: Scans::default(),
         tally: Tally::default(),
         audio_seconds: 0.0,
         decode_seconds: 0.0,
@@ -701,8 +755,9 @@ fn summarize(rows: &[Row], lost_tail: usize) -> Summary {
         s.yeah += row.yeah;
         s.seams.repeated += row.seams.repeated;
         s.seams.words += row.seams.words;
-        s.windows += row.windows;
-        s.windowed += usize::from(row.windows > 0);
+        s.long_ticks += row.long_ticks;
+        s.long_files += usize::from(row.long_ticks > 0);
+        s.scans += row.scans;
         s.tally += row.tally;
         if row.ref_words == 0 {
             s.empty_reference += 1;
@@ -838,7 +893,14 @@ fn print_report(rows: &[Row], summary: &Summary, args: &Args, plan: Plan, wall: 
     if plan.path == DecodePath::Live {
         println!(
             "ticks over a tail longer than preview.max_seconds: {} in {} captures",
-            summary.windows, summary.windowed
+            summary.long_ticks, summary.long_files
+        );
+        println!(
+            "detector passes {}: longest tail {:.1}s, slowest pass {:.0} ms, {:.1}s in all",
+            summary.scans.passes,
+            Frames(summary.scans.longest).seconds(plan.rate),
+            summary.scans.slowest * 1000.0,
+            summary.scans.seconds
         );
     }
     println!(
@@ -933,7 +995,9 @@ fn write_jsonl(
             "empty_after_retry": row.tally.empty_after_retry,
             "decodes": row.tally.decodes, "yeah": row.yeah,
             "seam_repeats": row.seams.repeated, "seam_words": row.seams.words,
-            "chunks": row.commits.len(), "window_ticks": row.windows,
+            "chunks": row.commits.len(), "long_tail_ticks": row.long_ticks,
+            "longest_scan_s": Frames(row.scans.longest).seconds(plan.rate),
+            "slowest_scan_ms": row.scans.slowest * 1000.0,
             "decode_seconds": row.decode_seconds,
         });
         if args.with_text {
@@ -962,7 +1026,11 @@ fn write_jsonl(
             "empty_after_retry": summary.tally.empty_after_retry,
             "decodes": summary.tally.decodes, "yeah": summary.yeah,
             "seam_repeats": summary.seams.repeated, "seam_words": summary.seams.words,
-            "window_ticks": summary.windows, "windowed_files": summary.windowed,
+            "long_tail_ticks": summary.long_ticks, "long_tail_files": summary.long_files,
+            "detector_passes": summary.scans.passes,
+            "longest_scan_s": Frames(summary.scans.longest).seconds(plan.rate),
+            "slowest_scan_ms": summary.scans.slowest * 1000.0,
+            "scan_seconds": summary.scans.seconds,
             "lost_tail_threshold": args.lost_tail,
             "lost_tail_files": summary.lost_tail_files,
             "lost_tail_words": summary.lost_tail_words,
@@ -1036,6 +1104,7 @@ fn main() -> Result<()> {
             .trailing_silence_ms
             .map(|ms| (ms * u64::from(rate) / 1000) as usize),
         tick,
+        window: config.preview.window(rate),
         previews: args.previews,
         rate,
     };
@@ -1260,16 +1329,14 @@ mod tests {
         assert_eq!((tally.empty_first, tally.empty_after_retry), (0, 0));
     }
 
-    /// The replay issues the daemon's kind of tick: a tail longer than the
-    /// window is read a window at a time, whatever `--previews` says, and a
-    /// shorter one is previewed or, without `--previews`, only settled.
-    /// Committing a window that settled nothing over a shorter tail would
-    /// cut speech the daemon never cuts, and every number this harness
-    /// produced would be of a decoder nobody runs.
+    /// The replay issues the daemon's kind of tick: a tail longer than
+    /// `preview.max_seconds` is not previewed, whatever `--previews` says,
+    /// and a shorter one is previewed or, without `--previews`, only settled.
+    /// Either way the tick commits the same chunks.
     #[test]
     fn the_replay_ticks_as_the_daemon_does() {
         for previews in [false, true] {
-            assert_eq!(tick_kind(11, 10, previews), TickKind::Window);
+            assert_eq!(tick_kind(11, 10, previews), TickKind::Settled);
         }
         assert_eq!(tick_kind(10, 10, true), TickKind::Preview);
         assert_eq!(tick_kind(10, 10, false), TickKind::Settled);
@@ -1291,7 +1358,8 @@ mod tests {
             lost_tail,
             yeah: 0,
             seams: Seams::default(),
-            windows: 0,
+            long_ticks: 0,
+            scans: Scans::default(),
             commits: vec![],
             tally: Tally::default(),
             decode_seconds: 0.1,

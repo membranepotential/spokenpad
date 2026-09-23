@@ -2364,6 +2364,8 @@ away: nothing visible happened.
 
 ## A window that settles nothing is committed whole, live too (2026-09-22)
 
+**Superseded 2026-09-23** by [a tick that reads the whole open tail](#a-tick-reads-the-whole-open-tail-the-window-commit-is-removed-2026-09-23) for the window commit; the `Preview::heard` rule and the per-segment commit (P1-002) stand.
+
 The audit of 2026-09-22 (finding P1-001) traced a latch that stopped itself
 while the user was still talking, and `tests/e2e.rs` reproduced it: slow
 dictation, short phrases with pauses too short to settle a chunk, and too
@@ -2588,6 +2590,8 @@ the retry path.
 
 ## A window that settles nothing is cut at its last pause (2026-09-23)
 
+**Superseded 2026-09-23** by [a tick that reads the whole open tail](#a-tick-reads-the-whole-open-tail-the-window-commit-is-removed-2026-09-23).
+
 The review of 2026-09-23 found two faults in the whole-window commit above.
 It cut the window at its end, which falls inside a word about as often as
 the user is speaking. Worse, a word begun less than `vad.min_speech_seconds`
@@ -2699,6 +2703,8 @@ while it starts.
 
 ## A window tick holds a full window, checked in the core (2026-09-23)
 
+**Superseded 2026-09-23** by [a tick that reads the whole open tail](#a-tick-reads-the-whole-open-tail-the-window-commit-is-removed-2026-09-23).
+
 The review of 2026-09-23 found that `examples/corpus.rs` without
 `--previews` ticked every tail with the kind the daemon uses only for a
 tail longer than `preview.max_seconds`. On a short tail that settled
@@ -2745,3 +2751,52 @@ only for editors that had run their `--cmd`.
 - Tests: the extended `a_restart_is_not_the_users_close` (the server is
   stopped and a new pane opens), `a_server_waiting_for_its_first_ui_is_stopped_in_pane_mode`,
   `a_starting_editor_that_gains_a_ui_is_not_stopped`.
+
+## A tick reads the whole open tail; the window commit is removed (2026-09-23)
+
+The window commit (three entries above) fixed P1-001 by cutting a window of
+`preview.max_seconds` that settled nothing at its last pause. On the local
+corpus, forced to run with `preview.max_seconds = 10`, it cost 2.2 WER
+points and 53 words lost at the ends: the audio after a cut decoded to
+nothing. The cause of P1-001 was not a missing cut but the truncation
+itself: a tick read only the first `preview.max_seconds` of the tail, and in
+slow dictation that slice never held a chunk's speech or a settling pause.
+
+- Chosen: every tick hands the worker the whole open tail, and the detector
+  reads all of it. `merge_spans` closes chunks by its usual rules, and only
+  settled chunks are decoded, however long the audio a settled chunk spans.
+  Every committed boundary is one a release of the same audio would have
+  cut. `preview.max_seconds` bounds only the cosmetic decode: a longer tail
+  gets a `TickKind::Settled` tick, which commits and does not preview.
+- Removed: `TickKind::Window`, `Worker::commit_window`, `Split::pause`, the
+  worker's window and its check, and the pipeline's split between
+  "decode no further segment" and "throw away the one just decoded", which
+  only the window commit used. A recording made before the model was ready
+  is read `preview.max_seconds` at a time, with a tick over its whole held
+  tail after each read, and never cut where a read ended.
+- Kept: speech the detector hears resets the silence timeout
+  (`Preview::heard`), and each segment of a final decode commits at its own
+  speech end.
+- Rejected, for now: running the detector incrementally, keeping its state
+  and spans for the part of the tail it has read. A pass costs about 4 ms
+  per second of tail on an idle machine (0.12 s at 30 s, 1.1 s at 280 s,
+  about the longest tail the chunk rules leave open), and the tick schedule
+  already keeps the worker idle half the time. An incremental scan that
+  gives exactly the spans of a fresh one needs where the detector's open
+  span began, which sherpa-onnx 1.13.8 does not expose.
+- Measured ([experiment](experiments/2026-09-23-decode-fixes-corpus.md)):
+  the committed text of all 181 captures is the same at `max_seconds` 30, 20
+  and 10, and the same as `main` and the window commit at the default. At
+  10 s it is 1.7 WER points and 52 lost words better than the window
+  commit, and 0.52 points worse than `main` at 10 s, whose truncated slices
+  cut different windows on 52 captures; that configuration commits nothing
+  in slow dictation, so it is no alternative.
+- Tests: `slow_dictation_past_the_preview_bound_commits_whole_chunks_before_the_release`
+  (core, the real merge policy: commits before the release, where one decode
+  of the whole capture ends its chunks, every loud sample once; fails on a
+  truncated tick),
+  `slow_dictation_past_the_preview_bound_commits_whole_chunks_and_keeps_recording`
+  (e2e, through the daemon's loop and a real nvim; fails on a truncated tick
+  with "stopped after silence"),
+  `a_tick_that_settles_nothing_commits_nothing_however_long_the_tail`,
+  `a_recording_with_nothing_settled_is_decoded_whole_at_its_end`.

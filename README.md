@@ -424,8 +424,9 @@ caught up. The log always has the full sentence and paths.
   returns nothing for a short sentence; such a chunk is decoded once more
   without its trailing silence.
 - **Previews pause on a long unsettled tail** (`preview.max_seconds`, 30 s)
-  and resume by themselves; text keeps landing while they are paused, 30 s at
-  a time even when you speak so slowly that no sentence ever ends.
+  and resume by themselves; text keeps landing while they are paused, a
+  chunk at a time, even when you speak so slowly that it takes a minute to
+  fill one.
 - **A long recording costs no more memory than a short one.** Audio that has
   been transcribed is dropped as you speak; what is held is the sentence you
   are still in. The recovery WAV keeps the whole recording.

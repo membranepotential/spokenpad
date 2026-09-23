@@ -172,9 +172,8 @@ words anyway.
 ### The two paths
 
 `--path live` drives `core::decode::Worker` the way `shell/daemon` does: a
-tick every `preview.interval_seconds` over the audio since the committed offset,
-bounded by `preview.max_seconds` as one tick's work, every settled chunk
-committed once, then the release decoding only the audio still held — the
+tick every `preview.interval_seconds` over all the audio since the committed
+offset, every settled chunk committed once, then the release decoding only the audio still held — the
 daemon drops the rest (`AudioCapture::discard_before`). `--path whole` decodes
 each capture in one pass with no detector. Both run by default.
 
@@ -185,20 +184,20 @@ reproducible and models an idle machine, where a decode runs ~14x faster than
 real time.
 
 Each tick is of the kind the daemon would issue (`TickKind::for_tail`): a
-tail longer than `preview.max_seconds` is read a window at a time
-(`TickKind::Window`), and a window in which nothing settles is committed
-through its last pause; a shorter tail is previewed. The preview decode is
-skipped unless `--previews` is given: the replay then ticks a shorter tail
-with `TickKind::Settled`, which commits exactly what a preview tick commits
-and decodes nothing else (`a_settled_tick_commits_what_a_preview_tick_commits`
-in `core/decode.rs`), so the replay does about a tenth of the decodes. With
-`--previews` the wall time is the daemon's real workload; without it, only
-the decodes that produce text. The report counts the window ticks and the
-captures that had one: only those can commit a window in which nothing
-settled. Before 2026-09-23 the replay ticked every tail as a window without
-`--previews`, which the daemon never does. That mattered only once a window
-could commit what did not settle, and no recorded experiment ran on such a
-build before [the check](experiments/2026-09-23-decode-fixes-corpus.md).
+tail longer than `preview.max_seconds` is not previewed (`TickKind::Settled`),
+a shorter one is. The preview decode is skipped unless `--previews` is given:
+the replay then ticks every tail with `TickKind::Settled`, which commits
+exactly what a preview tick commits and decodes nothing else
+(`a_settled_tick_commits_what_a_preview_tick_commits` in `core/decode.rs`),
+so the replay does about a tenth of the decodes. With `--previews` the wall
+time is the daemon's real workload; without it, only the decodes that produce
+text, and `preview.max_seconds` changes nothing in the replay at all. The
+report counts the ticks over a tail longer than `preview.max_seconds` and the
+captures that had one, and times every detector pass: the longest tail one
+pass read and the slowest pass, which is what a tick, and a release queued
+behind it, waits for. Before 2026-09-23 the replay ticked every tail as a
+window of `preview.max_seconds` without `--previews`, which the daemon never
+did; see [the check](experiments/2026-09-23-decode-fixes-corpus.md).
 
 ### Where the corpus comes from
 

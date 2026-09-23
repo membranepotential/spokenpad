@@ -278,7 +278,7 @@ are a regression proxy, not a general accuracy guarantee — see
 `cargo test --locked --all-targets` runs the library's unit tests, the CLI
 tests, the end-to-end tests and the pane tests, with the tests that load the
 real models or measure RSS ignored by default, plus the unit tests of the
-examples; on 2026-09-23 that was 333 library, 13 CLI and 37 end-to-end
+examples; on 2026-09-23 that was 334 library, 13 CLI and 37 end-to-end
 tests. Strict all-target clippy and rustfmt checks apply.
 `cargo run --example pane` opens the pane on a given display, and can
 write a screenshot of it.

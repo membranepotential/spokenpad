@@ -78,28 +78,32 @@ of the slice, on the detector's window grid, and commits empty text. Nothing is
 decoded there — the VAD heard no speech — but the audio behind it is finished
 with, which is what keeps a silent latch from growing.
 
-While the uncommitted tail exceeds `preview.max_seconds` (30 s) the tick still runs
-and still commits every settled chunk; only the cosmetic decode of the open
-tail is skipped, so the tail settles and previews resume by themselves. The
-winbar says which. Such a tick reads the first `preview.max_seconds` of the
-tail only (`TickKind::Window`; the worker refuses one that holds less). When no chunk settles inside that window —
-slow dictation whose pauses are too short to settle a chunk and whose speech
-is too little to fill one — the window is committed through its last pause:
-the end of the last speech the detector heard with silence after it, either
-before the next speech or, for the window's last speech, for at least
-`vad.pad_seconds` before the window ends. Every segment before the pause is
-decoded, padded by at most `vad.pad_seconds` of the silence after it, and
-committed at its own speech end, and the offset moves to the pause. What
-follows the pause stays for the next tick: a word the window's end would cut
-in two, and one begun too briefly before it for the detector to call it
-speech yet, which a cut at the window's end left under an empty commit and
-never decoded. Only a window with no pause at all — one run of speech the
-detector never breaks — is committed through its end, where the cut may fall
-inside a word; that is the price of the bound, and it is paid only there.
-Without either, every later tick read the same window, nothing committed
-until the release, and the tail grew with the capture. A release during such
-a commit keeps the segment whose decode it waited for, as it keeps a settled
-chunk, stops before the next one, and the release decodes the rest.
+The tick reads the whole uncommitted tail, however long, and the detector
+scans all of it. A chunk therefore commits exactly where a release of the same
+audio would have ended it — at a settling pause or at `vad.chunk_seconds` of
+speech — and never where a slice of the tail happened to stop. While the tail
+exceeds `preview.max_seconds` (30 s) the tick still runs and still commits
+every settled chunk; only the cosmetic decode of the open tail is skipped
+(`TickKind::Settled`), so the tail settles and previews resume by themselves.
+The winbar says which.
+
+Slow dictation is where this matters: short phrases whose pauses are too short
+to settle a chunk, so that a chunk closes only once ten seconds of speech have
+gathered, which at one part speech in four takes 40 s of tail. Until
+2026-09-23 a tick read only the first `preview.max_seconds` of the tail. That
+slice never held a chunk's speech, every tick read the same slice, nothing
+committed until the release, and since the detector never reached the new
+speech, the silence timeout ended the latch mid-sentence. Cutting such a slice
+at its last pause instead lost words after the cuts on the local corpus;
+reading the whole tail cuts nowhere a release would not
+([experiment](experiments/2026-09-23-decode-fixes-corpus.md)).
+
+What it costs is the detector pass. Silero reads the whole tail on every tick:
+about 4 ms per second of tail on an idle machine, 0.12 s at 30 s and 1.1 s at
+280 s, about the longest tail the chunk rules leave open (below). The next tick
+waits at least as long as the last one took, so the worker stays idle at
+least half the time whatever the pass costs, and a release queued behind a
+tick waits for at most one pass and one chunk's decode.
 
 The worker owns the offset because preview and release inference are serialized
 there. The main loop's hint exists only to avoid copying an entire long capture
@@ -259,9 +263,13 @@ closure, padding, settlement, preview isolation, and release tails. The
 capture through the real merge policy and a counting recognizer, assert the
 retained window stays under 45 s, and assert that dropping the committed audio
 decodes exactly the same windows, over the same capture-absolute samples, as
-keeping all of it. `tests/e2e.rs` checks progressive commits landing before
+keeping all of it; another replays slow dictation whose tail outgrows
+`preview.max_seconds` and asserts that its chunks commit before the release,
+where one decode of the whole capture ends them, every sample once.
+`tests/e2e.rs` checks progressive commits landing before
 release through the real event loop and a real nvim, and a latched capture that
 runs through a pause long enough to settle, and a latch nobody ends: it stops
 on the silence rule, commits what was said exactly once, shows the notice, and
-closes its recovery WAV. Two ignored tests measure the
-memory and check the real Silero against the silence that was dropped.
+closes its recovery WAV, and the same slow dictation through the daemon's
+loop. Three ignored tests measure the memory and the detector pass over a
+long tail, and check the real Silero against the silence that was dropped.

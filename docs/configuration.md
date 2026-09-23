@@ -201,6 +201,7 @@ and no keystrokes are synthesised ([nvim-window.md](nvim-window.md)).
   virtual text and never file content. The real gap is
   max(interval − last decode, last decode), so the worker stays idle at least
   half the time. See [progressive-commit.md](progressive-commit.md).
-- `max_seconds` (30): the most open tail one tick reads. Past it the preview
-  pauses and the tick still commits; a window in which nothing settles is
-  committed through its last pause, or whole when it has none.
+- `max_seconds` (30): the longest open tail that is previewed. Past it the
+  preview pauses and the tick still commits every chunk that settles. It
+  bounds the cosmetic decode only: a tick always reads the whole tail, so
+  the value changes no committed word.

@@ -163,6 +163,6 @@ copy_to_clipboard = false
 # you are in is previewed. At least 0.2.
 interval_seconds = 1.1
 
-# The most unfinished audio one preview reads; past it the preview pauses
-# while text keeps landing.
+# The longest unfinished tail that is previewed; past it the preview pauses
+# while text keeps landing, exactly as it would have.
 max_seconds = 30.0

@@ -202,15 +202,16 @@ session, decode and nvim tests:
    single worker is skipped, and one already running stops after its current
    chunk — which, if that chunk was settled, it has just committed rather than
    wasted. What a release can still queue behind is the work already inside
-   the tick: one detector pass, and one chunk's decode (a settled chunk, or
-   one segment of a window committed through its last pause because nothing
-   in it settled —
-   [progressive-commit.md](progressive-commit.md#recording-tick)). Neither is
-   interruptible, so both are bounded instead — a tick is handed at most
-   `[preview].max_seconds` of audio however long the tail is, which holds the
-   detector pass to about 0.29 s (measured; 2.4 s over a 270 s tail, which is
-   why the bound is there — see
-   [the experiment](experiments/2026-09-21-constant-ram-recording.md)).
+   the tick: one detector pass, and one settled chunk's decode. Neither is
+   interruptible, so both are bounded instead. A chunk closes once it holds
+   `vad.chunk_seconds` of speech. The pass reads the whole open tail, since a
+   tick that read less committed nothing in slow dictation
+   ([progressive-commit.md](progressive-commit.md#recording-tick)), and the
+   chunk rules keep that tail under about 280 s: the pass costs 0.12 s over
+   30 s of tail and 1.1 s over 280 s on an idle machine (measured,
+   [the experiment](experiments/2026-09-23-decode-fixes-corpus.md); 2.4 s
+   over 270 s under load,
+   [earlier](experiments/2026-09-21-constant-ram-recording.md)).
 
 The guard against a preview that came back *shorter* than the last one is
 kept: decoding 4.4 s of a real sample returned `"Okay."` where 3.3 s of the

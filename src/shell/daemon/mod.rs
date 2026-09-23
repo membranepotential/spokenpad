@@ -352,8 +352,8 @@ where
             })
             .collect(),
     );
-    // `preview.max_seconds` in samples: the engine's worker checks every
-    // window tick the loop sends against it.
+    // `preview.max_seconds` in samples: the longest tail the loop has
+    // previewed, and how much of a recording the engine reads at a time.
     let window = config.preview.window(rate);
 
     let (work_tx, work_rx) = mpsc::channel();
@@ -404,7 +404,7 @@ where
 struct Loop<'a, B: InputBackend> {
     config: &'a Config,
     rate: u32,
-    /// The engine's window, in samples: `preview.max_seconds`.
+    /// `preview.max_seconds` in samples: the longest tail a tick previews.
     window: usize,
     capture: AudioCapture<B>,
     requests: Requests,
@@ -732,7 +732,7 @@ impl<B: InputBackend> Loop<'_, B> {
         // The tick still runs, still commits what has settled, and so still
         // lets the shell drop the audio behind it.
         let kind = TickKind::for_tail(tail, self.window);
-        if kind == TickKind::Window {
+        if kind == TickKind::Settled {
             if self.session.previewing() {
                 log::warn!(
                     "preview paused: uncommitted audio exceeds preview.max_seconds; still recording and committing"
@@ -748,16 +748,11 @@ impl<B: InputBackend> Loop<'_, B> {
             .as_ref()
             .context("recording has no utterance")?
             .clone();
-        let mut audio = self.capture.snapshot_capture(self.session.committed_hint);
-        // One tick chews on at most `preview.max_seconds` of audio, whatever
-        // it is for. The detector pass alone costs 0.29 s over 30 s of tail
-        // and 2.4 s over 270 s, and a release queued behind it waits for all
-        // of it (docs/experiments/2026-09-21-constant-ram-recording.md). The
-        // rest of the tail is the next tick's business; a preview tick never
-        // reaches this, because it only runs while the tail is under the same
-        // limit. The snapshot holds at least `tail` samples, so a window tick
-        // gets the full window the worker requires.
-        audio.samples.truncate(self.window);
+        // The whole tail, however long: a chunk settles where the detector,
+        // reading all of it, closes it, and nowhere else. The detector pass
+        // costs about 4 ms per second of tail on an idle machine, and the
+        // tail is bounded by the chunk rules (docs/progressive-commit.md).
+        let audio = self.capture.snapshot_capture(self.session.committed_hint);
         self.session.requested(now);
         log::debug!(
             "preview {} requested: {:.2}s audio starting at {}",

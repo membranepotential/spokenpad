@@ -1721,45 +1721,52 @@ fn a_capture_that_runs_through_a_long_pause_is_still_committed_whole() {
     h.finish();
 }
 
-/// Slow dictation into a latch: short phrases, pauses too short to settle a
-/// chunk, and too little speech to fill one, so that no chunk settles inside
-/// the `preview.max_seconds` window a tick reads. That window is committed
-/// whole, and the detector hearing speech keeps the silence timeout off, so
-/// the capture goes on and commits as it goes, every sample exactly once.
+/// Slow dictation into a latch: short phrases, and pauses too short to
+/// settle a chunk, so that a chunk closes only on its speech target, once
+/// the open tail is past `preview.max_seconds`. The tick reads the whole
+/// tail, so each chunk commits while the latch runs, whole: four phrases,
+/// never a piece cut where a slice of the tail ended or at a pause inside
+/// it. The detector hearing speech keeps the silence timeout off, so the
+/// capture goes on, and every sample is committed exactly once.
 #[test]
-fn slow_dictation_that_never_settles_a_chunk_still_commits_and_keeps_recording() {
+fn slow_dictation_past_the_preview_bound_commits_whole_chunks_and_keeps_recording() {
     if !nvim_available() {
         return;
     }
     let h = Harness::start(Settings {
-        vad: Some(Vad {
-            chunk_seconds: 10.0,
-            pad_seconds: 0.2,
-            edge_pad_seconds: 0.2,
-            max_speech_seconds: 5.0,
-            ..Vad::default()
-        }),
+        vad: Some(brisk_vad()),
         words: false,
         interval_seconds: 0.2,
         max_seconds: 2.0,
         silence_timeout_seconds: 1.0,
         ..Settings::default()
     });
-    h.press(true);
+    // Four phrases hold a chunk's second of speech: a quarter second of
+    // tone is eight or nine detector windows, so three are too few.
+    let phrase_loud = RATE as usize / 4;
+    let chunk_loud = 4 * phrase_loud;
     let phrase: Vec<f32> = tone(0.25)
         .into_iter()
         .chain(vec![0.0; RATE as usize / 2])
         .collect();
-    h.say(&phrase.repeat(8));
+    h.press(true);
+    h.say(&phrase.repeat(12));
     assert_eq!(
         h.indicator("phase").trim(),
         "recording",
         "the latch ended while the user was still talking: {}",
         h.winbar()
     );
+    let chunks = |text: &str| -> Vec<usize> {
+        text.split_whitespace()
+            .filter_map(|word| word.parse().ok())
+            .collect()
+    };
+    let latched = chunks(&h.text());
     assert!(
-        counted(&h.text()) > 0,
-        "nothing was committed while the latch ran"
+        latched.len() >= 2,
+        "{} chunks committed while the latch ran: {latched:?}",
+        latched.len()
     );
     h.press_only(true);
     h.release_for_good();
@@ -1769,6 +1776,12 @@ fn slow_dictation_that_never_settles_a_chunk_still_commits_and_keeps_recording()
         loud = loud_samples(&h.recovery_wav().0);
         loud > 0 && loud == previous && counted(&h.text()) == loud
     });
+    assert_eq!(loud, 12 * phrase_loud);
+    assert_eq!(
+        chunks(&h.text()),
+        vec![chunk_loud; 3],
+        "every chunk whole, four phrases each"
+    );
     h.finish();
 }
 
@@ -2075,17 +2088,22 @@ fn a_recording_that_fails_partway_is_left_to_the_next_start() {
         ..Settings::default()
     });
     let list = h.recordings.join("waiting.tsv");
+    // Chunks that settle on their pauses: the first is committed, and the
+    // second decoded, before the rest of the recording is read.
     h.press(true);
-    h.say(&tone(4.0));
+    for _ in 0..3 {
+        h.say(&tone(1.5));
+        h.say(&vec![0.0; RATE as usize * 2]);
+    }
     h.press_only(true);
     h.release_for_good();
     let recording = h.wavs().pop().expect("a recording");
     h.load(Ok(()));
-    wait_until("the first window's text is written", || {
+    wait_until("the first chunk's text is written", || {
         counted(&h.text()) > 0
     });
-    // Everything after the WAV header is gone, so the next window the
-    // transcription reads fails.
+    // Everything after the WAV header is gone, so the next read of the
+    // transcription fails.
     fs::OpenOptions::new()
         .write(true)
         .open(&recording)
@@ -2108,7 +2126,7 @@ fn a_recording_that_fails_partway_is_left_to_the_next_start() {
         .and_then(|frames| frames.parse().ok())
         .unwrap_or_else(|| panic!("{listed}"));
     assert!(
-        through > 0 && through < 4 * RATE as usize,
+        through > 0 && through < 10 * RATE as usize,
         "from where its text reaches: {listed}"
     );
 
@@ -2142,14 +2160,19 @@ fn a_recording_that_fails_during_the_stop_stays_listed() {
         delay: Duration::from_millis(1_500),
         ..Settings::default()
     });
+    // Chunks that settle on their pauses: the first is committed, and the
+    // second decoded, before the rest of the recording is read.
     h.press(true);
-    h.say(&tone(4.0));
+    for _ in 0..3 {
+        h.say(&tone(1.5));
+        h.say(&vec![0.0; RATE as usize * 2]);
+    }
     h.press_only(true);
     h.release_for_good();
     let recording = h.wavs().pop().expect("a recording");
     h.load(Ok(()));
-    wait_until("the first window's text is written", || dictated(&h) > 0);
-    // The next window the transcription reads fails, during the stop.
+    wait_until("the first chunk's text is written", || dictated(&h) > 0);
+    // The next read of the transcription fails, during the stop.
     fs::OpenOptions::new()
         .write(true)
         .open(&recording)
@@ -2339,18 +2362,15 @@ fn replay_into_capture(minutes: usize, dropping: bool) -> usize {
             max_total_bytes: 1,
         },
     );
-    let mut worker = Worker::new(
-        Pipeline {
-            recognizer: Counting {
-                words: false,
-                delay: Duration::ZERO,
-                calls: Arc::new(Mutex::new(Vec::new())),
-                failing: Arc::new(AtomicBool::new(false)),
-            },
-            segmenter: Chunker::Speech(Vad::default()),
+    let mut worker = Worker::new(Pipeline {
+        recognizer: Counting {
+            words: false,
+            delay: Duration::ZERO,
+            calls: Arc::new(Mutex::new(Vec::new())),
+            failing: Arc::new(AtomicBool::new(false)),
         },
-        30 * RATE as usize,
-    );
+        segmenter: Chunker::Speech(Vad::default()),
+    });
     let utterance = Utterance::new(1);
     capture.start_capture().expect("start the capture");
 
@@ -2448,9 +2468,10 @@ impl DirectMicrophone {
     }
 }
 
-/// How long the real Silero pass over an open tail takes. A window tick
-/// runs even past `preview.max_seconds`, and `Pipeline::split` has no abandon
-/// check, so whatever this costs is what a release can queue behind.
+/// How long the real Silero pass over an open tail takes. A tick reads the
+/// whole tail, however long, and `Pipeline::split` has no abandon check, so
+/// whatever this costs is what a release can queue behind. 280 s is about
+/// the longest tail the chunk rules leave open (docs/progressive-commit.md).
 ///
 ///     cargo test --locked --release --test e2e -- --ignored --exact \
 ///         silero_split_time_over_a_long_tail --nocapture
@@ -2468,7 +2489,7 @@ fn silero_split_time_over_a_long_tail() {
     let speech = resample(&source, rate, RATE);
     let mut segmenter = SpeechSegmenter::new(&config.vad, RATE).expect("load Silero");
 
-    for seconds in [30, 60, 270] {
+    for seconds in [30, 60, 120, 280] {
         // Speech and silence in turn, so the detector does the work it would
         // do on a real tail rather than skating over a flat buffer.
         let mut tail = Vec::with_capacity(seconds * RATE as usize);

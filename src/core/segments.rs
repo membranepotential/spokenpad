@@ -5,7 +5,7 @@
 //! [`shell::inference`](crate::shell::inference).
 use crate::{
     config::Vad,
-    core::decode::{Pause, Segment, Split},
+    core::decode::{Segment, Split},
 };
 use std::ops::Range;
 
@@ -46,39 +46,12 @@ fn settled_prefix(speech_end: usize, len: usize, keep: usize) -> usize {
 /// speech in is not decoded at all. Returning the whole buffer instead is what
 /// let Parakeet hallucinate "Thank you." into the file from a 0.5s empty press
 /// (docs/decisions.md, 2026-09-11).
-///
-/// The slice's last pause follows the last span with silence after it: one
-/// that another span follows after a gap, or the last one when the slice
-/// holds its padding after it. A span that runs to about the slice's end,
-/// which the detector closes only because the slice ended, has none, and
-/// neither has one that the detector cut at its longest span with no gap.
 pub fn merge_spans(spans: &[Range<usize>], len: usize, config: &Vad, rate: u32) -> Split {
-    let pad = (config.pad_seconds * f64::from(rate)) as usize;
-    let pause = spans.iter().enumerate().rev().find_map(|(i, span)| {
-        let (heard, silence_end) = match spans.get(i + 1) {
-            Some(next) => (next.start > span.end, next.start),
-            None => (span.end < len && span.end + pad <= len, len),
-        };
-        // Padded as the chunk's window is, but never into the speech that
-        // follows: only the side of the pause that is committed is read.
-        heard.then(|| Pause {
-            at: span.end,
-            segments: merge(&spans[..=i], silence_end.min(span.end + pad), config, rate).segments,
-        })
-    });
-    Split {
-        pause,
-        ..merge(spans, len, config, rate)
-    }
-}
-
-/// [`merge_spans`] without the pause.
-fn merge(spans: &[Range<usize>], len: usize, config: &Vad, rate: u32) -> Split {
     let split_silence = settling_silence(config, rate);
     if spans.is_empty() {
         return Split {
+            segments: vec![],
             silent_through: settled_prefix(0, len, split_silence),
-            ..Split::default()
         };
     }
     struct Chunk {
@@ -166,7 +139,6 @@ fn merge(spans: &[Range<usize>], len: usize, config: &Vad, rate: u32) -> Split {
     Split {
         segments,
         silent_through: settled_prefix(speech_end, len, split_silence),
-        pause: None,
     }
 }
 
@@ -284,51 +256,6 @@ mod tests {
             rate,
         )[0];
         assert_eq!(closed.window, later.window);
-    }
-
-    /// The last pause is after the last span with silence after it, and its
-    /// windows read that silence only up to the padding and never into the
-    /// speech that follows.
-    #[test]
-    fn the_last_pause_follows_the_last_span_with_silence_after_it() {
-        let c = Vad::default();
-        let pause = |spans: &[Range<usize>], len| merge_spans(spans, len, &c, 100).pause;
-        assert_eq!(
-            pause(&[100..300, 400..600], 1000),
-            Some(Pause {
-                at: 600,
-                segments: vec![Segment {
-                    window: 0..650,
-                    speech_end: 600,
-                    settled: false,
-                }],
-            }),
-            "the last span, with its padding before the slice ends"
-        );
-        assert_eq!(
-            pause(&[100..300, 400..980], 1000),
-            Some(Pause {
-                at: 300,
-                segments: vec![Segment {
-                    window: 50..350,
-                    speech_end: 300,
-                    settled: false,
-                }],
-            }),
-            "not a span the slice's end closed"
-        );
-        assert_eq!(
-            pause(&[100..300, 320..1000], 1000).map(|p| p.segments[0].window.clone()),
-            Some(50..320),
-            "the padding stops where the next speech begins"
-        );
-        assert_eq!(
-            pause(&[100..300, 300..1000], 1000),
-            None,
-            "a span the detector cut at its longest has no pause after it"
-        );
-        assert_eq!(pause(std::slice::from_ref(&(0..1000)), 1000), None);
-        assert_eq!(pause(&[], 1000), None);
     }
 
     /// The reproduction from the review of ba805a9: a chunk that follows a

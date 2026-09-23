@@ -502,8 +502,8 @@ impl Preview {
     pub fn interval(&self) -> Duration {
         Duration::from_secs_f64(self.interval_seconds)
     }
-    /// `max_seconds` in samples at `rate`, at least one: the most audio one
-    /// tick reads.
+    /// `max_seconds` in samples at `rate`, at least one: the longest open
+    /// tail a tick decodes for the preview.
     pub fn window(&self, rate: u32) -> usize {
         ((self.max_seconds * f64::from(rate)) as usize).max(1)
     }
