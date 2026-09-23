@@ -434,7 +434,7 @@ fn the_pane_draws_what_neovim_draws() {
     println!("closing the window wrote the buffer: what was typed by hand is in the file");
 
     // ------------------- (f) text Neovim will not write is kept, not lost
-    // A write can fail: a read-only file here, a full disk or a directory
+    // A write can fail: a path that is no file here, a full disk or a directory
     // that went away in the field. The pane is the only place that text
     // exists by then, so it goes beside the file instead of into `qall!`.
     const REFUSED: &str = "das hier darf nicht verloren gehen";
@@ -442,17 +442,17 @@ fn the_pane_draws_what_neovim_draws() {
     let unwritable = second.dictation_dir.join("dictation-2026-09-21-000001.md");
     std::fs::write(&unwritable, "").expect("create the dictation file");
     let mut pane = pane_on(&server, &second, &unwritable);
+    // No daemon set this editor up, so nothing saves the line on its own:
+    // only the write at closing can put it anywhere.
     put_line(&mut pane, REFUSED);
-    let mut forbid = std::fs::metadata(&unwritable)
-        .expect("the dictation file")
-        .permissions();
-    forbid.set_readonly(true);
-    std::fs::set_permissions(&unwritable, forbid).expect("make the dictation file read-only");
+    // A directory where the file was refuses every write, root's included:
+    // CI runs as root, which a read-only mode does not stop.
+    std::fs::remove_file(&unwritable).expect("remove the dictation file");
+    std::fs::create_dir(&unwritable).expect("put a directory in its place");
     drop(pane);
-    let on_disk = std::fs::read_to_string(&unwritable).expect("read the dictation file");
     assert!(
-        !on_disk.contains(REFUSED),
-        "the file was writable after all, so this proves nothing:\n{on_disk}"
+        unwritable.is_dir(),
+        "something replaced the directory, so this proves nothing"
     );
     let kept = PathBuf::from(format!("{}.unsaved", unwritable.display()));
     let rescued = std::fs::read_to_string(&kept).unwrap_or_else(|error| {
