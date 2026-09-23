@@ -35,7 +35,7 @@ use spokenpad::{
         wm::{HEADER_LEN, Message, encode, reply_length},
     },
     shell::{
-        nvim::pane_launch,
+        nvim::{STARTUP_TIMEOUT, pane_launch},
         pane::{Options, Pane, place::Target},
     },
 };
@@ -202,7 +202,7 @@ fn main() -> Result<()> {
             dimensions: Dimensions::new(args.columns, args.rows)
                 .expect("a grid of at least one cell"),
             layout: PaneLayout::Floating,
-            attach_timeout: Duration::from_secs_f64(config.startup_timeout_seconds),
+            attach_timeout: STARTUP_TIMEOUT,
             target: Some(Target {
                 monitor: Rect {
                     x: 0,
@@ -226,7 +226,7 @@ fn main() -> Result<()> {
     // -------------------- `src/lua/spokenpad.lua`'s own doc comment says the
     // -------------------- daemon does: `Spokenpad.setup`, `.append_once`,
     // -------------------- `.push`.
-    let timeout = Duration::from_secs_f64(config.startup_timeout_seconds);
+    let timeout = STARTUP_TIMEOUT;
     pane.call(
         "nvim_exec_lua",
         vec![Value::from(SPOKENPAD_LUA), Value::Array(Vec::new())],

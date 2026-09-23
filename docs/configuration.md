@@ -14,7 +14,8 @@ it is [`config.rs`](../src/config.rs).
 - A key spokenpad no longer reads is refused with what became of it: `[hotkey]`
   (spokenpad reads no keyboard), `nvim.mode = "managed"` and its keys,
   `asr.family` and `asr.language` (Parakeet only), `vad.enabled` and
-  `preview.enabled` (always on), and the durations renamed to seconds
+  `preview.enabled` (always on), `nvim.startup_timeout_seconds` (a fixed
+  30 s, below), and the durations renamed to seconds
   (`audio.preroll_ms` is now `audio.preroll_seconds`, and so on; the message
   gives the value converted). See
   [decisions.md](decisions.md#every-duration-is-in-seconds-and-its-key-says-so-2026-09-22).
@@ -178,6 +179,11 @@ and no keystrokes are synthesised ([nvim-window.md](nvim-window.md)).
   when unset). A tiled pane is allowed only where it is proven never to take
   the focus: i3, sway, Openbox and KWin. The pane opens beside the pointer,
   never under it ([constraints.md](constraints.md#no-window-spokenpad-opens-may-take-focus)).
+- An editor spokenpad opens has 30 s to start and answer. That is not a
+  setting: it only guards against an editor that never answers, such as a
+  configuration stuck at a prompt. It is generous because a first open took
+  13.5 s while a plugin manager did one-time work, and killing a healthy
+  editor is the worse failure.
 - `socket_path`: where Neovim listens; spokenpad reattaches to a live socket
   rather than opening a second window.
 - `dictation_dir` and `file_template`: one file per editor, saved after every
@@ -186,9 +192,6 @@ and no keystrokes are synthesised ([nvim-window.md](nvim-window.md)).
   Put a time in the template, or two sessions in one day share a page.
   The directory is created 0700 when it does not exist; one that exists is
   left as you set it.
-- `startup_timeout_seconds` (20): generous, because a first open took 13.5 s
-  while a plugin manager did one-time work, and killing a healthy editor is
-  the worse failure.
 - `notify`: a desktop notification when text goes to a file because no
   editor is open, and when closing the window cancelled a recording.
 - `copy_to_clipboard` (off): after each release, copy the whole buffer to

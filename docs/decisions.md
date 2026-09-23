@@ -2886,3 +2886,20 @@ unconfigured pane matched an unconfigured Alacritty. The user asked for 12.
 - The default silence timeout, 300 s, stays far above the two ticks
   `capture.silence_timeout_seconds` must exceed.
 
+## The editor's startup timeout is a constant (2026-09-23)
+
+`nvim.startup_timeout_seconds` (20 s) was a setting for one guard: an
+editor that never answers — a configuration stuck at a prompt, a plugin
+manager installing on first start — must not hold the editor thread
+forever. Nobody has a reason to tune it, and the user asked for one setting
+fewer.
+
+- Chosen: `shell::nvim::STARTUP_TIMEOUT`, 30 s, for the pane's window and
+  its editor together. Longer than the old default because the key that
+  let a slow configuration raise it is gone; a first open once took 13.5 s.
+  An editor that exits is still noticed at once, so a dead one costs no
+  more than before.
+- The key, and `startup_timeout_s` before it, is refused with "was removed
+  … Delete the line". Tests pass their own deadline where they need one
+  (`await_editor` takes it); no test needed a shorter budget.
+

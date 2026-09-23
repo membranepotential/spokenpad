@@ -48,6 +48,14 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// How long a dictation editor spokenpad opens may take to start and answer
+/// on its socket, the pane's window included. Not a setting: it exists only
+/// so that an editor that never answers — a configuration stuck at a prompt,
+/// a plugin manager installing on first start — cannot hold the editor
+/// thread forever. It is generous because a first open took 13.5 s while a
+/// plugin manager did one-time work, and killing a healthy editor is the
+/// worse failure; an editor that exits is noticed at once, not waited out.
+pub const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 /// Liveness and ownership probes: one cheap round trip on an editor that is
 /// otherwise idle. This is on the dictation path — the window is checked on
 /// every key-down — so a wedged editor has to be given up on quickly and
@@ -900,9 +908,9 @@ impl NvimSession {
             std::thread::sleep(CONNECT_POLL);
         }
         bail!(
-            "nvim did not answer on {} within {:.1}s{}",
+            "nvim did not answer on {} within the {}s it may take to start{}",
             self.config.socket_path.display(),
-            self.config.startup_timeout_seconds,
+            STARTUP_TIMEOUT.as_secs(),
             last_error
                 .map(|error| format!(": {error}"))
                 .unwrap_or_default()
@@ -941,8 +949,7 @@ impl NvimSession {
         // One deadline for the whole thing: the window, and the editor
         // answering inside it. Two would let a slow window spend the
         // editor's budget as well as its own.
-        let deadline =
-            Instant::now() + Duration::from_secs_f64(self.config.startup_timeout_seconds);
+        let deadline = Instant::now() + STARTUP_TIMEOUT;
         let (target, display, manager) = pane_target(&self.config)?;
         refuse_pane_focus_on_sway(&self.config, &manager)?;
         let layout = x11::layout_under(self.config.pane_layout, &manager);

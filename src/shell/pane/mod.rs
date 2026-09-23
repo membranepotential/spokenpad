@@ -115,7 +115,7 @@ impl Default for Options {
             size: Points::DEFAULT,
             dimensions: Dimensions::DEFAULT,
             layout: PaneLayout::Floating,
-            attach_timeout: Duration::from_secs(20),
+            attach_timeout: crate::shell::nvim::STARTUP_TIMEOUT,
             target: None,
             title: "spokenpad dictation".to_owned(),
         }

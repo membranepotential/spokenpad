@@ -38,7 +38,7 @@ use spokenpad::{
     shell::{
         audio::{AudioCapture, CallbackCore, InputBackend, InputStream, Teardown},
         daemon::{Devices, PipelineSource, Reload, serve},
-        nvim::pane_launch,
+        nvim::{STARTUP_TIMEOUT, pane_launch},
         pane::{
             Options,
             host::{Opening, PaneHost},
@@ -61,9 +61,6 @@ use std::{
 /// What the stand-in recogniser says for every capture.
 const SPOKEN: &str = "Der Pane hoert zu";
 const PATIENCE: Duration = Duration::from_secs(20);
-/// What the daemon under test allows an editor to start in. A dead one must
-/// cost a fraction of this, not all of it.
-const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 const RETURN: u32 = 0xff0d;
 
 #[test]
@@ -659,7 +656,6 @@ impl Daemon {
         config.nvim.copy_to_clipboard = true;
         config.nvim.socket_path = root.join("nvim.sock");
         config.nvim.dictation_dir = root.join("dictation");
-        config.nvim.startup_timeout_seconds = STARTUP_TIMEOUT.as_secs_f64();
         // The bundled configuration, read from the repository rather than
         // materialised into the user's state directory.
         config.nvim.init = Some(PathBuf::from(concat!(

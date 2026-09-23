@@ -20,7 +20,7 @@ use spokenpad::{
     config::{FontFamily, Nvim, PaneLayout},
     core::{font::Points, geometry::Dimensions},
     shell::{
-        nvim::pane_launch,
+        nvim::{STARTUP_TIMEOUT, pane_launch},
         pane::{Options, Pane, Status},
     },
 };
@@ -105,7 +105,7 @@ fn main() -> Result<()> {
         family: FontFamily::try_from(args.family.clone())?,
         size: Points::try_from(args.size)?,
         dimensions: Dimensions::new(args.columns, args.rows).expect("a grid of at least one cell"),
-        attach_timeout: Duration::from_secs_f64(config.startup_timeout_seconds),
+        attach_timeout: STARTUP_TIMEOUT,
         target: None,
         layout: match args.tiled {
             true => PaneLayout::Tiled,

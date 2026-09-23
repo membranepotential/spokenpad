@@ -264,7 +264,6 @@ fn headless(directory: &Path) -> Nvim {
         ],
         socket_path: directory.join("nvim.sock"),
         dictation_dir: directory.join("dictation"),
-        startup_timeout_seconds: 10.0,
         ..Nvim::default()
     }
 }
@@ -509,7 +508,7 @@ fn spawn_like_a_pane(session: &mut NvimSession) -> (Result<bool>, UserEditor) {
             .spawn()
             .unwrap(),
     );
-    let deadline = Instant::now() + Duration::from_secs_f64(config.startup_timeout_seconds);
+    let deadline = Instant::now() + STARTUP_TIMEOUT;
     let attached = session.await_editor(&mut fresh, marker.value(), deadline, || {
         editor.0.try_wait().ok().flatten().is_some()
     });
@@ -1719,7 +1718,6 @@ fn a_failed_spawn_leaves_no_empty_dictation_file() {
     let mut config = headless(directory.path());
     // An "editor" that exits immediately: the spawn succeeds, startup does not.
     config.editor = vec!["true".to_owned()];
-    config.startup_timeout_seconds = 2.0;
     let mut session = NvimSession::new(config.clone());
 
     let (attached, _editor) = spawn_like_a_pane(&mut session);

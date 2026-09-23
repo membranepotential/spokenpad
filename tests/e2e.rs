@@ -398,7 +398,6 @@ impl Harness {
         .into();
         config.nvim.socket_path = root.join("nvim.sock");
         config.nvim.dictation_dir = root.join("dictation");
-        config.nvim.startup_timeout_seconds = 10.0;
         config.preview.interval_seconds = settings.interval_seconds;
         config.capture.silence_timeout_seconds = settings.silence_timeout_seconds;
         config.preview.max_seconds = settings.max_seconds;
@@ -2610,7 +2609,6 @@ fn real_models_transcribe_the_kennedy_sample() {
     .into();
     config.nvim.socket_path = root.join("nvim.sock");
     config.nvim.dictation_dir = root.join("dictation");
-    config.nvim.startup_timeout_seconds = 10.0;
     config.validate().unwrap();
 
     let mut transcriber = Transcriber::new(&config.asr, RATE).expect("load the CPU recognizer");

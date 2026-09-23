@@ -439,8 +439,6 @@ pub struct Nvim {
     /// the display.
     #[serde(skip)]
     pub runtime_dir: Option<PathBuf>,
-    /// How long a dictation editor may take to start and answer.
-    pub startup_timeout_seconds: f64,
     /// Send a desktop notification when dictated text has to go to the
     /// dictation file because no editor is open.
     pub notify: bool,
@@ -475,7 +473,6 @@ impl Default for Nvim {
             display: None,
             sway_socket: None,
             runtime_dir: None,
-            startup_timeout_seconds: 20.,
             notify: true,
             copy_to_clipboard: false,
         }
@@ -686,10 +683,6 @@ impl Config {
             ("vad.max_speech_seconds", self.vad.max_speech_seconds),
             ("vad.chunk_seconds", self.vad.chunk_seconds),
             ("preview.max_seconds", self.preview.max_seconds),
-            (
-                "nvim.startup_timeout_seconds",
-                self.nvim.startup_timeout_seconds,
-            ),
         ] {
             positive_seconds(name, value)?;
         }
@@ -965,13 +958,11 @@ const GONE: &[(&str, &str, Gone)] = &[
             unit: Unit::Milliseconds,
         },
     ),
+    ("nvim", "startup_timeout_s", Gone::Removed(STARTUP_FIXED)),
     (
         "nvim",
-        "startup_timeout_s",
-        Gone::Renamed {
-            to: "startup_timeout_seconds",
-            unit: Unit::Seconds,
-        },
+        "startup_timeout_seconds",
+        Gone::Removed(STARTUP_FIXED),
     ),
     (
         "asr",
@@ -1005,6 +996,9 @@ const GONE: &[(&str, &str, Gone)] = &[
     ("nvim", "window_instance", Gone::Removed(MANAGED_ONLY)),
     ("nvim", "window_fraction", Gone::Removed(MANAGED_ONLY)),
 ];
+
+/// Why the editor's startup timeout is no longer a setting.
+const STARTUP_FIXED: &str = ": an editor now has 30 seconds to start, which only guards against one that never answers. Delete the line";
 
 /// Why the keys only managed mode read are gone. It was removed on
 /// 2026-09-22: the pane does what it did with no rule in the window
@@ -1328,17 +1322,26 @@ mod tests {
             ),
             ("[preview]\ninterval_ms=1100", "`interval_seconds = 1.1`"),
             (
-                "[nvim]\nstartup_timeout_s=20.5",
-                "`startup_timeout_seconds = 20.5`",
+                "[preview]\ninterval_ms='x'",
+                "write `interval_seconds` in seconds",
             ),
-            (
-                "[nvim]\nstartup_timeout_s='x'",
-                "write `startup_timeout_seconds` in seconds",
-            ),
+            ("[nvim]\nstartup_timeout_s=20", "Delete the line"),
         ] {
             let error = format!("{:#}", Config::parse(toml, None).unwrap_err());
             assert!(error.contains(says), "{toml}: {error}");
         }
+        // The message names the constant's value, which it cannot format in.
+        let error = format!(
+            "{:#}",
+            Config::parse("[nvim]\nstartup_timeout_seconds=20", None).unwrap_err()
+        );
+        let seconds = crate::shell::nvim::STARTUP_TIMEOUT.as_secs();
+        assert!(
+            error.contains(&format!(
+                "nvim.startup_timeout_seconds was removed: an editor now has {seconds} seconds to start"
+            )),
+            "{error}"
+        );
     }
     #[test]
     fn explicit_model_paths_use_config_directory() {
