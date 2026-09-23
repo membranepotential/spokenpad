@@ -100,9 +100,11 @@ those belongs in `src/shell/`.
   a listener of this user only, `SO_PEERCRED`; `with_manager_session`, the
   display the user manager has now, for the socket-activated daemon),
   `shell/nvim/passage.rs` (text dictated with no editor open), `shell/wm.rs`
-  (sway's IPC socket for the pane's rule, bounded helper processes),
+  (sway's IPC socket for the pane's rule), `shell/process.rs` (helper
+  processes such as `systemctl --user`, bounded in time and output),
   `shell/unix_socket.rs` (a Unix-socket connect under a deadline, and a
-  socket's peer credentials, for both), `shell/logging.rs`.
+  socket's peer credentials: sway's, the editor's and the CLI's sockets),
+  `shell/logging.rs`.
 - The pane (`shell/pane/`, the dictation window spokenpad draws itself,
   reached through `nvim.mode = "pane"`): `mod.rs` (the loop, the renderer,
   `requirements` for `spokenpad check`), `host.rs` (its thread, the three

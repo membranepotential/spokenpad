@@ -12,6 +12,7 @@ pub mod logging;
 pub mod models;
 pub mod nvim;
 pub mod pane;
+pub(crate) mod process;
 pub mod recorder;
 pub(crate) mod sync;
 pub(crate) mod unix_socket;

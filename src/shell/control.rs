@@ -14,8 +14,11 @@
 //!
 //! [`config::control_socket`]: crate::config::control_socket
 
-use crate::core::control::{MAX_LINE, Received, Reply, Request};
-use anyhow::{Context, Result, bail, ensure};
+use crate::{
+    core::control::{MAX_LINE, Received, Reply, Request},
+    shell::unix_socket::{self, ConnectError},
+};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use std::{
     env,
     ffi::OsStr,
@@ -484,7 +487,7 @@ impl std::error::Error for SendError {}
 /// terminal shows it.
 pub fn send(path: &Path, request: Request) -> Result<(), SendError> {
     let start_socket = (path == units_socket()).then_some(|| {
-        crate::shell::wm::run(&["systemctl", "--user", "start", "spokenpad.socket"]).map(drop)
+        crate::shell::process::run(&["systemctl", "--user", "start", "spokenpad.socket"]).map(drop)
     });
     send_recovering(path, request, start_socket)
 }
@@ -532,20 +535,33 @@ where
     }
 }
 
+/// One deadline covers the connect and the reply: a daemon that has stopped
+/// accepting leaves its queue full, and a blocking connect would then hang
+/// the key binding for good.
 fn send_once(path: &Path, request: Request) -> Result<(), SendError> {
-    let mut stream = UnixStream::connect(path).map_err(|cause| SendError::NoDaemon {
-        path: path.to_owned(),
-        cause,
+    let deadline = Instant::now() + REPLY_TIMEOUT;
+    let mut stream = unix_socket::connect(path, deadline).map_err(|error| match error {
+        ConnectError::Refused(cause) => SendError::NoDaemon {
+            path: path.to_owned(),
+            cause,
+        },
+        ConnectError::TimedOut => SendError::Failed(anyhow!(
+            "the spokenpad daemon on {} did not accept the connection within {}s",
+            path.display(),
+            REPLY_TIMEOUT.as_secs()
+        )),
+        ConnectError::Other(error) => SendError::Failed(error),
     })?;
-    match exchange(&mut stream, request).map_err(SendError::Failed)? {
+    match exchange(&mut stream, request, deadline).map_err(SendError::Failed)? {
         Reply::Accepted => Ok(()),
         reply => Err(SendError::Refused(reply)),
     }
 }
 
-fn exchange(stream: &mut UnixStream, request: Request) -> Result<Reply> {
-    let deadline = Instant::now() + REPLY_TIMEOUT;
-    stream.set_write_timeout(Some(REPLY_TIMEOUT))?;
+fn exchange(stream: &mut UnixStream, request: Request, deadline: Instant) -> Result<Reply> {
+    // A zero timeout is refused; what little is left still bounds the write.
+    let left = deadline.saturating_duration_since(Instant::now());
+    stream.set_write_timeout(Some(left.max(Duration::from_millis(1))))?;
     stream.write_all(request.encode().as_bytes())?;
     let line = read_line(stream, deadline).context("read the daemon's reply")?;
     Reply::decode(&line).with_context(|| {
@@ -560,6 +576,17 @@ fn exchange(stream: &mut UnixStream, request: Request) -> Result<Reply> {
 mod tests {
     use super::*;
     use std::sync::mpsc;
+
+    /// A daemon that stopped accepting leaves its queue full; a press then
+    /// fails within its deadline instead of hanging the key binding.
+    #[test]
+    fn a_press_to_a_full_accept_queue_fails_in_time() {
+        let full = unix_socket::FullQueue::new();
+        let started = Instant::now();
+        let result = send(&full.socket, Request::Start);
+        assert!(matches!(result, Err(SendError::Failed(_))), "{result:?}");
+        assert!(started.elapsed() < REPLY_TIMEOUT + Duration::from_secs(1));
+    }
 
     #[test]
     fn a_request_reaches_the_session_stamped_and_is_acknowledged() {

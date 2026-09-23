@@ -117,8 +117,8 @@ the root because both sides read it. Nothing under `core/` may import
   call carries an absolute deadline. `shell/nvim/passage.rs` writes commits
   to the pending dictation file while no editor is open. `shell/wm.rs` speaks
   the i3/sway IPC protocol to add the pane's `no_focus` rule on sway, one
-  request per connection under a deadline. Both sockets are connected
-  through `shell/unix_socket.rs`, whose connect a full accept queue cannot
+  request per connection under a deadline. Both sockets, and the CLI's, are
+  connected through `shell/unix_socket.rs`, whose connect a full accept queue cannot
   hold past its deadline. No module synthesizes input or calls a focus API.
 
 The dictation preview uses the theme's comment foreground with an italic

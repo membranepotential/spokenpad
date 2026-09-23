@@ -25,7 +25,8 @@ use crate::{
     core::{session::NoticeText, state::IndicatorPhase},
     shell::{
         pane::{host::PaneHost, place, x11},
-        wm::{self, Wm},
+        process,
+        wm::Wm,
     },
 };
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -1918,7 +1919,7 @@ fn pane_target(config: &Nvim) -> Result<(place::Target, String, x11::Manager)> {
 /// daemon's environment, which a process with threads cannot safely change,
 /// so a cookie file imported later still takes a restart.
 pub fn with_manager_session(mut nvim: Nvim) -> Nvim {
-    match wm::run(&["systemctl", "--user", "show-environment"]) {
+    match process::run(&["systemctl", "--user", "show-environment"]) {
         Ok(listing) => apply_manager_session(&mut nvim, &listing),
         Err(error) => log::debug!("could not read the user manager's environment: {error:#}"),
     }

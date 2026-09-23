@@ -3130,3 +3130,23 @@ preview.
   (`taps_are_measured_to_the_release`, `the_memory_ceiling_ends_the_capture`,
   `all_state_event_pairs`), the session tests, and the release and
   post-roll tests in `tests/e2e.rs`.
+
+## A key press connects under its deadline (2026-09-23)
+
+- Problem: `spokenpad start|stop|toggle|cancel` connected with a blocking
+  `UnixStream::connect`. A daemon that has stopped accepting leaves its
+  accept queue full, and the connect then blocks for good: the key binding
+  hangs, and every later press queues another hung process.
+- Fixed: the CLI client connects through `shell/unix_socket.rs` like the
+  window manager and editor clients, and one deadline (`REPLY_TIMEOUT`, 2 s)
+  covers the connect and the reply. A refused connect is still "no daemon"
+  (and still starts `spokenpad.socket` once for `start` and `toggle`); a
+  full queue fails with its own message when the deadline passes.
+- Test: `a_press_to_a_full_accept_queue_fails_in_time`.
+
+## Helper processes get their own module (2026-09-23)
+
+- `run`, which runs `systemctl --user` bounded in time and output, lived in
+  `shell/wm.rs` although nothing about it concerns the window manager. It
+  moved to `shell/process.rs` with its tests; `shell/wm.rs` now only speaks
+  the i3/sway IPC protocol. No behaviour change.

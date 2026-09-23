@@ -1,9 +1,10 @@
 //! Connecting to a Unix socket under a deadline, and asking who listens on it.
 //!
-//! Two clients use it: the window manager's IPC socket
-//! ([`shell::wm`](crate::shell::wm)) and the dictation editor's RPC socket
-//! ([`shell::nvim`](crate::shell::nvim)). Each words its own errors; this
-//! module only says which way a connection failed.
+//! Three clients use it: the window manager's IPC socket
+//! ([`shell::wm`](crate::shell::wm)), the dictation editor's RPC socket
+//! ([`shell::nvim`](crate::shell::nvim)) and the commands a key binding runs
+//! ([`shell::control::send`](crate::shell::control::send)). Each words its
+//! own errors; this module only says which way a connection failed.
 use anyhow::ensure;
 use std::{
     os::{
