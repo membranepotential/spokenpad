@@ -492,7 +492,7 @@ pub struct Preview {
 impl Default for Preview {
     fn default() -> Self {
         Self {
-            interval_seconds: 1.1,
+            interval_seconds: 1.0,
             max_seconds: 30.,
         }
     }

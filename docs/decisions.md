@@ -2873,3 +2873,16 @@ unconfigured pane matched an unconfigured Alacritty. The user asked for 12.
 - The default 72x20 cells grow with the font, to about 730x410 pixels at
   96 dpi instead of about 656x368; the arithmetic that turns points into
   cells is unchanged.
+
+## The preview ticks every second (2026-09-23)
+
+`preview.interval_seconds` defaulted to 1.1 s. The user asked for 1.0.
+
+- Chosen: 1.0 s. The real gap between ticks is already
+  max(interval − last decode, last decode), so the worker stays idle at
+  least half the time whatever the setting. Not measured on the corpus:
+  the change is a tenth of a second in how soon settled text and the
+  preview appear.
+- The default silence timeout, 300 s, stays far above the two ticks
+  `capture.silence_timeout_seconds` must exceed.
+

@@ -196,7 +196,7 @@ and no keystrokes are synthesised ([nvim-window.md](nvim-window.md)).
 
 ## [preview]
 
-- `interval_seconds` (1.1, at least 0.2): the tick. Each tick commits every
+- `interval_seconds` (1.0, at least 0.2): the tick. Each tick commits every
   chunk that has settled and decodes the open tail for the preview, which is
   virtual text and never file content. The real gap is
   max(interval − last decode, last decode), so the worker stays idle at least

@@ -161,7 +161,7 @@ copy_to_clipboard = false
 [preview]
 # How often, while you speak, finished chunks are committed and the sentence
 # you are in is previewed. At least 0.2.
-interval_seconds = 1.1
+interval_seconds = 1.0
 
 # The longest unfinished tail that is previewed; past it the preview pauses
 # while text keeps landing, exactly as it would have.
