@@ -28,8 +28,8 @@ what you are reading, with nothing to install in your window manager. What
 it gives up is the window's independence from the daemon: spokenpad owns it,
 so a daemon restart closes it. `attach` works everywhere else — any
 terminal, any desktop, also Wayland without Xwayland, where there is no X
-display for a pane; a pane that cannot open says so in its notification, and
-names `attach`.
+display for a pane; a pane that cannot open says so in the log, and names
+`attach`.
 
 Until 2026-09-22 there was a third mode, `managed`: the daemon opened the
 user's terminal on i3 or sway, and only after proving a `no_focus` rule for it
@@ -89,14 +89,15 @@ lost:
 - **An editor that exits mid-dictation loses nothing.** A request that
   could not be sent to the editor certainly did not land, so its text goes to
   the pending passage. An append that stays unconfirmed even after its
-  repeat goes there too, with a notification that it may be in both places:
+  repeat goes there too, and the log says it may be in both places:
   see [Reconnection](#reconnection).
 - **Decoding is unchanged.** The file is only a different sink for the same
   commits; each is still decoded exactly once.
-- **You are told.** When a pending passage is started, the daemon sends one
-  desktop notification (`notify-send`, off with `nvim.notify = false`) saying
-  where the text is and to run `spokenpad editor`; every write is also in the
-  log. The winbar cannot say it — there is no winbar.
+- **The log says where.** When a pending passage is started, the daemon logs
+  a warning that says where the text is, why no window took it, and to run
+  `spokenpad editor`; every write is logged too. The winbar cannot say it —
+  there is no winbar — and spokenpad sends no desktop notifications. The
+  next window opens on the passage.
 
 The pointer lives beside the socket, in `$XDG_RUNTIME_DIR` by default, so a
 reboot forgets it; the file stays in `nvim.dictation_dir`.
@@ -175,14 +176,14 @@ The pane opens only if sway answers that it took the rule. sway accepts
 `no_focus` at runtime and ignores a rule it already holds, so the rule is sent
 before every pane; a `swaymsg reload` drops it, and the next pane sends it
 again. Nothing is written to your sway configuration. The pane does not open,
-and the text goes to the pending passage with a notification that says why,
+and the text goes to the pending passage with a log line that says why,
 when:
 
 - the display does not name its window manager's process, so nothing can
   tell whether it is sway;
 - the process is not sway — another wlroots compositor (labwc, river,
   Wayfire) looks the same from the display, and spokenpad has no rule it can
-  add there and has not verified how it focuses windows; the notification
+  add there and has not verified how it focuses windows; the log line
   names the compositor and says to use `nvim.mode = "attach"`;
 - no socket of this sway is found — `$SWAYSOCK` unset, dead, or another
   sway's, and nothing in the runtime directory;
@@ -364,9 +365,8 @@ that is not a gap; for CJK input it is, and `attach` is the answer there.
   modified buffer and quit, its socket goes, and the next dictation opens a
   new window on a new file. **A recording running at that moment is
   cancelled**, as `spokenpad cancel` would: committed text stays in the
-  file, the tail is not decoded, the WAV is kept, and one desktop
-  notification ("recording cancelled") says so, since the window that would
-  have is gone. Until the next key press no window opens again: text still
+  file, the tail is not decoded, the WAV is kept, and the log says so and
+  names the file. Until the next key press no window opens again: text still
   arriving from before the close — a chunk that was being decoded, or the
   tail of a recording already released — goes to the pending passage, which
   the next pane opens on. The pane tells the daemon (`PaneHost::take_closed_by_user`,
@@ -483,7 +483,7 @@ allowed only where it is proven never to take the focus — i3, sway, Openbox
 and KWin (Wayland and X11), recognised by the name on the display's EWMH
 check window ([experiment](experiments/2026-09-22-tiled-pane-focus.md)).
 Under any other window manager, or none, the pane opens floating; the log
-says why every time, and one desktop notification per daemon session. On
+says why every time. On
 sway an empty workspace refuses both layouts alike.
 
 Every pane logs one line when it opens, with the layout asked for and the one
@@ -970,8 +970,8 @@ after its reply was lost. It is retried once, on a fresh connection, with the
 appending twice. A retry that answers means the text is in the window
 exactly once. If the retry fails too, the session disconnects, so the next
 utterance reattaches rather than writing into a client whose reply stream is out
-of step, and the text goes to the **pending passage**, with a desktop
-notification ("text saved outside the window") that names the file and says
+of step, and the text goes to the **pending passage**, with a warning in
+the log ("text saved outside the window") that names the file and says
 it may be in the window too. Kept only in the log it would be lost to the
 user in the usual case, since Neovim 0.12.5 drops a request whose connection
 closed before it ran (measured: after `<Esc>` ended the command it was held

@@ -151,9 +151,6 @@ font_size = 12.0
 # dictation_dir = "~/.local/state/spokenpad/dictation"
 file_template = "dictation-%Y-%m-%d-%H%M%S.md"
 
-# A desktop notification when text goes to a file because no window is open.
-notify = true
-
 # After each release, copy the whole dictation buffer to the clipboard.
 copy_to_clipboard = false
 

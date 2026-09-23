@@ -623,7 +623,6 @@ impl<B: InputBackend> Loop<'_, B> {
                         &mut self.transcriptions,
                         reason,
                     );
-                    send(&self.editor_tx, EditorWork::ClosedMidCapture)?;
                 }
             }
             ResultEvent::Unavailable(reason) => {

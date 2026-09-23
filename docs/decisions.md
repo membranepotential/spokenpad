@@ -2903,3 +2903,27 @@ fewer.
   … Delete the line". Tests pass their own deadline where they need one
   (`await_editor` takes it); no test needed a shorter budget.
 
+## No desktop notifications (2026-09-23)
+
+spokenpad sent a desktop notification through `notify-send` in four cases:
+text went to the pending passage (no editor, a window that could not open,
+an append the editor never confirmed), closing the window cancelled a
+recording, a tiled pane opened floating, and a key press reached no daemon.
+The user does not want them, "even as a fallback".
+
+- Chosen: none. `nvim.notify` is refused with "was removed … Delete the
+  line", and the package no longer depends on `libnotify`. This reverses
+  the `libnotify` half of
+  [the package pulls in a clipboard tool and notify-send](#the-package-pulls-in-a-clipboard-tool-and-notify-send-2026-09-22).
+- What each said goes to the log instead, at warning level where it was a
+  notification: `NvimSession::log_detached` gives the file and the reason
+  the text is not in a window; a close that cancelled a recording is logged
+  with the file the window showed; the tiled-pane warning was logged
+  already and now is only logged. A failed key press says why on standard
+  error, as it did besides the notification; the CLI writes no log, and a
+  window manager may discard its standard error.
+- Removed with them: `EditorWork::ClosedMidCapture`, whose only job was the
+  notification, the once-per-session flag for the tiled warning, and the
+  CLI's `Recovery` pair, which is now the one closure that starts the
+  socket.
+

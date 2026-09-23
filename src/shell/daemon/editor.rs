@@ -48,9 +48,6 @@ pub(super) enum EditorWork {
     /// `serve`, for why every `Append` of that utterance is already ahead of
     /// it in this same queue.
     Copy,
-    /// Closing the window cancelled the capture it showed: say so, since the
-    /// window that would have is gone.
-    ClosedMidCapture,
     Quit,
 }
 
@@ -194,7 +191,7 @@ pub(super) fn editor_thread(
                             // took it, which is the usual case: Neovim drops
                             // a request whose connection closed before it ran.
                             // So it goes to the pending passage as well, and
-                            // the notification says it may be in both.
+                            // the log says it may be in both.
                             Err(AppendFailure::Unconfirmed(e)) => {
                                 log::error!(
                                     "append not confirmed: {e:#}; writing the text to the pending passage too, so if the editor took it after all it is in both"
@@ -211,9 +208,9 @@ pub(super) fn editor_thread(
                             paragraph = Some((utterance, Sink::Passage));
                             log::info!("no dictation editor: appended to {}", write.path.display());
                             if maybe_landed {
-                                nvim.notify_detached(&write.path, Detached::Unconfirmed);
+                                nvim.log_detached(&write.path, Detached::Unconfirmed);
                             } else if write.started {
-                                nvim.notify_detached(&write.path, Detached::NoEditor);
+                                nvim.log_detached(&write.path, Detached::NoEditor);
                             }
                         }
                         Err(e) => {
@@ -243,7 +240,6 @@ pub(super) fn editor_thread(
                         }
                     }
                 }
-                EditorWork::ClosedMidCapture => nvim.notify_closed_mid_capture(),
                 EditorWork::Quit => {
                     quit = true;
                     break;
@@ -277,7 +273,6 @@ pub(super) fn editor_thread(
 /// pane showed.
 fn report_user_close(nvim: &mut NvimSession, events: &Sender<ResultEvent>) {
     if let Some(at) = nvim.take_user_close() {
-        log::info!("the user closed the dictation pane; the next text opens no window of its own");
         // The loop is gone only while this thread is being stopped.
         let _ = events.send(ResultEvent::WindowClosed { at });
     }

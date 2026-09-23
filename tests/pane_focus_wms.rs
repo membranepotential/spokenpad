@@ -845,7 +845,6 @@ fn pane_config(
             "/src/lua/dictation_init.lua"
         ))),
         font_size: Points::try_from(11.0).expect("a point size"),
-        notify: false,
         ..Nvim::default()
     }
 }

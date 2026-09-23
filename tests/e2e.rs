@@ -383,7 +383,6 @@ impl Harness {
         config.audio.postroll_seconds = settings.postroll_seconds;
         config.recording.dir = root.join("audio");
         config.nvim.mode = Mode::Attach;
-        config.nvim.notify = false;
         config.nvim.copy_to_clipboard = settings.copy_to_clipboard;
         config.nvim.editor = [
             "nvim",

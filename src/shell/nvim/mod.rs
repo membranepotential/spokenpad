@@ -105,7 +105,7 @@ const PROBE_ATTEMPTS: usize = 3;
 /// hours while every utterance after it queues behind it. Those then take
 /// the path any silent editor takes: the held call keeps its operation id,
 /// and if its repeat is not answered either, the text goes to the pending
-/// passage with a notification that it may also be in the window.
+/// passage, and the log says that it may also be in the window.
 const HELD_AT_MOST: Duration = Duration::from_secs(120);
 /// How often the log repeats that a call is still held.
 const HELD_LOG_EVERY: Duration = Duration::from_secs(10);
@@ -205,17 +205,14 @@ pub struct NvimSession {
     /// modes it stays `None` and nothing here touches X at all.
     pane: Option<PaneHost>,
     /// Why the last window this session tried to open did not open, until
-    /// one does: the desktop notification for text that went to the file
-    /// says this rather than only that no editor is open.
+    /// one does: the log line for text that went to the file says this
+    /// rather than only that no editor is open.
     refused: Option<String>,
-    /// Whether the user has been told, this session, that a tiled pane
-    /// opens floating under their window manager: once, not every window.
-    told_tiled_floats: bool,
     /// Set while the user has closed the last pane themselves and not
     /// pressed the key since. Text that arrives meanwhile goes to the pending
     /// passage rather than into a new pane: only a key press opens one after
     /// the user closed one.
-    closed_by_user: Option<ClosedByUser>,
+    closed_by_user: bool,
     /// Whether the pane that is open, or last was, became the dictation
     /// window: its editor answered and this session attached to it. Only
     /// such a pane's close is the user's close of the dictation window; a
@@ -235,8 +232,7 @@ impl NvimSession {
             append_sequence: 0,
             pane: None,
             refused: None,
-            told_tiled_floats: false,
-            closed_by_user: None,
+            closed_by_user: false,
             pane_attached: false,
             quitting: Arc::new(AtomicBool::new(false)),
         }
@@ -300,7 +296,7 @@ impl NvimSession {
     /// through [`append_detached`](Self::append_detached) instead.
     pub fn ensure(&mut self, want: Want) -> Result<Option<PathBuf>> {
         if want == Want::Press {
-            self.closed_by_user = None;
+            self.closed_by_user = false;
         }
         if self.attached()
             && let Some(open) = &self.connection
@@ -339,7 +335,7 @@ impl NvimSession {
     /// `alive` is read first: the pane's thread records a close before it
     /// clears `alive`, so a pane found gone has its close already recorded.
     fn may_open_for_text(&self) -> bool {
-        self.closed_by_user.is_none()
+        !self.closed_by_user
             && !self.pane.as_ref().is_some_and(|pane| {
                 pane.alive().load(Ordering::Acquire) || pane.closed_by_user_pending()
             })
@@ -355,39 +351,16 @@ impl NvimSession {
         if !std::mem::take(&mut self.pane_attached) {
             return None;
         }
-        self.closed_by_user = Some(ClosedByUser {
-            file: self.connection.take().map(|open| open.path),
-        });
-        Some(at)
-    }
-
-    /// Tells the user, through the desktop's notification service, that
-    /// closing the dictation window stopped the recording it was showing:
-    /// the window that would have said so is gone. Once per close.
-    pub fn notify_closed_mid_capture(&self) {
-        if !self.config.notify {
-            return;
-        }
-        let file = match self
-            .closed_by_user
-            .as_ref()
-            .and_then(|closed| closed.file.as_ref())
-        {
-            Some(path) => format!(" What was already transcribed is in {}.", path.display()),
-            None => String::new(),
-        };
-        let body = format!(
-            "You closed the dictation window, so the recording in progress was cancelled \
-             and the rest of it is not transcribed.{file} The recording itself is kept."
+        self.closed_by_user = true;
+        let showed = self
+            .connection
+            .take()
+            .map(|open| format!(" on {}", open.path.display()))
+            .unwrap_or_default();
+        log::info!(
+            "the user closed the dictation pane{showed}; the next text opens no window of its own"
         );
-        if let Err(error) = wm::run(&[
-            "notify-send",
-            "--app-name=spokenpad",
-            "spokenpad: recording cancelled",
-            &body,
-        ]) {
-            log::debug!("desktop notification unavailable: {error:#}");
-        }
+        Some(at)
     }
 
     /// Appends committed text straight to the pending passage, for when no
@@ -396,74 +369,45 @@ impl NvimSession {
         passage::append(&self.config, text, continued)
     }
 
-    /// Tells the user, through the desktop's notification service, that
-    /// dictation is going to a file no editor shows. Best effort: a desktop
-    /// without `notify-send` or a notification daemon only gets the log line.
-    pub fn notify_detached(&self, path: &Path, why: Detached) {
-        if !self.config.notify {
-            return;
-        }
-        let (title, body) = match (why, &self.refused) {
-            (Detached::Unconfirmed, _) => (
-                "spokenpad: text saved outside the window",
-                format!(
-                    "The dictation window did not confirm it received the last text, \
-                     so it is saved to {} as well. If the window shows it too, it is in both.",
-                    path.display()
-                ),
+    /// Says in the log why dictation is going to a file no editor shows,
+    /// and where: what a user who finds the text missing from the window
+    /// looks for.
+    pub fn log_detached(&self, path: &Path, why: Detached) {
+        let path = path.display();
+        match (why, &self.refused) {
+            (Detached::Unconfirmed, _) => log::warn!(
+                "text saved outside the window: the dictation window did not confirm it \
+                 received the last text, so it is saved to {path} as well; if the window shows \
+                 it too, it is in both"
             ),
-            (Detached::NoEditor, _) if self.closed_by_user.is_some() => (
-                "spokenpad: text saved after the window closed",
-                format!(
-                    "You closed the dictation window before this text arrived, so it is saved \
-                     to {}. The next dictation opens a window on it.",
-                    path.display()
-                ),
+            (Detached::NoEditor, _) if self.closed_by_user => log::warn!(
+                "text saved after the window closed: you closed the dictation window before \
+                 this text arrived, so it is saved to {path}; the next dictation opens a window \
+                 on it"
             ),
-            (Detached::NoEditor, Some(reason)) => (
-                "spokenpad: the dictation window could not open",
-                format!("{reason}.\nSaved to {}.", path.display()),
+            (Detached::NoEditor, Some(reason)) => log::warn!(
+                "the dictation window could not open: {reason}; the text is saved to {path}"
             ),
-            (Detached::NoEditor, None) => (
-                "spokenpad: no dictation editor is open",
-                format!(
-                    "Saved to {}. Run `spokenpad editor` to see it.",
-                    path.display()
-                ),
+            (Detached::NoEditor, None) => log::warn!(
+                "no dictation editor is open: the text is saved to {path}; run `spokenpad \
+                 editor` to see it"
             ),
-        };
-        if let Err(error) = wm::run(&["notify-send", "--app-name=spokenpad", title, &body]) {
-            log::debug!("desktop notification unavailable: {error:#}");
         }
     }
 
-    /// Says, in the log every time and in one desktop notification a
-    /// session, that `pane_layout = "tiled"` opens floating here: a tiled
-    /// pane gives up the window type that refuses focus on window managers
-    /// that ignore the user time, and is proven unfocused only on
-    /// [`x11::TILED_PROVEN`].
-    fn tell_tiled_floats(&mut self, manager: &x11::Manager) {
+    /// Says in the log, every time, that `pane_layout = "tiled"` opens
+    /// floating here: a tiled pane gives up the window type that refuses
+    /// focus on window managers that ignore the user time, and is proven
+    /// unfocused only on [`x11::TILED_PROVEN`].
+    fn warn_tiled_floats(manager: &x11::Manager) {
         let name = manager
             .name
             .as_deref()
             .unwrap_or("an unnamed window manager");
-        let reason = format!(
+        log::warn!(
             "nvim.pane_layout = \"tiled\" is proven never to take the focus only on i3, sway, \
              Openbox and KWin; this display runs {name}, so the pane opens floating"
         );
-        log::warn!("{reason}");
-        if self.told_tiled_floats || !self.config.notify {
-            return;
-        }
-        self.told_tiled_floats = true;
-        if let Err(error) = wm::run(&[
-            "notify-send",
-            "--app-name=spokenpad",
-            "spokenpad: the pane opens floating here",
-            &reason,
-        ]) {
-            log::debug!("desktop notification unavailable: {error:#}");
-        }
     }
 
     /// Appends literal text and does not return until Neovim confirms its save.
@@ -954,7 +898,7 @@ impl NvimSession {
         refuse_pane_focus_on_sway(&self.config, &manager)?;
         let layout = x11::layout_under(self.config.pane_layout, &manager);
         if layout != self.config.pane_layout {
-            self.tell_tiled_floats(&manager);
+            Self::warn_tiled_floats(&manager);
         }
         let mut fresh = NewFileGuard::claim(&self.config)?;
         let (command, marker) = pane_launch(&self.config, fresh.path())?;
@@ -1110,12 +1054,6 @@ enum Readiness {
     },
 }
 
-/// The user closed the last pane themselves.
-struct ClosedByUser {
-    /// The file it showed, if the session was attached to it.
-    file: Option<PathBuf>,
-}
-
 /// Why the daemon wants an editor, which decides whether a pane may open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Want {
@@ -1161,7 +1099,7 @@ struct Pinned {
     name: String,
 }
 
-/// Why text went to the pending passage, for the notification that says so.
+/// Why text went to the pending passage, for the log line that says so.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Detached {
     /// No editor could take it: none is open, or it could not be reached.

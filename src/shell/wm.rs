@@ -5,7 +5,7 @@
 //! has one caller: a pane about to open under sway, which reads none of the
 //! properties that keep the pane unfocused elsewhere, adds its own
 //! `no_focus` rule here first. It also runs short-lived helpers, such as
-//! `notify-send`, bounded in time and output.
+//! `systemctl --user`, bounded in time and output.
 use crate::core::wm::{self, Criterion, Message, WmKind};
 use anyhow::{Context, Result, bail, ensure};
 use std::{

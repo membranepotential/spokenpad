@@ -92,7 +92,7 @@ those belongs in `src/shell/`.
   `shell/dirs.rs` (every directory spokenpad creates is 0700),
   `shell/control.rs` (control socket server, each request under one
   deadline; the CLI's client, which starts `spokenpad.socket` once when its
-  socket is missing and reports a failed press through `notify-send`),
+  socket is missing and reports a failed press on standard error),
   `shell/inference.rs` (sherpa's transducer and Silero), `shell/models.rs`
   (downloads and verifies the default models: HTTPS only, bounded, one
   process at a time; the commands' progress reporters),

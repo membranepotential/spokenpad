@@ -21,7 +21,6 @@ pkgbase = spokenpad
 	depends = libxkbcommon-x11
 	depends = fontconfig
 	depends = xclip
-	depends = libnotify
 	optdepends = wl-clipboard: copying out of `spokenpad editor` in a Wayland terminal (nvim.mode = "attach")
 	noextract = sherpa-onnx-v1.13.8-linux-x64-static-lib.tar.bz2
 	source = spokenpad-0.2.0.tar.gz::https://github.com/membranepotential/spokenpad/archive/refs/tags/v0.2.0.tar.gz

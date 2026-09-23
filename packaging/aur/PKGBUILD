@@ -12,15 +12,14 @@ url="https://github.com/membranepotential/spokenpad"
 # its prebuilt archive brings, eSpeak NG (GPL-3.0-or-later) among them, and
 # Rust crates under ISC and CDLA-Permissive-2.0: THIRD-PARTY.md.
 license=('MIT' 'Apache-2.0' 'BSD-3-Clause' 'GPL-3.0-or-later' 'ISC' 'CDLA-Permissive-2.0')
-# The binary links none of the last six, so namcap calls them unneeded:
+# The binary links none of the last five, so namcap calls them unneeded:
 # neovim is run as a program in every mode, and for nvim.mode = "pane"
 # libxcb and libxkbcommon-x11 are opened with dlopen and fontconfig is run
 # as `fc-match`. xclip is Neovim's clipboard provider in the pane, which is
 # an X11 window everywhere: without one, `"+y` copies nothing, and copying
-# is the only way text leaves the pane. libnotify's `notify-send` is the one
-# channel left when no window can open (no display, a library missing).
+# is the only way text leaves the pane.
 depends=('glibc' 'libgcc' 'libstdc++' 'portaudio' 'neovim' 'libxcb' 'libxkbcommon-x11' 'fontconfig'
-         'xclip' 'libnotify')
+         'xclip')
 makedepends=('cargo')
 optdepends=(
     'wl-clipboard: copying out of `spokenpad editor` in a Wayland terminal (nvim.mode = "attach")'

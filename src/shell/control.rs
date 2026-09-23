@@ -473,34 +473,20 @@ impl std::error::Error for SendError {}
 /// Sends one request and waits for the daemon's acknowledgement: what
 /// `spokenpad start|stop|toggle|cancel` do.
 ///
-/// A key binding runs this, and a window manager throws its stderr away, so
-/// a press that finds nobody listening does what it can before it fails:
-/// when `path` is where `spokenpad.socket` listens and the request may begin
-/// a capture (`start`, `toggle`), it starts that unit once (`systemctl
-/// --user start spokenpad.socket`: the package enables it, but only for the
-/// next login) and tries again; failing that, it says why in a desktop
-/// notification as well. A `stop` or a `cancel` that finds nobody has
-/// nothing to end, and fails without either, so a release cannot start a
-/// daemon a crash just ended. At any other path — a daemon started by hand,
-/// a test — it only fails.
+/// When `path` is where `spokenpad.socket` listens, nobody listens on it and
+/// the request may begin a capture (`start`, `toggle`), it starts that unit
+/// once (`systemctl --user start spokenpad.socket`: the package enables it,
+/// but only for the next login) and tries again. A `stop` or a `cancel` that
+/// finds nobody has nothing to end, and fails without it, so a release
+/// cannot start a daemon a crash just ended. At any other path — a daemon
+/// started by hand, a test — it only fails. A failure goes to standard
+/// error, which a window manager may throw away: `spokenpad start` in a
+/// terminal shows it.
 pub fn send(path: &Path, request: Request) -> Result<(), SendError> {
-    let recovery = (path == units_socket()).then_some(Recovery {
-        start_socket: || {
-            crate::shell::wm::run(&["systemctl", "--user", "start", "spokenpad.socket"]).map(drop)
-        },
-        notify: |error: &SendError| {
-            let body = error.to_string();
-            if let Err(failed) = crate::shell::wm::run(&[
-                "notify-send",
-                "--app-name=spokenpad",
-                "spokenpad: the key press reached no daemon",
-                &body,
-            ]) {
-                log::debug!("desktop notification unavailable: {failed:#}");
-            }
-        },
+    let start_socket = (path == units_socket()).then_some(|| {
+        crate::shell::wm::run(&["systemctl", "--user", "start", "spokenpad.socket"]).map(drop)
     });
-    send_recovering(path, request, recovery)
+    send_recovering(path, request, start_socket)
 }
 
 /// Where `spokenpad.socket` listens: `%t/spokenpad.sock`, `%t` being the
@@ -511,39 +497,28 @@ fn units_socket() -> PathBuf {
     PathBuf::from(format!("/run/user/{uid}/spokenpad.sock"))
 }
 
-/// What a press does when nobody listens on the unit's socket.
-struct Recovery<S, N> {
-    start_socket: S,
-    notify: N,
-}
-
-fn send_recovering<S, N>(
+/// [`send`], with `start_socket` as what a press does when nobody listens on
+/// the unit's socket, or `None` at any other path.
+fn send_recovering<S>(
     path: &Path,
     request: Request,
-    recovery: Option<Recovery<S, N>>,
+    start_socket: Option<S>,
 ) -> Result<(), SendError>
 where
     S: FnOnce() -> Result<()>,
-    N: FnOnce(&SendError),
 {
     let first = send_once(path, request);
-    let Some(Recovery {
-        start_socket,
-        notify,
-    }) = recovery
-    else {
+    let Some(start_socket) = start_socket else {
         return first;
     };
-    let result = match first {
+    match first {
         Err(SendError::NoDaemon { ref cause, .. })
-            if matches!(
-                cause.kind(),
-                io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
-            ) =>
+            if request.may_begin()
+                && matches!(
+                    cause.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                ) =>
         {
-            if !request.may_begin() {
-                return first;
-            }
             match start_socket() {
                 Ok(()) => send_once(path, request),
                 Err(error) => Err(SendError::Failed(error.context(format!(
@@ -554,11 +529,7 @@ where
             }
         }
         other => other,
-    };
-    if let Err(error) = &result {
-        notify(error);
     }
-    result
 }
 
 fn send_once(path: &Path, request: Request) -> Result<(), SendError> {
@@ -798,39 +769,30 @@ mod tests {
     }
 
     /// A press that finds the unit's socket missing starts it, and is served
-    /// by what then listens; one whose start fails says so, once, where a
-    /// key binding's user sees it.
+    /// by what then listens; one whose start fails says why.
     #[test]
     fn a_press_starts_the_socket_it_finds_missing() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("spokenpad.sock");
         let (sender, receiver) = mpsc::channel();
         let mut started = None;
-        let mut notified = Vec::new();
         send_recovering(
             &path,
             Request::Start,
-            Some(Recovery {
-                start_socket: || {
-                    started = Some(ControlServer::start(Socket::bind(&path)?, sender)?);
-                    Ok(())
-                },
-                notify: |error: &SendError| notified.push(error.to_string()),
+            Some(|| {
+                started = Some(ControlServer::start(Socket::bind(&path)?, sender)?);
+                Ok(())
             }),
         )
         .expect("served once the socket was started");
         assert!(started.is_some());
-        assert!(notified.is_empty(), "{notified:?}");
         assert_eq!(receiver.recv().unwrap().request, Request::Start);
         drop(started);
 
         let error = send_recovering(
             &path,
             Request::Start,
-            Some(Recovery {
-                start_socket: || Err(anyhow::anyhow!("Unit spokenpad.socket not found.")),
-                notify: |error: &SendError| notified.push(error.to_string()),
-            }),
+            Some(|| Err(anyhow::anyhow!("Unit spokenpad.socket not found."))),
         )
         .unwrap_err()
         .to_string();
@@ -838,37 +800,27 @@ mod tests {
             error.contains("systemctl --user start spokenpad.socket` failed"),
             "{error}"
         );
-        assert_eq!(notified, [error]);
     }
 
     /// Only a press that may begin a capture starts the socket it finds
     /// missing. A `stop` or a `cancel` with no daemon has nothing to end: it
-    /// fails as it would at any other path, without a notification.
+    /// fails as it would at any other path.
     #[test]
     fn only_start_and_toggle_start_the_socket() {
         for request in Request::ALL {
             let directory = tempfile::tempdir().unwrap();
             let path = directory.path().join("spokenpad.sock");
             let mut started = false;
-            let mut notified = Vec::new();
             let result = send_recovering(
                 &path,
                 request,
-                Some(Recovery {
-                    start_socket: || {
-                        started = true;
-                        Err(anyhow::anyhow!("Unit spokenpad.socket not found."))
-                    },
-                    notify: |error: &SendError| notified.push(error.to_string()),
+                Some(|| {
+                    started = true;
+                    Err(anyhow::anyhow!("Unit spokenpad.socket not found."))
                 }),
             );
             let begins = matches!(request, Request::Start | Request::Toggle);
             assert_eq!(started, begins, "{request}");
-            assert_eq!(
-                notified.len(),
-                usize::from(begins),
-                "{request}: {notified:?}"
-            );
             if !begins {
                 assert!(
                     matches!(result, Err(SendError::NoDaemon { .. })),

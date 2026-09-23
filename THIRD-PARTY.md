@@ -39,7 +39,7 @@ them offering a choice; `cargo tree -e normal -f '{p} {l}'` lists each.
 
 At run time spokenpad uses, without linking them in: the system's PortAudio,
 glibc, libstdc++ and libgcc, and, for the pane, libxcb, libxkbcommon and
-fontconfig; it runs Neovim, `fc-match`, `notify-send` and a clipboard tool.
+fontconfig; it runs Neovim, `fc-match` and a clipboard tool.
 
 ## Downloaded on first use
 

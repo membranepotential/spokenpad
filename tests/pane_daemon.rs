@@ -648,7 +648,6 @@ impl Daemon {
         let root = directory.path();
         let mut config = Config::default();
         config.nvim.mode = Mode::Pane;
-        config.nvim.notify = false;
         config.nvim.display = display;
         // The editor's own provider does this — xclip, xsel or wl-copy,
         // inside nvim. It writes to whichever display that nvim is on, which

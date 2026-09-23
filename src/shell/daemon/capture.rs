@@ -45,7 +45,7 @@ pub(super) fn discard<B: InputBackend>(
             log::info!("capture cancelled; settled text and WAV retained")
         }
         DiscardReason::WindowClosed => log::info!(
-            "capture cancelled: the user closed the dictation window; settled text and WAV retained"
+            "capture cancelled: the user closed the dictation window, so the rest of it is not transcribed; settled text and WAV retained"
         ),
     }
 }

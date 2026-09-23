@@ -439,9 +439,6 @@ pub struct Nvim {
     /// the display.
     #[serde(skip)]
     pub runtime_dir: Option<PathBuf>,
-    /// Send a desktop notification when dictated text has to go to the
-    /// dictation file because no editor is open.
-    pub notify: bool,
     /// After every release, copy the whole dictation buffer to the `+`
     /// register through the editor's own clipboard provider. Off by
     /// default: dictation already lands in the file, and a clipboard write
@@ -473,7 +470,6 @@ impl Default for Nvim {
             display: None,
             sway_socket: None,
             runtime_dir: None,
-            notify: true,
             copy_to_clipboard: false,
         }
     }
@@ -992,6 +988,13 @@ const GONE: &[(&str, &str, Gone)] = &[
             ": the preview is always on; the same ticks commit settled text as you speak. Delete the line",
         ),
     ),
+    (
+        "nvim",
+        "notify",
+        Gone::Removed(
+            ": spokenpad sends no desktop notifications. What they said is in the log (`journalctl --user -u spokenpad`). Delete the line",
+        ),
+    ),
     ("nvim", "terminal", Gone::Removed(MANAGED_ONLY)),
     ("nvim", "window_instance", Gone::Removed(MANAGED_ONLY)),
     ("nvim", "window_fraction", Gone::Removed(MANAGED_ONLY)),
@@ -1311,6 +1314,10 @@ mod tests {
             ("[asr]\nlanguage='de'", "asr.language was removed"),
             ("[vad]\nenabled=false", "vad.enabled was removed"),
             ("[preview]\nenabled=true", "preview.enabled was removed"),
+            (
+                "[nvim]\nnotify=false",
+                "nvim.notify was removed: spokenpad sends no desktop notifications",
+            ),
             (
                 "[audio]\npreroll_ms=250",
                 "audio.preroll_ms is now audio.preroll_seconds: every duration is in seconds; write `preroll_seconds = 0.25` under [audio]",

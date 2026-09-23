@@ -29,7 +29,7 @@ imperative shell, and `config.rs` sits at the root because both sides read it.
 | `core/models.rs` | The pinned default model set: each file's fixed URL, size and sha256, which configurations use it, and the comparison against a pin | none |
 | `shell/models.rs` | Download and verify the default models: the program's only network access. HTTPS only, redirects included, to the URLs in `core/models.rs`; a timeout per phase and a body budget from the pinned size; never a byte past it; `.part` renamed into place only once size and sha256 match; one process at a time per directory (`flock` on `.fetch.lock`) | network (Hugging Face, GitHub releases), filesystem |
 | `shell/inference.rs` | CPU-only models; the sherpa recognizer and the Silero detector | ONNX Runtime |
-| `shell/control.rs` | Bind the control socket, or take over the one systemd passed (socket activation); stamp and forward each request, each line under one deadline; the client the CLI uses, which starts `spokenpad.socket` once when its socket is missing and says through `notify-send` why a press failed | Unix socket, `systemctl`, `notify-send` |
+| `shell/control.rs` | Bind the control socket, or take over the one systemd passed (socket activation); stamp and forward each request, each line under one deadline; the client the CLI uses, which starts `spokenpad.socket` once when its socket is missing and says on standard error why a press failed | Unix socket, `systemctl` |
 | `shell/audio.rs` | Pre-roll, immutable capture chunks, dropping committed audio, the memory ceiling, stream repair (backed off while the microphone stays missing) | PortAudio (behind `InputBackend`) |
 | `shell/recorder.rs` | Persist every capture independently of decode, prune the directory, and keep the list of recordings not transcribed yet for the next start (`waiting.tsv`) | filesystem |
 | `core/grid.rs` | Neovim's `ext_linegrid` redraw events, typed, and the screen they fold into; which rows each one changed; the mode `mode_change` last named | none |
@@ -45,7 +45,7 @@ imperative shell, and `config.rs` sits at the root because both sides read it.
 | `shell/pane/xkb.rs` | libxcb and libxkbcommon, opened with `dlopen` when a pane opens | shared libraries |
 | `shell/nvim/passage.rs` | With no editor open: append to the pending dictation file, and the pointer the next editor opens | filesystem |
 | `shell/nvim/rpc.rs` | msgpack-RPC transport with absolute deadlines; pure codec | Unix socket |
-| `shell/wm.rs` | The pane's `no_focus` rule sent to sway over its IPC socket before each pane, one request per connection under a deadline; a Unix socket's peer credentials; short-lived helpers such as `notify-send`, bounded in time and output | IPC socket, subprocesses |
+| `shell/wm.rs` | The pane's `no_focus` rule sent to sway over its IPC socket before each pane, one request per connection under a deadline; a Unix socket's peer credentials; short-lived helpers such as `systemctl --user`, bounded in time and output | IPC socket, subprocesses |
 | `shell/logging.rs` | Private 0600 diagnostic log, rotated at 1 MB | filesystem |
 | `shell/sync.rs` | One policy for a poisoned mutex, on the capture path and in the pane's shared state | none |
 | `shell/dirs.rs` | Every directory spokenpad creates is 0700; its own state directory is narrowed to that | filesystem |
