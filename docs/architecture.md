@@ -26,7 +26,7 @@ imperative shell, and `config.rs` sits at the root because both sides read it.
 | `core/session.rs` | Utterance lifecycle, preview cadence, and the one user-visible notice | internal channels |
 | `core/decode.rs` | Committed sample offset, settled commits, release tails, preview isolation | worker messages |
 | `core/segments.rs` | VAD merge/pad/settlement: spans in, decode windows out | none |
-| `core/models.rs` | The pinned default model set: each file's fixed URL, size and sha256, which configurations use it, and the comparison against a pin | none |
+| `core/models.rs` | The two default models, `DEFAULT_ASR` and `DEFAULT_VAD`, each one typed value: its place under the models directory and each file's fixed URL, size and sha256. The configuration's default paths and every download list are derived from them; which configurations use them, and the comparison against a pin | none |
 | `shell/models.rs` | Download and verify the default models: the program's only network access. HTTPS only, redirects included, to the URLs in `core/models.rs`; a timeout per phase and a body budget from the pinned size; never a byte past it; `.part` renamed into place only once size and sha256 match; one process at a time per directory (`flock` on `.fetch.lock`) | network (Hugging Face, GitHub releases), filesystem |
 | `shell/inference.rs` | CPU-only models; the sherpa recognizer and the Silero detector | ONNX Runtime |
 | `shell/control.rs` | Bind the control socket, or take over the one systemd passed (socket activation); stamp and forward each request, each line under one deadline; the client the CLI uses, which starts `spokenpad.socket` once when its socket is missing and says on standard error why a press failed | Unix socket, `systemctl` |
@@ -86,8 +86,9 @@ unit-tested without a device, a thread, or a process. Nothing there may import
   cell, the way Alacritty and FreeType compute them.
 - `core/wm.rs` — the i3 IPC protocol, which sway shares, as values: frames,
   replies, the focused workspace, the pane's `no_focus` command.
-- `core/models.rs` — the pinned default model set as literals: the only URLs
-  the program ever fetches, never built from configuration or input.
+- `core/models.rs` — the two default models as literals, from which the
+  configuration's defaults and the download lists are derived: the only
+  URLs the program ever fetches, never built from configuration or input.
 - one pure half still lives inside a shell module: in `shell/nvim`, the RPC
   codec, the editor argv, ownership parsing, and `passage::append_paragraph`.
 

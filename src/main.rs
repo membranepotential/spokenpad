@@ -313,10 +313,11 @@ fn fetch(dir: Option<PathBuf>) -> Result<Exit> {
         Some(d) => config::expand_path(&d)?,
         None => config::models_dir(),
     };
-    let files: Vec<_> = spokenpad::core::models::DEFAULT_MODEL_FILES
-        .iter()
-        .collect();
-    fetch_models(&dest, &files, models::report_on_stderr)?;
+    fetch_models(
+        &dest,
+        &spokenpad::core::models::every_default_file(),
+        models::report_on_stderr,
+    )?;
     Ok(Exit::Success)
 }
 

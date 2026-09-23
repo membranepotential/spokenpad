@@ -30,6 +30,7 @@ use spokenpad::{
             Worker,
         },
         frames::Frames,
+        models::DEFAULT_ASR,
         segments::{VAD_WINDOW, merge_spans, settling_silence},
         session::Preparing,
         state::REPEAT_WINDOW,
@@ -2478,7 +2479,7 @@ impl DirectMicrophone {
 fn silero_split_time_over_a_long_tail() {
     let _alone = one_heavy_test_at_a_time();
     let config = Config::default();
-    let sample = config.asr.model_dir.join("test_en.wav");
+    let sample = config.asr.model_dir.join(DEFAULT_ASR.sample.name);
     if !sample.is_file() || !config.vad.model.is_file() {
         eprintln!("skipping: `spokenpad fetch-models` has not been run");
         return;
@@ -2522,7 +2523,7 @@ fn silero_split_time_over_a_long_tail() {
 fn dropping_settled_silence_does_not_move_the_detector_spans() {
     let _alone = one_heavy_test_at_a_time();
     let config = Config::default();
-    let sample = config.asr.model_dir.join("test_en.wav");
+    let sample = config.asr.model_dir.join(DEFAULT_ASR.sample.name);
     if !sample.is_file() || !config.vad.model.is_file() {
         eprintln!("skipping: `spokenpad fetch-models` has not been run");
         return;
@@ -2581,7 +2582,7 @@ fn real_models_transcribe_the_kennedy_sample() {
         return;
     }
     let mut config = Config::default();
-    let sample = config.asr.model_dir.join("test_en.wav");
+    let sample = config.asr.model_dir.join(DEFAULT_ASR.sample.name);
     if !sample.is_file() || !config.vad.model.is_file() {
         eprintln!("skipping: `spokenpad fetch-models` has not been run");
         return;

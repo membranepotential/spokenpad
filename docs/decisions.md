@@ -2947,3 +2947,24 @@ They wanted to write `"5 GB"`.
   `shell::recorder` writes it) that is about 43 hours of speech, against
   46 before.
 
+## Each default model is one typed value (2026-09-23)
+
+The default model's identity was written down four times: the manifest in
+`core/models.rs` repeated its directory in every file's path, `config.rs`
+named the directory and `silero_vad.onnx` again for its defaults, and
+`default_asr_dir`/`default_vad_path` a third time. The config's messages
+also said "spokenpad runs Parakeet TDT only", though any NeMo transducer in
+`asr.model_dir` loads.
+
+- Chosen: `core::models::DEFAULT_ASR` (a directory name, a base URL, the
+  files loading reads and the sample recording) and `DEFAULT_VAD` (a base
+  URL and one file). `Asr::default`, `Vad::default`, `fetch-models`' list
+  (`every_default_file`) and `files_to_ensure` are derived from them; a
+  `ModelFile` is the derived download descriptor, with its path under the
+  models directory and its whole URL. The sample recording is a field of
+  its own rather than a file flagged "not required for load".
+- The pins, URLs, file names and paths on disk are unchanged; nothing is
+  downloaded again.
+- `asr.family` and `asr.language` are refused with a message that says a
+  NeMo transducer is loaded, the default or another one.
+

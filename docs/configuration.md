@@ -13,7 +13,8 @@ it is [`config.rs`](../src/config.rs).
   unknown key is an error, so a typo cannot pass silently.
 - A key spokenpad no longer reads is refused with what became of it: `[hotkey]`
   (spokenpad reads no keyboard), `nvim.mode = "managed"` and its keys,
-  `asr.family` and `asr.language` (Parakeet only), `vad.enabled` and
+  `asr.family` and `asr.language` (any NeMo transducer loads without
+  them), `vad.enabled` and
   `preview.enabled` (always on), `nvim.startup_timeout_seconds` (a fixed
   30 s, below), `nvim.notify` (no desktop notifications; the log says it),
   `recording.max_total_bytes` (now `max_total_size`, with a unit), and the

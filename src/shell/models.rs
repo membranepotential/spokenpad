@@ -11,7 +11,7 @@
 //! `spokenpad fetch-models`, `check` and `transcribe` take the same lock.
 use crate::{
     config::{Asr, Vad, models_dir},
-    core::models::{ModelFile, files_to_ensure},
+    core::models::{ModelFile, asr_uses_default_model, files_to_ensure},
 };
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
@@ -94,7 +94,7 @@ fn body_budget(size: u64) -> Duration {
 /// once every file verifies.
 pub fn fetch_models(
     dest_dir: &Path,
-    files: &[&ModelFile],
+    files: &[ModelFile],
     on_event: impl FnMut(FetchEvent<'_>),
 ) -> Result<()> {
     fetch_with(&agent(Schemes::HttpsOnly), dest_dir, files, on_event)
@@ -103,12 +103,12 @@ pub fn fetch_models(
 fn fetch_with(
     agent: &ureq::Agent,
     dest_dir: &Path,
-    files: &[&ModelFile],
+    files: &[ModelFile],
     mut on_event: impl FnMut(FetchEvent<'_>),
 ) -> Result<()> {
     let _lock = lock_dir(dest_dir)?;
     for file in files {
-        let dest = dest_dir.join(file.relative_path);
+        let dest = dest_dir.join(&file.relative_path);
         if verified(&dest, file)? {
             on_event(FetchEvent::Present(file));
             continue;
@@ -196,13 +196,10 @@ pub enum Repair {
 /// and downloads again any that do not match: for a model that
 /// [`ensure_defaults`] found at the right size and that did not load.
 pub fn repair_defaults(asr: &Asr, vad: &Vad, on_bytes: impl FnMut(u64, u64)) -> Result<Repair> {
-    let files = files_to_ensure(asr, vad);
-    if !files
-        .iter()
-        .any(|f| f.kind == crate::core::models::ModelKind::Asr)
-    {
+    if !asr_uses_default_model(asr) {
         return Ok(Repair::NotOurs);
     }
+    let files = files_to_ensure(asr, vad);
     log::warn!("verifying the default models against their pinned sha256");
     Ok(if fetch_counting(&models_dir(), &files, on_bytes)? {
         Repair::Replaced
@@ -215,7 +212,7 @@ pub fn repair_defaults(asr: &Asr, vad: &Vad, on_bytes: impl FnMut(u64, u64)) -> 
 /// whether anything was downloaded.
 fn fetch_counting(
     dest: &Path,
-    files: &[&ModelFile],
+    files: &[ModelFile],
     mut on_bytes: impl FnMut(u64, u64),
 ) -> Result<bool> {
     let mut downloaded_any = false;
@@ -223,13 +220,17 @@ fn fetch_counting(
     let mut done = 0;
     fetch_models(dest, files, |event| match event {
         FetchEvent::Present(file) | FetchEvent::Verified(file) => {
-            log::info!("model {} is in place", file.relative_path);
+            log::info!("model {} is in place", file.relative_path.display());
             done += file.size;
             on_bytes(done, total);
         }
         FetchEvent::Downloading(file) => {
             downloaded_any = true;
-            log::info!("downloading {} ({} bytes)", file.relative_path, file.size);
+            log::info!(
+                "downloading {} ({} bytes)",
+                file.relative_path.display(),
+                file.size
+            );
         }
         FetchEvent::Progress { downloaded, .. } => on_bytes(done + downloaded, total),
     })?;
@@ -271,31 +272,35 @@ fn percent(done: u64, total: u64) -> u64 {
 pub fn report_on_stderr(event: FetchEvent<'_>) {
     let terminal = io::stderr().is_terminal();
     match event {
-        FetchEvent::Present(f) => eprintln!("  {}: present", f.relative_path),
+        FetchEvent::Present(f) => eprintln!("  {}: present", f.relative_path.display()),
         FetchEvent::Downloading(f) => {
-            eprint!("  {}: downloading ({} bytes)", f.relative_path, f.size);
+            eprint!(
+                "  {}: downloading ({} bytes)",
+                f.relative_path.display(),
+                f.size
+            );
             let _ = io::stderr().flush();
         }
         FetchEvent::Progress { file, downloaded } if terminal => {
             eprint!(
                 "\r  {}: downloading {:3}%",
-                file.relative_path,
+                file.relative_path.display(),
                 percent(downloaded, file.size)
             );
             let _ = io::stderr().flush();
         }
         FetchEvent::Progress { .. } => {}
         FetchEvent::Verified(f) if terminal => {
-            eprintln!("\r  {}: done              ", f.relative_path);
+            eprintln!("\r  {}: done              ", f.relative_path.display());
         }
         FetchEvent::Verified(_) => eprintln!(": done"),
     }
 }
 
 /// Whether every one of `files` sits under `dest_dir` at its pinned size.
-fn all_sized(dest_dir: &Path, files: &[&ModelFile]) -> Result<bool> {
+fn all_sized(dest_dir: &Path, files: &[ModelFile]) -> Result<bool> {
     for file in files {
-        let path = dest_dir.join(file.relative_path);
+        let path = dest_dir.join(&file.relative_path);
         match fs::metadata(&path) {
             Ok(m) if m.is_file() && m.len() == file.size => {}
             Ok(_) => return Ok(false),
@@ -385,7 +390,7 @@ fn download_part(
     file: &ModelFile,
     on_progress: &mut dyn FnMut(u64),
 ) -> Result<()> {
-    let url = file.url();
+    let url = &file.url;
     let mut response = agent
         .get(url.as_str())
         .config()
@@ -439,7 +444,7 @@ fn download_part(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::models::ModelKind;
+    use crate::core::models::{DEFAULT_VAD, every_default_file};
     use std::{
         io::{BufRead, BufReader},
         net::TcpListener,
@@ -483,14 +488,9 @@ mod tests {
     }
 
     fn test_file(url: String, size: u64, sha256: &'static str) -> ModelFile {
-        // `base_url`/`url_suffix` are only `pub(crate)`, so this test builds
-        // the whole URL as the base and leaves the suffix empty.
         ModelFile {
-            kind: ModelKind::Asr,
-            required_for_load: true,
-            relative_path: "test-model.bin",
-            base_url: Box::leak(url.into_boxed_str()),
-            url_suffix: "",
+            relative_path: "test-model.bin".into(),
+            url,
             size,
             sha256,
         }
@@ -503,7 +503,12 @@ mod tests {
         file: &ModelFile,
         on_event: impl FnMut(FetchEvent<'_>),
     ) -> Result<()> {
-        fetch_with(&agent(Schemes::AlsoHttp), dir, &[file], on_event)
+        fetch_with(
+            &agent(Schemes::AlsoHttp),
+            dir,
+            std::slice::from_ref(file),
+            on_event,
+        )
     }
 
     const BODY: &[u8] = b"pretend model weights";
@@ -515,7 +520,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let url = serve_once(BODY);
         let file = test_file(url, BODY.len() as u64, BODY_SHA256);
-        assert!(!all_sized(dir.path(), &[&file]).unwrap(), "missing");
+        assert!(
+            !all_sized(dir.path(), std::slice::from_ref(&file)).unwrap(),
+            "missing"
+        );
 
         let mut events = vec![];
         fetch_local(dir.path(), &file, |e| {
@@ -546,7 +554,7 @@ mod tests {
             BODY_SHA256,
         );
 
-        assert!(all_sized(dir.path(), &[&file]).unwrap());
+        assert!(all_sized(dir.path(), std::slice::from_ref(&file)).unwrap());
         let mut events = vec![];
         fetch_local(dir.path(), &file, |e| {
             events.push(matches!(e, FetchEvent::Present(_)));
@@ -565,7 +573,7 @@ mod tests {
         let file = test_file(url, BODY.len() as u64, BODY_SHA256);
 
         assert!(
-            all_sized(dir.path(), &[&file]).unwrap(),
+            all_sized(dir.path(), std::slice::from_ref(&file)).unwrap(),
             "the size alone cannot tell"
         );
         fetch_local(dir.path(), &file, |_| {}).unwrap();
@@ -630,7 +638,7 @@ mod tests {
             BODY.len() as u64,
             BODY_SHA256,
         );
-        let error = fetch_models(dir.path(), &[&file], |_| {}).unwrap_err();
+        let error = fetch_models(dir.path(), &[file], |_| {}).unwrap_err();
         assert!(format!("{error:#}").contains("https only"), "{error:#}");
         assert!(!dir.path().join("test-model.bin.part").exists());
     }
@@ -692,17 +700,18 @@ mod tests {
     #[test]
     #[ignore = "hits the real, pinned Parakeet and Silero URLs over the network"]
     fn a_real_download_verifies_against_the_pinned_hash() {
-        let files: Vec<_> = crate::core::models::DEFAULT_MODEL_FILES
-            .iter()
+        let files: Vec<_> = every_default_file()
+            .into_iter()
             .filter(|f| {
-                f.relative_path.ends_with("tokens.txt") || f.relative_path == "silero_vad.onnx"
+                f.relative_path.ends_with("tokens.txt")
+                    || f.relative_path == Path::new(DEFAULT_VAD.file.name)
             })
             .collect();
         assert_eq!(files.len(), 2);
         let dir = tempfile::tempdir().unwrap();
         fetch_models(dir.path(), &files, |_| {}).expect("download and verify the real files");
         for file in files {
-            assert!(dir.path().join(file.relative_path).is_file());
+            assert!(dir.path().join(&file.relative_path).is_file());
         }
     }
 }

@@ -1,5 +1,9 @@
 //! TOML is validated once, before starting threads or loading native code.
-use crate::core::{font::Points, geometry::Dimensions};
+use crate::core::{
+    font::Points,
+    geometry::Dimensions,
+    models::{DEFAULT_ASR, DEFAULT_VAD},
+};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use serde::Deserialize;
 use std::{
@@ -131,7 +135,7 @@ pub struct Asr {
 impl Default for Asr {
     fn default() -> Self {
         Self {
-            model_dir: models_dir().join("parakeet-tdt-0.6b-v3-int8"),
+            model_dir: DEFAULT_ASR.dir(),
             num_threads: 6,
             decoding: Decoding::GreedySearch,
         }
@@ -230,7 +234,7 @@ pub struct Vad {
 impl Default for Vad {
     fn default() -> Self {
         Self {
-            model: models_dir().join("silero_vad.onnx"),
+            model: DEFAULT_VAD.path(),
             threshold: 0.5,
             min_silence_seconds: 0.35,
             min_speech_seconds: 0.15,
@@ -1083,14 +1087,14 @@ const GONE: &[(&str, &str, Gone)] = &[
         "asr",
         "family",
         Gone::Removed(
-            ": spokenpad runs Parakeet TDT only. Delete the line, and asr.model_dir too if it points at another family's model",
+            ": spokenpad loads a NeMo transducer, the default Parakeet TDT or another one in asr.model_dir, and needs no family to do it. Delete the line, and asr.model_dir too if it points at a model that is not a NeMo transducer",
         ),
     ),
     (
         "asr",
         "language",
         Gone::Removed(
-            " with the other model families: Parakeet TDT recognises the language by itself. Delete the line",
+            " with the other model families: a NeMo transducer takes no language setting, and the default Parakeet TDT v3 recognises the language by itself. Delete the line",
         ),
     ),
     (
@@ -1443,7 +1447,10 @@ mod tests {
     fn a_removed_key_says_what_became_of_it() {
         for (toml, says) in [
             ("[asr]\nfamily='whisper'", "asr.family was removed"),
-            ("[asr]\nfamily='parakeet'", "Parakeet TDT only"),
+            (
+                "[asr]\nfamily='parakeet'",
+                "spokenpad loads a NeMo transducer",
+            ),
             ("[asr]\nlanguage='de'", "asr.language was removed"),
             ("[vad]\nenabled=false", "vad.enabled was removed"),
             ("[preview]\nenabled=true", "preview.enabled was removed"),
@@ -1500,11 +1507,8 @@ mod tests {
         // whatever directory the config file happens to live in.
         let c = Config::parse("", Some(Path::new("/tmp"))).unwrap();
         assert!(models_dir().is_absolute());
-        assert_eq!(
-            c.asr.model_dir,
-            models_dir().join("parakeet-tdt-0.6b-v3-int8")
-        );
-        assert_eq!(c.vad.model, models_dir().join("silero_vad.onnx"));
+        assert_eq!(c.asr.model_dir, models_dir().join(DEFAULT_ASR.dir_name));
+        assert_eq!(c.vad.model, models_dir().join(DEFAULT_VAD.file.name));
     }
     #[test]
     fn the_editor_mode_is_explicit_and_pane_by_default() {
