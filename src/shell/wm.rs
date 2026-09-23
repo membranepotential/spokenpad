@@ -6,8 +6,11 @@
 //! properties that keep the pane unfocused elsewhere, adds its own
 //! `no_focus` rule here first. It also runs short-lived helpers, such as
 //! `systemctl --user`, bounded in time and output.
-use crate::core::wm::{self, Message, WmKind};
-use anyhow::{Context, Result, bail, ensure};
+use crate::{
+    core::wm::{self, Message, WmKind},
+    shell::unix_socket::{self, ConnectError},
+};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use std::{
     io::{ErrorKind, Read, Write},
     os::{
@@ -102,9 +105,9 @@ impl Wm {
 /// manager that stops answering must not hold the editor thread, which is
 /// opening a pane while the user is already speaking.
 fn request(socket: &Path, message: Message, payload: &str) -> Result<String> {
-    let remaining = remaining_until(Instant::now() + TIMEOUT);
-    let mut stream = connect_by(socket, &remaining)
-        .with_context(|| format!("connect to window manager at {}", socket.display()))?;
+    let deadline = Instant::now() + TIMEOUT;
+    let remaining = remaining_until(deadline);
+    let mut stream = connect(socket, deadline)?;
     stream.set_write_timeout(Some(remaining()?))?;
     stream
         .write_all(&wm::encode(message, payload)?)
@@ -124,37 +127,23 @@ fn request(socket: &Path, message: Message, payload: &str) -> Result<String> {
 /// The process listening on `socket`, from the connection's peer
 /// credentials (`SO_PEERCRED`, which the kernel fills in at `listen`).
 fn peer_pid(socket: &Path) -> Result<u32> {
-    let remaining = remaining_until(Instant::now() + TIMEOUT);
-    let stream = connect_by(socket, &remaining)
-        .with_context(|| format!("connect to window manager at {}", socket.display()))?;
-    let credentials = peer_credentials(&stream).context("read the socket's peer credentials")?;
+    let stream = connect(socket, Instant::now() + TIMEOUT)?;
+    let credentials =
+        unix_socket::peer_credentials(&stream).context("read the socket's peer credentials")?;
     u32::try_from(credentials.pid).context("the socket's peer has no process id")
 }
 
-/// The process, user and group on the other end of a connected Unix socket
-/// (`SO_PEERCRED`: for the side that listens, as it was at `listen`).
-pub(crate) fn peer_credentials(stream: &UnixStream) -> std::io::Result<libc::ucred> {
-    let mut credentials = libc::ucred {
-        pid: 0,
-        uid: 0,
-        gid: 0,
-    };
-    let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
-    // SAFETY: `credentials` is a live `ucred` of `length` bytes, which is
-    // what SO_PEERCRED writes, and `stream` is open for the whole call.
-    let read = unsafe {
-        libc::getsockopt(
-            stream.as_raw_fd(),
-            libc::SOL_SOCKET,
-            libc::SO_PEERCRED,
-            (&raw mut credentials).cast::<libc::c_void>(),
-            &raw mut length,
-        )
-    };
-    if read != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(credentials)
+/// A connection to the window manager's socket, made before `deadline`: one
+/// that has stopped accepting leaves its accept queue full, and a blocking
+/// connect would wait for it forever.
+fn connect(socket: &Path, deadline: Instant) -> Result<UnixStream> {
+    unix_socket::connect(socket, deadline)
+        .map_err(|failure| match failure {
+            ConnectError::TimedOut => anyhow!("window manager did not answer in time"),
+            ConnectError::Refused(error) => error.into(),
+            ConnectError::Other(error) => error,
+        })
+        .with_context(|| format!("connect to window manager at {}", socket.display()))
 }
 
 /// How much of the time until `deadline` is left, for each step of one
@@ -166,75 +155,6 @@ fn remaining_until(deadline: Instant) -> impl Fn() -> Result<Duration> {
             .filter(|left| !left.is_zero())
             .context("window manager did not answer in time")
     }
-}
-
-/// `UnixStream::connect` under the deadline.
-///
-/// A blocking connect to a Unix socket waits for as long as the listener's
-/// accept queue is full, which a window manager that has stopped accepting
-/// leaves it forever. So the socket is non-blocking while it connects: a
-/// full queue answers `EAGAIN`, and the connect is retried until the
-/// deadline; the stream is blocking again (with per-call timeouts) after.
-fn connect_by(path: &Path, remaining: &impl Fn() -> Result<Duration>) -> Result<UnixStream> {
-    use std::os::{
-        fd::{FromRawFd as _, OwnedFd},
-        unix::ffi::OsStrExt as _,
-    };
-
-    let bytes = path.as_os_str().as_bytes();
-    // SAFETY: an all-zero `sockaddr_un` is a valid value of the type; the
-    // family and path are filled in below.
-    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
-    ensure!(
-        bytes.len() < address.sun_path.len(),
-        "socket path is longer than a Unix socket address can hold"
-    );
-    address.sun_family = libc::AF_UNIX as libc::sa_family_t;
-    for (slot, byte) in address.sun_path.iter_mut().zip(bytes) {
-        *slot = *byte as libc::c_char;
-    }
-    let length =
-        (std::mem::offset_of!(libc::sockaddr_un, sun_path) + bytes.len() + 1) as libc::socklen_t;
-    // SAFETY: `socket` takes no pointers.
-    let fd = unsafe {
-        libc::socket(
-            libc::AF_UNIX,
-            libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
-            0,
-        )
-    };
-    if fd < 0 {
-        return Err(std::io::Error::last_os_error()).context("create a Unix socket");
-    }
-    // SAFETY: `fd` was just returned by `socket` and nothing else owns it.
-    let socket = unsafe { OwnedFd::from_raw_fd(fd) };
-    loop {
-        // SAFETY: `address` is an initialised `sockaddr_un` at least `length`
-        // bytes long, and `socket` is open for the duration of the call.
-        let connected = unsafe {
-            libc::connect(
-                socket.as_raw_fd(),
-                (&raw const address).cast::<libc::sockaddr>(),
-                length,
-            )
-        };
-        if connected == 0 {
-            break;
-        }
-        let error = std::io::Error::last_os_error();
-        match error.raw_os_error() {
-            Some(libc::EINTR) => {}
-            // The listener's queue is full: it has stopped accepting, or is
-            // slow to. Try again until the deadline says otherwise.
-            Some(libc::EAGAIN) => {
-                std::thread::sleep(remaining()?.min(Duration::from_millis(5)));
-            }
-            _ => return Err(error.into()),
-        }
-    }
-    let stream = UnixStream::from(socket);
-    stream.set_nonblocking(false)?;
-    Ok(stream)
 }
 
 /// `read_exact`, with the socket timeout shrunk to what is left of the
@@ -353,6 +273,7 @@ fn terminate_group(child: &mut Child) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shell::unix_socket::FullQueue;
     use serde_json::json;
     use std::{
         os::unix::net::UnixListener,
@@ -504,25 +425,15 @@ mod tests {
 
     /// A window manager that has stopped accepting fills its accept queue;
     /// a blocking connect would then wait forever. This one gives up at the
-    /// deadline.
+    /// deadline, and says the window manager did not answer.
     #[test]
     fn a_full_accept_queue_times_out_instead_of_hanging() {
-        let directory = tempfile::tempdir().unwrap();
-        let socket = directory.path().join("ipc.sock");
-        let _listener = UnixListener::bind(&socket).unwrap();
-        let mut queued = Vec::new();
-        let error = loop {
-            let remaining = remaining_until(Instant::now() + Duration::from_millis(200));
-            let started = Instant::now();
-            match connect_by(&socket, &remaining) {
-                Ok(stream) => queued.push(stream),
-                Err(error) => {
-                    assert!(started.elapsed() < Duration::from_secs(1));
-                    break error.to_string();
-                }
-            }
-            assert!(queued.len() < 10_000, "the accept queue never filled");
-        };
+        let full = FullQueue::new();
+        let started = Instant::now();
+        let error = connect(&full.socket, Instant::now() + Duration::from_millis(200))
+            .expect_err("the queue is full");
+        assert!(started.elapsed() < Duration::from_secs(1));
+        let error = format!("{error:#}");
         assert!(error.contains("did not answer in time"), "{error}");
     }
 

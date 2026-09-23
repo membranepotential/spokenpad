@@ -959,7 +959,9 @@ still has pinned, and it passes only if that is the buffer this session owns.
 It is bounded by an absolute two-second deadline — every call in
 [`shell/nvim/rpc.rs`](../src/shell/nvim/rpc.rs) carries one, because a peer
 that dribbles bytes must not extend a call indefinitely by staying inside a
-per-read timeout. An editor that does not answer in time is dropped and
+per-read timeout. The connect waits for the same deadline while the
+editor's accept queue is full, and then counts as a timeout, never as a
+stale socket to remove. An editor that does not answer in time is dropped and
 reattached to (or respawned) rather than waited on, since the recording is
 already running.
 

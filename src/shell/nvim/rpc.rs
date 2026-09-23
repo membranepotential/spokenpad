@@ -9,14 +9,12 @@
 //! says it is holding the call until its user finishes typing a command,
 //! because the call is not lost then, only late. Its caller still bounds that
 //! wait.
+use crate::shell::unix_socket::{self, ConnectError};
 use anyhow::{Result, anyhow, ensure};
 use rmpv::Value;
 use std::{
     io::{BufReader, Read, Write},
-    os::{
-        fd::{AsRawFd, FromRawFd, OwnedFd},
-        unix::{ffi::OsStrExt, net::UnixStream},
-    },
+    os::unix::net::UnixStream,
     path::Path,
     time::{Duration, Instant},
 };
@@ -256,8 +254,14 @@ impl RpcClient {
     /// in a directory other users can write to would otherwise let one of
     /// them listen there first.
     pub(super) fn connect(path: &Path, deadline: Instant) -> Result<Self, RpcFailure> {
-        let writer = connect_unix(path, deadline)?;
-        let peer = crate::shell::wm::peer_credentials(&writer).map_err(|error| {
+        let writer = unix_socket::connect(path, deadline).map_err(|failure| match failure {
+            ConnectError::Refused(error) => RpcFailure::StaleSocket(error),
+            ConnectError::TimedOut => {
+                RpcFailure::Timeout("nvim socket connect timed out".to_owned())
+            }
+            ConnectError::Other(error) => RpcFailure::Other(error),
+        })?;
+        let peer = unix_socket::peer_credentials(&writer).map_err(|error| {
             RpcFailure::Other(anyhow::Error::from(error).context("read the nvim socket's peer"))
         })?;
         // SAFETY: geteuid takes no arguments, touches no memory and cannot fail.
@@ -526,146 +530,10 @@ fn same_user(peer: libc::uid_t, own: libc::uid_t, path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Connects to a Unix socket under a deadline.
-///
-/// `UnixStream::connect` has no timeout, so this opens a non-blocking socket,
-/// polls it for writability, and only then turns blocking I/O back on: a
-/// socket file left behind by a killed editor must fail fast rather than hang
-/// the editor thread.
-fn connect_unix(path: &Path, deadline: Instant) -> Result<UnixStream, RpcFailure> {
-    let bytes = path.as_os_str().as_bytes();
-    ensure_socket_path(bytes).map_err(RpcFailure::Other)?;
-    // SAFETY: socket has no pointer arguments and returns a new owned descriptor.
-    let raw_fd = unsafe {
-        libc::socket(
-            libc::AF_UNIX,
-            libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
-            0,
-        )
-    };
-    if raw_fd == -1 {
-        return Err(RpcFailure::Other(std::io::Error::last_os_error().into()));
-    }
-    // SAFETY: `raw_fd` was just returned by socket and has no other owner.
-    let owned = unsafe { OwnedFd::from_raw_fd(raw_fd) };
-    // SAFETY: zero is a valid initial representation for sockaddr_un.
-    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
-    address.sun_family = libc::AF_UNIX as libc::sa_family_t;
-    for (target, source) in address.sun_path.iter_mut().zip(bytes.iter().copied()) {
-        *target = source as libc::c_char;
-    }
-    let address_length =
-        (std::mem::offset_of!(libc::sockaddr_un, sun_path) + bytes.len() + 1) as libc::socklen_t;
-    // SAFETY: address points to an initialized sockaddr_un of `address_length`
-    // bytes, and the descriptor is owned and live for the call.
-    let result = unsafe {
-        libc::connect(
-            owned.as_raw_fd(),
-            (&raw const address).cast::<libc::sockaddr>(),
-            address_length,
-        )
-    };
-    if result == -1 {
-        let error = std::io::Error::last_os_error();
-        if error.raw_os_error() != Some(libc::EINPROGRESS) {
-            return Err(RpcFailure::StaleSocket(error));
-        }
-        wait_for_connect(owned.as_raw_fd(), deadline)?;
-    }
-    set_blocking(owned.as_raw_fd()).map_err(|error| RpcFailure::Other(error.into()))?;
-    Ok(UnixStream::from(owned))
-}
-
-fn ensure_socket_path(path: &[u8]) -> Result<()> {
-    ensure!(!path.contains(&0), "nvim socket path contains NUL");
-    ensure!(
-        path.len()
-            < std::mem::size_of::<libc::sockaddr_un>()
-                - std::mem::offset_of!(libc::sockaddr_un, sun_path),
-        "nvim socket path is too long"
-    );
-    Ok(())
-}
-
-fn wait_for_connect(fd: libc::c_int, deadline: Instant) -> Result<(), RpcFailure> {
-    loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err(RpcFailure::Timeout(
-                "nvim socket connect timed out".to_owned(),
-            ));
-        }
-        let millis = remaining.as_millis().max(1).min(i32::MAX as u128) as libc::c_int;
-        let mut descriptor = libc::pollfd {
-            fd,
-            events: libc::POLLOUT,
-            revents: 0,
-        };
-        // SAFETY: descriptor is valid for one pollfd element for this call.
-        let ready = unsafe { libc::poll(&mut descriptor, 1, millis) };
-        if ready == 0 {
-            return Err(RpcFailure::Timeout(
-                "nvim socket connect timed out".to_owned(),
-            ));
-        }
-        if ready == -1 {
-            let error = std::io::Error::last_os_error();
-            if error.kind() == std::io::ErrorKind::Interrupted {
-                continue;
-            }
-            return Err(RpcFailure::Other(error.into()));
-        }
-        let mut socket_error: libc::c_int = 0;
-        let mut length = std::mem::size_of_val(&socket_error) as libc::socklen_t;
-        // SAFETY: the descriptor is live and both pointers reference writable
-        // objects of exactly the sizes passed alongside them.
-        if unsafe {
-            libc::getsockopt(
-                fd,
-                libc::SOL_SOCKET,
-                libc::SO_ERROR,
-                (&raw mut socket_error).cast(),
-                &mut length,
-            )
-        } == -1
-        {
-            return Err(RpcFailure::Other(std::io::Error::last_os_error().into()));
-        }
-        if socket_error != 0 {
-            return Err(RpcFailure::StaleSocket(std::io::Error::from_raw_os_error(
-                socket_error,
-            )));
-        }
-        return Ok(());
-    }
-}
-
-fn set_blocking(fd: libc::c_int) -> std::io::Result<()> {
-    // SAFETY: fd is owned and live; fcntl does not retain pointers.
-    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-    if flags == -1 {
-        return Err(std::io::Error::last_os_error());
-    }
-    // SAFETY: as above; flags came from F_GETFL for this descriptor.
-    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK) } == -1 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::{os::unix::net::UnixListener, thread, time::Duration};
-
-    #[test]
-    fn socket_path_must_be_nul_free_and_short_enough() {
-        assert!(ensure_socket_path(b"/run/user/1000/spokenpad-nvim.sock").is_ok());
-        let nul = ensure_socket_path(b"/run/\0/sock").unwrap_err().to_string();
-        assert!(nul.contains("NUL"), "{nul}");
-        let long = ensure_socket_path(&[b'a'; 512]).unwrap_err().to_string();
-        assert!(long.contains("too long"), "{long}");
-    }
 
     /// Another user's listener is refused. A test cannot listen as another
     /// user without root, so the decision is checked on its own, and the
@@ -700,6 +568,21 @@ mod tests {
             .expect("nothing is listening");
         assert!(failure.is_stale_socket(), "{failure}");
         assert!(socket.exists(), "the abandoned socket file must remain");
+    }
+
+    /// An editor too busy to accept fills its accept queue. That is a live
+    /// editor, whose socket must never be taken for stale and removed: the
+    /// connect waits for the deadline and says it timed out.
+    #[test]
+    fn a_full_accept_queue_is_a_timeout_not_a_stale_socket() {
+        let full = crate::shell::unix_socket::FullQueue::new();
+        let started = Instant::now();
+        let failure = RpcClient::connect(&full.socket, Instant::now() + Duration::from_millis(200))
+            .err()
+            .expect("the queue is full");
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(matches!(failure, RpcFailure::Timeout(_)), "{failure}");
+        assert!(!failure.is_stale_socket());
     }
 
     #[test]

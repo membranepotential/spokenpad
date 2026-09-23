@@ -45,7 +45,8 @@ imperative shell, and `config.rs` sits at the root because both sides read it.
 | `shell/pane/xkb.rs` | libxcb and libxkbcommon, opened with `dlopen` when a pane opens | shared libraries |
 | `shell/nvim/passage.rs` | With no editor open: append to the pending dictation file, and the pointer the next editor opens | filesystem |
 | `shell/nvim/rpc.rs` | msgpack-RPC transport with absolute deadlines; pure codec | Unix socket |
-| `shell/wm.rs` | The pane's `no_focus` rule sent to sway over its IPC socket before each pane, one request per connection under a deadline; a Unix socket's peer credentials; short-lived helpers such as `systemctl --user`, bounded in time and output | IPC socket, subprocesses |
+| `shell/wm.rs` | The pane's `no_focus` rule sent to sway over its IPC socket before each pane, one request per connection under a deadline; short-lived helpers such as `systemctl --user`, bounded in time and output | IPC socket, subprocesses |
+| `shell/unix_socket.rs` | A Unix-socket connect under a deadline, which a full accept queue cannot hold past it, for `shell/wm.rs` and `shell/nvim/rpc.rs`; the peer's credentials (`SO_PEERCRED`) | Unix socket |
 | `shell/logging.rs` | Private 0600 diagnostic log, rotated at 1 MB | filesystem |
 | `shell/sync.rs` | One policy for a poisoned mutex, on the capture path and in the pane's shared state | none |
 | `shell/dirs.rs` | Every directory spokenpad creates is 0700; its own state directory is narrowed to that | filesystem |

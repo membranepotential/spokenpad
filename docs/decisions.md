@@ -3067,3 +3067,30 @@ preview.
   (now also that the meter is zeroed), `the_preview_is_drawn_exactly_where_its_text_lands`
   and the resized-window tests. The tests that sent one field now send the
   whole state with that field changed.
+
+## One Unix-socket connect for the window manager and the editor (2026-09-23)
+
+- Problem: `shell/wm.rs` and `shell/nvim/rpc.rs` each built a Unix socket
+  address and connected non-blocking under a deadline, and they differed.
+  The window manager's retried `EAGAIN`, which Linux answers while the
+  listener's accept queue is full, until the deadline. The editor's waited
+  for `EINPROGRESS` with `poll`, which a Unix socket never answers
+  (`connect(2)`), so that path was dead, and a full queue failed at once as
+  a `StaleSocket` error of a kind the stale check does not count. The
+  window manager's did not refuse a path holding a NUL byte. nvim borrowed
+  its peer-credentials helper from `shell/wm.rs`.
+- Changed: `shell/unix_socket.rs` holds one `connect(path, deadline)` that
+  refuses a bad path, retries `EAGAIN` until the deadline and says which
+  way it failed (`ConnectError`: refused, timed out, other), and
+  `peer_credentials`. Each caller words its own errors: the window manager
+  still says it "did not answer in time", and nvim still maps a refusal to
+  `StaleSocket`, whose stale check is unchanged. An editor whose accept
+  queue is full now gets the connect's whole deadline and then counts as a
+  timeout; it was never taken for stale, before or now.
+- Tests: `a_full_accept_queue_times_out_instead_of_hanging` (the helper,
+  and the window manager's wording), the new
+  `a_full_accept_queue_is_a_timeout_not_a_stale_socket` (nvim),
+  `a_socket_with_no_listener_is_refused_at_once`,
+  `a_socket_file_with_no_listener_is_reported_as_stale`,
+  `socket_path_must_be_nul_free_and_short_enough` (moved), and the
+  same-user and same-process tests.

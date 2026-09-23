@@ -14,4 +14,5 @@ pub mod nvim;
 pub mod pane;
 pub mod recorder;
 pub(crate) mod sync;
+pub(crate) mod unix_socket;
 pub mod wm;
