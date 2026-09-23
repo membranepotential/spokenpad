@@ -791,7 +791,7 @@ function M.setup(buf, dedicated)
   render()
   -- The preview belongs to the capture, not to the buffer it was last drawn
   -- in: a daemon that re-pins mid-recording pushes the same indicator state
-  -- afterwards, and `set_state` redraws only what changed. Without this, the
+  -- afterwards, and a push redraws only what changed. Without this, the
   -- live preview would stay in the abandoned buffer until the next word.
   render_preview()
 end
@@ -901,80 +901,47 @@ function M.append_once(id, text, continued)
   return result
 end
 
---- Push indicator state.
+--- Show an indicator snapshot.
 ---
---- Any field may be omitted; only what is present changes. `level` is folded
---- into the rolling meter history rather than replacing it.
-function M.set_state(update)
-  local phase_changed = update.phase ~= nil and update.phase ~= M.state.phase
-  local preview_before = M.state.preview
-  local placement_before = M.state.preview_placement
-  if update.phase ~= nil then
-    M.state.phase = update.phase
-  end
-  if phase_changed and M.state.phase == "recording" then
-    -- Drop the previous utterance's preview the moment a new one starts.
-    -- Now that a preview survives `transcribing`, one that was never replaced
-    -- by committed text -- a decode that produced nothing, a cancellation --
-    -- would otherwise still be sitting there when the user speaks again, and
-    -- would read as the beginning of what they are saying now.
-    --
-    -- Before `update.preview` is applied, not after: a caller may set the
-    -- phase and a preview in one call, and that preview is news, not stale.
-    M.state.preview = ""
-  end
-  if update.preview ~= nil then
-    M.state.preview = update.preview
-  end
-  if update.preview_placement ~= nil then
-    M.state.preview_placement = update.preview_placement
-  end
-  -- The empty string is how the daemon says "no notice"; it sends one on every
-  -- push, and clears it on the next key press. Nothing here expires it.
-  if update.notice ~= nil then
-    M.state.notice = update.notice
-  end
-  if update.notice_detail ~= nil then
-    M.state.notice_detail = update.notice_detail
-  end
-  if update.latched ~= nil then
-    M.state.latched = update.latched
-  end
-  if update.previewing ~= nil then
-    M.state.previewing = update.previewing
-  end
-  if update.level ~= nil then
-    M.state.level = update.level
-    table.remove(M.levels, 1)
-    M.levels[#M.levels + 1] = update.level
-  end
-  if phase_changed and M.state.phase ~= "recording" then
+--- Every push carries every field of `M.state`, and replaces it whole: the
+--- editor's copy is the daemon's state, not the sum of the updates that
+--- reached it. The daemon's own snapshot drops the previous capture's
+--- preview the moment a new one starts, and says "no notice" with the empty
+--- string, which only its next key press sets. `level` is also folded into
+--- the rolling meter history.
+local function show(snapshot)
+  local before = M.state
+  M.state = snapshot
+  local phase_changed = snapshot.phase ~= before.phase
+  table.remove(M.levels, 1)
+  M.levels[#M.levels + 1] = snapshot.level
+  if phase_changed and snapshot.phase ~= "recording" then
     -- Leave no half-lit meter behind when recording ends.
     for i = 1, #M.levels do
       M.levels[i] = 0.0
     end
   end
   render()
-  -- Compared, not merely present: the daemon pushes the whole indicator state
-  -- ten times a second, and rebuilding the preview extmark on every level
-  -- sample would scroll the window under a reader for nothing.
+  -- Compared: the daemon pushes the whole indicator state ten times a
+  -- second, and rebuilding the preview extmark on every level sample would
+  -- scroll the window under a reader for nothing.
   if phase_changed
-    or M.state.preview ~= preview_before
-    or M.state.preview_placement ~= placement_before
+    or snapshot.preview ~= before.preview
+    or snapshot.preview_placement ~= before.preview_placement
   then
     render_preview()
   end
 end
 
---- Notification entry point: pushes state and never raises.
+--- Notification entry point: shows a snapshot and never raises.
 ---
---- The daemon sends indicator updates as notifications, so an error here has
---- no reply to travel back on -- it surfaces as a message in the editor, and
---- a message long enough to need a hit-enter prompt would sit unanswerable in
---- a window that cannot take focus. The failure is kept for inspection
---- instead.
-function M.push(update)
-  local ok, failure = pcall(M.set_state, update)
+--- The daemon sends indicator snapshots as notifications, so an error here
+--- has no reply to travel back on -- it surfaces as a message in the editor,
+--- and a message long enough to need a hit-enter prompt would sit
+--- unanswerable in a window that cannot take focus. The failure is kept for
+--- inspection instead.
+function M.push(snapshot)
+  local ok, failure = pcall(show, snapshot)
   if not ok then
     M.last_error = tostring(failure)
   end

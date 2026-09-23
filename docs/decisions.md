@@ -3050,3 +3050,20 @@ preview.
 - Tests: `the_pane_rule_is_anchored_on_both_halves_of_its_wm_class`,
   `sway_is_given_a_runtime_no_focus_rule_and_i3_is_not_asked`, and the sway
   cases of `tests/pane_focus_wms.rs`.
+
+## The editor applies each indicator push whole (2026-09-23)
+
+- Problem: `Spokenpad.set_state` merged optional fields into the editor's
+  indicator state, and cleared the preview itself when a phase change to
+  `recording` came without one. The daemon always sends all eight fields,
+  so that merge had no caller outside two tests.
+- Changed: `Spokenpad.push` shows a complete snapshot and replaces the
+  state with it. The daemon's snapshot already drops the previous
+  capture's preview at a new recording (`Session` clears it on
+  `Command::Start`). The editor keeps what is its own: the meter history,
+  zeroed when recording ends, and the preview redrawn only when the phase,
+  the preview or its placement changed. `push` still catches every error.
+- Tests: `an_idle_phase_deletes_the_preview_and_a_level_push_leaves_the_buffer_alone`
+  (now also that the meter is zeroed), `the_preview_is_drawn_exactly_where_its_text_lands`
+  and the resized-window tests. The tests that sent one field now send the
+  whole state with that field changed.

@@ -700,9 +700,10 @@ and append de-duplication cache, so restarting the daemon neither blanks the
 indicator nor replays an append whose reply was lost.
 
 The whole indicator is pushed at once — phase, level, preview,
-preview_placement, notice, notice_detail, latched, previewing — so the
-editor's copy is a function of daemon state rather than of the history of
-updates that reached it. `preview` and `notice` are separate fields and are
+preview_placement, notice, notice_detail, latched, previewing — and
+`Spokenpad.push` replaces the editor's copy with it whole, so that copy is
+a function of daemon state rather than of the history of updates that
+reached it. Only the meter's history is the editor's own. `preview` and `notice` are separate fields and are
 drawn in separate places; an absent
 notice travels as the empty string, because nvim turns a msgpack nil inside a
 map into `vim.NIL`, which Lua cannot tell from a field the daemon meant to set.

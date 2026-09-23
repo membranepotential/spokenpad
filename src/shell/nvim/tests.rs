@@ -926,9 +926,12 @@ assert(tail_visible, "preview tail fell below a long wrapped paragraph: " .. ren
   .. " view=" .. vim.inspect(vim.fn.winsaveview())
   .. " height=" .. vim.inspect(vim.api.nvim_win_text_height(0, { start_row = 0, end_row = 0 }))
   .. " winheight=" .. vim.api.nvim_win_get_height(0))
-Spokenpad.set_state({
-  preview = "a longer replacement preview still follows through to growthmarker",
-})
+-- The daemon's next snapshot: the same indicator with a newer preview.
+local function push_preview(text)
+  Spokenpad.push(vim.tbl_extend("force", Spokenpad.state, { preview = text }))
+  assert(Spokenpad.last_error == nil, Spokenpad.last_error)
+end
+push_preview("a longer replacement preview still follows through to growthmarker")
 vim.cmd("redraw!")
 assert(screen_contains("growthmarker"), "growing preview stopped following before commit")
 
@@ -936,12 +939,12 @@ vim.api.nvim_win_call(0, function()
   vim.cmd("normal! gg0zt")
 end)
 local before = vim.fn.winsaveview()
-Spokenpad.set_state({ preview = "do not snap back to moved reader" })
+push_preview("do not snap back to moved reader")
 vim.cmd("redraw!")
 local after = vim.fn.winsaveview()
 assert(vim.deep_equal(before, after), "preview update snapped a moved reader to the end")
 assert(not screen_contains("do not snap"), "moved reader unexpectedly followed preview")
-Spokenpad.set_state({ preview = "still do not snap on a later update" })
+push_preview("still do not snap on a later update")
 vim.cmd("redraw!")
 assert(vim.deep_equal(before, vim.fn.winsaveview()), "later preview update resumed following")
 assert(not screen_contains("still do not snap"), "later preview update snapped back")
@@ -1177,6 +1180,9 @@ fn an_idle_phase_deletes_the_preview_and_a_level_push_leaves_the_buffer_alone() 
         before, after,
         "a level-only push changed the buffer or the view"
     );
+    let meter_lit = "for _, level in ipairs(Spokenpad.levels) do \
+                     if level ~= 0 then return true end end return false";
+    assert_eq!(lua(&mut session, meter_lit).as_bool(), Some(true));
 
     session
         .set_indicator(&IndicatorState::default(), PreviewPlacement::NewParagraph)
@@ -1187,6 +1193,11 @@ fn an_idle_phase_deletes_the_preview_and_a_level_push_leaves_the_buffer_alone() 
     );
     assert_eq!(marks.as_u64(), Some(0), "idle left the preview extmark");
     assert_eq!(
+        lua(&mut session, meter_lit).as_bool(),
+        Some(false),
+        "the meter stayed lit after recording ended"
+    );
+    assert_eq!(
         fs::read_to_string(session.path().unwrap()).unwrap(),
         "committed\n"
     );
@@ -1194,7 +1205,7 @@ fn an_idle_phase_deletes_the_preview_and_a_level_push_leaves_the_buffer_alone() 
 
 /// `setup` is called on every (re)connection, including one that happens
 /// mid-recording after the pinned buffer was lost. The daemon then pushes the
-/// indicator it already had, and `set_state` redraws only what changed -- so
+/// indicator it already had, and a push redraws only what changed -- so
 /// `setup` itself has to put the live preview into the buffer it just pinned.
 #[test]
 fn re_pinning_mid_recording_moves_the_preview_to_the_new_buffer() {
@@ -1429,7 +1440,8 @@ fn a_window_that_stops_showing_the_buffer_gets_its_winbar_back() {
         r#"
 vim.o.winbar = "USER GLOBAL"
 vim.cmd.edit(vim.fn.tempname())
-Spokenpad.set_state({ level = 0.1 })
+Spokenpad.push(vim.tbl_extend("force", Spokenpad.state, { level = 0.1 }))
+assert(Spokenpad.last_error == nil, Spokenpad.last_error)
 return vim.api.nvim_get_option_value("winbar", { win = 0 })
 "#,
     );
