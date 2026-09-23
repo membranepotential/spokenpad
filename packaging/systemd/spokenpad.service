@@ -17,7 +17,7 @@ Type=exec
 # (~/.local/share/spokenpad/models, ~/.config/spokenpad/config.toml), so the
 # working directory does not matter. For development, point this at a build
 # of your own with the drop-in in packaging/systemd/dev.conf.example.
-ExecStart=/usr/bin/spokenpad
+ExecStart=/usr/bin/spokenpad daemon
 
 # Not -v: DEBUG still goes to the rotating file at
 # $XDG_STATE_HOME/spokenpad/spokenpad.log regardless, and duplicating it into

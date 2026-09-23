@@ -22,10 +22,11 @@ use std::{
     version,
     about = "Local push-to-talk dictation for Linux",
     long_about = "Local push-to-talk dictation for Linux.\n\n\
-        Run without a command, spokenpad is the daemon: it listens for the \
-        commands below, records while a key is held, and writes what you \
-        said into a Neovim window. systemd's spokenpad.socket starts it on \
-        the first press; nothing else needs to run it.",
+        `spokenpad daemon` runs the daemon: it listens for the commands below, \
+        records while a key is held, and writes what you said into a Neovim \
+        window. systemd's spokenpad.socket starts it on the first press; \
+        nothing else needs to run it.",
+    arg_required_else_help = true,
     after_help = "Exit codes: 0 success, 1 any other error, 2 the command line is not valid, \
         3 another daemon is running, 4 the recording given to transcribe is unreadable \
         or not 16 kHz, 5 check found that the pane cannot open here, 6 a model file is \
@@ -36,11 +37,8 @@ struct Cli {
     settings: Settings,
     #[command(flatten)]
     logging: Logging,
-    /// Write every capture into DIR as a WAV, for offline evaluation
-    #[arg(long, value_name = "DIR")]
-    dump_audio: Option<PathBuf>,
     #[command(subcommand)]
-    command: Option<Command>,
+    command: Command,
 }
 
 /// Where the configuration comes from. Given before the command or after
@@ -94,6 +92,20 @@ impl Logging {
 enum Command {
     #[command(flatten)]
     Control(Control),
+    /// Run the daemon (what spokenpad.service runs).
+    ///
+    /// Takes the requests `start`, `stop`, `toggle` and `cancel` send,
+    /// records while a capture runs, and writes the text into the dictation
+    /// window. systemd's spokenpad.socket starts it on the first press.
+    Daemon {
+        /// Write every capture into DIR as a WAV, for offline evaluation
+        #[arg(long, value_name = "DIR")]
+        dump_audio: Option<PathBuf>,
+        #[command(flatten)]
+        settings: Settings,
+        #[command(flatten)]
+        logging: Logging,
+    },
     /// Recover a recording: decode a WAV the way the daemon does and print
     /// the text.
     Transcribe {
@@ -202,18 +214,17 @@ fn run(cli: Cli) -> Result<Exit> {
     let Cli {
         settings: outer,
         logging: outer_logging,
-        dump_audio,
         command,
     } = cli;
     match command {
         // First, and alone: a key binding spawns this on every press and
         // release.
-        Some(Command::Control(control)) => {
+        Command::Control(control) => {
             spokenpad::shell::control::send(&config::control_socket(), control.into())?;
             Ok(Exit::Success)
         }
-        Some(Command::FetchModels { dir }) => fetch(dir),
-        Some(Command::Editor { config, logging }) => {
+        Command::FetchModels { dir } => fetch(dir),
+        Command::Editor { config, logging } => {
             start_logging(logging.or(outer_logging))?;
             let settings = Settings {
                 config,
@@ -223,29 +234,33 @@ fn run(cli: Cli) -> Result<Exit> {
             let config = settings.source().load()?;
             match spokenpad::shell::nvim::open_editor(&config.nvim)? {}
         }
-        Some(Command::Transcribe {
+        Command::Transcribe {
             wav,
             out,
             from,
             settings,
             logging,
-        }) => {
+        } => {
             start_logging(logging.or(outer_logging))?;
             let config = settings.or(outer).source().load()?;
             transcribe(&config, &wav, out.as_deref(), from)
         }
-        Some(Command::Check { settings, logging }) => {
+        Command::Check { settings, logging } => {
             start_logging(logging.or(outer_logging))?;
             // An invalid configuration is an error, with its whole text.
             let config = settings.or(outer).source().load()?;
             check(&config)
         }
-        None => {
+        Command::Daemon {
+            dump_audio,
+            settings,
+            logging,
+        } => {
             // SAFETY: nothing so far has started a thread: only the
             // arguments have been parsed.
             let inherited = unsafe { Socket::from_systemd(&config::control_socket()) }?;
-            start_logging(outer_logging)?;
-            serve(outer.source(), inherited, dump_audio)
+            start_logging(logging.or(outer_logging))?;
+            serve(settings.or(outer).source(), inherited, dump_audio)
         }
     }
 }

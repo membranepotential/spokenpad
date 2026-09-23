@@ -3,7 +3,8 @@
 ← [docs index](README.md) | See also [constraints](constraints.md),
 [progressive commit](progressive-commit.md), and [Rust implementation](rust.md).
 
-spokenpad is entirely Rust: one statically linked binary runs the daemon,
+spokenpad is entirely Rust: one statically linked binary runs the daemon
+(`spokenpad daemon`), the control commands the key bindings run,
 `spokenpad editor`, `transcribe`, `check` and `fetch-models`. The WER harness is the
 `examples/eval.rs` example ([evaluation.md](evaluation.md)).
 

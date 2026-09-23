@@ -2,7 +2,8 @@
 
 Local push-to-talk dictation for Linux. The user binds keys in their window
 manager to `spokenpad start`/`stop` (push-to-talk), `toggle` (latch) and
-`cancel`, which talk to the daemon over its control socket
+`cancel`, which talk to the daemon (`spokenpad daemon`, which
+`spokenpad.socket` starts at the first press) over its control socket
 (`$XDG_RUNTIME_DIR/spokenpad.sock`); the transcript lands in a dictation
 Neovim over msgpack-RPC.
 `nvim.mode = "pane"` (default): the daemon opens a window it draws itself,

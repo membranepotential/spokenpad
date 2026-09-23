@@ -10,4 +10,4 @@
 [Service]
 # The empty line clears the packaged ExecStart; a service has only one.
 ExecStart=
-ExecStart=%h/.local/bin/spokenpad
+ExecStart=%h/.local/bin/spokenpad daemon

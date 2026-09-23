@@ -1,7 +1,8 @@
 # Rust implementation
 
-spokenpad is one Rust binary: the daemon and the `editor`, `transcribe`,
-`check` and `fetch-models` commands. There is no other implementation — the
+spokenpad is one Rust binary: the `daemon`, `editor`, `transcribe`,
+`check` and `fetch-models` commands, and the control commands the key
+bindings run. There is no other implementation — the
 Python reference used during the port is retired, see
 [decisions.md](decisions.md#the-python-reference-implementation-is-dropped).
 It ships as an Arch package (`packaging/aur/PKGBUILD`) whose systemd user
@@ -160,15 +161,17 @@ which case defaults are used. An explicit `--config PATH` that does not exist is
 an **error**: silently running on defaults because a `--config` typo pointed
 nowhere is how a user loses their settings.
 
-Command-line flags: `-c/--config PATH` and `--model-dir PATH` for the
-daemon, `transcribe` and `check` (`editor` takes `-c` only), `-v/--verbose`
+Command-line flags: `-c/--config PATH` and `--model-dir PATH` for
+`daemon`, `transcribe` and `check` (`editor` takes `-c` only), `-v/--verbose`
 and `--log-file PATH` (the literal `none` disables the file) for the same
-four, given before the command or after it, and, on the daemon only,
+four, given before the command or after it, and, on `daemon` only,
 `--dump-audio DIR`, which writes each capture exactly as decoded for
 debugging. Subcommands are `start`, `stop`, `toggle`, `cancel` (no options:
-they read no config and write no log), `editor`,
-`transcribe <WAV> [--out PATH] [--from SECONDS]`, `check` and
-`fetch-models [--dir DIR]`, which reads no configuration either.
+they read no config and write no log), `daemon` (what `spokenpad.service`
+runs), `editor`, `transcribe <WAV> [--out PATH] [--from SECONDS]`, `check`
+and `fetch-models [--dir DIR]`, which reads no configuration either.
+`spokenpad` with no command prints the help to stderr and exits 2, clap's
+code for a command line without its command.
 
 Exit codes are selected by error *type* (`Exit` in `main.rs`), never by
 matching a message, so a reworded error cannot silently turn into a restart
@@ -193,8 +196,8 @@ downloads the pinned 1.13.8 static libraries (or uses `SHERPA_ONNX_LIB_DIR`)
 and links sherpa-onnx and onnxruntime into the executable, so the binary needs
 only system libraries (libc, libstdc++, PortAudio) and runs from any
 directory; there is no runpath and nothing to keep beside it.
-The package installs it as `/usr/bin/spokenpad`, which `spokenpad.service`
-runs when `spokenpad.socket` is first connected to; for development,
+The package installs it as `/usr/bin/spokenpad`, whose `daemon` command
+`spokenpad.service` runs when `spokenpad.socket` is first connected to; for development,
 `cargo install --locked --path . --root ~/.local` and the drop-in
 `packaging/systemd/dev.conf.example` run a build of one's own instead. The
 per-user lock above rejects a second daemon. The package build sets
@@ -278,7 +281,7 @@ are a regression proxy, not a general accuracy guarantee — see
 `cargo test --locked --all-targets` runs the library's unit tests, the CLI
 tests, the end-to-end tests and the pane tests, with the tests that load the
 real models or measure RSS ignored by default, plus the unit tests of the
-examples; on 2026-09-23 that was 334 library, 13 CLI and 37 end-to-end
+examples; on 2026-09-23 that was 334 library, 14 CLI and 37 end-to-end
 tests. Strict all-target clippy and rustfmt checks apply.
 `cargo run --example pane` opens the pane on a given display, and can
 write a screenshot of it.

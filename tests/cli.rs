@@ -6,6 +6,12 @@ use std::{
 use tempfile::TempDir;
 
 fn command(directory: &TempDir) -> Command {
+    let mut cmd = bare(directory);
+    cmd.args(["--log-file", "none"]);
+    cmd
+}
+/// spokenpad with no arguments, its directories all in `directory`.
+fn bare(directory: &TempDir) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_spokenpad"));
     cmd.env("XDG_STATE_HOME", directory.path())
         .env("XDG_CONFIG_HOME", directory.path())
@@ -15,7 +21,6 @@ fn command(directory: &TempDir) -> Command {
         .env_remove("DISPLAY")
         .env_remove("WAYLAND_DISPLAY")
         .env_remove("SWAYSOCK");
-    cmd.args(["--log-file", "none"]);
     cmd
 }
 fn code(output: &Output) -> i32 {
@@ -57,12 +62,11 @@ fn each_command_lists_only_the_options_it_reads() {
         "{transcribe}"
     );
     assert!(help(&["check"]).contains("--model-dir"));
+    assert!(help(&["daemon"]).contains("--dump-audio"));
+    assert!(!help(&[]).contains("--dump-audio"));
     assert!(!help(&["fetch-models"]).contains("--config"));
     let top = help(&[]);
-    assert!(
-        top.contains("Run without a command, spokenpad is the daemon"),
-        "{top}"
-    );
+    assert!(top.contains("`spokenpad daemon` runs the daemon"), "{top}");
     assert!(
         top.contains("5 check found that the pane cannot open here"),
         "{top}"
@@ -218,6 +222,24 @@ fn invalid_config_fails_before_devices_and_missing_model_is_exit_six() {
     assert_eq!(code(&output), 6);
     assert!(output.stdout.is_empty());
 }
+/// Without a command spokenpad prints its help and runs nothing: the daemon
+/// is `spokenpad daemon`. The help goes to stderr with exit code 2, as clap
+/// does for a missing command, so a script cannot take it for a success.
+#[test]
+fn no_command_prints_the_help_and_starts_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = bare(&dir).output().unwrap();
+    assert_eq!(code(&output), 2);
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Usage: spokenpad"), "{stderr}");
+    assert!(stderr.contains("Run the daemon"), "{stderr}");
+    // Options but no command: a usage error, not the daemon either.
+    let options = command(&dir).output().unwrap();
+    assert_eq!(code(&options), 2);
+    assert!(String::from_utf8_lossy(&options.stderr).contains("requires a subcommand"));
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+}
 /// Exit code 2 is the argument parser's, for a command line it cannot read,
 /// and means nothing else.
 #[test]
@@ -329,6 +351,7 @@ fn activate(
         .arg("--listen")
         .arg(&socket)
         .arg(env!("CARGO_BIN_EXE_spokenpad"))
+        .arg("daemon")
         .arg("--log-file")
         .arg(log)
         .stdout(std::process::Stdio::null())

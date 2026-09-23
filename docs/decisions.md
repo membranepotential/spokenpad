@@ -2800,3 +2800,25 @@ slow dictation that slice never held a chunk's speech or a settling pause.
   with "stopped after silence"),
   `a_tick_that_settles_nothing_commits_nothing_however_long_the_tail`,
   `a_recording_with_nothing_settled_is_decoded_whole_at_its_end`.
+
+## The daemon is `spokenpad daemon`; bare `spokenpad` prints the help (2026-09-23)
+
+`spokenpad` with no command ran the daemon, and `--dump-audio` was a
+top-level option that only the daemon read. A user who typed `spokenpad` to
+see what it does started a second daemon, which exited 3 against the one
+systemd runs, or took the microphone when none ran.
+
+- Chosen: `spokenpad daemon` runs the daemon and takes `--dump-audio DIR`,
+  besides the options `transcribe` and `check` take. `spokenpad` alone
+  prints the help to stderr and exits 2 (clap's `arg_required_else_help`
+  on a required command); options without a command are the same usage
+  error. `spokenpad.service` and `packaging/systemd/dev.conf.example` run
+  `spokenpad daemon`.
+- Rejected: `daemon start`/`daemon stop`. systemd owns the daemon's
+  lifecycle (`spokenpad.socket`, `systemctl --user restart spokenpad`), and
+  the key bindings' `start`, `stop`, `toggle` and `cancel` stay top-level.
+- Upgrading: a copied unit or drop-in whose `ExecStart` names the bare
+  binary now prints the help and fails; it needs ` daemon` appended.
+- Test: `no_command_prints_the_help_and_starts_nothing`,
+  `each_command_lists_only_the_options_it_reads`, and the socket-activation
+  tests in `tests/cli.rs`, which start `spokenpad daemon` as the unit does.
