@@ -3161,3 +3161,30 @@ preview.
 - The package still builds from the tag's tarball; the tarball's sha256 is
   pinned in the PKGBUILD in the commit after the tag, since the tag cannot
   contain its own checksum.
+
+## The dictation editor's clipboard is bounded (2026-09-23)
+
+- Problem: after a release the pane stayed on "transcribing"; the copy
+  (`nvim.copy_to_clipboard`) timed out, every later call to the pane's nvim
+  timed out, and closing the pane could not write its buffer. The pane's nvim
+  hung in Neovim's clipboard provider detection, which, with `xsel`
+  installed, first runs `xsel -o -b`: a read of the clipboard that waits,
+  with no timeout, for the program that owns it. On the user's desktop that
+  owner had stopped answering (`xclip -o -selection clipboard` hung too).
+  Reproduced on a private Xvfb with a stopped `xclip` as the owner: a plain
+  `nvim --clean` hangs in `setreg('+')` and does not even exit on SIGTERM.
+- Fixed: `Spokenpad.setup` in a dedicated editor sets `g:clipboard` to a
+  provider of spokenpad's own, unless the user configured one: `wl-copy` /
+  `wl-paste` when `WAYLAND_DISPLAY` is set, else `xclip`, else `xsel` (the
+  order Neovim's detection uses), chosen by what is installed rather than by
+  reading the clipboard, each run through `vim.system` with a 1 s timeout.
+  A write captures no output, since these tools leave a child serving the
+  selection. The provider is reloaded, so one Neovim chose earlier is
+  replaced. The copy, the pane's Ctrl+V and the user's own `"+y` now cost at
+  most a second and an error.
+- Kept: an editor the user configured with `g:clipboard` uses theirs, and
+  one whose clipboard is switched off (`g:loaded_clipboard_provider` set to
+  anything but Neovim's 2) stays without; the daemon still starts no
+  clipboard program, the dictation nvim does.
+- Test: `a_dedicated_editors_clipboard_never_waits_on_a_stuck_owner` (a fake
+  `xclip` whose read never answers; fails after 30 s without the fix).

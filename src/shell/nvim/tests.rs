@@ -2213,6 +2213,93 @@ fn bundled_lua_loads_cleanly_under_the_installed_nvim() {
     }
 }
 
+/// A dedicated editor's clipboard waits on no other program for long: a
+/// clipboard owner that stopped answering once held the whole dictation
+/// editor through Neovim's own provider probe (`xsel -o -b`), with no
+/// redraw, append or write on close. Here `xclip` never answers a read; the
+/// read gives up within the bound, and the copy still lands. A provider the
+/// user configured is left alone.
+#[test]
+fn a_dedicated_editors_clipboard_never_waits_on_a_stuck_owner() {
+    if !nvim_or_skip() {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let bin = directory.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let copied = directory.path().join("copied");
+    let xclip = bin.join("xclip");
+    fs::write(
+        &xclip,
+        format!(
+            "#!/bin/sh\ncase \"$*\" in *-o*) exec sleep 30 ;; *) cat > '{}' ;; esac\n",
+            copied.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&xclip, fs::Permissions::from_mode(0o755)).unwrap();
+    let lua = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lua/spokenpad.lua");
+    let probe = directory.path().join("probe.lua");
+    fs::write(
+        &probe,
+        format!(
+            r#"
+if vim.env.USER_CLIPBOARD then
+  vim.g.clipboard = {{ name = "mine", copy = {{ ["+"] = function() end, ["*"] = function() end }},
+    paste = {{ ["+"] = function() return {{}} end, ["*"] = function() return {{}} end }} }}
+end
+vim.cmd.edit(vim.fn.fnameescape({dictation:?}))
+dofile({lua:?})
+Spokenpad.setup(vim.api.nvim_get_current_buf(), true)
+local started = vim.uv.hrtime()
+local read = pcall(vim.fn.getreg, "+")
+local waited = (vim.uv.hrtime() - started) / 1e6
+vim.api.nvim_buf_set_lines(0, 0, -1, false, {{ "dictated text" }})
+local copy = Spokenpad.copy_buffer()
+io.stderr:write(vim.json.encode({{ provider = vim.g.clipboard.name, read = read, waited = waited, copy = copy[1] }}))
+"#,
+            dictation = directory.path().join("dictation.md"),
+        ),
+    )
+    .unwrap();
+    let run = |user_clipboard: bool| {
+        let mut command = Command::new("nvim");
+        command
+            .args(["--headless", "-u", "NONE", "-i", "NONE", "-c"])
+            .arg(format!("luafile {}", probe.display()))
+            .args(["-c", "qall!"])
+            .env(
+                "PATH",
+                format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+            )
+            .env("DISPLAY", ":99")
+            .env_remove("WAYLAND_DISPLAY")
+            .env("NVIM_LOG_FILE", directory.path().join("nvim.log"));
+        if user_clipboard {
+            command.env("USER_CLIPBOARD", "1");
+        }
+        let output = command.output().unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let report: serde_json::Value = serde_json::from_str(stderr.trim())
+            .unwrap_or_else(|_| panic!("no report from nvim: {stderr}"));
+        report
+    };
+
+    let report = run(false);
+    assert_eq!(report["provider"], "spokenpad", "{report}");
+    assert_eq!(report["read"], false, "a stuck read fails: {report}");
+    let waited = report["waited"].as_f64().unwrap();
+    assert!(
+        (900.0..5000.0).contains(&waited),
+        "the read gives up at its bound: {waited}ms"
+    );
+    assert_eq!(report["copy"], "copied", "{report}");
+    assert_eq!(fs::read_to_string(&copied).unwrap(), "dictated text");
+
+    let report = run(true);
+    assert_eq!(report["provider"], "mine", "{report}");
+}
+
 /// The only clipboard write is the opt-in whole-buffer copy: the bundled
 /// init does not route every yank and delete to the system clipboard.
 #[test]

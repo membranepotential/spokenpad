@@ -700,6 +700,108 @@ local function save_soon(buf)
   end))
 end
 
+--- The longest a clipboard tool may take before it is killed.
+local CLIPBOARD_TIMEOUT_MS = 1000
+
+--- The commands that write and read the clipboard on this editor's display,
+--- in the order Neovim's own detection tries them, or nil with no display.
+---
+--- Chosen without Neovim's probe: it takes xsel only once `xsel -o -b` has
+--- read the clipboard, and that read waits, with no timeout, for whichever
+--- program owns the clipboard. One that had stopped answering held the whole
+--- dictation editor the first time anything touched `+`: no redraw, no
+--- append, no write when the window closed.
+local function clipboard_commands()
+  local function all_executable(names)
+    for _, name in ipairs(names) do
+      if vim.fn.executable(name) ~= 1 then
+        return false
+      end
+    end
+    return true
+  end
+  if vim.env.WAYLAND_DISPLAY and all_executable({ "wl-copy", "wl-paste" }) then
+    return {
+      copy = { ["+"] = { "wl-copy", "--type", "text/plain" }, ["*"] = { "wl-copy", "--primary", "--type", "text/plain" } },
+      paste = { ["+"] = { "wl-paste", "--no-newline" }, ["*"] = { "wl-paste", "--primary", "--no-newline" } },
+    }
+  elseif vim.env.DISPLAY and all_executable({ "xclip" }) then
+    return {
+      copy = { ["+"] = { "xclip", "-i", "-selection", "clipboard" }, ["*"] = { "xclip", "-i", "-selection", "primary" } },
+      paste = { ["+"] = { "xclip", "-o", "-selection", "clipboard" }, ["*"] = { "xclip", "-o", "-selection", "primary" } },
+    }
+  elseif vim.env.DISPLAY and all_executable({ "xsel" }) then
+    return {
+      copy = { ["+"] = { "xsel", "-i", "-b" }, ["*"] = { "xsel", "-i", "-p" } },
+      paste = { ["+"] = { "xsel", "-o", "-b" }, ["*"] = { "xsel", "-o", "-p" } },
+    }
+  end
+end
+
+--- Run a clipboard command for at most `CLIPBOARD_TIMEOUT_MS`, and raise if
+--- it failed; `setreg` and `getreg` pass the error on. Writing captures no
+--- output: each of these tools leaves a child behind that keeps serving the
+--- selection, and a pipe it holds would never reach end-of-file.
+local function run_clipboard(argv, input)
+  local result = vim.system(argv, {
+    stdin = input,
+    stdout = input == nil,
+    stderr = false,
+    text = true,
+    timeout = CLIPBOARD_TIMEOUT_MS,
+  }):wait()
+  if result.code == 124 then
+    error(("%s gave no answer within %d ms"):format(argv[1], CLIPBOARD_TIMEOUT_MS), 0)
+  elseif result.code ~= 0 then
+    error(("%s exited with %d"):format(argv[1], result.code), 0)
+  end
+  return result.stdout
+end
+
+local CLIPBOARD_NAME = "spokenpad"
+
+--- Give a dedicated editor a clipboard provider no program can hold up:
+--- `copy_to_clipboard`, the pane's Ctrl+V, and the user's own `"+y` all go
+--- through `+`, and each now waits at most `CLIPBOARD_TIMEOUT_MS`. A
+--- provider the user configured (`g:clipboard`) is theirs and stays.
+local function bound_clipboard()
+  local current = vim.g.clipboard
+  if current ~= nil and not (type(current) == "table" and current.name == CLIPBOARD_NAME) then
+    return
+  end
+  -- Neovim sets this to 2 once it chose a provider, 0 when it found none;
+  -- any other value, or one set before it looked, switches the clipboard
+  -- off, and it stays off.
+  local loaded = vim.g.loaded_clipboard_provider
+  if loaded ~= nil and loaded ~= 2 then
+    return
+  end
+  local commands = clipboard_commands()
+  if not commands then
+    return
+  end
+  local function writer(register)
+    return function(lines)
+      run_clipboard(commands.copy[register], table.concat(lines, "\n"))
+    end
+  end
+  local function reader(register)
+    return function()
+      return vim.split(run_clipboard(commands.paste[register]), "\n", { plain = true })
+    end
+  end
+  vim.g.clipboard = {
+    name = CLIPBOARD_NAME,
+    copy = { ["+"] = writer("+"), ["*"] = writer("*") },
+    paste = { ["+"] = reader("+"), ["*"] = reader("*") },
+  }
+  -- Neovim settles its provider once, when first asked; a provider chosen
+  -- before this one (by the user's init, or by a previous setup) is chosen
+  -- again, now from `g:clipboard`.
+  vim.g.loaded_clipboard_provider = nil
+  vim.cmd.runtime("autoload/provider/clipboard.vim")
+end
+
 --- Bind to the dictation buffer. Idempotent: called on every (re)connection.
 ---
 --- `dedicated` says whether this editor was opened by spokenpad for dictation
@@ -708,6 +810,9 @@ end
 function M.setup(buf, dedicated)
   M.buf = buf
   M.dedicated = M.dedicated or dedicated == true
+  if M.dedicated then
+    bound_clipboard()
+  end
   -- Before the markdown FileType autocmds can lint the empty backing buffer,
   -- and again after, since a plugin may enable diagnostics from FileType. The
   -- buffer filter keeps every other buffer in the user's editor untouched.

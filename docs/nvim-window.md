@@ -694,7 +694,15 @@ loaded over RPC on every connection (so a reattach re-applies it) and defines
 `copy_buffer`, which sets `+` to the whole buffer after every release (see
 [decisions.md](decisions.md#the-whole-buffer-is-copied-to-the-clipboard-after-a-release)
 and [decisions.md](decisions.md#the-clipboard-copy-becomes-opt-in-off-by-default-2026-09-21)
-for why it is now opt-in). Reloading is state-preserving by construction: the
+for why it is now opt-in). `setup` in an editor spokenpad opened for
+dictation also gives it a clipboard provider of its own, unless the user set
+`g:clipboard`: `wl-copy`/`wl-paste` under Wayland, else `xclip`, else
+`xsel`, chosen without reading the clipboard, and each run for at most
+`CLIPBOARD_TIMEOUT_MS` (1 s). The copy, Ctrl+V in the pane and the user's
+own `"+y` all go through it, so a clipboard owner that stopped answering
+costs a second and an error, not the editor
+([decisions.md](decisions.md#the-dictation-editors-clipboard-is-bounded-2026-09-23)).
+Reloading is state-preserving by construction: the
 chunk keeps the previous module's pinned buffer, indicator state, meter history
 and append de-duplication cache, so restarting the daemon neither blanks the
 indicator nor replays an append whose reply was lost.

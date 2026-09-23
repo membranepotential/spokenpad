@@ -199,7 +199,10 @@ plain `y` stays in Neovim unless your own Neovim config sends it to the
 clipboard. The pane uses `xclip` for this, even on Wayland, where it is an
 Xwayland window; `spokenpad editor` in a Wayland terminal uses `wl-copy` from
 `wl-clipboard`. With `nvim.copy_to_clipboard = true`, the dictation Neovim
-copies the whole buffer to `+` after every release.
+copies the whole buffer to `+` after every release. Unless your own config
+sets `g:clipboard`, each clipboard call from the window gives up after a
+second, so a program holding the clipboard that stopped answering costs an
+error message, not the window.
 
 **Pasting in.** In the pane, Ctrl+V pastes the clipboard in Insert mode and
 on the command line, as a terminal does; in Normal mode it is Visual block.

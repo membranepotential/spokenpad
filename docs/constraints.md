@@ -77,8 +77,16 @@ Since 2026-09-23 the pane reads the clipboard too, and only when the user
 asks: Ctrl+V in Insert mode or on the command line, and Ctrl+Shift+V in any
 mode, paste the `+` register into the pane's own nvim, as the user's
 terminal pastes into an nvim running in it. The read goes through that
-nvim's clipboard provider; spokenpad starts no clipboard program and reads
-no selection itself. The text moves from the clipboard into the dictation
+nvim's clipboard provider; the daemon starts no clipboard program and reads
+no selection itself.
+
+In an editor spokenpad opened for dictation, that provider is spokenpad's
+own unless the user configured one (`g:clipboard`): the nvim runs `xclip`,
+`xsel` or `wl-copy`/`wl-paste` itself, for at most a second each, and never
+probes the clipboard to choose one. Neovim's own detection reads the
+clipboard first (`xsel -o -b`), with no timeout, and a clipboard owner that
+had stopped answering held the whole dictation editor. See
+[decisions.md](decisions.md#the-dictation-editors-clipboard-is-bounded-2026-09-23). The text moves from the clipboard into the dictation
 buffer, never out of spokenpad into another window. See
 [decisions.md](decisions.md#ctrlv-in-the-pane-pastes-as-a-terminal-does-2026-09-23). See
 [decisions.md](decisions.md#the-whole-buffer-is-copied-to-the-clipboard-after-a-release)
