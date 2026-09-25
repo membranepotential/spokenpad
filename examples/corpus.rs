@@ -92,6 +92,10 @@ struct Args {
     /// Zeros appended before each decode, overriding the recognizer's second
     #[arg(long, value_name = "MS")]
     trailing_silence_ms: Option<u64>,
+    /// Audio dropped from the start of each capture: 250 replays the corpus,
+    /// recorded with `audio.preroll_seconds = 0.25`, as if without pre-roll
+    #[arg(long, value_name = "MS", default_value_t = 0)]
+    skip_ms: u64,
     /// Audio between preview ticks on the live path [default: preview.interval_seconds]
     #[arg(long, value_name = "MS")]
     tick_ms: Option<u64>,
@@ -143,6 +147,8 @@ struct Plan {
     /// Zeros to append before each decode, or `None` to leave the recognizer
     /// its own second.
     padding: Option<usize>,
+    /// Samples dropped from the start of each capture.
+    skip: usize,
     /// Audio between preview ticks, in samples.
     tick: usize,
     /// `preview.max_seconds`, in samples: a longer tail is not previewed.
@@ -157,6 +163,9 @@ impl Plan {
     }
     fn tick_ms(self) -> u64 {
         (self.tick as u64) * 1000 / u64::from(self.rate)
+    }
+    fn skip_ms(self) -> u64 {
+        (self.skip as u64) * 1000 / u64::from(self.rate)
     }
 }
 
@@ -251,7 +260,7 @@ fn select(entries: Vec<Entry>, ids: &[&str]) -> Result<Vec<Entry>> {
         .collect())
 }
 
-// -- normalisation, WER and the lost tail --------------------------------------
+// -- normalisation, WER and the lost ends ---------------------------------------
 
 /// Casefold, punctuation to spaces, collapse whitespace -- the normalisation
 /// `examples/eval.rs` documents, so the two harnesses score alike.
@@ -272,6 +281,14 @@ struct Alignment {
     /// Reference words at the very end with nothing opposite them: the capture
     /// whose last sentence never arrived.
     lost_tail: usize,
+}
+
+/// Reference words at the very start with nothing opposite them: the first
+/// words of a capture that was not yet recording when they were spoken. The
+/// lost tail of the alignment of both sequences reversed.
+fn lost_head(reference: &[String], hypothesis: &[String]) -> usize {
+    let reversed = |words: &[String]| words.iter().rev().cloned().collect::<Vec<_>>();
+    align(&reversed(reference), &reversed(hypothesis)).lost_tail
 }
 
 /// Levenshtein distance over tokens, plus the length of the run of deletions
@@ -595,6 +612,7 @@ struct Row {
     /// nobody spoke in belongs in its own count.
     wer: Option<f64>,
     lost_tail: usize,
+    lost_head: usize,
     yeah: usize,
     seams: Seams,
     /// Live ticks over a tail longer than `preview.max_seconds`.
@@ -646,11 +664,12 @@ fn run_pass(
                         "{}: {wav_rate}Hz, expected {rate}Hz",
                         entry.file
                     );
+                    let samples = &samples[plan.skip.min(samples.len())..];
                     worker.pipeline.recognizer.take();
                     let started = Instant::now();
                     let (texts, long_ticks) = match plan.path {
-                        DecodePath::Live => replay_live(&mut worker, &samples, plan)?,
-                        DecodePath::Whole => (decode_whole(&mut worker, &samples)?, 0),
+                        DecodePath::Live => replay_live(&mut worker, samples, plan)?,
+                        DecodePath::Whole => (decode_whole(&mut worker, samples)?, 0),
                     };
                     let decode_seconds = started.elapsed().as_secs_f64();
                     let yeah = texts.iter().filter(|t| is_yeah(t)).count();
@@ -676,6 +695,7 @@ fn run_pass(
                             wer: (!reference.is_empty())
                                 .then(|| alignment.edits as f64 / reference.len() as f64),
                             lost_tail: alignment.lost_tail,
+                            lost_head: lost_head(&reference, &hyp),
                             yeah,
                             seams,
                             long_ticks,
@@ -715,6 +735,9 @@ struct Summary {
     wer: f64,
     lost_tail_files: usize,
     lost_tail_words: usize,
+    /// Captures missing at least their first reference word.
+    lost_head_files: usize,
+    lost_head_words: usize,
     yeah: usize,
     seams: Seams,
     long_ticks: usize,
@@ -739,6 +762,8 @@ fn summarize(rows: &[Row], lost_tail: usize) -> Summary {
         wer: 0.0,
         lost_tail_files: 0,
         lost_tail_words: 0,
+        lost_head_files: 0,
+        lost_head_words: 0,
         yeah: 0,
         seams: Seams::default(),
         long_ticks: 0,
@@ -769,6 +794,8 @@ fn summarize(rows: &[Row], lost_tail: usize) -> Summary {
         s.edits += row.edits;
         s.lost_tail_words += row.lost_tail;
         s.lost_tail_files += usize::from(row.lost_tail > lost_tail);
+        s.lost_head_words += row.lost_head;
+        s.lost_head_files += usize::from(row.lost_head > 0);
     }
     if s.ref_words > 0 {
         s.wer = s.edits as f64 / s.ref_words as f64;
@@ -883,6 +910,10 @@ fn print_report(rows: &[Row], summary: &Summary, args: &Args, plan: Plan, wall: 
         "captures losing more than {} reference words at the end: {}  ({} words lost at the ends in all)",
         args.lost_tail, summary.lost_tail_files, summary.lost_tail_words
     );
+    println!(
+        "captures losing reference words at the start: {}  ({} words lost at the starts in all)",
+        summary.lost_head_files, summary.lost_head_words
+    );
     println!("commits that are nothing but \"Yeah.\": {}", summary.yeah);
     println!(
         "chunk seams that wrote a word twice: {} ({} words), over {} committed chunks",
@@ -991,6 +1022,7 @@ fn write_jsonl(
             "duration_s": row.duration_s,
             "ref_words": row.ref_words, "hyp_words": row.hyp_words,
             "edits": row.edits, "wer": row.wer, "lost_tail": row.lost_tail,
+            "lost_head": row.lost_head,
             "empty_first": row.tally.empty_first,
             "empty_after_retry": row.tally.empty_after_retry,
             "decodes": row.tally.decodes, "yeah": row.yeah,
@@ -1007,37 +1039,38 @@ fn write_jsonl(
         }
         writeln!(out, "{value}")?;
     }
-    writeln!(
-        out,
-        "{}",
-        serde_json::json!({
-            "kind": "summary", "label": label, "path": plan.path.name(),
-            "family": family, "decoding": decoding,
-            "model_dir": config.asr.model_dir, "num_threads": config.asr.num_threads,
-            "sherpa_onnx": sherpa_onnx::version(),
-            "trailing_silence_ms": plan.padding_ms(), "tick_ms": plan.tick_ms(),
-            "previews": plan.previews, "jobs": args.jobs,
-            "subset": args.subset.clone().or_else(|| args.ids.as_ref().map(|p| p.display().to_string())),
-            "files": summary.files, "scored": summary.scored,
-            "empty_reference": summary.empty_reference, "invented": summary.invented,
-            "ref_words": summary.ref_words, "hyp_words": summary.hyp_words,
-            "edits": summary.edits, "wer": summary.wer,
-            "empty_first": summary.tally.empty_first,
-            "empty_after_retry": summary.tally.empty_after_retry,
-            "decodes": summary.tally.decodes, "yeah": summary.yeah,
-            "seam_repeats": summary.seams.repeated, "seam_words": summary.seams.words,
-            "long_tail_ticks": summary.long_ticks, "long_tail_files": summary.long_files,
-            "detector_passes": summary.scans.passes,
-            "longest_scan_s": Frames(summary.scans.longest).seconds(plan.rate),
-            "slowest_scan_ms": summary.scans.slowest * 1000.0,
-            "scan_seconds": summary.scans.seconds,
-            "lost_tail_threshold": args.lost_tail,
-            "lost_tail_files": summary.lost_tail_files,
-            "lost_tail_words": summary.lost_tail_words,
-            "audio_seconds": summary.audio_seconds,
-            "decode_seconds": summary.decode_seconds, "wall_seconds": wall,
-        })
-    )?;
+    let mut line = serde_json::json!({
+        "kind": "summary", "label": label, "path": plan.path.name(),
+        "family": family, "decoding": decoding,
+        "model_dir": config.asr.model_dir, "num_threads": config.asr.num_threads,
+        "sherpa_onnx": sherpa_onnx::version(),
+        "trailing_silence_ms": plan.padding_ms(), "tick_ms": plan.tick_ms(),
+        "previews": plan.previews, "jobs": args.jobs,
+        "subset": args.subset.clone().or_else(|| args.ids.as_ref().map(|p| p.display().to_string())),
+        "files": summary.files, "scored": summary.scored,
+        "empty_reference": summary.empty_reference, "invented": summary.invented,
+        "ref_words": summary.ref_words, "hyp_words": summary.hyp_words,
+        "edits": summary.edits, "wer": summary.wer,
+        "empty_first": summary.tally.empty_first,
+        "empty_after_retry": summary.tally.empty_after_retry,
+        "decodes": summary.tally.decodes, "yeah": summary.yeah,
+        "seam_repeats": summary.seams.repeated, "seam_words": summary.seams.words,
+        "long_tail_ticks": summary.long_ticks, "long_tail_files": summary.long_files,
+        "detector_passes": summary.scans.passes,
+        "longest_scan_s": Frames(summary.scans.longest).seconds(plan.rate),
+        "slowest_scan_ms": summary.scans.slowest * 1000.0,
+        "scan_seconds": summary.scans.seconds,
+        "lost_tail_threshold": args.lost_tail,
+        "lost_tail_files": summary.lost_tail_files,
+        "lost_tail_words": summary.lost_tail_words,
+        "audio_seconds": summary.audio_seconds,
+        "decode_seconds": summary.decode_seconds, "wall_seconds": wall,
+    });
+    // Outside the literal above, which is at serde_json's macro recursion limit.
+    line["skip_ms"] = plan.skip_ms().into();
+    line["lost_head_files"] = summary.lost_head_files.into();
+    line["lost_head_words"] = summary.lost_head_words.into();
+    writeln!(out, "{line}")?;
     Ok(())
 }
 
@@ -1103,6 +1136,7 @@ fn main() -> Result<()> {
         padding: args
             .trailing_silence_ms
             .map(|ms| (ms * u64::from(rate) / 1000) as usize),
+        skip: (args.skip_ms * u64::from(rate) / 1000) as usize,
         tick,
         window: config.preview.window(rate),
         previews: args.previews,
@@ -1131,8 +1165,9 @@ fn main() -> Result<()> {
     );
     let shape = plan(DecodePath::Live);
     println!(
-        "trailing silence {} ms, preview tick {} ms of audio, previews {}, {} job(s)",
+        "trailing silence {} ms, {} ms skipped at each start, preview tick {} ms of audio, previews {}, {} job(s)",
         shape.padding_ms(),
+        shape.skip_ms(),
         shape.tick_ms(),
         if args.previews { "decoded" } else { "skipped" },
         args.jobs
@@ -1276,6 +1311,16 @@ mod tests {
     }
 
     #[test]
+    fn a_lost_head_is_the_leading_deletions() {
+        let reference = tokenize("so one two three");
+        assert_eq!(lost_head(&reference, &tokenize("one two three")), 1);
+        assert_eq!(lost_head(&reference, &tokenize("so one two three")), 0);
+        assert_eq!(lost_head(&reference, &tokenize("go one two three")), 0);
+        assert_eq!(lost_head(&reference, &tokenize("so one three")), 0);
+        assert_eq!(lost_head(&reference, &tokenize("one two")), 1);
+    }
+
+    #[test]
     fn yeah_is_recognized_whatever_the_punctuation() {
         assert!(is_yeah("Yeah."));
         assert!(is_yeah(" yeah "));
@@ -1356,6 +1401,7 @@ mod tests {
             edits,
             wer: (ref_words > 0).then(|| edits as f64 / ref_words as f64),
             lost_tail,
+            lost_head: 0,
             yeah: 0,
             seams: Seams::default(),
             long_ticks: 0,

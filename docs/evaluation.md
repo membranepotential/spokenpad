@@ -145,14 +145,20 @@ configuration, so another model family, a patched sherpa-onnx or another
 provider is a config file rather than a change here. `--model-dir` and
 `--threads` override single keys of it.
 
+`--skip-ms N` drops the first N ms of every capture before it is decoded.
+Every capture begins with the 250 ms pre-roll it was recorded with, so
+`--skip-ms 250` replays the corpus as it would have been recorded without one
+([experiment](experiments/2026-09-25-idle-cpu-and-preroll.md)).
+
 ### What it measures
 
 Per capture and in aggregate: WER, reference and hypothesis words, decode
-time, and four counts WER cannot express.
+time, and the counts WER cannot express.
 
 | Column | Meaning |
 |---|---|
 | `lost` | Reference words at the very end the hypothesis has nothing opposite. The dictation whose last sentence never arrived. |
+| (summary) | Captures missing at least their first reference word, and the words lost at the starts: speech from before the capture began. In the JSON lines as `lost_head`. |
 | `e1` | Speech chunks whose padded decode returned nothing, so the pipeline decoded them again bare. |
 | `e2` | Of those, the ones the bare retry returned nothing for either: speech that is simply gone. |
 | `yeah` | Commits that are nothing but "Yeah." — what beam search invents for clear speech ([k2-fsa/sherpa-onnx#3267](https://github.com/k2-fsa/sherpa-onnx/issues/3267)). |
