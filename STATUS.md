@@ -7,7 +7,7 @@ Hold a key (or latch with shift), speak, and text appears in an nvim that
 never takes focus. Fully local, CPU-only. 1.0.0 public since 2026-09-23.
 
 ## Now
-- Nothing running. v1.0.1 released (clipboard hang fix); user to upgrade
+- v1.0.1 released (clipboard hang fix); user to upgrade
   with `git pull && makepkg -si` in packaging/aur.
 
 ## Next
@@ -17,6 +17,10 @@ never takes focus. Fully local, CPU-only. 1.0.0 public since 2026-09-23.
    guard (experiments/2026-09-22-empty-chunk-flips.md).
 
 ## Done
+- 09-25 idle CPU (~2% -> 0.05%): idle event loop waits on requests, indicator
+  sent only on change; default audio.preroll_seconds 0 (user), the pre-roll
+  measured at 0.2 WER pts on the corpus; corpus --skip-ms + lost-head.
+  Not pushed; service still runs packaged 1.0.1.
 - 09-23 release: CLI connect under a deadline, shell/process.rs; history
   audited (no audio/corpus/key ever committed); repo public; v1.0.0 tagged,
   package built from the tag tarball, sha256 pinned; GitHub release.
