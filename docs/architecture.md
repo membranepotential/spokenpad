@@ -164,8 +164,8 @@ headlessly, directly and through a real control socket.
 ```
 
 Everything the event loop learns about the microphone arrives as a typed
-`CaptureEvent` from `AudioCapture::poll`, drained on a fixed interval and again
-at every release; there is no separate watchdog, health or notice query. Each
+`CaptureEvent` from `AudioCapture::poll`, drained every 100 ms while a capture
+runs, every 250 ms while the daemon is idle, and again at every release; there is no separate watchdog, health or notice query. Each
 event is delivered exactly once.
 
 The session owns the single user-visible notice — held too briefly, microphone

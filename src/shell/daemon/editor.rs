@@ -21,10 +21,19 @@ use std::{
 };
 
 /// Everything the editor's winbar shows, replaced wholesale, never merged.
-/// `status` is the speech model's notice, shown when it outranks the
-/// capture's own.
-pub(super) fn indicator_of(session: &Session, level: f32, status: Option<Notice>) -> EditorWork {
-    EditorWork::Indicator {
+/// Where its preview goes is not in `state`: only the editor thread knows
+/// where it put the earlier text of `capture`, the capture whose tail the
+/// preview is.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct Indicator {
+    state: IndicatorState,
+    capture: Option<UtteranceId>,
+}
+
+/// The indicator for `session`. `status` is the speech model's notice, shown
+/// when it outranks the capture's own.
+pub(super) fn indicator_of(session: &Session, level: f32, status: Option<Notice>) -> Indicator {
+    Indicator {
         state: IndicatorState {
             phase: session.state.indicator_phase(),
             level: f64::from(level),
@@ -43,13 +52,9 @@ pub(super) enum EditorWork {
         utterance: UtteranceId,
         text: String,
     },
-    /// Where its preview goes is not in `state`: only this thread knows
-    /// where it put the earlier text of `capture`, the capture whose tail the
-    /// preview is.
-    Indicator {
-        state: IndicatorState,
-        capture: Option<UtteranceId>,
-    },
+    /// Sent only when it changes; the thread keeps the latest and draws it
+    /// again whenever the editor's copy may no longer match.
+    Indicator(Indicator),
     /// Copy the whole dictation buffer to `+`. Sent once per utterance, after
     /// its `Finished` result -- see the comment where it is sent, in
     /// `serve`, for why every `Append` of that utterance is already ahead of
@@ -92,11 +97,8 @@ fn placement(
 /// preview may still hold the words the append writes: pushed after the
 /// append, it would draw them a second time, after themselves, until the
 /// next indicator.
-fn forget_committed_preview(
-    indicator: &mut Option<(IndicatorState, Option<UtteranceId>)>,
-    utterance: UtteranceId,
-) {
-    if let Some((state, capture)) = indicator
+fn forget_committed_preview(indicator: &mut Option<Indicator>, utterance: UtteranceId) {
+    if let Some(Indicator { state, capture }) = indicator
         && *capture == Some(utterance)
     {
         state.preview.clear();
@@ -158,6 +160,7 @@ pub(super) fn editor_thread(
     let mut reported = Vec::new();
     let mut paragraph: Option<(UtteranceId, Sink)> = None;
     let mut shown: Option<(IndicatorState, PreviewPlacement)> = None;
+    let mut indicator: Option<Indicator> = None;
     let mut quit = false;
     while !quit {
         let first = match rx.recv_timeout(Duration::from_millis(66)) {
@@ -166,15 +169,13 @@ pub(super) fn editor_thread(
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         };
         report_user_close(&mut nvim, &events);
-        // Drain what is already queued, keeping only the newest indicator:
-        // the loop offers one 50 times a second and only the last is true.
-        let mut indicator = None;
+        // Drain what is already queued, keeping only the newest indicator.
         for work in first.into_iter().chain(rx.try_iter()) {
             // Before each piece of work, so that text arriving just after
             // the user closed the pane does not open another.
             report_user_close(&mut nvim, &events);
             match work {
-                EditorWork::Indicator { state, capture } => indicator = Some((state, capture)),
+                EditorWork::Indicator(latest) => indicator = Some(latest),
                 EditorWork::Ensure if quitting.load(Ordering::Acquire) => {}
                 EditorWork::Ensure => {
                     // A window about to open, or an editor about to be
@@ -292,15 +293,18 @@ pub(super) fn editor_thread(
         }
         // The placement is taken after the appends queued ahead of the
         // indicator, so a preview drawn after them follows their text.
+        // It is drawn again after anything that may have changed the
+        // editor's copy (an append, a new window: `shown` is `None`), not
+        // only when a new one arrives.
         if nvim.connected()
-            && let Some((state, capture)) = indicator
+            && let Some(Indicator { state, capture }) = &indicator
         {
-            let next = (state, placement(paragraph, capture));
-            if shown.as_ref() != Some(&next) {
-                if let Err(e) = nvim.set_indicator(&next.0, next.1) {
+            let at = placement(paragraph, *capture);
+            if shown.as_ref().is_none_or(|(s, p)| s != state || *p != at) {
+                if let Err(e) = nvim.set_indicator(state, at) {
                     log::warn!("editor indicator unavailable: {e:#}");
                 }
-                shown = Some(next);
+                shown = Some((state.clone(), at));
             }
         }
     }
@@ -380,13 +384,13 @@ mod tests {
     fn an_append_blanks_the_preview_queued_before_it() {
         let (this, other) = (UtteranceId(2), UtteranceId(1));
         let queued = |capture| {
-            Some((
-                IndicatorState {
+            Some(Indicator {
+                state: IndicatorState {
                     preview: "words about to land".into(),
                     ..IndicatorState::default()
                 },
                 capture,
-            ))
+            })
         };
         for (capture, appended, kept) in [
             (Some(this), this, false),
@@ -395,9 +399,7 @@ mod tests {
         ] {
             let mut indicator = queued(capture);
             forget_committed_preview(&mut indicator, appended);
-            let preview = indicator
-                .map(|(state, _)| state.preview)
-                .unwrap_or_default();
+            let preview = indicator.map(|i| i.state.preview).unwrap_or_default();
             assert_eq!(!preview.is_empty(), kept, "{capture:?}, {appended:?}");
         }
     }

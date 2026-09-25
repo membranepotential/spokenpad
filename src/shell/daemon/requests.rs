@@ -6,7 +6,7 @@ use crate::core::{
 use std::{
     collections::VecDeque,
     sync::mpsc::{self, Receiver},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 /// Control requests in arrival order, each preceded by the clock at its own
@@ -111,6 +111,19 @@ impl Requests {
         !self.alive && self.early.is_empty()
     }
 
+    /// Blocks until a request arrives or `timeout` passes. What arrives is
+    /// queued for the next drain, as `start_waiting` queues it.
+    pub(super) fn wait(&mut self, timeout: Duration) {
+        if !self.early.is_empty() || !self.alive {
+            return;
+        }
+        match self.receiver.recv_timeout(timeout) {
+            Ok(request) => self.early.push_back(request),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => self.alive = false,
+        }
+    }
+
     fn receive(&mut self) -> Option<Received> {
         match self.receiver.try_recv() {
             Ok(request) => Some(request),
@@ -126,7 +139,6 @@ impl Requests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
 
     /// Every request is preceded by the clock at its own stamp, and a drain
     /// ends with the clock at the current time, once.
@@ -159,6 +171,32 @@ mod tests {
         assert!(matches!(requests.next(), Some(Event::Clock { .. })));
         assert!(!requests.exhausted());
         drop(sender);
+        assert_eq!(requests.next(), None);
+        assert!(requests.exhausted());
+    }
+
+    /// A wait ends with the request that ended it queued for the drain, at
+    /// the timeout with none, and at once when no request can come.
+    #[test]
+    fn a_wait_queues_what_ends_it() {
+        let (sender, receiver) = mpsc::channel();
+        let mut requests = Requests::new(receiver);
+        let before = Instant::now();
+        requests.wait(Duration::from_millis(30));
+        assert!(before.elapsed() >= Duration::from_millis(30));
+        let start = Received {
+            request: Request::Start,
+            at: Instant::now(),
+        };
+        sender.send(start).unwrap();
+        requests.wait(Duration::from_secs(60));
+        assert_eq!(requests.next(), Some(Event::Clock { now: start.at }));
+        assert_eq!(requests.next(), Some(Event::Request(start)));
+        drop(sender);
+        let before = Instant::now();
+        requests.wait(Duration::from_secs(60));
+        assert!(before.elapsed() < Duration::from_secs(1));
+        assert!(matches!(requests.next(), Some(Event::Clock { .. })));
         assert_eq!(requests.next(), None);
         assert!(requests.exhausted());
     }

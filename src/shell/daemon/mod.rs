@@ -21,7 +21,7 @@ pub use lock::AnotherDaemon;
 
 use self::{
     capture::{apply_capture_event, discard, note_postroll, release},
-    editor::{EditorWork, editor_thread, indicator_of},
+    editor::{EditorWork, Indicator, editor_thread, indicator_of},
     engine::{Work, engine_thread},
     lock::{daemon_lock, lock_under_activation},
     requests::Requests,
@@ -36,7 +36,7 @@ use crate::{
         },
         frames::Frames,
         session::{Notice, Preparing, Recognition, Session},
-        state::{Cause, Command, Event},
+        state::{Cause, Command, Event, State},
         text::Processor,
     },
     shell::{
@@ -77,6 +77,12 @@ const MAX_RESULTS_PER_PASS: usize = 128;
 pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
 
 const LOOP_INTERVAL: Duration = Duration::from_millis(20);
+
+/// How long the loop waits for a request while it is idle (see
+/// [`Loop::idle`]). A request ends the wait at once; this bounds only how
+/// late the loop sees a result nobody is waiting on (a notice while the
+/// model loads, the pane closed), the device watchdog and a shutdown.
+const IDLE_WAIT: Duration = Duration::from_millis(250);
 
 const DEVICE_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -388,6 +394,7 @@ where
         stopping,
         dump_dir,
         next_device_poll: Instant::now(),
+        indicated: None,
     };
     let result = state.run(&results, &engine, &editor);
     state.shut_down(engine, &results);
@@ -423,6 +430,8 @@ struct Loop<'a, B: InputBackend> {
     stopping: Arc<AtomicBool>,
     dump_dir: Option<&'a Path>,
     next_device_poll: Instant,
+    /// The indicator last sent to the editor thread, which keeps it.
+    indicated: Option<Indicator>,
 }
 
 impl<B: InputBackend> Loop<'_, B> {
@@ -460,9 +469,20 @@ impl<B: InputBackend> Loop<'_, B> {
                 !self.requests.exhausted() && !engine.is_finished() && !editor.is_finished(),
                 "a required worker stopped unexpectedly"
             );
-            thread::sleep(LOOP_INTERVAL);
+            if self.idle() {
+                self.requests.wait(IDLE_WAIT);
+            } else {
+                thread::sleep(LOOP_INTERVAL);
+            }
         }
         Ok(())
+    }
+
+    /// No capture is recording or transcribing, and no recording made before
+    /// the model was ready waits for its text: a released capture that was
+    /// kept leaves the session idle while its text is still owed.
+    fn idle(&self) -> bool {
+        self.session.state == State::Idle && self.transcriptions.waiting() == 0
     }
 
     /// Hands the device's news to the session, every
@@ -812,15 +832,17 @@ impl<B: InputBackend> Loop<'_, B> {
         self.show_level(level)
     }
 
-    fn show_level(&self, level: f32) -> Result<()> {
-        send(
-            &self.editor_tx,
-            indicator_of(
-                &self.session,
-                level,
-                self.recognition.notice(self.transcriptions.waiting()),
-            ),
-        )
+    fn show_level(&mut self, level: f32) -> Result<()> {
+        let indicator = indicator_of(
+            &self.session,
+            level,
+            self.recognition.notice(self.transcriptions.waiting()),
+        );
+        if self.indicated.as_ref() == Some(&indicator) {
+            return Ok(());
+        }
+        self.indicated = Some(indicator.clone());
+        send(&self.editor_tx, EditorWork::Indicator(indicator))
     }
 
     /// Stops the capture and the engine, delivers what the engine produced

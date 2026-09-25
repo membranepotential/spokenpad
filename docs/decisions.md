@@ -3188,3 +3188,25 @@ preview.
   clipboard program, the dictation nvim does.
 - Test: `a_dedicated_editors_clipboard_never_waits_on_a_stuck_owner` (a fake
   `xclip` whose read never answers; fails after 30 s without the fix).
+
+## An idle daemon waits for requests instead of polling (2026-09-25)
+
+- Problem: an idle daemon used about 2% of a core. Three threads woke 50
+  times a second: the event loop slept a fixed 20 ms per pass, it sent the
+  editor thread an unchanged indicator on every pass, and the pre-roll's
+  input stream delivered a 21 ms PipeWire quantum
+  ([experiment](experiments/2026-09-25-idle-cpu-and-preroll.md)).
+- Chosen: with no capture recording or transcribing (`State::Idle`) and no
+  recording made before the model was ready waiting for its text (such a
+  capture leaves the session idle at its release), the loop blocks on the
+  request channel for at most 250 ms (`IDLE_WAIT`, `Requests::wait`)
+  instead of sleeping, so a press still wakes it at once. What else it
+  reacts to while idle (a result nobody waits on, the device watchdog, a
+  shutdown) is seen within 250 ms instead of 20 ms.
+- Chosen: the loop sends the indicator only when it changes. The editor
+  thread keeps the latest one across passes and draws it again whenever its
+  copy in the editor may differ (after an append, in a new window), where it
+  used to rely on the next pass sending it again.
+- Result: event loop 4 wakeups a second, editor thread 15 (its 66 ms check
+  for a pane the user closed); the daemon without its input stream idles at
+  0.05 %. The pre-roll's stream is what remains, and is a separate decision.

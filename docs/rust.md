@@ -44,7 +44,15 @@ the root because both sides read it. Nothing under `core/` may import
   pipeline is built, captures are kept as their recovery WAVs and decoded
   from them afterwards. Each pass of the loop is a sequence of `Loop`
   methods: poll the device, take the requests, deliver results, tick,
-  dispatch kept recordings, drop committed audio, show the winbar. Each request
+  dispatch kept recordings, drop committed audio, show the winbar. Passes
+  are 20 ms apart while a capture records or transcribes, or a recording
+  made before the model was ready waits for its text; otherwise the
+  loop waits on the request channel instead, for at most 250 ms
+  (`IDLE_WAIT`), so a press wakes it at once and an idle daemon wakes 4
+  times a second rather than 50. The winbar's indicator goes to the editor
+  thread only when it changes; that thread keeps the latest and draws it
+  again whenever the editor's copy may differ (after an append, in a new
+  window). Each request
   reaches the state machine after the clock at its own stamp, so a repeat
   window that closed before the request arrived is closed first. It drains
   requests before inference results and moves
