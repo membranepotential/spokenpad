@@ -55,8 +55,9 @@ impl Decoding {
 #[serde(default, deny_unknown_fields)]
 pub struct Audio {
     pub sample_rate: u32,
-    /// Audio kept from before the press, because the first word is often
-    /// already sounding when the key goes down.
+    /// Audio kept from before the press, for a first word already sounding
+    /// when the key goes down. Above 0 the microphone stays open between
+    /// presses; at 0 it is opened at each press.
     pub preroll_seconds: f64,
     /// Audio still captured after a release, because speech is often still
     /// sounding when the key comes up.
@@ -67,7 +68,7 @@ impl Default for Audio {
     fn default() -> Self {
         Self {
             sample_rate: 16000,
-            preroll_seconds: 0.25,
+            preroll_seconds: 0.0,
             postroll_seconds: 0.25,
             device: None,
         }

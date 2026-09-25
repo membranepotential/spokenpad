@@ -133,8 +133,10 @@ order, against PortAudio's device name and host API. The daemon picks it up
 after `systemctl --user restart spokenpad`.
 
 A microphone that stops delivering audio is reopened, and the capture it
-interrupted is marked as having a gap. While idle the same repair runs
-quietly, so the pre-roll is ready at the next press. A microphone that is not
+interrupted is marked as having a gap. The microphone is open only while a
+capture runs, unless `audio.preroll_seconds` keeps audio from before the
+press: then it stays open, and while idle the same repair runs quietly, so
+the pre-roll is ready at the next press. A microphone that is not
 there when the daemon starts is looked for the same way, after a wait that
 doubles up to a minute; a press meanwhile says "microphone unavailable" and
 always tries at once.

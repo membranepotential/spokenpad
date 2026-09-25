@@ -663,6 +663,10 @@ impl Daemon {
         )));
         config.recording.dir = root.join("audio");
         config.recording.enabled = false;
+        // With a pre-roll the stream stays open between captures, so the
+        // microphone is drained at any time: speech after a close is heard,
+        // and must reach nothing.
+        config.audio.preroll_seconds = 0.25;
         adjust(&mut config);
         config.validate().expect("the test configuration is valid");
 

@@ -82,8 +82,9 @@ the root because both sides read it. Nothing under `core/` may import
   outside the callback lock. Everything the loop learns about the device arrives
   as a typed `CaptureEvent` from `poll`, delivered once each: stream restarted
   (with the gap, and whether a capture was running), stream unavailable, memory
-  cap reached, device flags. The watchdog also repairs a dead stream while
-  *idle*, so the pre-roll is full at the next press; the ring is cleared when a
+  cap reached, device flags. With a pre-roll configured, the stream stays
+  open between captures and the watchdog also repairs it while *idle*, so
+  the pre-roll is full at the next press; the ring is cleared when a
   capture starts, so audio from before the previous capture cannot be spliced
   into this one. A decode (release, latched stop) keeps capturing for
   `audio.postroll_seconds` (0.25 s, at most 1) after the `stop` or the ending

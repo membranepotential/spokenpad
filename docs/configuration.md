@@ -36,10 +36,13 @@ it is [`config.rs`](../src/config.rs).
 
 - `sample_rate` must be 16000. Silero's window is 512 samples at 16 kHz and
   Parakeet reads the same rate; nothing resamples in between.
-- `preroll_seconds` (0.25) keeps audio from before the key goes down, so the
-  first word is not clipped. It costs an always-open input stream. At 0 the
-  stream is opened at each press instead, and a quick start can lose its
-  first syllable.
+- `preroll_seconds` (0) keeps audio from before the key goes down, for a
+  first word already sounding at the press. At 0 the input stream is opened
+  at each press (about 7 ms on a suspended built-in microphone) and closed
+  after it. Above 0 the stream stays open between presses: about 2 % of a
+  core, and the sound device never suspends. On the author's corpus 0.25
+  bought 0.2 WER points, less than chunking noise
+  ([experiment](experiments/2026-09-25-idle-cpu-and-preroll.md)).
 - `postroll_seconds` (0.25, at most 1) keeps capturing after the key comes
   up, because speech was still sounding at key-up in 22 of 128 recorded
   captures. It runs from the `stop`; a `start` meanwhile ends it at once, so a

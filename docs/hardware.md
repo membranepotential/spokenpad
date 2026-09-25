@@ -65,10 +65,11 @@ words are matched case-insensitively, **in order**, against `"<device
 name>, <host API>"`, with a unique exact match winning an otherwise
 ambiguous query (see `[audio]` in [`config.example.toml`](../config.example.toml)).
 
-The input stream stays open while spokenpad runs, because the pre-roll ring has
-to be warm at the key press. A stream that stops delivering audio is reopened by
-the watchdog — mid-capture, where the gap is reported to the user, and while
-idle, where it is only logged.
+The input stream is open only while a capture runs, unless `audio.preroll_seconds`
+is above 0: then it stays open while spokenpad runs, because the pre-roll ring
+has to be warm at the key press. A stream that stops delivering audio is
+reopened by the watchdog — mid-capture, where the gap is reported to the user,
+and, with a pre-roll, while idle, where it is only logged.
 
 ## Window manager
 

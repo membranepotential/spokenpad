@@ -3210,3 +3210,19 @@ preview.
 - Result: event loop 4 wakeups a second, editor thread 15 (its 66 ms check
   for a pane the user closed); the daemon without its input stream idles at
   0.05 %. The pre-roll's stream is what remains, and is a separate decision.
+
+## No pre-roll by default (2026-09-25)
+
+- Problem: `audio.preroll_seconds = 0.25` kept the input stream open all the
+  time, which was about 98 % of an idle daemon's CPU (1.7–2.5 % of a core
+  against 0.05 % without) and kept PipeWire's graph running and the sound
+  device out of suspend
+  ([experiment](experiments/2026-09-25-idle-cpu-and-preroll.md)).
+- Measured: opening the microphone at the press delivers audio about 7 ms
+  after the open call, even from suspend (built-in microphone, PipeWire).
+  Replaying the whole corpus without its first 250 ms moved WER from 10.7 %
+  to 10.9 %, less than the capture-by-capture churn of shifted chunk
+  boundaries, and lost no word that was right.
+- Chosen (user): the default is 0. The setting stays for anyone who starts
+  speaking before the key is down, or whose microphone opens slowly (USB and
+  Bluetooth not measured).

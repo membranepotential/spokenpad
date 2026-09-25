@@ -16,9 +16,11 @@
 # Must be 16000: the models read 16 kHz.
 sample_rate = 16000
 
-# Audio kept from before the key goes down, so the first word is not
-# clipped. 0 closes the microphone between presses.
-preroll_seconds = 0.25
+# Audio kept from before the key goes down, for a first word that is
+# already sounding when the key goes down. 0 opens the microphone at each
+# press (a few ms) and closes it after; above 0 it stays open between
+# presses, which costs about 2% of a core and keeps the sound device awake.
+preroll_seconds = 0
 
 # Audio still captured after the key comes up, for the word still sounding.
 # At most 1.
