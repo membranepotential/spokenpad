@@ -25,7 +25,7 @@ pkgbase = spokenpad
 	noextract = sherpa-onnx-v1.13.8-linux-x64-static-lib.tar.bz2
 	source = spokenpad-1.0.2.tar.gz::https://github.com/membranepotential/spokenpad/archive/refs/tags/v1.0.2.tar.gz
 	source = https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.8/sherpa-onnx-v1.13.8-linux-x64-static-lib.tar.bz2
-	sha256sums = SKIP
+	sha256sums = af6dad00fbc4495aa7f763a35f7b9d070479945de1f76cf95ae632a1ff12c753
 	sha256sums = e1fdc5b67530e15741ef897fa5ffff297056f3bf0c6d829a27af9225a4c4b5a6
 
 pkgname = spokenpad
