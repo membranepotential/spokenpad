@@ -190,6 +190,25 @@ opens on `:0` or reads the user's i3 configuration. All tests pass while the
 user's service is running: they use temp dirs and never the real state dir or
 the daemon lock.
 
+## Releasing
+
+A release is a signed tag and a GitHub release with notes; the user asks
+for it. The PKGBUILD never holds `SKIP`: at every commit it points at a tag
+that exists, pinned to that tarball's sha256.
+
+1. Bump `version` in `Cargo.toml`, `cargo build` to update `Cargo.lock`, and
+   commit only those two as `Release X.Y.Z`. The PKGBUILD in this commit
+   still names the previous tag.
+2. `git tag -s vX.Y.Z -m 'spokenpad X.Y.Z'`, then push `main` and the tag.
+3. Download `https://github.com/membranepotential/spokenpad/archive/refs/tags/vX.Y.Z.tar.gz`,
+   set `pkgver` and its sha256 in `packaging/aur/PKGBUILD` in one edit,
+   regenerate `.SRCINFO` (`makepkg --printsrcinfo`), build a copy of
+   `packaging/aur` with `makepkg -f`, and commit `Point the PKGBUILD at vX.Y.Z`;
+   push.
+4. `gh release create vX.Y.Z --title 'spokenpad X.Y.Z' --notes-file F`: what
+   changed for the user, and the upgrade steps (`git pull`, `makepkg -si` in
+   `packaging/aur`, `systemctl --user restart spokenpad`).
+
 ## Working conventions
 
 - Style: fully typed, illegal states unrepresentable, functional core /
