@@ -6,6 +6,7 @@ use crate::{
         decode::{Commit, UtteranceId},
         frames::Frames,
         session::{Notice, RecordingStatus, Rest, Session},
+        timestamp::Heading,
     },
     shell::{
         audio::{AudioCapture, InputBackend},
@@ -15,11 +16,13 @@ use crate::{
 use std::{path::PathBuf, time::Duration};
 
 /// A recording whose text is not all written yet: its recovery WAV, the
-/// utterance it is, how far into the WAV its text reaches, where this
-/// daemon's attempt at it began, and where it is now.
+/// utterance it is and what that utterance's paragraphs open with, how far
+/// into the WAV its text reaches, where this daemon's attempt at it began,
+/// and where it is now.
 pub(super) struct Transcription {
     pub(super) path: PathBuf,
     pub(super) id: UtteranceId,
+    pub(super) heading: Heading,
     pub(super) through: Frames,
     pub(super) from: Frames,
     pub(super) stage: Stage,
@@ -100,6 +103,7 @@ pub(super) fn persist<'a, B: InputBackend>(
         .map(|recording| Unfinished {
             path: recording.path.clone(),
             through: recording.through,
+            heading: recording.heading,
         })
         .collect();
     capture.save_unfinished(&unfinished).map_err(|e| {
@@ -273,6 +277,7 @@ pub(super) fn begin<B: InputBackend>(
     transcriptions.0.push(Transcription {
         path,
         id: utterance.id,
+        heading: utterance.heading,
         through: Frames::ZERO,
         from: Frames::ZERO,
         stage: Stage::Capturing,

@@ -16,7 +16,10 @@
 //! The clock also ends a capture nobody is ending: see [`MAX_CAPTURE`] and
 //! the `silence` argument of [`step`]. And closing the dictation window
 //! cancels the capture it was showing ([`Event::WindowClosed`]).
-use crate::core::control::{Received, Request};
+use crate::core::{
+    control::{Received, Request},
+    timestamp::Heading,
+};
 use std::time::{Duration, Instant};
 
 /// Below this a press is a stray tap, not dictation. Deliberately not
@@ -158,7 +161,10 @@ pub enum Cause {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
     Nothing,
-    Start,
+    /// Begin a capture, which opens its paragraphs as `Heading` says: the
+    /// press that began it is the only one that decides, so a repeat, a
+    /// latch or the press that ends it cannot change it.
+    Start(Heading),
     /// End the capture and decode it. `released` is when the key came up:
     /// the post-roll runs from there, not from when the window closed. A
     /// capture that ended by itself is released at the moment it ended.
@@ -215,14 +221,14 @@ impl State {
 
 /// A capture begins. Nothing has been heard yet, so the silence timeout runs
 /// from the press.
-fn begin(at: Instant, hold: Hold) -> (State, Command) {
+fn begin(at: Instant, hold: Hold, heading: Heading) -> (State, Command) {
     (
         State::Recording {
             started: at,
             last_speech: at,
             hold,
         },
-        Command::Start,
+        Command::Start(heading),
     )
 }
 
@@ -258,9 +264,23 @@ pub fn step(state: State, event: Event, silence: Option<Duration>) -> (State, Co
     match (state, event) {
         // A capture that already ended, still decoding, does not stop a new
         // one: a quick re-press is a new paragraph.
-        (Idle | Transcribing, Event::Request(Received { request, at })) => match request {
-            Start => begin(at, Held),
-            Toggle => begin(at, Latched { last_press: at }),
+        (Idle | Transcribing, Event::Request(Received { request, at, wall })) => match request {
+            Start(timestamps) => begin(
+                at,
+                Held,
+                Heading {
+                    started: wall,
+                    timestamps,
+                },
+            ),
+            Toggle(timestamps) => begin(
+                at,
+                Latched { last_press: at },
+                Heading {
+                    started: wall,
+                    timestamps,
+                },
+            ),
             // The `stop` of the press that ended a latched capture, or of a
             // tap already discarded; and a cancel after the release, which
             // must not destroy a dictation that is already captured. A
@@ -273,7 +293,7 @@ pub fn step(state: State, event: Event, silence: Option<Duration>) -> (State, Co
                 last_speech,
                 hold,
             },
-            Event::Request(Received { request, at }),
+            Event::Request(Received { request, at, .. }),
         ) => {
             let holding = |hold| {
                 (
@@ -287,18 +307,18 @@ pub fn step(state: State, event: Event, silence: Option<Duration>) -> (State, Co
             };
             match (hold, request) {
                 // Auto-repeat of the held key.
-                (Held, Start) => (state, Nothing),
+                (Held, Start(_)) => (state, Nothing),
                 (Held, Stop) => holding(Releasing { at }),
                 // The key came back within the window: it never came up.
                 // The shell closes a passed window with a `Clock` at this
                 // request's stamp first, so here `at` is inside it.
-                (Releasing { .. }, Start) => holding(Held),
+                (Releasing { .. }, Start(_)) => holding(Held),
                 // The first release is the one that counts.
                 (Releasing { .. }, Stop) => (state, Nothing),
                 // Shift added to a held key latches it: its auto-repeat now
                 // fires the toggle binding.
-                (Held | Releasing { .. }, Toggle) => holding(Latched { last_press: at }),
-                (Latched { last_press }, Start | Toggle) => {
+                (Held | Releasing { .. }, Toggle(_)) => holding(Latched { last_press: at }),
+                (Latched { last_press }, Start(_) | Toggle(_)) => {
                     if at.saturating_duration_since(last_press) <= REPEAT_WINDOW {
                         holding(Latched { last_press: at })
                     } else {
@@ -379,7 +399,27 @@ pub fn step(state: State, event: Event, silence: Option<Duration>) -> (State, Co
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::timestamp::Timestamps;
     use DiscardReason::*;
+
+    const START: Request = Request::Start(Timestamps::Configured);
+    const TOGGLE: Request = Request::Toggle(Timestamps::Configured);
+
+    /// The wall-clock time every request in these tests is read at.
+    fn wall() -> chrono::NaiveDateTime {
+        chrono::NaiveDate::from_ymd_opt(2026, 10, 12)
+            .unwrap()
+            .and_hms_opt(14, 32, 5)
+            .unwrap()
+    }
+
+    /// The command a press without a flag begins a capture with.
+    fn start() -> Command {
+        Command::Start(Heading {
+            started: wall(),
+            timestamps: Timestamps::Configured,
+        })
+    }
 
     /// The silence timeout these tests run with. Long enough that nothing in
     /// a test measured in milliseconds reaches it, so every case below is
@@ -387,7 +427,11 @@ mod tests {
     const QUIET: Duration = Duration::from_secs(300);
 
     fn request(request: Request, at: Instant) -> Event {
-        Event::Request(Received { request, at })
+        Event::Request(Received {
+            request,
+            at,
+            wall: wall(),
+        })
     }
 
     /// The command a key release produces, which is most of them.
@@ -445,9 +489,9 @@ mod tests {
             }
         }
         let events = [
-            request(Request::Start, at),
+            request(START, at),
             request(Request::Stop, at),
-            request(Request::Toggle, at),
+            request(TOGGLE, at),
             request(Request::Cancel, at),
             Event::Clock { now: at },
             Event::Speech { at },
@@ -510,9 +554,9 @@ mod tests {
         let expected = [
             // Idle
             [
-                (held_new, Command::Start),
+                (held_new, start()),
                 nothing(State::Idle),
-                (latched_new, Command::Start),
+                (latched_new, start()),
                 nothing(State::Idle),
                 nothing(State::Idle),
                 nothing(State::Idle),
@@ -558,9 +602,9 @@ mod tests {
             ],
             // Transcribing
             [
-                (held_new, Command::Start),
+                (held_new, start()),
                 nothing(transcribing),
-                (latched_new, Command::Start),
+                (latched_new, start()),
                 // A cancel cannot destroy a dictation that is already captured.
                 nothing(transcribing),
                 nothing(transcribing),
@@ -593,6 +637,45 @@ mod tests {
         }
     }
 
+    /// The press that begins a capture decides its timestamps. Its
+    /// auto-repeat, a `toggle` that latches it, and the press that ends it
+    /// all carry a choice of their own, and none of them changes it; the
+    /// next capture takes its own press's.
+    #[test]
+    fn only_the_press_that_begins_a_capture_chooses_its_timestamps() {
+        let t = Instant::now();
+        let ms = |n| t + Duration::from_millis(n);
+        let heading = |timestamps| Heading {
+            started: wall(),
+            timestamps,
+        };
+        let (on, off) = (Timestamps::On, Timestamps::Off);
+        let (state, commands) = run(
+            State::Idle,
+            &requests(&[
+                (Request::Start(on), t),
+                // Held: repeats, a stop and its repeat inside the window.
+                (Request::Start(off), ms(40)),
+                (Request::Stop, ms(1000)),
+                (Request::Start(off), ms(1040)),
+                // Latched with Shift, then ended.
+                (Request::Toggle(off), ms(1100)),
+                (Request::Toggle(off), ms(3000)),
+                // A new capture, while the last one decodes.
+                (Request::Toggle(off), ms(4000)),
+            ]),
+        );
+        assert_eq!(
+            commands,
+            [
+                Command::Start(heading(on)),
+                decode(t, ms(3000)),
+                Command::Start(heading(off)),
+            ]
+        );
+        assert!(state.latched());
+    }
+
     /// Closing the window cancels the capture it was showing, held or
     /// latched, exactly as `spokenpad cancel` would; a capture pressed after
     /// the close is a new one and goes on, and one already released is
@@ -602,14 +685,14 @@ mod tests {
         let t = Instant::now();
         let ms = |n| t + Duration::from_millis(n);
         let closed = |at| Event::WindowClosed { at };
-        for (latch, name) in [(Request::Toggle, "latched"), (Request::Start, "held")] {
+        for (latch, name) in [(TOGGLE, "latched"), (START, "held")] {
             let (state, commands) = run(
                 State::Idle,
                 &[requests(&[(latch, t)]), vec![closed(ms(20_000))]].concat(),
             );
             assert_eq!(
                 commands,
-                [Command::Start, Command::Discard(WindowClosed)],
+                [start(), Command::Discard(WindowClosed)],
                 "{name}"
             );
             assert_eq!(state, State::Idle, "{name}");
@@ -618,24 +701,20 @@ mod tests {
         // reported: that capture is not the one the window showed.
         let (state, commands) = run(
             State::Idle,
-            &[
-                requests(&[(Request::Toggle, ms(500))]),
-                vec![closed(ms(400))],
-            ]
-            .concat(),
+            &[requests(&[(TOGGLE, ms(500))]), vec![closed(ms(400))]].concat(),
         );
-        assert_eq!(commands, [Command::Start]);
+        assert_eq!(commands, [start()]);
         assert!(state.latched());
         // Released and decoding: the close changes nothing.
         let (state, commands) = run(
             State::Idle,
             &[
-                requests(&[(Request::Toggle, t), (Request::Toggle, ms(1000))]),
+                requests(&[(TOGGLE, t), (TOGGLE, ms(1000))]),
                 vec![closed(ms(1100))],
             ]
             .concat(),
         );
-        assert_eq!(commands, [Command::Start, decode(t, ms(1000))]);
+        assert_eq!(commands, [start(), decode(t, ms(1000))]);
         assert_eq!(state, State::Transcribing);
     }
 
@@ -646,7 +725,7 @@ mod tests {
         let (state, commands) = run(
             State::Idle,
             &[
-                requests(&[(Request::Start, t), (Request::Stop, ms(1000))]),
+                requests(&[(START, t), (Request::Stop, ms(1000))]),
                 vec![
                     Event::Clock { now: ms(1150) },
                     Event::Clock { now: ms(1151) },
@@ -654,7 +733,7 @@ mod tests {
             ]
             .concat(),
         );
-        assert_eq!(commands, [Command::Start, decode(t, ms(1000))]);
+        assert_eq!(commands, [start(), decode(t, ms(1000))]);
         assert_eq!(state, State::Transcribing);
     }
 
@@ -671,13 +750,13 @@ mod tests {
                 "start first" => true,
                 _ => i % 3 == 1,
             };
-            let mut pairs = vec![(Request::Start, t)];
+            let mut pairs = vec![(START, t)];
             for i in 0..20u64 {
                 let pair_at = 660 + 40 * i;
                 let (first, second) = if reversed(i) {
-                    (Request::Start, Request::Stop)
+                    (START, Request::Stop)
                 } else {
-                    (Request::Stop, Request::Start)
+                    (Request::Stop, START)
                 };
                 pairs.push((first, ms(pair_at)));
                 pairs.push((second, ms(pair_at + 2)));
@@ -693,7 +772,7 @@ mod tests {
                 now: released + REPEAT_WINDOW,
             });
             let (state, commands) = run(State::Idle, &events);
-            assert_eq!(commands, [Command::Start], "{order}");
+            assert_eq!(commands, [start()], "{order}");
             assert!(state.recording(), "still inside the last window");
 
             let (state, commands) = step(
@@ -713,11 +792,11 @@ mod tests {
     fn repeated_starts_while_held_are_ignored() {
         let t = Instant::now();
         let mut pairs: Vec<_> = (0..30u64)
-            .map(|i| (Request::Start, t + Duration::from_millis(660 + 40 * i)))
+            .map(|i| (START, t + Duration::from_millis(660 + 40 * i)))
             .collect();
-        pairs.insert(0, (Request::Start, t));
+        pairs.insert(0, (START, t));
         let (state, commands) = run(State::Idle, &requests(&pairs));
-        assert_eq!(commands, [Command::Start]);
+        assert_eq!(commands, [start()]);
         assert_eq!(
             state,
             State::Recording {
@@ -734,16 +813,9 @@ mod tests {
         let ms = |n| t + Duration::from_millis(n);
         let (state, commands) = run(
             State::Idle,
-            &requests(&[
-                (Request::Start, t),
-                (Request::Stop, ms(1000)),
-                (Request::Start, ms(1151)),
-            ]),
+            &requests(&[(START, t), (Request::Stop, ms(1000)), (START, ms(1151))]),
         );
-        assert_eq!(
-            commands,
-            [Command::Start, decode(t, ms(1000)), Command::Start]
-        );
+        assert_eq!(commands, [start(), decode(t, ms(1000)), start()]);
         assert_eq!(
             state,
             State::Recording {
@@ -761,18 +833,18 @@ mod tests {
     fn a_latched_capture_ignores_stray_stops_and_ends_on_the_next_press() {
         let t = Instant::now();
         let ms = |n| t + Duration::from_millis(n);
-        for ending in [Request::Start, Request::Toggle] {
+        for ending in [START, TOGGLE] {
             let (state, commands) = run(
                 State::Idle,
                 &requests(&[
-                    (Request::Toggle, t),
+                    (TOGGLE, t),
                     (Request::Stop, ms(90)),
                     (Request::Stop, ms(3000)),
                     (ending, ms(5000)),
                     (Request::Stop, ms(5080)),
                 ]),
             );
-            assert_eq!(commands, [Command::Start, decode(t, ms(5000))], "{ending}");
+            assert_eq!(commands, [start(), decode(t, ms(5000))], "{ending}");
             assert_eq!(state, State::Transcribing);
         }
     }
@@ -786,14 +858,14 @@ mod tests {
         let (state, commands) = run(
             State::Idle,
             &requests(&[
-                (Request::Toggle, t),
-                (Request::Toggle, ms(40)),
-                (Request::Toggle, ms(80)),
-                (Request::Toggle, ms(200)),
-                (Request::Toggle, ms(340)),
+                (TOGGLE, t),
+                (TOGGLE, ms(40)),
+                (TOGGLE, ms(80)),
+                (TOGGLE, ms(200)),
+                (TOGGLE, ms(340)),
             ]),
         );
-        assert_eq!(commands, [Command::Start]);
+        assert_eq!(commands, [start()]);
         assert!(state.latched());
     }
 
@@ -803,17 +875,13 @@ mod tests {
         let ms = |n| t + Duration::from_millis(n);
         let (state, commands) = run(
             State::Idle,
-            &requests(&[
-                (Request::Start, t),
-                (Request::Toggle, ms(800)),
-                (Request::Stop, ms(1200)),
-            ]),
+            &requests(&[(START, t), (TOGGLE, ms(800)), (Request::Stop, ms(1200))]),
         );
-        assert_eq!(commands, [Command::Start]);
+        assert_eq!(commands, [start()]);
         assert!(state.latched());
         let (_, commands) = run(
             state,
-            &requests(&[(Request::Start, ms(2000)), (Request::Stop, ms(2100))]),
+            &requests(&[(START, ms(2000)), (Request::Stop, ms(2100))]),
         );
         assert_eq!(commands, [decode(t, ms(2000))]);
     }
@@ -822,7 +890,7 @@ mod tests {
     fn cancel_discards_only_while_recording() {
         let t = Instant::now();
         let ms = |n| t + Duration::from_millis(n);
-        for opening in [Request::Start, Request::Toggle] {
+        for opening in [START, TOGGLE] {
             let (state, commands) = run(
                 State::Idle,
                 &requests(&[
@@ -831,19 +899,19 @@ mod tests {
                     (Request::Stop, ms(600)),
                 ]),
             );
-            assert_eq!(commands, [Command::Start, Command::Discard(Cancelled)]);
+            assert_eq!(commands, [start(), Command::Discard(Cancelled)]);
             assert_eq!(state, State::Idle);
         }
         // Inside a release's window the capture is still recording.
         let (state, commands) = run(
             State::Idle,
             &requests(&[
-                (Request::Start, t),
+                (START, t),
                 (Request::Stop, ms(500)),
                 (Request::Cancel, ms(550)),
             ]),
         );
-        assert_eq!(commands, [Command::Start, Command::Discard(Cancelled)]);
+        assert_eq!(commands, [start(), Command::Discard(Cancelled)]);
         assert_eq!(state, State::Idle);
     }
 
@@ -855,7 +923,7 @@ mod tests {
             let (state, commands) = run(
                 State::Idle,
                 &[
-                    requests(&[(Request::Start, t), (Request::Stop, released)]),
+                    requests(&[(START, t), (Request::Stop, released)]),
                     vec![Event::Clock {
                         now: released + REPEAT_WINDOW + Duration::from_millis(1),
                     }],
@@ -863,10 +931,10 @@ mod tests {
                 .concat(),
             );
             if ms < 120 {
-                assert_eq!(commands, [Command::Start, Command::Discard(TooShort)]);
+                assert_eq!(commands, [start(), Command::Discard(TooShort)]);
                 assert_eq!(state, State::Idle);
             } else {
-                assert_eq!(commands, [Command::Start, decode(t, released)]);
+                assert_eq!(commands, [start(), decode(t, released)]);
                 assert_eq!(state, State::Transcribing);
             }
         }
@@ -877,8 +945,8 @@ mod tests {
     #[test]
     fn a_silent_latch_ends_itself_on_the_clock() {
         let t = Instant::now();
-        let (state, commands) = run(State::Idle, &requests(&[(Request::Toggle, t)]));
-        assert_eq!(commands, [Command::Start]);
+        let (state, commands) = run(State::Idle, &requests(&[(TOGGLE, t)]));
+        assert_eq!(commands, [start()]);
 
         let (still, commands) = run(
             state,
@@ -907,7 +975,7 @@ mod tests {
     #[test]
     fn speech_restarts_the_silence_timeout() {
         let t = Instant::now();
-        let (state, _) = run(State::Idle, &requests(&[(Request::Toggle, t)]));
+        let (state, _) = run(State::Idle, &requests(&[(TOGGLE, t)]));
         let mut state = state;
         // Half the timeout apart, four times over: never quiet long enough.
         for i in 1..=4 {
@@ -940,7 +1008,7 @@ mod tests {
     #[test]
     fn speech_stamped_in_the_past_does_not_shorten_the_timeout() {
         let t = Instant::now();
-        let (state, _) = run(State::Idle, &requests(&[(Request::Toggle, t)]));
+        let (state, _) = run(State::Idle, &requests(&[(TOGGLE, t)]));
         let recent = t + QUIET;
         let (state, _) = run(state, &[Event::Speech { at: recent }]);
         let (state, commands) = run(
@@ -962,7 +1030,7 @@ mod tests {
     #[test]
     fn silence_ends_a_latch_but_never_a_held_key() {
         let t = Instant::now();
-        for (opening, latched) in [(Request::Start, false), (Request::Toggle, true)] {
+        for (opening, latched) in [(START, false), (TOGGLE, true)] {
             let (state, _) = run(State::Idle, &requests(&[(opening, t)]));
             let (state, commands) = run(state, &[Event::Clock { now: t + QUIET * 3 }]);
             if latched {
@@ -985,7 +1053,7 @@ mod tests {
     #[test]
     fn without_speech_reports_only_the_length_limit_applies() {
         let t = Instant::now();
-        let (latched, _) = run_with(None, State::Idle, &requests(&[(Request::Toggle, t)]));
+        let (latched, _) = run_with(None, State::Idle, &requests(&[(TOGGLE, t)]));
         let (state, commands) = run_with(
             None,
             latched,
@@ -1014,7 +1082,7 @@ mod tests {
     fn every_capture_ends_at_the_length_limit() {
         let t = Instant::now();
         let limit = t + MAX_CAPTURE;
-        for opening in [Request::Start, Request::Toggle] {
+        for opening in [START, TOGGLE] {
             let (mut state, _) = run(State::Idle, &requests(&[(opening, t)]));
             // Talking throughout, so the silence rule never fires.
             let mut at = t;
@@ -1053,7 +1121,7 @@ mod tests {
     fn the_memory_ceiling_ends_the_capture() {
         let t = Instant::now();
         let at = t + Duration::from_secs(3600);
-        for opening in [Request::Start, Request::Toggle] {
+        for opening in [START, TOGGLE] {
             let (state, _) = run(State::Idle, &requests(&[(opening, t)]));
             let (state, commands) = run(state, &[Event::Exhausted { at }]);
             assert_eq!(
@@ -1089,7 +1157,7 @@ mod tests {
         assert!(KEY_SETTLED > MINIMUM_HOLD && MAX_CAPTURE > MINIMUM_HOLD);
         let t = Instant::now();
         let soon = t + MINIMUM_HOLD / 2;
-        for opening in [Request::Start, Request::Toggle] {
+        for opening in [START, TOGGLE] {
             let (state, _) = run(State::Idle, &requests(&[(opening, t)]));
             let (state, commands) = run(state, &[Event::Exhausted { at: soon }]);
             assert_eq!(
@@ -1115,8 +1183,8 @@ mod tests {
     fn a_latch_whose_key_is_still_down_is_not_ended_by_silence() {
         let t = Instant::now();
         let ms = |n: u64| t + Duration::from_millis(n);
-        let (mut state, commands) = run(State::Idle, &requests(&[(Request::Toggle, t)]));
-        assert_eq!(commands, [Command::Start]);
+        let (mut state, commands) = run(State::Idle, &requests(&[(TOGGLE, t)]));
+        assert_eq!(commands, [start()]);
 
         // Shift+key held for twice the timeout, repeating at 25 Hz. Nothing
         // is said into it: without the freshness rule the first 300 s would
@@ -1124,10 +1192,7 @@ mod tests {
         let repeats = (QUIET.as_millis() as u64 * 2) / 40;
         for i in 1..=repeats {
             let at = ms(40 * i);
-            let (next, commands) = run(
-                state,
-                &[Event::Clock { now: at }, request(Request::Toggle, at)],
-            );
+            let (next, commands) = run(state, &[Event::Clock { now: at }, request(TOGGLE, at)]);
             assert_eq!(commands, [], "the repeat at {:?} broke the capture", at - t);
             state = next;
         }
@@ -1169,7 +1234,7 @@ mod tests {
     fn a_late_key_after_an_auto_stop_is_harmless() {
         let t = Instant::now();
         let ended = t + QUIET;
-        let (state, _) = run(State::Idle, &requests(&[(Request::Toggle, t)]));
+        let (state, _) = run(State::Idle, &requests(&[(TOGGLE, t)]));
         let (transcribing, _) = run(state, &[Event::Clock { now: ended }]);
         let late = |state, from: Instant| {
             let (state, commands) = run(
@@ -1192,8 +1257,8 @@ mod tests {
         assert_eq!(late(idle, ended + Duration::from_secs(10)), State::Idle);
 
         let again = ended + Duration::from_secs(60);
-        let (state, commands) = run(idle, &requests(&[(Request::Toggle, again)]));
-        assert_eq!(commands, [Command::Start]);
+        let (state, commands) = run(idle, &requests(&[(TOGGLE, again)]));
+        assert_eq!(commands, [start()]);
         assert_eq!(
             state,
             State::Recording {

@@ -72,7 +72,9 @@ lost:
 
 - **The text goes to the file.** Each commit is appended to a dictation file
   directly, with the same paragraph rule the editor applies (one blank line
-  between utterances, a continued utterance extends its paragraph), and the
+  between utterances, a continued utterance extends its paragraph; a
+  paragraph opened here gets the capture's timestamp, when it has one, as
+  in the editor), and the
   file is on disk before the next commit is taken. The rule exists twice —
   `transactional_append` in Lua and `passage::append_paragraph` in Rust — and
   a test runs both on the same inputs.
@@ -677,7 +679,17 @@ before.
   config would reflow dictated prose behind their back.
 
 Each utterance is appended as its own paragraph — one blank line between,
-none at the top of a fresh file. The cursor follows the end of the buffer
+none at the top of a fresh file. A capture that has timestamps
+([usage.md](usage.md#timestamps)) opens its paragraph with its stamp and a
+space; the daemon puts them in front of the text before it sends it, for
+the editor and the pending passage alike, so the append itself knows
+nothing of them. `setup` takes the Vim pattern of a stamp at the start of a
+line, derived from `nvim.timestamp_format` by `core/timestamp.rs`, and adds
+it with `matchadd()` to every window showing the dictation buffer, in the
+`SpokenpadTimestamp` group (a `default` link to `Comment`); a window that
+switches to another file loses the match. A match rather than an extmark
+placed at append time, because the stamps are file content: the pattern
+finds them again after the file is saved and read back. The cursor follows the end of the buffer
 only for a reader who was already at the end; someone who scrolled up to
 re-read or edit an earlier passage keeps their place. Someone typing in the
 window keeps their cursor as well: in Insert or Replace mode the view still

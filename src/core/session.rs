@@ -526,9 +526,9 @@ impl Session {
         let (state, command) = state::step(self.state, event, self.silence);
         self.state = state;
         match command {
-            Command::Start => {
+            Command::Start(heading) => {
                 self.next_id += 1;
-                self.current = Some(Utterance::new(self.next_id));
+                self.current = Some(Utterance::new(self.next_id, heading));
                 self.committed_hint = Frames::ZERO;
                 self.preview_epoch = Frames::ZERO;
                 self.speech_through = Frames::ZERO;
@@ -753,12 +753,21 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::control::{Received, Request};
+    use crate::core::{
+        control::{Received, Request},
+        timestamp::{Heading, Timestamps},
+    };
+    const START: Request = Request::Start(Timestamps::Configured);
+    const TOGGLE: Request = Request::Toggle(Timestamps::Configured);
     fn request(s: &mut Session, request: Request, at: Instant) -> Command {
-        s.event(Event::Request(Received { request, at }))
+        s.event(Event::Request(Received {
+            request,
+            at,
+            wall: chrono::NaiveDateTime::default(),
+        }))
     }
     fn start(s: &mut Session) {
-        request(s, Request::Start, Instant::now());
+        request(s, START, Instant::now());
     }
     fn cancel(s: &mut Session) {
         request(s, Request::Cancel, Instant::now());
@@ -772,7 +781,7 @@ mod tests {
     }
     /// A latch: the capture the silence timeout applies to.
     fn latch(s: &mut Session, at: Instant) {
-        request(s, Request::Toggle, at);
+        request(s, TOGGLE, at);
     }
     fn commit(s: &mut Session, text: &str, now: Instant) {
         let utterance = s.current.clone().expect("a capture to commit into");
@@ -940,7 +949,7 @@ mod tests {
     fn a_too_short_tap_tells_the_user_why_nothing_appeared() {
         let mut s = Session::new(true, Duration::from_secs(1), None);
         let at = Instant::now();
-        request(&mut s, Request::Start, at);
+        request(&mut s, START, at);
         let command = release(&mut s, at + Duration::from_millis(50));
         assert_eq!(command, Command::Discard(DiscardReason::TooShort));
         assert_eq!(s.notice(), Some(&Notice::HeldTooBriefly));
@@ -1418,8 +1427,11 @@ mod tests {
 
         let again = later + Duration::from_secs(1);
         assert_eq!(
-            request(&mut s, Request::Toggle, again),
-            Command::Start,
+            request(&mut s, TOGGLE, again),
+            Command::Start(Heading {
+                started: chrono::NaiveDateTime::default(),
+                timestamps: Timestamps::Configured,
+            }),
             "the next press starts a fresh capture"
         );
         assert!(s.notice().is_none());

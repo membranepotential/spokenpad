@@ -231,7 +231,7 @@ with the "recording partly transcribed" notice, since this daemon's attempt
 was the first. What is still on the list at the stop — a capture held then, which
 the stop cancels, or one whose release decode did not end within the
 shutdown's wait for the engine — goes to `waiting.tsv` with how far its text
-reaches, and the next start transcribes the rest, as it does a recording made
+reaches, when it began and its press's choice of timestamps, and the next start transcribes the rest, as it does a recording made
 before the model was ready. A running daemon writes only the recordings made
 before the model was ready to that list: after a crash, a capture decoded as
 it was captured would otherwise be written a second time from where the list

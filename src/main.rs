@@ -2,7 +2,7 @@ use anyhow::{Context, Result, ensure};
 use clap::{Args, Parser, Subcommand};
 use spokenpad::{
     config::{self, Config, Source},
-    core::{control::Request, decode::Pipeline, text::Processor},
+    core::{control::Request, decode::Pipeline, text::Processor, timestamp::Timestamps},
     shell::{
         control::Socket,
         inference::{SpeechSegmenter, Transcriber, model_config},
@@ -166,21 +166,44 @@ enum Command {
 #[derive(Subcommand, Clone, Copy)]
 enum Control {
     /// Begin a push-to-talk capture. Bind it to the key going down.
-    Start,
+    Start(Press),
     /// End a push-to-talk capture. Bind it to the key coming up.
     Stop,
     /// Begin a latched capture, or end the capture that is running.
-    Toggle,
+    Toggle(Press),
     /// Discard the capture being recorded. Text already in the file stays.
     Cancel,
+}
+
+/// What a press that begins a capture says about it. A press that ends or
+/// latches a capture already running changes nothing about it.
+#[derive(Args, Clone, Copy)]
+struct Press {
+    /// Start each paragraph of this capture with the time it began, in
+    /// nvim.timestamp_format, whatever nvim.timestamps says.
+    #[arg(long, conflicts_with = "no_timestamps")]
+    timestamps: bool,
+    /// Write this capture without timestamps, whatever nvim.timestamps says.
+    #[arg(long)]
+    no_timestamps: bool,
+}
+
+impl From<Press> for Timestamps {
+    fn from(press: Press) -> Self {
+        match (press.timestamps, press.no_timestamps) {
+            (true, _) => Self::On,
+            (false, true) => Self::Off,
+            (false, false) => Self::Configured,
+        }
+    }
 }
 
 impl From<Control> for Request {
     fn from(control: Control) -> Self {
         match control {
-            Control::Start => Self::Start,
+            Control::Start(press) => Self::Start(press.into()),
             Control::Stop => Self::Stop,
-            Control::Toggle => Self::Toggle,
+            Control::Toggle(press) => Self::Toggle(press.into()),
             Control::Cancel => Self::Cancel,
         }
     }

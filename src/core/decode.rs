@@ -1,5 +1,5 @@
 //! Shared live/recovery pipeline. Preview output has a separate event type.
-use crate::core::frames::Frames;
+use crate::core::{frames::Frames, timestamp::Heading};
 use anyhow::{Result, ensure};
 use std::{
     ops::Range,
@@ -68,17 +68,34 @@ impl Lifecycle {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct UtteranceId(pub u64);
+/// One capture, as the decoder and everything after it sees it: which one
+/// it is, what its paragraphs open with, and how far its lifecycle has got.
 #[derive(Debug)]
 pub struct Utterance {
     pub id: UtteranceId,
+    /// Carried to the editor with each of its commits; the decoder never
+    /// reads it.
+    pub heading: Heading,
     lifecycle: AtomicU8,
 }
 impl Utterance {
-    pub fn new(id: u64) -> Arc<Self> {
+    pub fn new(id: u64, heading: Heading) -> Arc<Self> {
         Arc::new(Self {
             id: UtteranceId(id),
+            heading,
             lifecycle: AtomicU8::new(Lifecycle::Live as u8),
         })
+    }
+    /// An utterance whose heading no test looks at.
+    #[cfg(test)]
+    pub(crate) fn for_test(id: u64) -> Arc<Self> {
+        Self::new(
+            id,
+            Heading {
+                started: chrono::NaiveDateTime::default(),
+                timestamps: crate::core::timestamp::Timestamps::Off,
+            },
+        )
     }
     fn advance(&self, to: Lifecycle) {
         self.lifecycle.fetch_max(to as u8, Ordering::AcqRel);
@@ -479,7 +496,7 @@ mod tests {
     #[test]
     fn progressive_release_never_redecodes_committed_speech() {
         let mut w = worker();
-        let u = Utterance::new(1);
+        let u = Utterance::for_test(1);
         let samples: Vec<_> = (0..10).map(|i| i as f32).collect();
         let mut commits = vec![];
         assert_eq!(
@@ -515,7 +532,7 @@ mod tests {
     #[test]
     fn lagging_snapshot_and_stale_tick() {
         let mut w = worker();
-        let a = Utterance::new(1);
+        let a = Utterance::for_test(1);
         let s: Vec<_> = (0..10).map(|i| i as f32).collect();
         w.tick(&s, Frames::ZERO, &a, TickKind::Preview, |_| {})
             .unwrap();
@@ -525,7 +542,7 @@ mod tests {
         .unwrap();
         assert_eq!(w.pipeline.recognizer.calls.last().unwrap(), &vec![8., 9.]);
         a.release();
-        let b = Utterance::new(2);
+        let b = Utterance::for_test(2);
         assert_eq!(
             w.tick(&s, Frames::ZERO, &a, TickKind::Preview, |_| panic!())
                 .unwrap(),
@@ -539,7 +556,7 @@ mod tests {
     #[test]
     fn release_in_settled_decode_commits_current_chunk_then_stops() {
         let mut w = worker();
-        let u = Utterance::new(1);
+        let u = Utterance::for_test(1);
         w.pipeline.recognizer.stop = Some(u.clone());
         let mut commits = vec![];
         assert_eq!(
@@ -554,7 +571,7 @@ mod tests {
     #[test]
     fn a_cancelled_final_decode_decodes_nothing() {
         let mut w = worker();
-        let u = Utterance::new(1);
+        let u = Utterance::for_test(1);
         u.cancel();
         w.finish(&[1.; 10], Frames::ZERO, &u, |_| panic!()).unwrap();
         assert!(w.pipeline.recognizer.calls.is_empty());
@@ -571,7 +588,7 @@ mod tests {
             "recovered".into(),
         ];
         let mut commits = vec![];
-        w.finish(&[1.; 8], Frames::ZERO, &Utterance::new(1), |c| {
+        w.finish(&[1.; 8], Frames::ZERO, &Utterance::for_test(1), |c| {
             commits.push((c.text, c.through))
         })
         .unwrap();
@@ -607,7 +624,7 @@ mod tests {
     fn empty_speech_is_decoded_again_without_trailing_silence() {
         use TrailingSilence::{Bare, Padded};
         let mut w = deaf_worker("words");
-        let u = Utterance::new(1);
+        let u = Utterance::for_test(1);
         let samples = [1.; 10];
         let mut commits = vec![];
         let preview = w
@@ -648,7 +665,7 @@ mod tests {
     fn speech_empty_either_way_commits_nothing_and_still_advances() {
         use TrailingSilence::{Bare, Padded};
         let mut w = deaf_worker("");
-        let u = Utterance::new(1);
+        let u = Utterance::for_test(1);
         let mut commits = vec![];
         w.tick(&[1.; 10], Frames::ZERO, &u, TickKind::Preview, |c| {
             commits.push(c)
@@ -656,7 +673,7 @@ mod tests {
         .unwrap();
         assert!(commits.iter().all(|c| c.text.is_empty()));
         assert_eq!(w.progress.through, Frames(8));
-        let fresh = Utterance::new(2);
+        let fresh = Utterance::for_test(2);
         w.finish(&[1.; 8], Frames::ZERO, &fresh, |_| {
             panic!("committed nothing")
         })
@@ -683,7 +700,7 @@ mod tests {
             },
             segmenter: Silent,
         });
-        let u = Utterance::new(1);
+        let u = Utterance::for_test(1);
         assert_eq!(
             w.tick(&[0.; 10], Frames::ZERO, &u, TickKind::Preview, |_| panic!(
                 "committed silence"
@@ -729,7 +746,7 @@ mod tests {
             },
             segmenter: Quiet(4),
         });
-        let u = Utterance::new(1);
+        let u = Utterance::for_test(1);
         let mut commits = vec![];
         assert_eq!(
             w.tick(&[0.; 10], Frames::ZERO, &u, TickKind::Preview, |c| commits
@@ -798,7 +815,7 @@ mod tests {
                 },
                 segmenter: Unbroken,
             });
-            let u = Utterance::new(1);
+            let u = Utterance::for_test(1);
             for len in [10, 1_000, 100_000] {
                 w.tick(&vec![1.; len], Frames::ZERO, &u, kind, |_| {
                     panic!("committed an open chunk of {len} ({kind:?})")
@@ -834,7 +851,7 @@ mod tests {
             let mut w = worker();
             let samples: Vec<f32> = (0..10).map(|i| i as f32).collect();
             let mut commits = vec![];
-            w.tick(&samples, Frames::ZERO, &Utterance::new(1), kind, |c| {
+            w.tick(&samples, Frames::ZERO, &Utterance::for_test(1), kind, |c| {
                 commits.push((c.text, c.through))
             })
             .unwrap();
@@ -861,7 +878,7 @@ mod tests {
         w.tick(
             &[1.; 10],
             Frames::ZERO,
-            &Utterance::new(1),
+            &Utterance::for_test(1),
             TickKind::Settled,
             |_| panic!("committed an open chunk"),
         )
@@ -883,7 +900,7 @@ mod tests {
             }
         }
         let mut w = worker();
-        let u = Utterance::new(1);
+        let u = Utterance::for_test(1);
         w.resume(&u, Frames(100));
         let mut commits = vec![];
         w.finish(&[1.; 10], Frames(100), &u, |c| commits.push(c.through))
@@ -895,7 +912,7 @@ mod tests {
             segmenter: Quarters,
         });
         let mut commits = vec![];
-        let failed = w.finish(&[1.; 10], Frames::ZERO, &Utterance::new(2), |c| {
+        let failed = w.finish(&[1.; 10], Frames::ZERO, &Utterance::for_test(2), |c| {
             commits.push(c.through)
         });
         assert!(failed.is_err());
@@ -904,7 +921,7 @@ mod tests {
 
     #[test]
     fn lifecycle_only_moves_forwards() {
-        let u = Utterance::new(1);
+        let u = Utterance::for_test(1);
         assert_eq!(u.lifecycle(), Lifecycle::Live);
         assert!(u.ticking() && !u.cancelled());
         u.release();
@@ -925,7 +942,7 @@ mod tests {
                 Ok("late".into())
             }
         }
-        let u = Utterance::new(1);
+        let u = Utterance::for_test(1);
         let mut p = Pipeline {
             recognizer: Cancel(u.clone()),
             segmenter: Quarters,
@@ -1214,7 +1231,7 @@ mod long_capture {
             end: 0,
             whole: (mode != Bookkeeping::Dropping).then(|| spans.clone()),
         };
-        let utterance = Utterance::new(1);
+        let utterance = Utterance::for_test(1);
         let mut through = 0_usize;
         let mut peak_retained = 0;
         let mut next_tick = step;
@@ -1373,7 +1390,7 @@ mod long_capture {
                 before: false,
             },
         });
-        let utterance = Utterance::new(1);
+        let utterance = Utterance::for_test(1);
         let mut through = 0_usize;
         let mut peak = 0;
         for end in (INTERVAL..seconds * RATE as usize).step_by(INTERVAL) {
@@ -1459,7 +1476,7 @@ mod long_capture {
             recognizer: Counter(Rc::clone(&calls)),
             segmenter: MinSpeech(config.clone()),
         });
-        let utterance = Utterance::new(1);
+        let utterance = Utterance::for_test(1);
         let mut commits: Vec<(usize, Frames)> = vec![];
         let mut through = Frames::ZERO;
         let mut longest = 0;

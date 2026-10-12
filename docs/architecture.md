@@ -16,12 +16,13 @@ imperative shell, and `config.rs` sits at the root because both sides read it.
 | Module | Responsibility | External boundary |
 |---|---|---|
 | `config.rs` | Parse and validate the TOML once, before any thread or model | filesystem |
-| `core/control.rs` | The control protocol: `Request`, `Reply`, their one-line codec, the stamped `Received` | none |
+| `core/control.rs` | The control protocol: `Request` (a `start` or `toggle` carries its press's `Timestamps`), `Reply`, their one-line codec, the stamped `Received` (by the monotonic clock and the local wall clock) | none |
 | `core/state.rs` | Total session-state transition function over requests and the clock; the minimum hold, the repeat window, and the limits that end a capture nobody ends | none |
 | `core/frames.rs` | `Frames`: capture-absolute sample offsets, distinct from slice indices | none |
 | `core/geometry.rs` | Which output the pointer is on, and where the window goes: its frame a gap beside the pointer, or around it | none |
 | `core/font.rs` | The pane's font size in points, `Xft.dpi`, and the cell a face makes: Alacritty's and FreeType's arithmetic, rounding included | none |
 | `core/text.rs` | Filler stripping, exact replacements, whitespace repair | none |
+| `core/timestamp.rs` | `nvim.timestamp_format` parsed (`TimestampFormat`), the stamp it renders and the Vim pattern that finds it; a capture's `Heading` (when it began, its press's `Timestamps`) and the paragraph text it opens | none |
 | `core/wm.rs` | i3/sway IPC framing; the tree's focused workspace; the pane's runtime `no_focus` command for sway | none |
 | `core/session.rs` | Utterance lifecycle, preview cadence, and the one user-visible notice | internal channels |
 | `core/decode.rs` | Committed sample offset, settled commits, release tails, preview isolation | worker messages |
@@ -84,6 +85,11 @@ unit-tested without a device, a thread, or a process. Nothing there may import
 - `core/decode.rs` — offsets, settlement, and what a release still owes.
 - `core/segments.rs` — VAD spans merged into padded, settled decode windows.
 - `core/frames.rs`, `core/geometry.rs`, `core/text.rs` — values and arithmetic.
+- `core/timestamp.rs` — the stamp a paragraph opens with, and the pattern
+  the editor dims it with, both derived from one parsed format. The press
+  that begins a capture fixes its `Heading` in `state::Command::Start`; the
+  `Utterance` carries it to every commit, and the editor thread puts the
+  stamp in front of a commit that opens a paragraph.
 - `core/font.rs` — points and `Xft.dpi` to pixels, and a face's tables to a
   cell, the way Alacritty and FreeType compute them.
 - `core/wm.rs` — the i3 IPC protocol, which sway shares, as values: frames,

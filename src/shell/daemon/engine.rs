@@ -272,7 +272,7 @@ mod tests {
         decode_recording(
             &mut worker,
             &path,
-            &Utterance::new(1),
+            &Utterance::for_test(1),
             Frames::ZERO,
             3_000,
             16_000,
@@ -303,7 +303,7 @@ mod tests {
         decode_recording(
             &mut worker,
             &path,
-            &Utterance::new(1),
+            &Utterance::for_test(1),
             Frames(4_000),
             3_000,
             16_000,
@@ -317,7 +317,7 @@ mod tests {
         let beyond = decode_recording(
             &mut worker,
             &path,
-            &Utterance::new(2),
+            &Utterance::for_test(2),
             Frames(20_000),
             3_000,
             16_000,
@@ -343,7 +343,7 @@ mod tests {
         decode_recording(
             &mut worker,
             &path,
-            &Utterance::new(1),
+            &Utterance::for_test(1),
             Frames::ZERO,
             3_000,
             16_000,

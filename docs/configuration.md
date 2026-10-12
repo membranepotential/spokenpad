@@ -204,6 +204,15 @@ and no keystrokes are synthesised ([nvim-window.md](nvim-window.md)).
   left as you set it.
 - `copy_to_clipboard` (off): after each release, copy the whole buffer to
   `+` through Neovim's own clipboard provider.
+- `timestamps` (off): whether a capture begun by a press without
+  `--timestamps` or `--no-timestamps` opens its paragraph with the local
+  time its key went down. Read when the text is written, from the settings
+  the window opened with, like every `[nvim]` key.
+- `timestamp_format` (`"[%H:%M:%S]"`): the stamp, followed by one space.
+  Parsed when the file is read: `%H`, `%I`, `%M`, `%S`, `%p`, `%%` and
+  literal text on one line; anything else is refused, naming the specifier.
+  The window dims a stamp at the start of a line with a pattern derived
+  from it ([usage.md](usage.md#timestamps)).
 
 ## [preview]
 

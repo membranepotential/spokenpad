@@ -6,11 +6,16 @@
 
 use crate::{
     config::{MAX_POSTROLL_SECONDS, MAX_PREROLL_SECONDS, Recording},
-    core::{frames::Frames, session::RecordingStatus, state::MAX_CAPTURE},
+    core::{
+        frames::Frames,
+        session::RecordingStatus,
+        state::MAX_CAPTURE,
+        timestamp::{Heading, Timestamps},
+    },
     shell::sync::lock,
 };
 use anyhow::{Context, Result, bail, ensure};
-use chrono::Local;
+use chrono::{DateTime, Local, NaiveDateTime};
 use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
 use std::{
     collections::HashSet,
@@ -31,11 +36,19 @@ const FILE_MODE: u32 = 0o600;
 const CAPTURE_PREFIX: &str = "capture-";
 const CAPTURE_SUFFIX: &str = ".wav";
 /// The recordings the daemon has yet to finish transcribing, in the
-/// recording directory: one line each, the frames its text already reaches,
-/// a tab, and the file's name. Rewritten whenever one is added or finished,
-/// and at the stop; read at the next start, which transcribes the rest.
-/// Removed once none is left.
+/// recording directory: one line each, four fields separated by tabs — the
+/// frames its text already reaches, the file's name, the local time the
+/// capture began ([`STARTED`]) and its choice of timestamps
+/// ([`timestamps_field`]). Rewritten whenever one is added or finished, and
+/// at the stop; read at the next start, which transcribes the rest. Removed
+/// once none is left. A line of the first two fields alone, as a daemon
+/// before 2026-10-12 wrote it, is read too ([`read_waiting_list`]).
 const WAITING_LIST: &str = "waiting.tsv";
+/// How `waiting.tsv` writes the time a capture began.
+const STARTED: &str = "%Y-%m-%dT%H:%M:%S";
+/// The local time in a recording's name, after [`CAPTURE_PREFIX`]
+/// (`open_capture`).
+const NAMED: &str = "%Y-%m-%d-%H%M%S";
 const MAX_SAME_SECOND: usize = 100;
 const FULL_SCALE: f32 = 32_767.0;
 const WRITER_JOIN: Duration = Duration::from_secs(3);
@@ -115,6 +128,9 @@ pub struct Unfinished {
     pub path: PathBuf,
     /// How far into it the text already written reaches.
     pub through: Frames,
+    /// What its paragraphs open with: a restart changes neither when it
+    /// began nor the press's choice.
+    pub heading: Heading,
 }
 
 /// The recording directory's budget, and what pruning passes over. Shared
@@ -215,14 +231,24 @@ impl CaptureRecorder {
         }
         let staging = self.config.dir.join(format!("{WAITING_LIST}.new"));
         let mut text = String::new();
-        for Unfinished { path, through } in unfinished {
+        for Unfinished {
+            path,
+            through,
+            heading,
+        } in unfinished
+        {
             let name = path
                 .strip_prefix(&self.config.dir)
                 .ok()
                 .and_then(Path::to_str)
                 .filter(|name| is_capture_name(name))
                 .with_context(|| format!("{} is not a recording of ours", path.display()))?;
-            text.push_str(&format!("{}\t{name}\n", through.get()));
+            text.push_str(&format!(
+                "{}\t{name}\t{}\t{}\n",
+                through.get(),
+                heading.started.format(STARTED),
+                timestamps_field(heading.timestamps)
+            ));
         }
         (|| -> std::io::Result<()> {
             let mut file = OpenOptions::new()
@@ -745,9 +771,23 @@ fn is_capture_name(name: &str) -> bool {
     name.starts_with(CAPTURE_PREFIX) && name.ends_with(CAPTURE_SUFFIX) && !name.contains('/')
 }
 
+/// The `waiting.tsv` field for a capture's choice of timestamps.
+fn timestamps_field(timestamps: Timestamps) -> &'static str {
+    match timestamps {
+        Timestamps::Configured => "configured",
+        Timestamps::On => "on",
+        Timestamps::Off => "off",
+    }
+}
+
 /// Reads the waiting list in `directory`. It stays until the daemon rewrites
 /// it, so a daemon that dies before then leaves it to the next. Lines that do
 /// not name a recording that is there are skipped.
+///
+/// A line without the time and the choice of timestamps, from a daemon that
+/// wrote neither, or with either unreadable, takes the time in the recording's name — the local time
+/// its capture began, to the second — and leaves the choice to
+/// `nvim.timestamps`, as a press without a flag does.
 fn read_waiting_list(directory: &Path) -> Vec<Unfinished> {
     let path = directory.join(WAITING_LIST);
     let text = match fs::read_to_string(&path) {
@@ -763,16 +803,7 @@ fn read_waiting_list(directory: &Path) -> Vec<Unfinished> {
     };
     text.lines()
         .filter_map(|line| {
-            let parsed = line.split_once('\t').and_then(|(through, name)| {
-                let through = Frames(through.parse().ok()?);
-                let recording = directory.join(name);
-                let present = fs::symlink_metadata(&recording)
-                    .is_ok_and(|metadata| metadata.file_type().is_file());
-                (is_capture_name(name) && present).then_some(Unfinished {
-                    path: recording,
-                    through,
-                })
-            });
+            let parsed = waiting(directory, line);
             if parsed.is_none() {
                 log::error!(
                     "{}: skipped {line:?}, which names no recording here",
@@ -784,8 +815,67 @@ fn read_waiting_list(directory: &Path) -> Vec<Unfinished> {
         .collect()
 }
 
+/// One line of the waiting list, if it names a recording that is there.
+fn waiting(directory: &Path, line: &str) -> Option<Unfinished> {
+    let fields: Vec<&str> = line.split('\t').collect();
+    let (through, name, heading) = match fields[..] {
+        [through, name] => (through, name, None),
+        [through, name, started, timestamps] => {
+            // A damaged heading costs the stamp's precision, not the
+            // recording: it falls back as a line without one does.
+            let heading = [Timestamps::Configured, Timestamps::On, Timestamps::Off]
+                .into_iter()
+                .find(|t| timestamps_field(*t) == timestamps)
+                .zip(NaiveDateTime::parse_from_str(started, STARTED).ok())
+                .map(|(timestamps, started)| Heading {
+                    started,
+                    timestamps,
+                });
+            if heading.is_none() {
+                log::warn!(
+                    "waiting list: {name} has an unreadable time or choice of timestamps; using the time in its name"
+                );
+            }
+            (through, name, heading)
+        }
+        _ => return None,
+    };
+    let through = Frames(through.parse().ok()?);
+    if !is_capture_name(name) {
+        return None;
+    }
+    let recording = directory.join(name);
+    let metadata = fs::symlink_metadata(&recording)
+        .ok()
+        .filter(|metadata| metadata.file_type().is_file())?;
+    let heading = heading.unwrap_or_else(|| Heading {
+        // A name this recorder did not give it has no time in it; when the
+        // file was last written is the next best.
+        started: named_time(name).unwrap_or_else(|| {
+            metadata.modified().map_or_else(
+                |_| NaiveDateTime::default(),
+                |modified| DateTime::<Local>::from(modified).naive_local(),
+            )
+        }),
+        timestamps: Timestamps::Configured,
+    });
+    Some(Unfinished {
+        path: recording,
+        through,
+        heading,
+    })
+}
+
+/// The local time in a recording's name, as `open_capture` writes it.
+fn named_time(name: &str) -> Option<NaiveDateTime> {
+    let stamp = name.strip_prefix(CAPTURE_PREFIX)?;
+    NaiveDateTime::parse_and_remainder(stamp, NAMED)
+        .ok()
+        .map(|(time, _)| time)
+}
+
 fn open_capture(directory: &Path) -> Result<(PathBuf, File)> {
-    let stamp = Local::now().format("%Y-%m-%d-%H%M%S");
+    let stamp = Local::now().format(NAMED);
     for index in 0..MAX_SAME_SECOND {
         let tail = if index == 0 {
             String::new()
@@ -988,14 +1078,28 @@ mod tests {
             path
         };
         let (older, newer) = (record(&first), record(&first));
+        let at = |h, m, s| {
+            chrono::NaiveDate::from_ymd_opt(2026, 10, 12)
+                .unwrap()
+                .and_hms_opt(h, m, s)
+                .unwrap()
+        };
         let unfinished = [
             Unfinished {
                 path: older.clone(),
                 through: Frames::ZERO,
+                heading: Heading {
+                    started: at(9, 5, 7),
+                    timestamps: Timestamps::On,
+                },
             },
             Unfinished {
                 path: newer.clone(),
                 through: Frames(32),
+                heading: Heading {
+                    started: at(23, 59, 59),
+                    timestamps: Timestamps::Configured,
+                },
             },
         ];
         first.save_unfinished(&unfinished).unwrap();
@@ -1089,25 +1193,57 @@ mod tests {
     }
 
     /// A list line that names no recording of ours is skipped: the list is
-    /// read from disk, and nothing outside the directory is ever opened.
+    /// read from disk, and nothing outside the directory is ever opened. A
+    /// line of a daemon that wrote no time and no choice takes the time in
+    /// the recording's name and leaves the choice to the configuration, and
+    /// so does a line whose time or choice cannot be read.
     #[test]
     fn a_waiting_list_naming_anything_else_is_skipped() {
         let temporary = tempdir().unwrap();
         let directory = temporary.path().join("audio");
         fs::create_dir(&directory).unwrap();
-        let present = directory.join("capture-2026-09-22-120000.wav");
-        dump_capture(&present, &[0.5; 16], 16_000).unwrap();
+        let old = directory.join("capture-2026-09-22-120000.wav");
+        let new = directory.join("capture-2026-09-22-120000-1.wav");
+        for path in [&old, &new] {
+            dump_capture(path, &[0.5; 16], 16_000).unwrap();
+        }
         fs::write(
             directory.join(WAITING_LIST),
-            "16\tcapture-2026-09-22-120000.wav\n0\tcapture-gone.wav\n0\t../capture-x.wav\nnonsense\n5\tnotes.txt\n",
+            "16\tcapture-2026-09-22-120000.wav\n\
+             8\tcapture-2026-09-22-120000-1.wav\t2026-09-22T11:59:58\toff\n\
+             0\tcapture-gone.wav\n0\t../capture-x.wav\nnonsense\n5\tnotes.txt\n\
+             8\tcapture-2026-09-22-120000-1.wav\t2026-09-22T11:59:58\tsometimes\n",
         )
         .unwrap();
+        let day = chrono::NaiveDate::from_ymd_opt(2026, 9, 22).unwrap();
         assert_eq!(
             read_waiting_list(&directory),
-            [Unfinished {
-                path: present,
-                through: Frames(16),
-            }]
+            [
+                Unfinished {
+                    path: old,
+                    through: Frames(16),
+                    heading: Heading {
+                        started: day.and_hms_opt(12, 0, 0).unwrap(),
+                        timestamps: Timestamps::Configured,
+                    },
+                },
+                Unfinished {
+                    path: new.clone(),
+                    through: Frames(8),
+                    heading: Heading {
+                        started: day.and_hms_opt(11, 59, 58).unwrap(),
+                        timestamps: Timestamps::Off,
+                    },
+                },
+                Unfinished {
+                    path: new.clone(),
+                    through: Frames(8),
+                    heading: Heading {
+                        started: day.and_hms_opt(12, 0, 0).unwrap(),
+                        timestamps: Timestamps::Configured,
+                    },
+                },
+            ]
         );
     }
 

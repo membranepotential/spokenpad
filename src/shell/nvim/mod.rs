@@ -777,7 +777,13 @@ impl NvimSession {
         // The editor is only dedicated if spokenpad opened it. The Lua side
         // also remembers this across reloads, so reattaching to the window
         // this daemon opened before a restart keeps its chrome.
-        setup_buffer(&mut client, buffer, owned, deadline(SETUP_TIMEOUT))?;
+        setup_buffer(
+            &mut client,
+            buffer,
+            owned,
+            &self.config,
+            deadline(SETUP_TIMEOUT),
+        )?;
         if let Some(file) = fresh.as_mut() {
             file.keep();
         }
@@ -1048,6 +1054,7 @@ impl NvimSession {
             &mut client,
             buffer,
             true,
+            &self.config,
             capped(startup_deadline, SETUP_TIMEOUT),
         )?;
         Ok(Readiness::Ready(Connected {
@@ -1667,17 +1674,25 @@ fn open_buffer(client: &mut RpcClient, path: &Path, deadline: Instant) -> Result
         .context("nvim returned a non-integer buffer handle")
 }
 
+/// Binds the editor to the dictation buffer, and gives it the pattern its
+/// windows dim the timestamps with: derived from `nvim.timestamp_format`
+/// here, never again in Lua.
 fn setup_buffer(
     client: &mut RpcClient,
     buffer: i64,
     dedicated: bool,
+    config: &Nvim,
     deadline: Instant,
 ) -> Result<()> {
     client.request(
         "nvim_exec_lua",
         vec![
             Value::from("Spokenpad.setup(...)"),
-            Value::Array(vec![Value::from(buffer), Value::from(dedicated)]),
+            Value::Array(vec![
+                Value::from(buffer),
+                Value::from(dedicated),
+                Value::from(config.timestamp_format.pattern()),
+            ]),
         ],
         deadline,
         Patience::Deadline,

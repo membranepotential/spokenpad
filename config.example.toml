@@ -158,6 +158,15 @@ file_template = "dictation-%Y-%m-%d-%H%M%S.md"
 # After each release, copy the whole dictation buffer to the clipboard.
 copy_to_clipboard = false
 
+# Open each recording's paragraph with the time its key went down, for a
+# press without --timestamps or --no-timestamps (`spokenpad start
+# --timestamps` stamps one recording whatever this says).
+timestamps = false
+
+# The stamp: %H (00-23), %I (01-12), %M, %S, %p (AM/PM), %% and any other
+# text on one line. The window draws it dimmed (highlight SpokenpadTimestamp).
+timestamp_format = "[%H:%M:%S]"
+
 [preview]
 # How often, while you speak, finished chunks are committed and the sentence
 # you are in is previewed. At least 0.2.

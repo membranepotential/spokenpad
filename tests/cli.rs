@@ -271,6 +271,32 @@ fn a_control_command_without_a_daemon_says_so() {
     }
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
 }
+/// `start` and `toggle` take `--timestamps` or `--no-timestamps`, never
+/// both; `stop` and `cancel` end a capture and take neither.
+#[test]
+fn only_a_press_that_begins_a_capture_takes_a_timestamps_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    for press in ["start", "toggle"] {
+        for flag in ["--timestamps", "--no-timestamps"] {
+            let output = command(&dir).args([press, flag]).output().unwrap();
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                code(&output) == 1 && stderr.contains("no spokenpad daemon is listening"),
+                "{press} {flag} is understood and sent: {stderr}"
+            );
+        }
+        let both = command(&dir)
+            .args([press, "--timestamps", "--no-timestamps"])
+            .output()
+            .unwrap();
+        assert_eq!(code(&both), 2, "{press} with both flags");
+        assert!(String::from_utf8_lossy(&both.stderr).contains("cannot be used with"));
+    }
+    for end in ["stop", "cancel"] {
+        let output = command(&dir).args([end, "--timestamps"]).output().unwrap();
+        assert_eq!(code(&output), 2, "{end} --timestamps");
+    }
+}
 /// Socket activation as `spokenpad.socket` does it, with systemd's own
 /// `systemd-socket-activate`: it binds the socket and starts the daemon on
 /// the first connection, which that very press is waiting on. The daemon

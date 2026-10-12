@@ -1,8 +1,5 @@
 //! The control requests, as the event loop reads them.
-use crate::core::{
-    control::{Received, Request},
-    state::Event,
-};
+use crate::core::{control::Received, state::Event};
 use std::{
     collections::VecDeque,
     sync::mpsc::{self, Receiver},
@@ -98,10 +95,7 @@ impl Requests {
         while let Some(request) = self.receive() {
             self.early.push_back(request);
         }
-        self.early
-            .iter()
-            .any(|r| matches!(r.request, Request::Start | Request::Toggle))
-            || !self.alive
+        self.early.iter().any(|r| r.request.may_begin()) || !self.alive
     }
 
     /// No request is queued and none can arrive again. Disconnection alone is
@@ -139,6 +133,7 @@ impl Requests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::{control::Request, timestamp::Timestamps};
 
     /// Every request is preceded by the clock at its own stamp, and a drain
     /// ends with the clock at the current time, once.
@@ -147,13 +142,16 @@ mod tests {
         let (sender, receiver) = mpsc::channel();
         let mut requests = Requests::new(receiver);
         let t = Instant::now();
+        let wall = chrono::NaiveDateTime::default();
         let stop = Received {
             request: Request::Stop,
             at: t,
+            wall,
         };
         let start = Received {
-            request: Request::Start,
+            request: Request::Start(Timestamps::Configured),
             at: t + Duration::from_millis(40),
+            wall,
         };
         sender.send(stop).unwrap();
         sender.send(start).unwrap();
@@ -185,8 +183,9 @@ mod tests {
         requests.wait(Duration::from_millis(30));
         assert!(before.elapsed() >= Duration::from_millis(30));
         let start = Received {
-            request: Request::Start,
+            request: Request::Start(Timestamps::Configured),
             at: Instant::now(),
+            wall: chrono::NaiveDateTime::default(),
         };
         sender.send(start).unwrap();
         requests.wait(Duration::from_secs(60));

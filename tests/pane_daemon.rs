@@ -34,6 +34,7 @@ use spokenpad::{
         decode::{Pipeline, Recognizer, Segment, Segmenter, Split, TrailingSilence},
         font::Points,
         geometry::Dimensions,
+        timestamp::Timestamps,
     },
     shell::{
         audio::{AudioCapture, CallbackCore, InputBackend, InputStream, Teardown},
@@ -281,7 +282,7 @@ fn closing_the_pane_cancels_the_capture_it_showed() {
     let speech = vec![0.4_f32; 32_000];
 
     // ----------------------------------------- the window manager closes it
-    daemon.send(Request::Toggle);
+    daemon.send(Request::Toggle(Timestamps::Configured));
     daemon.say(&speech);
     let first = daemon.wait_for_text(1, "the first capture's text");
     let pane = wait_for(PATIENCE, "i3 to manage the pane", || pane_window(&i3));
@@ -302,7 +303,7 @@ fn closing_the_pane_cancels_the_capture_it_showed() {
     println!("closing the window cancelled the capture and opened nothing");
 
     // ---------------------------------------------------- `:q` in the pane
-    daemon.send(Request::Toggle);
+    daemon.send(Request::Toggle(Timestamps::Configured));
     daemon.say(&speech);
     let second = daemon.wait_for_text(2, "the second capture's text");
     assert_ne!(second, first, "a new press opens a new file");
@@ -324,10 +325,10 @@ fn closing_the_pane_cancels_the_capture_it_showed() {
     println!("`:q` cancelled the capture and opened nothing");
 
     // ------------------------------- `:q`, and the key pressed right after
-    daemon.send(Request::Toggle);
+    daemon.send(Request::Toggle(Timestamps::Configured));
     daemon.say(&speech);
     daemon.wait_for_text(3, "the third capture's text");
-    daemon.send(Request::Toggle);
+    daemon.send(Request::Toggle(Timestamps::Configured));
     let settled = daemon.spoken_count();
     std::thread::sleep(Duration::from_secs(1));
     assert_eq!(daemon.spoken_count(), settled, "the third capture is done");
@@ -350,7 +351,7 @@ fn closing_the_pane_cancels_the_capture_it_showed() {
     wait_for(PATIENCE, "the editor to act on `:q`", || {
         UnixStream::connect(&daemon.socket).is_err().then_some(())
     });
-    daemon.send(Request::Toggle);
+    daemon.send(Request::Toggle(Timestamps::Configured));
     wait_for(PATIENCE, "the next capture to start", || {
         (daemon.wavs().len() > recordings).then_some(())
     });
@@ -373,12 +374,12 @@ fn closing_the_pane_cancels_the_capture_it_showed() {
         Some(pane),
         "the new pane was closed with the old one"
     );
-    daemon.send(Request::Toggle);
+    daemon.send(Request::Toggle(Timestamps::Configured));
     assert!(contains(&fourth, SPOKEN));
     println!("a capture started right after `:q` went on in a new pane");
 
     // ------------------------------------------------ the editor is killed
-    daemon.send(Request::Toggle);
+    daemon.send(Request::Toggle(Timestamps::Configured));
     daemon.say(&speech);
     daemon.wait_for_text(4, "the fifth capture's text");
     wait_for(PATIENCE, "i3 to manage the fifth pane", || pane_window(&i3));
@@ -389,7 +390,7 @@ fn closing_the_pane_cancels_the_capture_it_showed() {
         (daemon.spoken_count() > before && pane_window(&i3).is_some()).then_some(())
     });
     println!("an editor that died left the capture running, and its text opened a new pane");
-    daemon.send(Request::Toggle);
+    daemon.send(Request::Toggle(Timestamps::Configured));
     daemon.stop();
 }
 
@@ -817,7 +818,7 @@ impl Daemon {
     /// One push-to-talk: press, speak, release. Returns the moment the key
     /// came up, which is when the daemon starts working.
     fn dictate(&self) -> Instant {
-        self.send(Request::Start);
+        self.send(Request::Start(Timestamps::Configured));
         self.microphone.speak(&vec![0.4_f32; 16_000]);
         wait_for(PATIENCE, "the microphone to be drained", || {
             self.microphone.spoken().then_some(())
@@ -831,6 +832,7 @@ impl Daemon {
             .send(Received {
                 request,
                 at: Instant::now(),
+                wall: chrono::Local::now().naive_local(),
             })
             .expect("the daemon is listening");
     }

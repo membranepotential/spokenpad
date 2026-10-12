@@ -1,7 +1,10 @@
 use super::*;
 use crate::{
     config::Mode,
-    core::session::{Notice, RecordingStatus},
+    core::{
+        session::{Notice, RecordingStatus},
+        timestamp::TimestampFormat,
+    },
 };
 use std::{
     os::unix::{fs::PermissionsExt, net::UnixListener},
@@ -708,6 +711,70 @@ fn headless_append_literal_text_and_adopt() {
         fs::read_to_string(path).unwrap(),
         "$(touch nope)\nGrüße 東京 continued\n"
     );
+}
+
+/// A timestamp is file content drawn dimmed: the window matches it by the
+/// pattern the daemon derived from `nvim.timestamp_format`, at the start of
+/// a line only, so the same text further along stays as it is. The match
+/// holds after the file is read again from disk, follows the buffer into a
+/// new window and leaves a window that shows another file. The format here
+/// is full of characters Vim's patterns treat as magic.
+#[test]
+fn a_timestamp_at_the_start_of_a_line_is_dimmed_and_only_there() {
+    if !nvim_or_skip() {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let config = Nvim {
+        timestamp_format: TimestampFormat::parse(r"[.*~%H \ /]").unwrap(),
+        ..headless(directory.path())
+    };
+    let (mut session, _, _editor) = dictating(&config);
+    attach_ui(&mut session);
+    let stamp = r"[.*~14 \ /]";
+    session
+        .append(&format!("{stamp} Said {stamp} again"), false)
+        .unwrap();
+    session.append(r"[x*~14 \ /] near miss", false).unwrap();
+    let checked = lua(
+        &mut session,
+        r#"
+local stamp = ...
+local link = vim.api.nvim_get_hl(0, { name = "SpokenpadTimestamp" }).link
+assert(link == "Comment", "linked to " .. tostring(link))
+-- The attribute each character of line `lnum`, from byte `col`, is drawn with.
+local function attr(lnum, col)
+  vim.cmd("redraw!")
+  local pos = vim.fn.screenpos(0, lnum, col)
+  assert(pos.row > 0, "line " .. lnum .. " is on the screen")
+  return vim.fn.screenattr(pos.row, pos.col)
+end
+local function dimmed()
+  local plain = attr(1, #stamp + 2)
+  local mid = vim.fn.getline(1):find(stamp, 2, true)
+  return attr(1, 1) ~= plain and attr(1, #stamp) ~= plain
+    and attr(1, mid) == plain and attr(3, 1) == plain
+end
+assert(dimmed(), "the stamp is drawn dimmed, and only at the start of its line")
+vim.cmd("edit!")
+assert(dimmed(), "dimmed after the file is read again")
+vim.cmd("split")
+assert(dimmed(), "dimmed in a new window on the buffer")
+vim.cmd("edit " .. vim.fn.fnameescape(vim.fn.tempname()))
+vim.api.nvim_buf_set_lines(0, 0, -1, false, { vim.fn.getbufline(Spokenpad.buf, 1)[1] })
+local others = vim.tbl_filter(function(m)
+  return m.group == "SpokenpadTimestamp"
+end, vim.fn.getmatches())
+assert(#others == 0, "a window on another file keeps no match")
+return true
+"#
+        .replace(
+            "local stamp = ...",
+            &format!("local stamp = [==[{stamp}]==]"),
+        )
+        .as_str(),
+    );
+    assert_eq!(checked, Value::Boolean(true));
 }
 
 #[test]

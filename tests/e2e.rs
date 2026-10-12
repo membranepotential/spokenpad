@@ -34,6 +34,7 @@ use spokenpad::{
         segments::{VAD_WINDOW, merge_spans, settling_silence},
         session::Preparing,
         state::REPEAT_WINDOW,
+        timestamp::{Heading, Timestamps},
     },
     shell::{
         audio::{AudioCapture, CallbackCore, InputBackend, InputStream, Teardown},
@@ -67,6 +68,17 @@ const PER_WORD: usize = 8_000;
 const RATE: u32 = 16_000;
 /// Generous, because each test also starts a real editor.
 const DEADLINE: Duration = Duration::from_secs(15);
+const START: Request = Request::Start(Timestamps::Configured);
+const TOGGLE: Request = Request::Toggle(Timestamps::Configured);
+
+/// The local wall-clock time `h:m:s` on the day these tests are set, which
+/// the harness hands the daemon with a request instead of reading a clock.
+fn wall(h: u32, m: u32, s: u32) -> chrono::NaiveDateTime {
+    chrono::NaiveDate::from_ymd_opt(2026, 10, 12)
+        .unwrap()
+        .and_hms_opt(h, m, s)
+        .unwrap()
+}
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
@@ -338,6 +350,8 @@ struct Settings {
     /// `nvim.copy_to_clipboard` is taken; everything else stays the
     /// harness's, which no file could express as tersely.
     config_file: Option<PathBuf>,
+    /// Mirrors `nvim.timestamps`, off by default like the setting itself.
+    timestamps: bool,
 }
 
 impl Default for Settings {
@@ -357,6 +371,7 @@ impl Default for Settings {
             loading: false,
             max_seconds: 30.,
             config_file: None,
+            timestamps: false,
         }
     }
 }
@@ -385,6 +400,7 @@ impl Harness {
         config.recording.dir = root.join("audio");
         config.nvim.mode = Mode::Attach;
         config.nvim.copy_to_clipboard = settings.copy_to_clipboard;
+        config.nvim.timestamps = settings.timestamps;
         config.nvim.editor = [
             "nvim",
             "-u",
@@ -521,9 +537,13 @@ impl Harness {
     fn send(&self, request: Request) {
         self.send_at(request, Instant::now());
     }
+    /// Sends `request` read at `at`, at 14:32:05 by the wall clock.
     fn send_at(&self, request: Request, at: Instant) {
+        self.send_read(request, at, wall(14, 32, 5));
+    }
+    fn send_read(&self, request: Request, at: Instant, wall: chrono::NaiveDateTime) {
         self.requests
-            .send(Received { request, at })
+            .send(Received { request, at, wall })
             .expect("serve is running");
     }
     /// Runs `spokenpad <request>` against this harness's control socket, as
@@ -546,14 +566,21 @@ impl Harness {
         self.press_only(latch);
         wait_until("the capture starts", || self.captures() > before);
     }
+    /// [`press`](Self::press) with a flag, read at `wall` by the wall clock.
+    fn press_stamped(&self, latch: bool, timestamps: Timestamps, wall: chrono::NaiveDateTime) {
+        let before = self.captures();
+        let request = if latch {
+            Request::Toggle(timestamps)
+        } else {
+            Request::Start(timestamps)
+        };
+        self.send_read(request, Instant::now(), wall);
+        wait_until("the capture starts", || self.captures() > before);
+    }
     /// `toggle` when `latch`, else `start`: a press that may end a latched
     /// recording rather than start one.
     fn press_only(&self, latch: bool) {
-        self.send(if latch {
-            Request::Toggle
-        } else {
-            Request::Start
-        });
+        self.send(if latch { TOGGLE } else { START });
     }
     fn captures(&self) -> usize {
         self.wavs().len()
@@ -586,7 +613,7 @@ impl Harness {
     /// Press and release inside the minimum hold, without waiting for it.
     fn tap(&self) {
         let at = Instant::now();
-        self.send_at(Request::Start, at);
+        self.send_at(START, at);
         self.send_at(Request::Stop, at + Duration::from_millis(50));
     }
     fn say(&self, samples: &[f32]) {
@@ -1124,9 +1151,9 @@ fn auto_repeat_while_held_is_one_capture() {
     for i in 0..12 {
         let at = Instant::now();
         let (first, second) = if i % 2 == 1 {
-            (Request::Stop, Request::Start)
+            (Request::Stop, START)
         } else {
-            (Request::Start, Request::Stop)
+            (START, Request::Stop)
         };
         h.send_at(first, at);
         h.send_at(second, at + Duration::from_millis(1));
@@ -1356,6 +1383,88 @@ fn a_second_press_while_transcribing_starts_a_new_paragraph() {
         "word word\n\nword word\n",
         "two captures are two paragraphs, in order"
     );
+    h.finish();
+}
+
+/// A capture pressed with `--timestamps` opens its paragraph with the time
+/// of the press; the commits that continue that paragraph add none. The next
+/// capture, pressed with `--no-timestamps`, writes its paragraph bare, in
+/// the same file.
+#[test]
+fn a_stamped_and_an_unstamped_capture_share_a_file() {
+    if !nvim_available() {
+        return;
+    }
+    let h = Harness::start(Settings {
+        chunk: Some(RATE as usize),
+        words: false,
+        ..Settings::default()
+    });
+    h.press_stamped(false, Timestamps::On, wall(9, 5, 7));
+    h.say(&tone(3.0));
+    wait_until("a settled chunk is committed while the key is held", || {
+        !h.text().is_empty()
+    });
+    h.release_for_good();
+    let mut loud = 0;
+    wait_until("every captured sample is committed", || {
+        let previous = loud;
+        loud = loud_samples(&h.recovery_wav().0);
+        loud > 0 && loud == previous && counted(&h.text()) == loud
+    });
+    let stamped = h.text();
+    assert!(
+        stamped.starts_with("[09:05:07] ") && stamped.matches('[').count() == 1,
+        "one stamp, at the start of the paragraph: {stamped:?}"
+    );
+    assert!(
+        stamped.split_whitespace().count() > 2,
+        "the capture committed more than once, so commits continued it: {stamped:?}"
+    );
+
+    h.press_stamped(false, Timestamps::Off, wall(9, 6, 0));
+    h.say(&tone(1.0));
+    h.release();
+    wait_until("the second capture lands as its own paragraph", || {
+        counted(&h.text()) == loud + RATE as usize
+    });
+    let text = h.text();
+    let (first, second) = text.split_once("\n\n").expect("two paragraphs");
+    assert_eq!(format!("{first}\n"), stamped);
+    assert!(
+        !second.contains('[') && counted(second) == RATE as usize,
+        "no stamp: {text:?}"
+    );
+    h.finish();
+}
+
+/// With `nvim.timestamps` on and no editor open, a press without a flag
+/// stamps its paragraph in the pending passage too, by the same rule; a
+/// press with `--no-timestamps` does not.
+#[test]
+fn the_pending_passage_is_stamped_by_the_same_rule() {
+    if !nvim_available() {
+        return;
+    }
+    let h = Harness::start(Settings {
+        editor: false,
+        timestamps: true,
+        ..Settings::default()
+    });
+    thread::sleep(Duration::from_millis(300));
+    h.press(false);
+    h.say(&tone(1.0));
+    h.release_for_good();
+    wait_until("the stamped paragraph reaches the passage", || {
+        h.text() == "[14:32:05] word word\n"
+    });
+    h.press_stamped(false, Timestamps::Off, wall(14, 40, 0));
+    h.say(&tone(1.0));
+    h.release();
+    wait_until("the unstamped paragraph follows it", || {
+        h.text() == "[14:32:05] word word\n\nword word\n"
+    });
+    assert_eq!(h.editors(), 0);
     h.finish();
 }
 
@@ -1906,6 +2015,39 @@ fn recordings_left_at_a_stop_are_transcribed_at_the_next_start() {
     h.finish();
 }
 
+/// A recording that waits for the speech model across a restart keeps the
+/// time its capture began and its press's choice: the list the next start
+/// reads carries both, and the paragraph it is finally written as opens
+/// with that time, not the time it was transcribed at.
+#[test]
+fn a_waiting_recording_is_stamped_with_the_time_its_capture_began() {
+    if !nvim_available() {
+        return;
+    }
+    let settings = |loading| Settings {
+        editor: false,
+        loading,
+        ..Settings::default()
+    };
+    let mut h = Harness::start(settings(true));
+    h.press_stamped(true, Timestamps::On, wall(8, 0, 0));
+    h.say(&tone(1.0));
+    h.press_only(true);
+    h.release_for_good();
+    h.stop();
+    let list = h.recordings.join("waiting.tsv");
+    let saved = fs::read_to_string(&list).expect("the stop saved what waits");
+    assert!(
+        saved.ends_with("\t2026-10-12T08:00:00\ton\n"),
+        "the time and the choice are listed: {saved:?}"
+    );
+
+    let h = h.restart(settings(false));
+    wait_until("the recording is transcribed", || !h.text().is_empty());
+    assert_eq!(h.text(), "[08:00:00] word word\n");
+    h.finish();
+}
+
 /// A live capture whose release decode the stop cuts short is listed for the
 /// next start like a recording made before the model was ready, and that
 /// start transcribes it: every sample once across the two runs.
@@ -2370,7 +2512,13 @@ fn replay_into_capture(minutes: usize, dropping: bool) -> usize {
         },
         segmenter: Chunker::Speech(Vad::default()),
     });
-    let utterance = Utterance::new(1);
+    let utterance = Utterance::new(
+        1,
+        Heading {
+            started: wall(14, 32, 5),
+            timestamps: Timestamps::Off,
+        },
+    );
     capture.start_capture().expect("start the capture");
 
     let buffer = RATE as usize / 50;
@@ -2649,8 +2797,9 @@ fn real_models_transcribe_the_kennedy_sample() {
 
     requests
         .send(Received {
-            request: Request::Start,
+            request: START,
             at: Instant::now(),
+            wall: wall(14, 32, 5),
         })
         .unwrap();
     microphone.speak(&speech);
@@ -2660,6 +2809,7 @@ fn real_models_transcribe_the_kennedy_sample() {
         .send(Received {
             request: Request::Stop,
             at: Instant::now(),
+            wall: wall(14, 32, 5),
         })
         .unwrap();
 

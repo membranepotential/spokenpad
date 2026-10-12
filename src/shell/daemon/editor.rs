@@ -7,6 +7,7 @@ use crate::{
     core::{
         decode::UtteranceId,
         session::{Notice, Session},
+        timestamp::Heading,
     },
     shell::nvim::{
         AppendFailure, CopyOutcome, Detached, IndicatorState, NvimSession, PreviewPlacement, Want,
@@ -50,6 +51,9 @@ pub(super) enum EditorWork {
     Ensure,
     Append {
         utterance: UtteranceId,
+        /// What a paragraph this text opens starts with; the window's
+        /// `[nvim]` says in which format, and whether by default.
+        heading: Heading,
         text: String,
     },
     /// Sent only when it changes; the thread keeps the latest and draws it
@@ -194,7 +198,27 @@ pub(super) fn editor_thread(
                         Err(e) => log::error!("could not open dictation window: {e:#}"),
                     }
                 }
-                EditorWork::Append { utterance, text } => {
+                EditorWork::Append {
+                    utterance,
+                    heading,
+                    text,
+                } => {
+                    // The stamp goes in front of the text before either
+                    // path takes it, so both open a paragraph alike. Each
+                    // path decides `continued` for itself: text that went
+                    // to the editor last and now goes to the passage opens
+                    // a paragraph there, stamped with the same time.
+                    let written = |nvim: &NvimSession, continued| {
+                        let settings = nvim.config();
+                        heading
+                            .paragraph(
+                                &text,
+                                continued,
+                                &settings.timestamp_format,
+                                settings.timestamps,
+                            )
+                            .into_owned()
+                    };
                     forget_committed_preview(&mut indicator, utterance);
                     // A failed request elsewhere (a clipboard copy that timed
                     // out, an indicator push) drops the connection; text that
@@ -213,7 +237,8 @@ pub(super) fn editor_thread(
                     if nvim.connected() {
                         let now = Instant::now();
                         let continued = continues(paragraph, utterance, Sink::Editor);
-                        match nvim.append(&text, continued) {
+                        let written = written(&nvim, continued);
+                        match nvim.append(&written, continued) {
                             Ok(line) => {
                                 paragraph = Some((utterance, Sink::Editor));
                                 shown = None;
@@ -248,7 +273,7 @@ pub(super) fn editor_thread(
                     // With no editor at all, the text goes to the file the
                     // next editor will open on, rather than nowhere.
                     let continued = continues(paragraph, utterance, Sink::Passage);
-                    match nvim.append_detached(&text, continued) {
+                    match nvim.append_detached(&written(&nvim, continued), continued) {
                         Ok(write) => {
                             paragraph = Some((utterance, Sink::Passage));
                             log::info!("no dictation editor: appended to {}", write.path.display());

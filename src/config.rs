@@ -3,6 +3,7 @@ use crate::core::{
     font::Points,
     geometry::Dimensions,
     models::{DEFAULT_ASR, DEFAULT_VAD},
+    timestamp::TimestampFormat,
 };
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use serde::Deserialize;
@@ -563,6 +564,12 @@ pub struct Nvim {
     /// is a side effect worth opting into rather than assuming. When off,
     /// no copy request is ever sent.
     pub copy_to_clipboard: bool,
+    /// Whether a capture begun by a press without `--timestamps` or
+    /// `--no-timestamps` opens each of its paragraphs with the time it
+    /// began. Off by default.
+    pub timestamps: bool,
+    /// The stamp those paragraphs open with, parsed when the file is read.
+    pub timestamp_format: TimestampFormat,
 }
 impl Default for Nvim {
     fn default() -> Self {
@@ -589,6 +596,8 @@ impl Default for Nvim {
             sway_socket: None,
             runtime_dir: None,
             copy_to_clipboard: false,
+            timestamps: false,
+            timestamp_format: TimestampFormat::default(),
         }
     }
 }
@@ -1231,6 +1240,32 @@ mod tests {
         .unwrap();
         assert_eq!(running.restart_needed(&fresh), vec!["asr", "vad"]);
         assert!(running.restart_needed(&running.clone()).is_empty());
+    }
+
+    /// The format is parsed when the file is read: a refused one fails the
+    /// load and says which specifier, and one that loads is the stamp.
+    #[test]
+    fn a_timestamp_format_is_checked_when_the_file_loads() {
+        let config = Config::parse(
+            "[nvim]\ntimestamps = true\ntimestamp_format = \"%I:%M %p\"\n",
+            None,
+        )
+        .unwrap();
+        assert!(config.nvim.timestamps);
+        assert_eq!(
+            config.nvim.timestamp_format,
+            TimestampFormat::parse("%I:%M %p").unwrap()
+        );
+        assert!(!Config::default().nvim.timestamps, "off by default");
+        for (format, says) in [("%Y %H", "%Y"), ("", "empty"), ("%H\\n", "one line")] {
+            let error = Config::parse(&format!("[nvim]\ntimestamp_format = \"{format}\"\n"), None)
+                .unwrap_err();
+            let error = format!("{error:#}");
+            assert!(
+                error.contains("timestamp_format") && error.contains(says),
+                "{format:?}: {error}"
+            );
+        }
     }
 
     #[test]

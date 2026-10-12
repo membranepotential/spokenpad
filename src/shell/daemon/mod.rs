@@ -344,7 +344,7 @@ where
         capture
             .take_unfinished()
             .into_iter()
-            .map(|Unfinished { path, through }| {
+            .map(|Unfinished { path, through, heading }| {
                 log::info!(
                     "{} was left untranscribed by the last run; it is transcribed from {:.2}s once the speech model is ready",
                     path.display(),
@@ -353,6 +353,7 @@ where
                 Transcription {
                     path,
                     id: session.reserve_id(),
+                    heading,
                     through,
                     from: through,
                     stage: Stage::Kept,
@@ -531,7 +532,7 @@ impl<B: InputBackend> Loop<'_, B> {
                 break;
             };
             match command {
-                Command::Start => self.start()?,
+                Command::Start(_) => self.start()?,
                 Command::Decode {
                     released,
                     held,
@@ -563,6 +564,7 @@ impl<B: InputBackend> Loop<'_, B> {
                 self.session.event(Event::Request(Received {
                     request: Request::Cancel,
                     at: Instant::now(),
+                    wall: chrono::Local::now().naive_local(),
                 }));
                 self.session.notify(Notice::MicrophoneUnavailable);
                 log::error!("capture could not start: {e:#}");
@@ -813,7 +815,7 @@ impl<B: InputBackend> Loop<'_, B> {
                 &self.work_tx,
                 Work::Recording {
                     path: recording.path.clone(),
-                    utterance: Utterance::new(recording.id.0),
+                    utterance: Utterance::new(recording.id.0, recording.heading),
                     from: recording.through,
                 },
             )?;
@@ -954,6 +956,7 @@ fn commit(
         editor_tx,
         EditorWork::Append {
             utterance: c.utterance.id,
+            heading: c.utterance.heading,
             text,
         },
     )

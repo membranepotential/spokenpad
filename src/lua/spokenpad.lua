@@ -29,6 +29,9 @@ local M = {}
 local BARS = { "\u{2581}", "\u{2582}", "\u{2583}", "\u{2584}", "\u{2585}", "\u{2586}", "\u{2587}", "\u{2588}" }
 local METER_CELLS = 24
 local PREVIEW_EXTMARK = 1
+-- The `matchadd()` id of the timestamp match in each window showing the
+-- dictation buffer: fixed, so that adding it again replaces it.
+local TIMESTAMP_MATCH = 7301
 -- Only for a winbar built before any window shows the buffer; every real one
 -- is measured against the window it is about to be set on.
 local DEFAULT_WINBAR_WIDTH = 80
@@ -65,6 +68,9 @@ M.preview_views = {}
 M.winbar_windows = {}
 M.buf = nil
 M.dedicated = false
+-- The Vim pattern a timestamp at the start of a line matches, as the daemon
+-- derived it from `nvim.timestamp_format`; set by every `setup`.
+M.timestamp_pattern = nil
 M.ns = vim.api.nvim_create_namespace("spokenpad")
 
 for _ = 1, METER_CELLS do
@@ -111,6 +117,7 @@ local function define_highlights()
     SpokenpadPreview = "Comment",
     SpokenpadNotice = "WarningMsg",
     SpokenpadFile = "Directory",
+    SpokenpadTimestamp = "Comment",
   }
   for name, target in pairs(links) do
     vim.api.nvim_set_hl(0, name, { link = target, default = true })
@@ -267,6 +274,21 @@ local function windows()
     end
   end
   return out
+end
+
+--- Dims the timestamps that open paragraphs in every window showing the
+--- dictation buffer, and in no other window. The stamps are file content, so
+--- they are found by their pattern wherever the window draws them -- after a
+--- save, after the file is opened again -- rather than marked when they are
+--- appended. A match belongs to a window, not to a buffer, so a window that
+--- now shows another file loses it.
+local function mark_timestamps()
+  for _, win in ipairs(vim.api.nvim_list_wins()) do
+    pcall(vim.fn.matchdelete, TIMESTAMP_MATCH, win)
+    if M.timestamp_pattern and vim.api.nvim_win_get_buf(win) == M.buf then
+      vim.fn.matchadd("SpokenpadTimestamp", M.timestamp_pattern, 10, TIMESTAMP_MATCH, { window = win })
+    end
+  end
 end
 
 --- The winbar is set window-locally on every window showing the dictation
@@ -807,9 +829,12 @@ end
 --- `dedicated` says whether this editor was opened by spokenpad for dictation
 --- and nothing else. It is remembered across reloads, so a daemon restart
 --- that reattaches to the window it opened last time keeps its chrome.
-function M.setup(buf, dedicated)
+--- `timestamp_pattern` is the Vim pattern of a timestamp at the start of a
+--- line, which the daemon derives from `nvim.timestamp_format`.
+function M.setup(buf, dedicated, timestamp_pattern)
   M.buf = buf
   M.dedicated = M.dedicated or dedicated == true
+  M.timestamp_pattern = timestamp_pattern
   if M.dedicated then
     bound_clipboard()
   end
@@ -846,6 +871,13 @@ function M.setup(buf, dedicated)
       render()
     end,
   })
+  -- Any window: one that starts showing the buffer gets the match, one that
+  -- stops showing it loses it.
+  vim.api.nvim_create_autocmd({ "BufWinEnter", "WinNew" }, {
+    group = group,
+    callback = mark_timestamps,
+  })
+  mark_timestamps()
   -- The preview is laid out for its window's width and height, and the
   -- daemon sends it again only when it changes: a resized window, such as a
   -- tiled pane beside a window that just opened, lays it out again now.

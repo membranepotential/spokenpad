@@ -188,6 +188,7 @@ changes apply to the next window; everything else after
 | `nvim.font_family`, `nvim.font_size` | `"monospace"`, `12` | the pane's font, in points as Alacritty's `font.size` |
 | `nvim.pane_dimensions` | `{ columns = 72, lines = 20 }` | the pane's size in cells |
 | `nvim.pane_layout` | `"floating"` | `"tiled"` tiles it on i3 and sway |
+| `nvim.timestamps` | `false` | open each recording's paragraph with the time, as `[14:32:05]` (`nvim.timestamp_format`) |
 | `asr.vocabulary` | `[]` | words to bias the model towards, such as `["kubectl", "nginx"]` |
 | `capture.silence_timeout_seconds` | `300` | a latch without speech this long ends by itself; `0` turns it off |
 
@@ -196,6 +197,8 @@ changes apply to the next window; everything else after
 ```
 spokenpad start | stop            begin or end a push-to-talk capture
 spokenpad toggle                  begin a latched capture, or end the running one
+    start, toggle: --timestamps | --no-timestamps
+                                  stamp the capture they begin, or not, whatever nvim.timestamps says
 spokenpad cancel                  discard the capture being recorded
 spokenpad editor                  open the dictation editor in this terminal
 spokenpad transcribe WAV [--out PATH] [--from SECONDS]

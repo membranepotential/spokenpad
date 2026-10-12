@@ -3226,3 +3226,58 @@ preview.
 - Chosen (user): the default is 0. The setting stays for anyone who starts
   speaking before the key is down, or whose microphone opens slowly (USB and
   Bluetooth not measured).
+
+## Timestamps, per capture, as dimmed text in the file (2026-10-12)
+
+- Asked (user): a recording's paragraph may open with the time it was
+  made, `[14:32:05] Text…`, chosen per key: one key for stamped
+  recordings, another for bare ones.
+- Chosen (user): the stamp is plain text in the file, and the window draws
+  it dimmed by a pattern match (`matchadd()` in every window on the
+  dictation buffer, group `SpokenpadTimestamp`, a `default` link to
+  `Comment`). Rejected: an extmark with the time, plus a yank that adds it
+  back. Extmarks do not survive saving and opening the file again, and every
+  way text leaves the window (`"+y`, `nvim.copy_to_clipboard`, the file
+  itself) would have to add the stamp back by itself. Time only, no date
+  lines. Off by default.
+- Chosen (user): `spokenpad start` and `toggle` take `--timestamps` or
+  `--no-timestamps` (never both; `stop` and `cancel` take neither).
+  `nvim.timestamps` (off) decides for a press without a flag, and
+  `nvim.timestamp_format` (`"[%H:%M:%S]"`) is the stamp. The request line
+  carries the choice as an optional field (`start timestamps`,
+  `toggle no-timestamps`); a line without it means what it meant before, so
+  an older client still works. An older daemon answers a flagged press with
+  "error unknown request".
+- Chosen: the time is the local wall-clock time the daemon read the press
+  that began the capture (`Received::wall`), not the release or the decode.
+  Only that press decides, so `state::Command::Start` alone carries the
+  capture's `Heading` and the `Utterance` takes it to every commit. A
+  `start` repeat while held, a `start` inside the repeat window after a
+  `stop`, a Shift `toggle` that latches a held capture, and the press that
+  ends a latch all carry a flag of their own, and none of them changes it.
+  A press while the last capture is still transcribing begins a new capture
+  and takes its own flag.
+- Chosen: a press without a flag is resolved when its text is written,
+  against the `[nvim]` the window opened with, as every `[nvim]` key is;
+  the format is read there too. So the press records "no flag", not the
+  setting at the time of the press.
+- Chosen: a commit that continues its capture's paragraph gets no stamp. A
+  commit that opens a paragraph does, also when the capture's text moves
+  from the editor to the pending passage mid-capture: the stamp is put in
+  front of the text in Rust before either path takes it, so the Lua append
+  and `passage::append_paragraph` are unchanged. The preview never has one.
+- Chosen: `waiting.tsv` gains two columns after the name: the start time
+  (`%Y-%m-%dT%H:%M:%S`, local) and the choice (`configured`, `on`, `off`). A
+  line of the two old columns takes its time from the recording's name,
+  which is the local time the capture opened its WAV, to the second, and
+  leaves the choice to `nvim.timestamps`; a name with no time in it, which
+  this recorder never writes, falls back to the file's modification time. A
+  daemon older than this one skips a four-column line as naming no
+  recording.
+- Chosen: `nvim.timestamp_format` is parsed when the config loads, into the
+  only specifiers a time of day needs (`%H %I %M %S %p %%`); anything else,
+  an empty format or one with a line break is refused, naming the problem.
+  The stamp and the Vim pattern that finds it (`^\V`, literal text with
+  `\` and `/` escaped, `\d\d` per number) are both derived from that one
+  value in `core/timestamp.rs`; Lua receives the pattern from `setup` and
+  derives nothing.

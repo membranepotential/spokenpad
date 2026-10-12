@@ -58,6 +58,53 @@ ready and has caught up. The log always has the full sentence and paths.
 - **A tap shorter than 120 ms is discarded**, with "held too briefly — hold
   the key while speaking" in the winbar. The WAV is still written.
 
+## Timestamps
+
+A recording can open its paragraph with the time you pressed the key:
+
+```
+[14:32:05] What you said in that recording, as one paragraph.
+```
+
+- **Per key.** `spokenpad start --timestamps` and `spokenpad toggle
+  --timestamps` stamp the recording they begin; `--no-timestamps` leaves it
+  bare. A press without either does what `nvim.timestamps` says (off by
+  default). Only the press that begins a recording decides: the key's
+  auto-repeat, Shift latching it, and the press that ends it change nothing,
+  whatever flag their binding carries. `stop` and `cancel` take no flag.
+- **The time is when the recording began**, by this computer's clock, not
+  when its text arrived. A recording that waits for the speech model, even
+  across a restart, keeps the time it was made.
+- **Only the paragraph's start.** The text a recording adds to its
+  paragraph while you are still talking gets no second stamp. If its text
+  has to go to the dictation file because the window went away, the
+  paragraph it opens there has the same stamp.
+- **It is text in the file**, so `"+y`, `nvim.copy_to_clipboard` and
+  anything else that reads the file include it. The window draws a stamp at
+  the start of a line dimmed, in the `SpokenpadTimestamp` highlight group
+  (linked to `Comment`, which your config can override), also after the
+  file is opened again. The preview never shows a stamp.
+- **The format** is `nvim.timestamp_format`, default `"[%H:%M:%S]"`. It
+  takes `%H` (hour, 00–23), `%I` (hour, 01–12), `%M`, `%S`, `%p` (AM or
+  PM), `%%` and any other text on one line; any other `%` code is a config
+  error that names it. Like every `[nvim]` key, a change applies to the
+  next window.
+
+To keep both, bind a second key to a stamped press. On i3, beside the
+bindings in the README:
+
+```
+set $spokenpad_stamped Print
+bindsym $spokenpad_stamped exec --no-startup-id spokenpad start --timestamps
+bindsym --release $spokenpad_stamped exec --no-startup-id spokenpad stop
+bindsym Shift+$spokenpad_stamped exec --no-startup-id spokenpad toggle --timestamps
+exec_always --no-startup-id xset -r 107
+```
+
+`xset -r 107` turns off auto-repeat for Print's usual keycode, as the
+README's `xset -r 127` does for Pause; `xev` shows your key's. `packaging/i3/spokenpad.conf` and
+`packaging/sway/spokenpad.conf` carry the same lines, commented out.
+
 ## Limits
 
 - **A latch you forget stops by itself** after five minutes without speech
@@ -109,7 +156,9 @@ ready and has caught up. The log always has the full sentence and paths.
 - **Stopping the daemon does not lose a capture.** A capture still recording
   when the daemon stops (a restart, an upgrade, a logout), or whose last
   text is not written yet, is listed for the next start, which transcribes
-  the rest from where its text reached. A capture you cancel is not.
+  the rest from where its text reached. A capture you cancel is not. The
+  list keeps when the capture began and whether its key asked for
+  timestamps, so its paragraph is stamped as it would have been.
 - **A recording that fails partway** says "recording partly transcribed":
   the next start tries the rest again, or, if it failed at the same point
   before, the notice gives the `spokenpad transcribe --from SECONDS` that

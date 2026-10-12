@@ -39,6 +39,7 @@ use spokenpad::{
         },
         frames::Frames,
         text::Processor,
+        timestamp::{Heading, Timestamps},
     },
     shell::{
         inference::{SpeechSegmenter, Transcriber},
@@ -536,7 +537,14 @@ fn engine(config: &Config, padding: Option<usize>) -> Result<Engine> {
 /// Also returns how many ticks read a tail longer than `preview.max_seconds`,
 /// which the daemon does not preview.
 fn replay_live(worker: &mut Engine, samples: &[f32], plan: Plan) -> Result<(Vec<String>, usize)> {
-    let utterance = Utterance::new(1);
+    // The replay writes no paragraph, so no stamp either.
+    let utterance = Utterance::new(
+        1,
+        Heading {
+            started: chrono::NaiveDateTime::default(),
+            timestamps: Timestamps::Off,
+        },
+    );
     let mut long_ticks = 0;
     // `session.committed_hint`. Here it never lags: the replay is one thread,
     // so it is the worker's own offset.

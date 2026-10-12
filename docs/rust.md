@@ -23,8 +23,11 @@ the root because both sides read it. Nothing under `core/` may import
   requests and the clock, including the 120 ms minimum hold, the 150 ms
   repeat window that tells a held key's auto-repeat from a new press, and the
   rule that a cancel after release is a no-op; closing the dictation pane
-  cancels as a cancel request does. `core/control.rs` is the
-  one-line wire protocol. `core/session.rs`
+  cancels as a cancel request does. The press that begins a capture fixes
+  what its paragraphs open with (`Command::Start` carries its `Heading`:
+  when the daemon read the press, by the local wall clock, and the press's
+  `--timestamps` choice), so no repeat, latch or ending press changes it.
+  `core/control.rs` is the one-line wire protocol. `core/session.rs`
   handles utterance identity, cancellation, preview scheduling, and the single
   user-visible notice, which the next key press clears — `Notice::priority`
   ranks them and `notify` replaces only upwards, so the worst thing that
@@ -182,8 +185,9 @@ Command-line flags: `-c/--config PATH` and `--model-dir PATH` for
 and `--log-file PATH` (the literal `none` disables the file) for the same
 four, given before the command or after it, and, on `daemon` only,
 `--dump-audio DIR`, which writes each capture exactly as decoded for
-debugging. Subcommands are `start`, `stop`, `toggle`, `cancel` (no options:
-they read no config and write no log), `daemon` (what `spokenpad.service`
+debugging. Subcommands are `start`, `stop`, `toggle`, `cancel` (they read
+no config and write no log; `start` and `toggle` take `--timestamps` or
+`--no-timestamps`, one or neither), `daemon` (what `spokenpad.service`
 runs), `editor`, `transcribe <WAV> [--out PATH] [--from SECONDS]`, `check`
 and `fetch-models [--dir DIR]`, which reads no configuration either.
 `spokenpad` with no command prints the help to stderr and exits 2, clap's

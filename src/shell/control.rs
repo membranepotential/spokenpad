@@ -390,9 +390,9 @@ fn answer(mut stream: UnixStream, sender: &Sender<Received>) -> Result<()> {
     stream.set_nonblocking(false)?;
     stream.set_write_timeout(Some(REQUEST_TIMEOUT))?;
     let line = read_line(&mut stream, Instant::now() + REQUEST_TIMEOUT)?;
-    let at = Instant::now();
+    let (at, wall) = (Instant::now(), chrono::Local::now().naive_local());
     let reply = match Request::decode(&line) {
-        Ok(request) => match sender.send(Received { request, at }) {
+        Ok(request) => match sender.send(Received { request, at, wall }) {
             Ok(()) => {
                 log::debug!("control: {request}");
                 Reply::Accepted
@@ -575,7 +575,11 @@ fn exchange(stream: &mut UnixStream, request: Request, deadline: Instant) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::timestamp::Timestamps;
     use std::sync::mpsc;
+
+    const START: Request = Request::Start(Timestamps::Configured);
+    const TOGGLE: Request = Request::Toggle(Timestamps::Configured);
 
     /// A daemon that stopped accepting leaves its queue full; a press then
     /// fails within its deadline instead of hanging the key binding.
@@ -583,7 +587,7 @@ mod tests {
     fn a_press_to_a_full_accept_queue_fails_in_time() {
         let full = unix_socket::FullQueue::new();
         let started = Instant::now();
-        let result = send(&full.socket, Request::Start);
+        let result = send(&full.socket, START);
         assert!(matches!(result, Err(SendError::Failed(_))), "{result:?}");
         assert!(started.elapsed() < REPLY_TIMEOUT + Duration::from_secs(1));
     }
@@ -606,7 +610,7 @@ mod tests {
         drop(server);
         assert!(!path.exists(), "the socket is removed on shutdown");
         assert!(matches!(
-            send(&path, Request::Start),
+            send(&path, START),
             Err(SendError::NoDaemon { .. })
         ));
     }
@@ -668,9 +672,9 @@ mod tests {
             sender,
         )
         .unwrap();
-        send(&path, Request::Toggle).unwrap();
+        send(&path, TOGGLE).unwrap();
         let received = receiver.recv_timeout(Duration::from_secs(1)).unwrap();
-        assert_eq!(received.request, Request::Toggle);
+        assert_eq!(received.request, TOGGLE);
         drop(server);
         assert!(path.exists(), "systemd's socket file stays");
     }
@@ -686,7 +690,7 @@ mod tests {
         let refused = {
             let path = path.clone();
             thread::spawn(move || {
-                let first = send(&path, Request::Start);
+                let first = send(&path, START);
                 let second = send(&path, Request::Stop);
                 (first, second)
             })
@@ -770,13 +774,13 @@ mod tests {
         });
         thread::sleep(Duration::from_millis(50));
         let pressed = Instant::now();
-        send(&path, Request::Start).expect("served after the trickling client");
+        send(&path, START).expect("served after the trickling client");
         assert!(
             pressed.elapsed() < REQUEST_TIMEOUT + Duration::from_millis(400),
             "{:?}",
             pressed.elapsed()
         );
-        assert_eq!(receiver.recv().unwrap().request, Request::Start);
+        assert_eq!(receiver.recv().unwrap().request, START);
         trickle.join().unwrap();
     }
 
@@ -805,7 +809,7 @@ mod tests {
         let mut started = None;
         send_recovering(
             &path,
-            Request::Start,
+            START,
             Some(|| {
                 started = Some(ControlServer::start(Socket::bind(&path)?, sender)?);
                 Ok(())
@@ -813,12 +817,12 @@ mod tests {
         )
         .expect("served once the socket was started");
         assert!(started.is_some());
-        assert_eq!(receiver.recv().unwrap().request, Request::Start);
+        assert_eq!(receiver.recv().unwrap().request, START);
         drop(started);
 
         let error = send_recovering(
             &path,
-            Request::Start,
+            START,
             Some(|| Err(anyhow::anyhow!("Unit spokenpad.socket not found."))),
         )
         .unwrap_err()
@@ -846,7 +850,7 @@ mod tests {
                     Err(anyhow::anyhow!("Unit spokenpad.socket not found."))
                 }),
             );
-            let begins = matches!(request, Request::Start | Request::Toggle);
+            let begins = matches!(request, Request::Start(_) | Request::Toggle(_));
             assert_eq!(started, begins, "{request}");
             if !begins {
                 assert!(

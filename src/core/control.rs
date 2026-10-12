@@ -2,11 +2,16 @@
 //! daemon, as values.
 //!
 //! One exchange per connection. The client writes one request line, the
-//! daemon answers with one reply line and closes. Both lines are a single
-//! ASCII word or two, ending in `\n`, so the protocol can be spoken with
-//! `socat` as well as with the CLI. The socket itself lives in
+//! daemon answers with one reply line and closes. Both lines are a few ASCII
+//! words, ending in `\n`, so the protocol can be spoken with `socat` as well
+//! as with the CLI. A request is the subcommand's name, and for `start` and
+//! `toggle` optionally one field after a space: `timestamps` or
+//! `no-timestamps`. A line without it means what it meant before the field
+//! existed, so an older client is understood. The socket itself lives in
 //! [`shell::control`](crate::shell::control).
 
+use crate::core::timestamp::Timestamps;
+use chrono::NaiveDateTime;
 use std::{fmt, time::Instant};
 
 /// Longest line either side accepts, newline included. Far above any line the
@@ -17,25 +22,36 @@ pub const MAX_LINE: usize = 64;
 /// names send exactly these.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Request {
-    /// The push-to-talk key went down: begin a capture.
-    Start,
+    /// The push-to-talk key went down: begin a capture, which opens its
+    /// paragraphs with the time or not as the press says.
+    Start(Timestamps),
     /// The push-to-talk key came up: end the held capture.
     Stop,
-    /// Begin a latched capture, or end the capture that is running.
-    Toggle,
+    /// Begin a latched capture, or end the capture that is running. The
+    /// choice of timestamps counts only when it begins one.
+    Toggle(Timestamps),
     /// Throw away the capture being recorded.
     Cancel,
 }
 
 impl Request {
-    pub const ALL: [Self; 4] = [Self::Start, Self::Stop, Self::Toggle, Self::Cancel];
+    pub const ALL: [Self; 8] = [
+        Self::Start(Timestamps::Configured),
+        Self::Start(Timestamps::On),
+        Self::Start(Timestamps::Off),
+        Self::Stop,
+        Self::Toggle(Timestamps::Configured),
+        Self::Toggle(Timestamps::On),
+        Self::Toggle(Timestamps::Off),
+        Self::Cancel,
+    ];
 
-    /// The word on the wire, which is also the subcommand's name.
+    /// The first word on the wire, which is also the subcommand's name.
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Start => "start",
+            Self::Start(_) => "start",
             Self::Stop => "stop",
-            Self::Toggle => "toggle",
+            Self::Toggle(_) => "toggle",
             Self::Cancel => "cancel",
         }
     }
@@ -45,29 +61,43 @@ impl Request {
     /// nothing to end.
     pub fn may_begin(self) -> bool {
         match self {
-            Self::Start | Self::Toggle => true,
+            Self::Start(_) | Self::Toggle(_) => true,
             Self::Stop | Self::Cancel => false,
         }
     }
 
     /// The request line a client sends.
     pub fn encode(self) -> String {
-        format!("{}\n", self.as_str())
+        format!("{self}\n")
     }
 
     /// Reads one request line, newline included.
     pub fn decode(line: &[u8]) -> Result<Self, Reply> {
-        let word = line.strip_suffix(b"\n").ok_or(Reply::Malformed)?;
+        let line = line.strip_suffix(b"\n").ok_or(Reply::Malformed)?;
         Self::ALL
             .into_iter()
-            .find(|request| request.as_str().as_bytes() == word)
+            .find(|request| request.to_string().as_bytes() == line)
             .ok_or(Reply::UnknownRequest)
     }
 }
 
 impl fmt::Display for Request {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
+        f.write_str(self.as_str())?;
+        // The field a press carries for `timestamps`; none for
+        // `Configured`, the line an older client sends.
+        match self {
+            Self::Start(Timestamps::On) | Self::Toggle(Timestamps::On) => {
+                f.write_str(" timestamps")
+            }
+            Self::Start(Timestamps::Off) | Self::Toggle(Timestamps::Off) => {
+                f.write_str(" no-timestamps")
+            }
+            Self::Start(Timestamps::Configured)
+            | Self::Toggle(Timestamps::Configured)
+            | Self::Stop
+            | Self::Cancel => Ok(()),
+        }
     }
 }
 
@@ -141,6 +171,9 @@ impl fmt::Display for Reply {
 pub struct Received {
     pub request: Request,
     pub at: Instant,
+    /// The local wall-clock time it was read: the time a capture this
+    /// request begins is stamped with.
+    pub wall: NaiveDateTime,
 }
 
 #[cfg(test)]
@@ -160,6 +193,35 @@ mod tests {
         for reply in Reply::ALL {
             assert_eq!(Reply::decode(reply.encode().as_bytes()), Some(reply));
             assert!(reply.encode().len() <= MAX_LINE);
+        }
+    }
+
+    /// A line without a field is what an older client sends, and still
+    /// means what it did: the configuration decides.
+    #[test]
+    fn a_press_carries_its_timestamps_or_leaves_them_to_the_config() {
+        for (line, request) in [
+            (&b"start\n"[..], Request::Start(Timestamps::Configured)),
+            (b"start timestamps\n", Request::Start(Timestamps::On)),
+            (b"toggle no-timestamps\n", Request::Toggle(Timestamps::Off)),
+            (b"toggle\n", Request::Toggle(Timestamps::Configured)),
+        ] {
+            assert_eq!(Request::decode(line), Ok(request), "{line:?}");
+            assert_eq!(request.encode().as_bytes(), line);
+        }
+        for line in [
+            &b"stop timestamps\n"[..],
+            b"cancel no-timestamps\n",
+            b"start configured\n",
+            b"start timestamps no-timestamps\n",
+            b"start  timestamps\n",
+            b"start --timestamps\n",
+        ] {
+            assert_eq!(
+                Request::decode(line),
+                Err(Reply::UnknownRequest),
+                "{line:?}"
+            );
         }
     }
 

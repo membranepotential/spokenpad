@@ -77,6 +77,8 @@ those belongs in `src/shell/`.
   (keysym and modifiers to nvim key notation, or Ctrl+V's clipboard paste
   where a terminal would paste), `core/font.rs` (the pane's point size and
   `Xft.dpi` to pixels, and cells measured as Alacritty measures them),
+  `core/timestamp.rs` (a capture's stamp: the format, its rendering and
+  the Vim pattern that dims it),
   `core/frames.rs`, `core/geometry.rs`, `core/text.rs`; plus the `shell/nvim/rpc.rs` codec, `parse_ownership` and
   `passage::append_paragraph`, still inside their modules.
 - Imperative shell: `shell/daemon/` — `mod.rs` (`run` = lock/socket/signals/devices
