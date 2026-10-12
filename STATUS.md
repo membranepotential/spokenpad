@@ -17,6 +17,9 @@ never takes focus. Fully local, CPU-only. 1.0.0 public since 2026-09-23.
    guard (experiments/2026-09-22-empty-chunk-flips.md).
 
 ## Done
+- 10-12 timestamps (1ac51ae, not pushed/deployed): per capture, press time
+  as dimmed text at each new paragraph; `nvim.timestamps` (off) +
+  `--timestamps`/`--no-timestamps` per press; `nvim.timestamp_format`.
 - 09-25 idle CPU (~2% -> 0.05%): idle event loop waits on requests, indicator
   sent only on change; default audio.preroll_seconds 0 (user), the pre-roll
   measured at 0.2 WER pts on the corpus; corpus --skip-ms + lost-head.
@@ -39,16 +42,9 @@ never takes focus. Fully local, CPU-only. 1.0.0 public since 2026-09-23.
   bounded download; CI pinned + green; package deps/licences (eSpeak NG
   GPL declared, user choice A); README setup rewritten; screenshot; live
   path reads the whole tail (no window cuts; corpus unchanged at default).
-- 09-22: pane never focuses by itself on i3, sway (runtime no_focus rule
-  over IPC, sway found from the display), Openbox, KWin Wayland + X11; on
-  top; size in cells; tiled where proven; default mode = pane; font in pt x
-  Xft.dpi = Alacritty cells. Packaging: socket activation, presses taken
-  before model ready, config reload per window, PKGBUILD, CI;
-  daemon never exits under the socket; waiting recordings survive restarts.
-  Corpus: dev subset (28 captures, ~2 min), 15 mixed-language flagged.
-- 09-21: constant RAM while recording, auto-stop of forgotten latches,
-  sherpa 1.13.8, corpus harness (Gladia refs): greedy stays, 1 s padding,
-  no model switch; beam bug cause found, patch documented, not shipped.
+- 09-22: pane never focuses itself (i3, sway, Openbox, KWin); default mode
+  pane; socket activation, PKGBUILD, CI; waiting recordings survive restarts.
+- 09-21: constant RAM while recording; sherpa 1.13.8; corpus harness.
 
 ## Decided (known issue: dying input stream seen once; watchdog recovers)
 - Hard constraints: docs/constraints.md. No input device is read. No paste.
