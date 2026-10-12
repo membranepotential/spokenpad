@@ -7,8 +7,8 @@ Hold a key (or latch with shift), speak, and text appears in an nvim that
 never takes focus. Fully local, CPU-only. 1.0.0 public since 2026-09-23.
 
 ## Now
-- v1.0.2 released (idle CPU, no pre-roll by default); user to upgrade
-  with `git pull && makepkg -si` in packaging/aur.
+- v1.1.0 released 10-12 (timestamps); user installs it from the local
+  PKGBUILD (`makepkg -si`, then `systemctl --user restart spokenpad`).
 
 ## Next
 1. User live check still open: pane_layout "tiled", hover focus.
@@ -17,7 +17,7 @@ never takes focus. Fully local, CPU-only. 1.0.0 public since 2026-09-23.
    guard (experiments/2026-09-22-empty-chunk-flips.md).
 
 ## Done
-- 10-12 timestamps (1ac51ae, not pushed/deployed): per capture, press time
+- 10-12 timestamps, released as v1.1.0: per capture, press time
   as dimmed text at each new paragraph; `nvim.timestamps` (off) +
   `--timestamps`/`--no-timestamps` per press; `nvim.timestamp_format`.
 - 09-25 idle CPU (~2% -> 0.05%): idle event loop waits on requests, indicator
